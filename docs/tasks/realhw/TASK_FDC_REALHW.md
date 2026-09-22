@@ -1,0 +1,89 @@
+# TASK_FDC_REALHW — 実機で FD から起動できない (root panic) を直す
+
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実装済み・エミュレータ検証中**。実機は未検証 (R6)
+
+基点: `feat/gui` `ec48c6b`。実機計画は [`PLAN.md`](PLAN.md)、1.44MB の経緯は [`TASK_FD144.md`](TASK_FD144.md)、
+FDC ドライバの仕様表は [`../../05_drivers.md`](../../05_drivers.md) §5-2。
+
+## 0. 症状 (ユーザー報告、2026-09-22)
+
+実機 PC-9821Ra266 で FD から起動すると、カーネルの `MOUNT...` の右に赤い **`root panic`**。
+**1.2MB 2HD (`os32_boot.d88` 由来) と 1.44MB (`os32_boot144.img`) の両方**で同じ。
+HDD は接続されているが未フォーマット (または他 OS の内容)。
+
+ユーザーの当初の見立ては「新規インストール時は ext2 が無いので当たり前」だったが、
+**FD 起動の経路に ext2 の依存は無い** (§1)。`root panic` は **fd0 の FAT マウント失敗**である。
+
+## 1. 机上で潰したこと
+
+| 疑い | 結論 | 根拠 |
+|---|---|---|
+| ext2 が無いと起動できない | **否** | `kernel/kernel.c` は `boot_drive` が FDD なら `fd0`+`fat` をルートにし、`/hd0` は ext2 → iso9660 → fat と試して**全部失敗しても続行**する。ext2 は superblock の magic 不一致で `EXT2_ERR_MAGIC` を返すだけ |
+| 空 / 他 OS の HDD でマウント試行がハングする | **否** | `ide_wait_*` は全部ループ上限つき。`ext2_find_partition` は読めなければ既定 LBA に落ちる。`iso9660_mount` は CD 以外を断る。`pc98_find_fat_partition` は空エントリで抜ける |
+| HostDrv が無いと止まる | **否** | `hostdrvfs_detect()` が 0 を返せばマウントしない (TASK_FD144 F11 で実測) |
+| IPL / ローダ | **否** | どちらも BIOS INT 1Bh で読む。カーネルまで到達している (`MOUNT...` が出る) |
+| **カーネル自前の FDC ドライバ** | **ここ** | fd0 の FAT マウントは `fs/fatfs/diskio.c` → `fdc_read_sector()` (`drivers/fdc.c`) で、BIOS を使わない。**実機で初めて走った** |
+
+## 2. 原因
+
+`drivers/fdc.h` の **`FDC_IRQ_TIMEOUT_TICKS = 20` (200ms)** が NP21/W に合わせた値で、実機の機構に足りない。
+
+| 動作 | 実機の所要時間 | 200ms との関係 |
+|---|---|---|
+| RECALIBRATE / SEEK | SPECIFY が SRT=8ms なので **最大 77〜80 トラック × 8ms ≒ 620〜640ms**。ローダが `VMKRNL.LZ4` を読んだ直後のヘッドはシリンダ 20〜40 付近 → 160〜320ms | **`fdc_init()` の recalibrate がタイムアウト** |
+| READ DATA | 1 回転 (360rpm=167ms / 300rpm=200ms) + ヘッドロード 10ms + 転送 16ms | ぎりぎり。運次第 |
+
+**NP21/W はシーク時間を模擬していない**: `np21w-src/src/io/fdc.c` の `fdc_intwait` は
+`nevent_set(NEVENT_FDCINT, 512, ...)` — 512 サイクル後に割り込みが来る。だからエミュレータでは
+200ms で一度も困らなかった (POLICY_DEBUG §4-49 のシリアルと同じ型: **模擬していない量は「確認済み」にならない**)。
+
+**タイムアウトの後に回収が無いので事故が連鎖する**:
+遅れて来た seek-end 割り込みを SENSE INTERRUPT STATUS で読み出さないまま次の SEEK を出すと、
+µPD765 の INT 線が上がりっぱなしになり、PIC (エッジトリガ) に次のエッジが来ない。以後の
+`fdc_wait_irq` が**全部**タイムアウトし、3 回リトライしても読めず `RES_ERROR` → `f_mount` 失敗 → `root panic`。
+1.2MB / 1.44MB の両方で同じになるのは、この経路が媒体に依らないから。
+
+## 3. 直し方 (コーダーへの依頼、§4 に結果)
+
+1. タイムアウトを機構に合わせる: シーク/リキャリブレート 1.5s、R/W 1s、リセット 0.5s (根拠は `fdc.h` のコメント)。
+2. シーク完了待ちを堅牢に: IRQ を待ち、タイムアウトしても SIS で ST0 を読み、SE が立っていれば「エッジ取りこぼし」として完了扱い。
+3. SEEK / RECALIBRATE の前に SIS で未回収割り込みを**排水** (上限 4 回、0x80 で止める)。
+4. リトライの間に `fdc_recover()` (リセット → Specify → 排水 → recalibrate)。
+5. RECALIBRATE の EC (77 ステップで届かない) はもう 1 回。
+6. DMA バッファを `aligned(1024)` にして [HW2] を**リンク順に頼らず**保証。起動時に検査。
+7. 最終失敗のときだけ `[fdc] ... st0/st1/st2` を 1 行出す ([V4]、実機の画面で読める)。
+
+## 4. 結果 (コーダー Opus 5、`fix/fdc-realhw`)
+
+| 項目 | 実装 |
+|---|---|
+| 時間上限 | `FDC_SEEK_TIMEOUT_TICKS` 150 / `FDC_RW_TIMEOUT_TICKS` 100 / `FDC_RESET_TIMEOUT_TICKS` 50。旧 `FDC_IRQ_TIMEOUT_TICKS` は R/W の別名として残置 |
+| 判定の切り出し | `drivers/fdc_decide.[ch]` — `fdc_sis_result_bytes()` (SIS の 1 バイト応答) と `fdc_classify_seek_end()` (OK / RETRY_EC / PENDING / FAIL)。I/O も tick も触らない |
+| 排水 | `fdc_drain_interrupts()` を SEEK / RECALIBRATE / リセット後に。ST0=80h で打ち切り、上限 4 |
+| 完了待ち | `fdc_wait_seek_end()` — IRQ を待ち、タイムアウトしても SIS。別ドライブの通知は読み捨て |
+| 回復 | `fdc_recover()` を R/W リトライの**間**にだけ |
+| EC | `FDC_RECAL_ATTEMPTS` = 2 |
+| DMA | `aligned(1024)`、番地は 0x1555e0 → 0x156000。起動時検査 |
+| 診断 | `[fdc] read/write fail ... phase= st0= st1= st2=`、`[fdc] recalibrate drv= rc= st0=` |
+| ホスト TDD | `tools/tests/test_fdc_seek.py --target --mutate` (6 ケース、変異 4 本が全部 RED)。記録 `tools/tests/fdc_seek_tdd.md`。`make check-par` に `check-fdc-seek-host` |
+
+**コーダーが見つけて設計に入れたこと**: pending 無しの SIS は ST0=80h の **1 バイトだけ**返る (NP21/W `FDC_SenceintStatus` も同じ)。
+旧コードは無条件に 2 バイト読んでいたので、排水のたびに来ない 2 バイト目を 10000 回空転して待つところだった。
+
+**失敗経路の所要時間**: 全部タイムアウトする最悪ケースで 1 セクタ約 11.5 秒 (旧 1.2 秒)。媒体無しのドライブは
+NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `FDC_Seek`/`FDC_Recalibrate` も) ので、普段は踏まない。
+
+**変えていないこと**: SRT 8ms、モーター制御、`fdc_motor_off()` (未使用のまま)、既存 API のシグネチャ、`kernel/kernel.c`。
+
+## 5. 検証の段取り
+
+| ID | 見るもの | 手段 |
+|---|---|---|
+| R1 | ホスト TDD (判定関数) | コーダー |
+| R2 | `make kernel` / `make all` / `make check` | テスター |
+| R3 | **2HD FD 起動の回帰** (NP21/W): `root OK`、シェル、`/bin/cfg.bin` md5 一致 | テスター/PM |
+| R4 | **1.44MB FD 起動の回帰** (NP21/W): 同上 | テスター/PM |
+| R5 | HDD 起動の回帰 (fd0 は /fd0 にサブマウント) | テスター |
+| **R6** | **実機で FD 起動 → `root OK` → シェル** | **ユーザー**。失敗時は `[fdc]` の行を写真で |
+
+**エミュレータでは原因そのものは再現できない** (§2)。R3〜R5 は退行が無いことしか言わない。

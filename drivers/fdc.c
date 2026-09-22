@@ -11,10 +11,10 @@
 #include "fdc.h"
 #include "io.h"
 #include "kstring.h"
+#include "kprintf.h"
 
-/* ST0ビットマスク */
-#define ST0_SEEK_END    0x20    /* Seek End ビット */
-#define ST0_IC_MASK     0xC0    /* Interrupt Code マスク */
+/* ST0 のビット定義と判定は drivers/fdc_decide.h / .c にある
+ * (I/O を引かずにホストで試験するため — tools/tests/fdc_seek_tdd.md)。 */
 #define FDC_DTL_UNUSED  0xFF    /* DTL未使用時の値 */
 
 /* 外部: tick_count (idt.c) */
@@ -23,9 +23,12 @@ extern volatile u32 tick_count;
 /* IRQ11完了フラグ */
 volatile u32 fdc_irq_fired = 0;
 
-/* DMAバッファ (1MB未満のBSS領域に配置される) */
-/* DMAバンク(64KB)をまたがないように1セクタ分 */
-static u8 dma_buffer[FDC_SECTOR_SIZE];
+/* DMA バッファ。
+ * 大きさは 1 セクタ分 (最大 1024B) で、**1024B 境界に揃える** ([HW2])。
+ * 揃えておけば 64KB 境界をまたぎようがない。以前は揃え指定が無く、
+ * またいでいないことが**リンク順のたまたま**に依存していた
+ * (2026-09-22 時点の番地は 0x1555e0 で、たまたま無事だった)。 */
+static u8 dma_buffer[FDC_SECTOR_SIZE] __attribute__((aligned(FDC_DMA_ALIGN)));
 
 /* ======================================================================== */
 /*  内部ユーティリティ                                                      */
@@ -106,19 +109,85 @@ static int fdc_wait_irq(u32 timeout_ticks)
 }
 
 /* ======================================================================== */
-/*  Sense Interrupt コマンド                                                */
+/*  リザルトフェーズがまだ続いているか                                      */
+/*                                                                          */
+/*  CB が立ったまま FDC→CPU 方向に RQM が立てば、次のリザルトバイトがある。  */
+/*  CB が落ちていればコマンドは終わっていて、もうバイトは来ない。           */
+/*  直前のバイトを読んだ直後は RQM が落ちているので少しだけ待つ。           */
+/* ======================================================================== */
+static int fdc_result_pending(void)
+{
+    int i;
+
+    for (i = 0; i < FDC_MSR_SETTLE_LOOP; i++) {
+        u8 msr = (u8)inp(FDC_MSR);
+        if ((msr & MSR_BUSY) == 0) return 0;   /* コマンド終了 */
+        if ((msr & (MSR_RQM | MSR_DIO)) == (MSR_RQM | MSR_DIO)) return 1;
+        fdc_delay();
+    }
+    return 0;
+}
+
+/* ======================================================================== */
+/*  Sense Interrupt Status (SIS)                                            */
+/*                                                                          */
+/*  ST0 を 1 バイト読み、**pending が無いときの invalid 応答 (ST0 = 80h)     */
+/*  では PCN を読まずに戻る**。µPD765A の invalid command のリザルトは       */
+/*  1 バイトで、2 バイト目を待つと来ないバイトを FDC_TIMEOUT_LOOP 回        */
+/*  空転してから諦めることになる。排水ループは pending が尽きるまで回すので */
+/*  **毎回 1 度は必ずこの空振りを踏む**。                                   */
+/*  NP21/W も同じ 1 バイト応答を返す (src/io/fdc.c の FDC_SenceintStatus は  */
+/*  pending 無しで fdc.buf[0] = FDCRLT_IC1 (0x80) / fdc.bufcnt = 1)。        */
+/*                                                                          */
+/*  戻り値: 0 = ST0 を読めた (pending の有無は *st0 で見る) / -1 = 失敗      */
 /* ======================================================================== */
 static int fdc_sense_interrupt(u8 *st0, u8 *cyl)
 {
+    int r0, r1;
+
+    *st0 = 0;
+    *cyl = 0;
     if (fdc_send_byte(FDC_CMD_SENSE_INTERRUPT) != 0) return -1;
-    {
-        int r0 = fdc_read_byte();
-        int r1 = fdc_read_byte();
-        if (r0 < 0 || r1 < 0) return -1;
-        *st0 = (u8)r0;
-        *cyl = (u8)r1;
-    }
+
+    r0 = fdc_read_byte();
+    if (r0 < 0) return -1;
+    *st0 = (u8)r0;
+
+    /* 1 バイト応答なら PCN は来ない。MSR でも裏を取る — ST0 の読み方を
+     * 間違えても、CB が落ちていれば読みに行かない。 */
+    if (fdc_sis_result_bytes(*st0) < FDC_SIS_LEN_NORMAL) return 0;
+    if (!fdc_result_pending()) return 0;
+
+    r1 = fdc_read_byte();
+    if (r1 < 0) return -1;
+    *cyl = (u8)r1;
     return 0;
+}
+
+/* ======================================================================== */
+/*  未回収の割り込みを排水する                                              */
+/*                                                                          */
+/*  SEEK / RECALIBRATE を出す前に必ず呼ぶ。遅れて来た seek-end 割り込みを    */
+/*  SIS で読み出さないまま次のコマンドを出すと、µPD765A の INT 線が上がり    */
+/*  っぱなしになり、**エッジトリガの PIC に次のエッジが来ない**。以後の      */
+/*  fdc_wait_irq が全部タイムアウトし、3 回リトライしても読めず f_mount が   */
+/*  落ちる — 実機の root panic はこの連鎖だった。                           */
+/*                                                                          */
+/*  回数は FDC_SIS_DRAIN_MAX で縛る (壊れた FDC で無限ループにしない)。      */
+/*  戻り値: 排水した件数。                                                  */
+/* ======================================================================== */
+static int fdc_drain_interrupts(void)
+{
+    u8 st0, cyl;
+    int i;
+
+    for (i = 0; i < FDC_SIS_DRAIN_MAX; i++) {
+        if (fdc_sense_interrupt(&st0, &cyl) != 0) break;
+        /* ST0 = 80h = もう pending は無い。 */
+        if (fdc_sis_result_bytes(st0) < FDC_SIS_LEN_NORMAL) break;
+    }
+    fdc_irq_fired = 0;
+    return i;
 }
 
 /* ======================================================================== */
@@ -182,13 +251,47 @@ static void fdc_motor_off(void)
 }
 
 /* ======================================================================== */
+/*  シーク完了待ち (SEEK / RECALIBRATE 共通)                                */
+/*                                                                          */
+/*  IRQ フラグを待ち、来たら SIS で ST0 / PCN を読む。                      */
+/*  **タイムアウトしても SIS は 1 回出す** — 実機では遅れて上がった INT の   */
+/*  エッジを PIC が取りこぼすことがあり、そのとき ST0 の SE が立っていれば   */
+/*  シーク自体は終わっている。ST0 = 80h (pending 無し) なら本当に            */
+/*  終わっていないので、そこは FDC_SEEK_PENDING で区別する。                */
+/*                                                                          */
+/*  別ドライブの遅れた完了通知は読み捨てて次を見る (fdc_init が未接続の      */
+/*  ドライブ 1 を recalibrate するため、これが混ざる)。                     */
+/*                                                                          */
+/*  want_cyl >= 0 で PCN を照合する。RECALIBRATE は -1 を渡す。             */
+/*  戻り値は fdc_classify_seek_end() の FDC_SEEK_*。                        */
+/* ======================================================================== */
+static int fdc_wait_seek_end(int drv, u8 *st0, u8 *cyl, int want_cyl)
+{
+    int i, rc;
+
+    *st0 = 0;
+    *cyl = 0;
+
+    /* タイムアウトしても続ける。戻り値は見ない — 判断は ST0 でする。 */
+    (void)fdc_wait_irq(FDC_SEEK_TIMEOUT_TICKS);
+
+    for (i = 0; i < FDC_SIS_DRAIN_MAX; i++) {
+        if (fdc_sense_interrupt(st0, cyl) != 0) return FDC_SEEK_FAIL;
+        rc = fdc_classify_seek_end(*st0, *cyl, want_cyl);
+        if (rc == FDC_SEEK_PENDING) return rc;
+        if ((u8)(*st0 & FDC_ST0_DS_MASK) != (u8)(drv & FDC_ST0_DS_MASK)) {
+            continue;   /* 別ドライブの完了通知 — 読み捨てる */
+        }
+        return rc;
+    }
+    return FDC_SEEK_FAIL;
+}
+
+/* ======================================================================== */
 /*  FDCリセット                                                             */
 /* ======================================================================== */
 static int fdc_reset(void)
 {
-    u8 st0, cyl;
-    int i;
-
     /* FDCをリセット */
     outp(FDC_CTRL, CTRL_RST);
     fdc_delay();
@@ -200,16 +303,12 @@ static int fdc_reset(void)
     fdc_irq_fired = 0;
     outp(FDC_CTRL, CTRL_MTON | CTRL_DMAE);
 
-    /* リセット完了IRQ待ち */
-    if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) {
-        /* タイムアウト: エミュレータによってはIRQが来ない場合あり */
-        /* Sense Interruptで続行を試みる */
-    }
+    /* リセット完了IRQ待ち。来ない機種・エミュレータがあるので、
+     * タイムアウトしても止めずに SIS の排水へ進む。 */
+    (void)fdc_wait_irq(FDC_RESET_TIMEOUT_TICKS);
 
-    /* Sense Interrupt × 4回 (リセット後は4ドライブ分必要) */
-    for (i = 0; i < 4; i++) {
-        if (fdc_sense_interrupt(&st0, &cyl) != 0) break;
-    }
+    /* リセット後は 4 ドライブ分の完了通知が溜まる。ST0 = 80h で尽きる。 */
+    (void)fdc_drain_interrupts();
 
     /* Specifyコマンド: SRT=8ms, HLT=10ms, HUT=max, DMA有効 */
     /* SRT_value = 16 - (8 * 500000 / 500000) = 8 */
@@ -226,27 +325,66 @@ static int fdc_reset(void)
 /* ======================================================================== */
 /*  Recalibrate (ヘッドをシリンダ0に移動)                                   */
 /* ======================================================================== */
-static int fdc_recalibrate(int drv)
+/* 成功条件は「SE が立ち、EC が立っていない」こと。PCN は照合しない。
+ * 戻り値: 0 = 成功 / -1 = コマンド送信失敗 / -2 = 未完了 (ST0 = 80h)
+ *         -3 = EC が取れなかった / -4 = その他の失敗
+ * 最後に見た ST0 を *out_st0 に返す (診断用。NULL 可)。 */
+static int fdc_recalibrate_st0(int drv, u8 *out_st0)
 {
     u8 st0, cyl;
+    int rc, attempt;
 
-    fdc_irq_fired = 0;
-    if (fdc_send_byte(FDC_CMD_RECALIBRATE) != 0) return -1;
-    if (fdc_send_byte((u8)drv) != 0) return -1;
+    st0 = 0;
+    rc = FDC_SEEK_FAIL;
 
-    /* 完了IRQ待ち (最大3秒) */
-    if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) return -2;
+    for (attempt = 0; attempt < FDC_RECAL_ATTEMPTS; attempt++) {
+        /* 前のコマンドの取りこぼしを片付けてから出す。 */
+        (void)fdc_drain_interrupts();
 
-    /* Sense Interrupt */
-    if (fdc_sense_interrupt(&st0, &cyl) != 0) return -3;
+        fdc_irq_fired = 0;
+        if (fdc_send_byte(FDC_CMD_RECALIBRATE) != 0) {
+            if (out_st0) *out_st0 = st0;
+            return -1;
+        }
+        if (fdc_send_byte((u8)drv) != 0) {
+            if (out_st0) *out_st0 = st0;
+            return -1;
+        }
 
-    /* st0のbit5 (Seek End)がセットされているか確認 */
-    if ((st0 & ST0_SEEK_END) == 0) {
-        /* 失敗: リトライ */
-        return -4;
+        rc = fdc_wait_seek_end(drv, &st0, &cyl, -1);
+        if (rc == FDC_SEEK_OK) {
+            if (out_st0) *out_st0 = st0;
+            return 0;
+        }
+        if (rc != FDC_SEEK_RETRY_EC) break;
+        /* EC = 77 ステップでトラック 0 に届かなかった。80 シリンダ媒体で
+         * ヘッドが 77 より奥に居ると起きる。もう一度出せば残りを踏む。 */
     }
 
-    return 0;
+    if (out_st0) *out_st0 = st0;
+    if (rc == FDC_SEEK_PENDING)  return -2;
+    if (rc == FDC_SEEK_RETRY_EC) return -3;
+    return -4;
+}
+
+static int fdc_recalibrate(int drv)
+{
+    return fdc_recalibrate_st0(drv, (u8 *)0);
+}
+
+/* ======================================================================== */
+/*  リトライのあいだの回復                                                  */
+/*                                                                          */
+/*  FDC リセット (0x94 bit7) → Specify → SIS 排水 → recalibrate。           */
+/*  排水と recalibrate は fdc_recalibrate_st0() の中で順に行う。            */
+/*  1 回目の転送が失敗した時点で INT 線が上がりっぱなしになっている可能性   */
+/*  があり、そのまま 2 回目を出しても必ず同じ形で失敗する。                 */
+/* ======================================================================== */
+static int fdc_recover(int drv)
+{
+    int rc = fdc_reset();
+    if (rc != 0) return rc;
+    return fdc_recalibrate(drv);
 }
 
 /* ======================================================================== */
@@ -255,20 +393,20 @@ static int fdc_recalibrate(int drv)
 static int fdc_seek(int drv, int cyl, int head)
 {
     u8 st0, result_cyl;
+    int rc;
+
+    /* 未回収の割り込みを片付けてから出す (上の fdc_drain_interrupts の注記)。 */
+    (void)fdc_drain_interrupts();
 
     fdc_irq_fired = 0;
     if (fdc_send_byte(FDC_CMD_SEEK) != 0) return -1;
     if (fdc_send_byte((u8)((head << 2) | drv)) != 0) return -1;
     if (fdc_send_byte((u8)cyl) != 0) return -1;
 
-    /* 完了IRQ待ち */
-    if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) return -2;
-
-    /* Sense Interrupt */
-    if (fdc_sense_interrupt(&st0, &result_cyl) != 0) return -3;
-
-    /* 正しいシリンダに到達したか */
-    if (result_cyl != (u8)cyl) return -4;
+    /* 完了待ち。PCN が要求シリンダと一致することまで見る。 */
+    rc = fdc_wait_seek_end(drv, &st0, &result_cyl, cyl);
+    if (rc == FDC_SEEK_PENDING) return -2;
+    if (rc != FDC_SEEK_OK) return -4;
 
     /* ヘッド安定待ち: 約15ms */
     {
@@ -289,9 +427,18 @@ int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
     int n, retry;
     u32 phys = (u32)dma_buffer;
     u16 bps = g->bps;
+    const char *phase = "seek";
 
-    for (retry = 0; retry < 3; retry++) {
+    kmemset(results, 0, sizeof(results));
+
+    for (retry = 0; retry < FDC_RW_RETRIES; retry++) {
+        /* 0. 前の試行が失敗している。**次を出す前に回復する** —
+         *    リセットと recalibrate を挟まないと、上がりっぱなしの INT 線の
+         *    まま同じ形で失敗し続ける。最後の失敗の後には呼ばない。 */
+        if (retry > 0) (void)fdc_recover(drv);
+
         /* 1. シーク */
+        phase = "seek";
         if (fdc_seek(drv, cyl, head) != 0) continue;
 
         /* 2. DMAセットアップ (FDC→メモリ = read) */
@@ -310,21 +457,28 @@ int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
         if (fdc_send_byte(FDC_DTL_UNUSED) != 0) continue;     /* DTL */
 
         /* 4. IRQ待ち (データ転送完了) */
-        if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) continue;
+        phase = "irq";
+        if (fdc_wait_irq(FDC_RW_TIMEOUT_TICKS) != 0) continue;
 
         /* 5. リザルト読み出し (7バイト) */
+        phase = "result";
         n = fdc_read_results(results, 7);
         if (n < 7) continue;
 
         /* 6. エラーチェック: ST0のbit6-7が00なら成功 */
-        if ((results[0] & ST0_IC_MASK) == 0) {
+        if ((results[0] & FDC_ST0_IC_MASK) == FDC_ST0_IC_NORMAL) {
             /* DMAバッファからユーザーバッファにコピー */
             kmemcpy((u8 *)buf, dma_buffer, (u32)bps);
             return 0;
         }
     }
 
-    return -1; /* 3回リトライ失敗 */
+    /* 最終失敗のときだけ 1 行出す ([V4]: 黙って失敗を返さない)。
+     * リトライごとには出さない — 画面が流れて元の失敗が見えなくなる。 */
+    kprintf(0x07,
+            "[fdc] read fail drv=%d chs=%d/%d/%d phase=%s st0=%02x st1=%02x st2=%02x\n",
+            drv, cyl, head, sect, phase, results[0], results[1], results[2]);
+    return -1;
 }
 
 /* ======================================================================== */
@@ -337,12 +491,19 @@ int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
     int n, retry;
     u32 phys = (u32)dma_buffer;
     u16 bps = g->bps;
+    const char *phase = "seek";
+
+    kmemset(results, 0, sizeof(results));
 
     /* ユーザーバッファからDMAバッファにコピー */
     kmemcpy(dma_buffer, (const u8 *)buf, (u32)bps);
 
-    for (retry = 0; retry < 3; retry++) {
+    for (retry = 0; retry < FDC_RW_RETRIES; retry++) {
+        /* 0. 前の試行が失敗している。次を出す前に回復する (read 側と同じ)。 */
+        if (retry > 0) (void)fdc_recover(drv);
+
         /* 1. シーク */
+        phase = "seek";
         if (fdc_seek(drv, cyl, head) != 0) continue;
 
         /* 2. DMAセットアップ (メモリ→FDC = write) */
@@ -361,18 +522,23 @@ int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
         if (fdc_send_byte(FDC_DTL_UNUSED) != 0) continue;     /* DTL */
 
         /* 4. IRQ待ち */
-        if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) continue;
+        phase = "irq";
+        if (fdc_wait_irq(FDC_RW_TIMEOUT_TICKS) != 0) continue;
 
         /* 5. リザルト読み出し */
+        phase = "result";
         n = fdc_read_results(results, 7);
         if (n < 7) continue;
 
         /* 6. エラーチェック */
-        if ((results[0] & ST0_IC_MASK) == 0) {
+        if ((results[0] & FDC_ST0_IC_MASK) == FDC_ST0_IC_NORMAL) {
             return 0;
         }
     }
 
+    kprintf(0x07,
+            "[fdc] write fail drv=%d chs=%d/%d/%d phase=%s st0=%02x st1=%02x st2=%02x\n",
+            drv, cyl, head, sect, phase, results[0], results[1], results[2]);
     return -1;
 }
 
@@ -398,6 +564,16 @@ int fdc_write_sector(int drv, int cyl, int head, int sect, const void *buf)
 int fdc_init(void)
 {
     int ret;
+    u8 st0 = 0;
+
+    /* [HW2] DMA バッファが 64KB 境界をまたいでいないこと。
+     * FDC_DMA_ALIGN の揃え指定があればまたぎようがないが、揃えが外れても
+     * **黙って別の番地を壊さない** よう確かめて言う。 */
+    if ((((u32)dma_buffer & FDC_DMA_BANK_MASK) + FDC_SECTOR_SIZE)
+            > FDC_DMA_BANK_SIZE) {
+        kprintf(0x07, "[fdc] dma buffer crosses 64KB boundary at %08x\n",
+                (u32)dma_buffer);
+    }
 
     /* 前回の取りこぼし IRQ をクリア (冪等化対策) */
     fdc_irq_fired = 0;
@@ -409,17 +585,25 @@ int fdc_init(void)
     ret = fdc_reset();
     if (ret != 0) return ret;
 
-    /* Recalibrate (ヘッドをシリンダ0に移動)
-     * 1回目失敗: リセット直後の安定化待ち(100ms)後にリトライ */
-    ret = fdc_recalibrate(0);
+    /* Recalibrate (ヘッドをシリンダ0に移動)。
+     * fdc_recalibrate_st0 は中で SIS 排水 → RECALIBRATE を
+     * FDC_RECAL_ATTEMPTS 回 (EC のときだけ) 繰り返す。
+     * ここでの 1 回目失敗はリセット直後の安定化待ち (100ms) 後にもう一度。 */
+    ret = fdc_recalibrate_st0(0, &st0);
     if (ret != 0) {
         u32 start = tick_count;
         while ((tick_count - start) < 10) { /* 100ms ウェイト */ }
-        ret = fdc_recalibrate(0);
+        ret = fdc_recalibrate_st0(0, &st0);
+    }
+    if (ret != 0) {
+        /* [V4] 失敗はそのまま言う。ここで諦めると MOUNT の root panic に
+         * なるが、画面には「なぜ」が出ていなかった。 */
+        kprintf(0x07, "[fdc] recalibrate drv=%d rc=%d st0=%02x\n", 0, ret, st0);
     }
 
-    /* ドライブ1は未接続時にタイムアウトするためエラーは無視する */
-    fdc_recalibrate(1);
+    /* ドライブ1は未接続時にタイムアウトするためエラーは無視する。
+     * **黙って捨てない** — 失敗した完了通知は次の排水で回収される。 */
+    (void)fdc_recalibrate(1);
 
     return ret;
 }

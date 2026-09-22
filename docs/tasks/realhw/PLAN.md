@@ -58,6 +58,7 @@ CHS へ変換する。**CHS の上限がそのまま容量の上限になる。*
 |---|---|
 | FD **1.2MB** (2HD、77cyl × 2head × 8sect × 1024B) | **対応済み**。既定はこちら |
 | FD **1.44MB** (80cyl × 2head × 18sect × 512B) | **エミュレータで対応済み** (2026-09-18)。`make fd144` → `images/os32_boot144.img`。実機は未検証 → [`TASK_FD144.md`](TASK_FD144.md) |
+| FD 起動 **実機** | **2026-09-22 に `root panic` を確認**。FDC ドライバの IRQ 待ちがエミュレータ基準の 200ms で実機のシークに足りなかった → [`TASK_FDC_REALHW.md`](TASK_FDC_REALHW.md) (修正中) |
 | CD | **対応済み**。`userland/system/cdinst.c`、`make iso`、`fs/iso9660.c` |
 | IDE | 対応済み (§2 の上限つき) |
 

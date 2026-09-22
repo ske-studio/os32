@@ -982,6 +982,27 @@ curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"   # Build タイ�
 明示的に呼ぶ形にした (`drivers/serial.h` の注記)。bit0 は「ポート切り離し」なので
 read-modify-write で保つ。
 
+### 4-51. FDC の IRQ 待ち 200ms は**エミュレータに合わせた値**で、実機のシークに足りなかった (2026-09-22)
+
+- **症状**: 実機 PC-9821Ra266 で FD (1.2MB / 1.44MB とも) から起動すると `MOUNT...` で **`root panic`**。
+  HDD は未フォーマットだったので「ext2 が無いから」と見えたが、**FD 起動の経路に ext2 の依存は無い**。
+  `root panic` は fd0 の FAT マウント失敗で、その下はカーネル自前の FDC ドライバ (`drivers/fdc.c`)。
+  IPL とローダは BIOS で読むので、**FDC ドライバが実機で走ったのはこれが最初**だった。
+- **原因**: `drivers/fdc.h` の `FDC_IRQ_TIMEOUT_TICKS = 20` (200ms)。コメントに「NP21/W で IRQ 未到達時の
+  遅延を抑制」とあるとおりエミュレータ基準。実機は SPECIFY の SRT=8ms で **RECALIBRATE / SEEK が最大
+  77〜80 トラック × 8ms ≒ 620〜640ms**、READ DATA も 1 回転 (167〜200ms) + ヘッドロードで 200ms 前後。
+  ローダがカーネルを読んだ直後のヘッドはシリンダ 20〜40 付近なので `fdc_init()` の recalibrate が落ちる。
+  **NP21/W はシーク時間を模擬していない** (`src/io/fdc.c` の `fdc_intwait` は 512 サイクル後に割り込み)。
+- **連鎖**: タイムアウトの後に SENSE INTERRUPT で回収しないまま次の SEEK を出すと、µPD765 の INT 線が
+  上がりっぱなしになり PIC (エッジ) に次のエッジが来ない → 以後の待ちが全部落ちる → 3 回リトライしても
+  読めず `root panic`。媒体に依らないので 1.2MB / 1.44MB の両方で同じになる。
+- **対策**: 票 [`tasks/realhw/TASK_FDC_REALHW.md`](tasks/realhw/TASK_FDC_REALHW.md)。時間定数を機構から導き
+  (シーク 1.5s / R/W 1s)、SEEK の前に SIS で排水、タイムアウト後は SIS で「取りこぼし」を判定、
+  リトライの間に FDC リセット + recalibrate、最終失敗だけ `[fdc]` の 1 行を画面に出す。
+- **教訓**: §4-49 と同じ型 — **エミュレータが模擬していない量 (今回はシーク時間・回転待ち) を「確認済み」に
+  しない**。時間の上限は「エミュレータで困らない値」ではなく**機構の最悪値から導いてコメントに根拠を書く**。
+  「NP21/W で〜を抑制」という理由の定数は、実機の前に必ず疑う (`grep -rn NP21 drivers/*.h`)。
+
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 
 - **症状**: NHD 配備 (`os32-cycle deploy`) 直後に、試験用ファイルを 1 本足す目的でゲストの `hsync` を実行したら、

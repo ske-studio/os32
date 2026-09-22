@@ -152,6 +152,8 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 - フロッピーは 2 形式。既定は 2HD 1232KB、`make fd144` が 1.44MB の**生イメージ**を作る。
   **1.44MB の IPL は 512 バイトしか読まれない**、spt=18 はシフトで割れない、ルートDirが SP に当たる、
   FAT は 9 セクタ。D88 は `fd_type=0x21` + 全セクタ `rpm_flg=1` が要り未対応。 → §4-47、§4-48
+- FDC の時間上限は**機構の最悪値**から導く (シーク 8ms × 80 トラック、1 回転 200ms)。NP21/W はシーク時間を
+  模擬しないので「エミュレータで困らない 200ms」は実機で `root panic` になった (2026-09-22)。 → §4-51
 - Boot loaders: PM transition inlined in `loader_fat.asm`, `boot_fat.asm` is `.8086`, IPL calls INT 1Bh at most 4 times. → [`docs/10_notes.md`](docs/10_notes.md) §10-2, §10-3
 - Physical 0x90000 is the auto-play mailbox: change the layout and `game/tools/autoplay/driver.py` in the same commit. → [`docs/02_memory.md`](docs/02_memory.md) §2-1
 - 9MB 構成の `v86 -t` は **2026-09-16 に再現しないことを確認** (原因は特定せず解消)。 → §4-28
