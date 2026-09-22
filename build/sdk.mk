@@ -269,6 +269,39 @@ check-cpu-calibrate-host:
 check-pit-clock-host:
 	python3 -B tools/tests/test_pit_clock.py --target --mutate
 
+# 8237 DMA 共通部の算数 (drivers/dma8237_math.c)。票 TASK_HAL_WIRING §1-2。
+# 見るのは 4 つ: 64KB バンクまたぎの判定、16MB の壁、TC 後の FFFFh を弾く
+# 安定読みの採用規則、**バンクレジスタが等差数列でないこと** (ch0 だけ
+# 0027h。式で出すと ch1 のバンクを壊す)。
+# **NP21/W は 8237 の折り返しも 16MB の壁も模擬しない**ので、またいだ転送が
+# 「たまたま読めて」しまう (§4-51 と同じ型)。断る規則をホストで固定する。
+# --target はカーネルと同じ i386-elf で I/O を出す側 (dma8237.c) ごと通す。
+# --mutate は写しの上で変異するので並列 (check-par) で回せる。
+# 記録は tools/tests/dma8237_tdd.md。
+check-dma8237-host:
+	python3 -B tools/tests/test_dma8237.py --target --mutate
+
+# DMA プールの表 (kernel/dma_pool_math.c)。票 TASK_HAL_WIRING §1-3。
+# 池は 0x2E8000〜0x2F7FFF で **0x2F0000 の 64KB 境界を跨ぐ**ので、跨ぐ候補を
+# 飛ばして後半に置けること・33KB が空の池でも必ず失敗すること・隣接 span の
+# 解放が先頭一致でだけ通ること・LEAKED を再利用しないことを見る。
+# --target は i386-elf で唯一の池 (dma_pool.c) ごと通す。
+# --mutate は写しの上で変異するので並列 (check-par) で回せる。
+# 記録は tools/tests/dma_pool_tdd.md。
+check-dma-pool-host:
+	python3 -B tools/tests/test_dma_pool.py --target --mutate
+
+# PCI の結線表 (drivers/pci_bind_match.c)。票 TASK_HAL_WIRING §1-4。
+# **NP21/W には PCI が無い**ので、この層はエミュレータでは 1 行も走らない。
+# 一致規則 (4 欄の AND と「任意」)、DECLINE → 次の候補へ、QUARANTINE →
+# **その BDF の探索を打ち切る**、理由が候補ごとに初期化されること、
+# 線の様子を**読む時点で合成する** (結線後に隔離されても BOUND のまま
+# line_state だけ変わる) を見る。probe は関数ポインタなので偽 driver で足りる。
+# --mutate は写しの上で変異するので並列 (check-par) で回せる。
+# 記録は tools/tests/pci_bind_tdd.md。
+check-pci-bind-host:
+	python3 -B tools/tests/test_pci_bind.py --target --mutate
+
 # ホスト道具 tools/rshell_serial.py の「応答の識別」。実機の rshell と
 # 話すときに **EOT の対応が 1 つずれる** 事故を止める (票 TASK_SERIAL_VFAST
 # の Codex レビュー往復 3 ⑤⑥)。見るのは 3 つ: エコー行を **行全体** で
@@ -678,7 +711,7 @@ check:
 check-key-inject-host:
 	python3 -B tools/tests/test_key_inject.py
 
-check-par: check-kprintf-attr-host check-key-inject-host check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-pit-clock-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-lan-bridge-host check-pci-decode-host
+check-par: check-kprintf-attr-host check-key-inject-host check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-lan-bridge-host check-pci-decode-host
 
 check-mut: check-edit-doc-host check-fstat-redir-host check-kstring-c-host check-kstr-bench-host check-sh-status-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host check-cat-linenum-host check-result-conv-host check-guest-host
 
@@ -698,4 +731,4 @@ check-edit-doc-host:
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-pit-clock-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host
+.PHONY: check-dma8237-host check-dma-pool-host check-pci-bind-host check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host

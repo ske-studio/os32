@@ -228,8 +228,16 @@ def bands(m, sym):
         "RW", "kernel.map の __sqlite_start / __sqlite_end")
     add(SQL, "SQLite 代替スタック", v("MEM_SQLITE_STACK_BASE"),
         plus("MEM_SQLITE_STACK_BASE", "MEM_SQLITE_STACK_SIZE", -1), "RW")
-    add(SQL, "カーネル予約", v("MEM_KERNEL_RESV_START"), v("MEM_KERNEL_RESV_END"),
-        "NP")
+    # カーネル予約は DMA プールで **2 つに割れる**。上下が NP のままガードに
+    # なるので、割れていること自体が設計の一部 (票 TASK_HAL_WIRING §1-3)。
+    add(SQL, "カーネル予約 (下)", v("MEM_KERNEL_RESV_START"),
+        (v("MEM_DMA_POOL_BASE") or 0) - 1, "NP",
+        "DMA プールの下側ガード")
+    add(SQL, "DMA プール", v("MEM_DMA_POOL_BASE"), v("MEM_DMA_POOL_END"), "RW",
+        "予約域に開けた穴。present / supervisor / R/W。**USER は立てない** "
+        "(kselftest の MM 検査が MM_RW と MM_RWU を分けて見る)")
+    add(SQL, "カーネル予約 (上)", (v("MEM_DMA_POOL_END") or 0) + 1,
+        v("MEM_KERNEL_RESV_END"), "NP", "DMA プールの上側ガード")
     add(SQL, "カーネルスタックガード", v("MEM_STACK_GUARD"),
         v("MEM_STACK_GUARD_END"), "NP", "2026-09-17 に 0x1FB000 から移設 (決裁 D1)")
     add(SQL, "カーネルスタック", v("MEM_KSTACK_BASE"),
@@ -338,6 +346,14 @@ MIRRORS = (
      "MEM_KSTACK_TOP"),
     ("build/os32.ld", r"^\s*MEM_KERNEL_IMAGE_MAX\s*=\s*(0x[0-9A-Fa-f]+)\s*;",
      "MEM_KERNEL_IMAGE_MAX"),
+    # SQLite の伸び代を **リンク時に** 止めるための 2 つ (票 TASK_HAL_WIRING
+    # §1-3)。ld の ASSERT が
+    #   __sqlite_end + MEM_SQLITE_STACK_SIZE + 0x1000 <= MEM_DMA_POOL_BASE
+    # を見るので、C 側とずれると「重なっていないはずの帯が重なる」。
+    ("build/os32.ld", r"^\s*MEM_SQLITE_STACK_SIZE\s*=\s*(0x[0-9A-Fa-f]+)\s*;",
+     "MEM_SQLITE_STACK_SIZE"),
+    ("build/os32.ld", r"^\s*MEM_DMA_POOL_BASE\s*=\s*(0x[0-9A-Fa-f]+)\s*;",
+     "MEM_DMA_POOL_BASE"),
     ("sdk/include/os32/os32_gui_shared.h",
      r"^#define\s+GUI_SHM_OFFSET\s+(0x[0-9A-Fa-f]+)UL",
      "MEM_SHM_GUI_OFFSET"),

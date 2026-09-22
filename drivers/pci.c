@@ -114,6 +114,36 @@ void pci_cfg_write32(u32 bus, u32 dev, u32 fn, u32 reg, u32 value)
 }
 
 /* ======================================================================== */
+/*  16 ビット書き (票 TASK_HAL_WIRING §1-4)                                 */
+/*                                                                          */
+/*  Command (04h) を触るために要る。**32 ビットの read-modify-write で      */
+/*  代用しない** — 同じ DWORD の上位は Status (06h) で、そこは W1C          */
+/*  (1 を書くと消える) なので、読んだ値をそのまま書き戻すと                 */
+/*  「いま立っているエラービットを全部消す」ことになる。                    */
+/*                                                                          */
+/*  0CF8h は DWORD 単位でレジスタを選び、**下位 2 ビットは 0CFCh 側の       */
+/*  バイトレーンで選ぶ** (PCI 規格)。だからデータポートは                   */
+/*  PCI_CFG_DATA_PORT + (reg & 2) に WORD で出す。                          */
+/*  オフセットは偶数に限る (奇数は DWORD をまたぐ) — 負を返して何もしない。 */
+/*                                                                          */
+/*  アドレスを置いてからデータを出すまでは 1 つの手続き。**同じ irq_save の */
+/*  中**に置く (読みと同じ理由)。                                           */
+/* ======================================================================== */
+int pci_cfg_write16(u32 bus, u32 dev, u32 fn, u32 reg, u16 value)
+{
+    unsigned int flags;
+
+    if (reg & 1u) return OS32_ERR_INVAL;
+    if (!g_pci_present) return OS32_ERR_NOSYS;
+
+    flags = irq_save();
+    outpd(PCI_CFG_ADDR_PORT, pci_cfg_addr(bus, dev, fn, reg));
+    outpw(PCI_CFG_DATA_PORT + (reg & 2u), value);
+    irq_restore(flags);
+    return 0;
+}
+
+/* ======================================================================== */
 /*  1 ファンクションの記録                                                  */
 /* ======================================================================== */
 static void pci_report(const struct pci_dev *d)

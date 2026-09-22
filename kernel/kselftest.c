@@ -33,7 +33,9 @@
 #include "cpu_calibrate_math.h"
 #include "idt.h"          /* pit_get_setup / PIT_MODE_TIMER0 */
 #include "sysclk.h"       /* sysclk_hz / sysclk_detected */
-#include "memmap.h"       /* PIT_HZ */
+#include "memmap.h"       /* PIT_HZ / MEM_DMA_POOL_* */
+#include "dma_pool.h"     /* DMA プール (票 TASK_HAL_WIRING §1-3) */
+#include "dma8237.h"      /* 8237 の共通部 (同 §1-2) */
 
 /* 結果はホストから読めるようにグローバルにする。
  * ブート時の出力はスプラッシュで流れてしまい、rshell も未起動なので
@@ -536,12 +538,50 @@ static void test_memmap(void)
     }
 }
 
+/* ------------------------------------------------------------------------ */
+/*  DMA プールの写像 (票 TASK_HAL_WIRING §1-3 / 受入 W5)                     */
+/*                                                                          */
+/*  プールは予約域 (NP) の中に開けた 64KB の穴で、present / supervisor /     */
+/*  R/W でなければならない。**USER が立ってはいけない** — 立つと CPL=3 の   */
+/*  アプリが装置の記述子 (CB/RFD、PCM リング) を書き換えられる。            */
+/*                                                                          */
+/*  この検査が意味を持つのは `memmap_seen_at` が MM_RW と MM_RWU を         */
+/*  分けてからで、それより前は RW を見た時点で MM_RW を返していた。         */
+/*  **見分けられることを毎回確かめる**ために、PTE 1 本に USER を立てて       */
+/*  検査が落ちるところまで見て、戻す (往復 3 B6)。                          */
+/* ------------------------------------------------------------------------ */
+static void test_memmap_pool_user(void)
+{
+    u32 tramp = exec_tramp_page_addr();
+    int clean, poked;
+
+    /* 変異の前。ここが 0 でなければ test_memmap が既に報告している。 */
+    clean = paging_memmap_selftest(tramp);
+    check(clean == 0, "pool: map ok before mutation");
+    if (clean != 0) return;   /* 既に壊れている。変異しても意味が無い */
+
+    if (paging_poke_user_bit(MEM_DMA_POOL_BASE, 1) != 0) {
+        check(0, "pool: PTE poke failed");
+        return;
+    }
+    poked = paging_memmap_selftest(tramp);
+    /* **必ず戻す** — 落ちたかどうかを見る前に戻しておく。 */
+    (void)paging_poke_user_bit(MEM_DMA_POOL_BASE, 0);
+
+    check(poked > 0, "pool: USER bit fails the map check");
+
+    /* 戻したので、もう一度通ること。TLB は poke の中で無効化している。 */
+    check(paging_memmap_selftest(tramp) == 0,
+          "pool: map ok after restore");
+}
+
 int kselftest_run_post_exec(void)
 {
     int before = ksel_fail;
 
     test_tramp_user_str();
     test_memmap();
+    test_memmap_pool_user();
 
     if (ksel_fail != before) {
         kprintf(0xC1, "[selftest] %d FAILED after exec_init\n",
@@ -688,6 +728,122 @@ static void test_pit_setup(void)
           "pit: counter 0 in mode 2 (rate generator)");
 }
 
+/* ------------------------------------------------------------------------ */
+/*  DMA プールの配り方 (票 TASK_HAL_WIRING §1-3)                            */
+/*                                                                          */
+/*  表の算数はホスト試験 (tools/tests/test_dma_pool.py) が見る。ここが       */
+/*  見るのは **実物の池**: 固定番地が memmap.h のとおりで、物理 = 仮想で、   */
+/*  枯渇と解放が起動のたびに一度踏まれること。                              */
+/*                                                                          */
+/*  **後片付けまでが試験。** 途中で return すると池が埋まったまま残り、      */
+/*  82557 の probe が取れなくなる。                                          */
+/* ------------------------------------------------------------------------ */
+static void test_dma_pool(void)
+{
+    void *a, *b, *c, *d;
+    u32 pa = 0, pb = 0, pc = 0;
+    u32 free_before = dma_pool_free_pages();
+    u32 bad_before = dma_pool_bad_free();
+    u32 leak_before = dma_pool_leaked();
+
+    check(free_before == DMA_POOL_PAGES, "pool: starts empty");
+
+    a = dma_pool_alloc(16 * 1024, 0, &pa);
+    b = dma_pool_alloc(16 * 1024, 0, &pb);
+    c = dma_pool_alloc(16 * 1024, 0, &pc);
+    check(a != (void *)0 && b != (void *)0 && c != (void *)0,
+          "pool: 3x16KB fit");
+    /* 恒等写像。装置へ渡すのがどちらか迷わせないための約束。 */
+    check(pa == (u32)a && pb == (u32)b && pc == (u32)c,
+          "pool: phys == virt");
+    check(pa == (u32)MEM_DMA_POOL_BASE, "pool: first span at base");
+    /* **64KB 境界をまたがない。** またぐ候補は飛ばしている。 */
+    check(!dma_crosses_64k(pa, 16 * 1024) && !dma_crosses_64k(pb, 16 * 1024) &&
+          !dma_crosses_64k(pc, 16 * 1024),
+          "pool: no 64KB straddle");
+
+    /* 真ん中を返すと、そこに 8KB が入る。 */
+    check(dma_pool_free(b) == 0, "pool: free middle");
+    d = dma_pool_alloc(8 * 1024, 0, (u32 *)0);
+    check(d == b, "pool: 8KB reuses it");
+
+    /* 途中ポインタの解放は数える (装置がまだ書いているかもしれない)。 */
+    check(dma_pool_free((void *)((u32)a + 4096)) < 0,
+          "pool: mid pointer refused");
+    check(dma_pool_bad_free() == bad_before + 1,
+          "pool: bad free counted");
+
+    /* LEAKED は二度と配らない。 */
+    check(dma_pool_mark_leaked(c) == 0, "pool: mark_leaked ok");
+    check(dma_pool_leaked() == leak_before + 1, "pool: leak counted");
+    check(dma_pool_free(c) < 0, "pool: leaked not freeable");
+
+    /* 枯渇。32KB より大きい要求は**空でも**通らない。 */
+    check(dma_pool_alloc(33 * 1024, 0, (u32 *)0) == (void *)0,
+          "pool: 33KB refused");
+    check(dma_pool_alloc(0, 0, (u32 *)0) == (void *)0,
+          "pool: 0 bytes refused");
+
+    /* 後片付け。LEAKED の c は**戻せない**ので、その 16KB は使えないまま。
+     * 起動ごとの自己診断で池を削るわけにはいかないので、
+     * **プールを作り直す**。そのため kernel.c は `pci_bind_all` を
+     * **この自己診断より後**で呼ぶ (先に呼ぶと driver の span が消える)。 */
+    (void)dma_pool_free(a);
+    (void)dma_pool_free(d);
+    dma_pool_init();
+    check(dma_pool_free_pages() == DMA_POOL_PAGES,
+          "pool: empty again");
+}
+
+/* ------------------------------------------------------------------------ */
+/*  8237 の共通部 (票 TASK_HAL_WIRING §1-2)                                  */
+/*                                                                          */
+/*  **悪い引数でハードウェアに触らないこと**だけを見る。良い引数の転送は     */
+/*  FDC が起動のたびに踏んでいる (W2)。ここで出せない out が 1 つでも        */
+/*  出ると、他チャネル (CS4231) の設定を壊す。                              */
+/* ------------------------------------------------------------------------ */
+static void test_dma8237(void)
+{
+    int done = -1, tc = -1;
+
+    check(dma8237_ready() != 0, "dma: init before fdc");
+    check(dma_above_1mb_state() != DMA_A20_UNKNOWN,
+          "dma: 0439h recorded");
+
+    /* ch は 0〜3。範囲外は表も引かない。 */
+    check(dma_chan_setup(DMA_CHAN_COUNT, MEM_DMA_POOL_BASE, 512,
+                         DMA_DIR_TO_MEM, DMA_MODE_SINGLE) < 0,
+          "dma: bad channel refused");
+    /* 0 バイトは積めない (カウントに -1 を積むので 65536 になる)。 */
+    check(dma_chan_setup(2, MEM_DMA_POOL_BASE, 0, DMA_DIR_TO_MEM,
+                         DMA_MODE_SINGLE) < 0,
+          "dma: 0 bytes refused");
+    /* 64KB バンクまたぎ ([HW2])。プールの境界 0x2F0000 の手前から。 */
+    check(dma_chan_setup(3, MEM_DMA_POOL_BASE + 0x7000UL, 0x4000UL,
+                         DMA_DIR_TO_MEM, DMA_MODE_SINGLE) < 0,
+          "dma: 64KB straddle refused");
+    /* 16MB 以上 */
+    check(dma_chan_setup(3, 0x1000000UL, 512, DMA_DIR_TO_MEM,
+                         DMA_MODE_SINGLE) < 0,
+          "dma: >=16MB refused");
+
+    /* 引数が通っても **マスクしていなければ積まない**。ch3 は誰も使って
+     * いないので、ここで触っても他の装置に当たらない。 */
+    check(dma_chan_setup(3, MEM_DMA_POOL_BASE, 512, DMA_DIR_TO_MEM,
+                         DMA_MODE_SINGLE) < 0,
+          "dma: unmasked setup refused");
+
+    /* マスクしてから積むと通り、done / tc_event が落ちている。
+     * **積んだだけでマスクは外れない**ので、ch3 は閉じたまま。 */
+    dma_chan_mask(3);
+    check(dma_chan_setup(3, MEM_DMA_POOL_BASE, 512, DMA_DIR_TO_MEM,
+                         DMA_MODE_SINGLE) == 0,
+          "dma: masked setup ok");
+    check(dma_chan_state(3, &done, &tc) == 0, "dma: state readable");
+    check(done == 0 && tc == 0, "dma: setup cleared TC");
+    dma_chan_mask(3);   /* 念のため閉じたままにしておく */
+}
+
 int kselftest_run(void)
 {
     ksel_pass = 0;
@@ -712,6 +868,8 @@ int kselftest_run(void)
     test_db_v50();
     test_cpu_calibrate();
     test_pit_setup();
+    test_dma8237();
+    test_dma_pool();
 
     if (ksel_fail == 0) {
         kprintf(0xA1, "[selftest] %d/%d passed\n", ksel_pass, ksel_pass);

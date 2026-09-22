@@ -215,6 +215,25 @@ int  dma_above_1mb_state(void);   /* DMA_A20_VERIFIED / DMA_A20_UNREADABLE / DMA
   発行せず `fdc_report_fail` の phase に "dma" を足して出す**。`fdc_abort_transfer` と `fdc_recover` (fdc.c 480 行) の
   `DMA_MASK_CH2` 直書きも `dma_chan_mask(2)` に。
 
+- **進捗 (2026-09-23、worktree `wt/hal-b`)**: 実装済み。`drivers/dma8237.{c,h}` と純粋部
+  `drivers/dma8237_math.c` を新設し、`drivers/fdc.c` の `dma_setup()` は
+  `dma_chan_mask(2) → dma_chan_setup(2,…) → dma_chan_unmask(2)` の 3 段に置き換え、負なら
+  **FDC コマンドを出さず** `phase="dma"` で `fdc_report_fail` に出す。`fdc_abort_transfer` /
+  `fdc_recover` の `DMA_MASK_CH2` 直書きも `dma_chan_mask(2)` に。**0439h の RMW と 3 値の診断は
+  `dma8237_init()` へ移した** (`kernel.c` の `sysclk_detect` の次、`fdc_init` より前)。起動行は
+  `[dma] 0439h xx -> yy state=VERIFIED|UNREADABLE|BLOCKED`、最下行の `FDC rc=… 0439h=xx->yy` は
+  `dma_above_1mb_raw()` の写しで書式が変わっていない。ポート番号は `drivers/dma8237.h` に 1 か所
+  ([C4]、`fdc.h` の `DMA_CH2_*` は撤去して `FDC_DMA_CHANNEL 2` だけ残した)。典拠は
+  UNDOCUMENTED Vol.2「DMAコントローラ」(`/mnt/c/WATCOM/docs/undocumented/io_dma.md` 140〜380 行) を
+  実読して照合 — **ch0 のバンクだけ 0027h で並びが飛ぶ**ことを表とホスト試験で固定した。
+  エラーは独自の `DMA_ERR_*` を作らず `OS32_ERR_INVAL` / `OS32_ERR_AGAIN` / `OS32_ERR_NOSYS` の別名。
+  ホスト試験 `make check-dma8237-host` (7 ケース / 変異 8 本すべて RED)、kselftest の `test_dma8237()`
+  (悪い引数でハードウェアに触らないこと・マスク無しの setup を断ること・setup 後の done/tc_event)。
+  **PM が NP21/W で見るもの**: W2 (FDC が dma8237 経由でも 2HD 起動と md5 一致、書き込み→読み戻し、
+  `dma_chan_setup` が負のときコマンドを出さない、タイムアウト→`fdc_abort_transfer`→再試行) と
+  実機の FD 起動 + 0439h の 3 値。`dma_chan_remaining` / `dma_chan_ack_tc` は**まだ呼び手が無い**
+  (CS4231 は §5-5 の別票) ので、遷移表の実機確認は L-B / PCM の票に残る。
+
 ### 1-3. DMA プール — `kernel/dma_pool.c` (固定番地、SQLite 帯の予約域)
 
 **理由 (往復 1 の B8/B9、往復 2 の R4/R5)**: 割り込みは**そのときの CR3 (アプリの PD)** で走る。全 PD で共有される
@@ -259,6 +278,26 @@ int  dma_above_1mb_state(void);   /* DMA_A20_VERIFIED / DMA_A20_UNREADABLE / DMA
 - 用途と大きさ: 82557 の CB (数 KB) + RFD 8 本 × 1.5KB ≒ 16KB、PCM リング 16KB、余裕 32KB。
   FDC の 1KB は**静的配列のまま** (起動最初期に要る)。
 - 純粋関数: 最初適合 + 整列 + 64KB 跨ぎの判定、span の登録 / 解放 / 不正解放をホスト試験に。
+
+- **進捗 (2026-09-23、worktree `wt/hal-b`)**: 実装済み。`include/memmap.h` に
+  `MEM_DMA_POOL_BASE` = 0x2E8000 / `MEM_DMA_POOL_SIZE` = 0x10000 / `MEM_DMA_POOL_END` を純粋な定数式で
+  追加し、`build/os32.ld` に `MEM_SQLITE_STACK_SIZE` / `MEM_DMA_POOL_BASE` の絶対シンボルと
+  `ASSERT(__sqlite_end + MEM_SQLITE_STACK_SIZE + 0x1000 <= MEM_DMA_POOL_BASE, …)` を置いた
+  (いまの余裕は `__sqlite_end` = 0x2BC060 に対して **44KB**)。`tools/gen_memmap.py` は 2 つの写しを
+  `MIRRORS` に足し、帯の表を「カーネル予約 (下) 44KB NP / **DMA プール 64KB RW** / カーネル予約 (上)
+  12KB NP」に割った (`docs/02_memory.md` 再生成済み、`--check` 通過)。`kernel/paging.c` は
+  `paging_set_not_present(予約域)` の**後**に `paging_map_range(…, PAGE_RW)` で張り直す (NP 化の範囲から
+  外すだけにしない)。MM 検査に `MM_RWU` (present+RW+**USER**) を足して `MM_RW` と分け、期待値側は
+  予約域を NP とする分岐より**先に**プールを `MM_RW` と判定する。`kernel/dma_pool.{c,h}` と純粋部
+  `kernel/dma_pool_math.c` (最初適合 + 整列 + 候補ごとの 64KB またぎ、16 ページのビットマップ +
+  16 本の span 表、FREE/USED/LEAKED)。受付は 1〜32KB で、**33KB 以上は `ERR_ARG`** (断片化の
+  `ERR_NOSPC` と分ける)。ホスト試験 `make check-dma-pool-host` (7 ケース / 変異 9 本すべて RED)。
+  kselftest は `test_dma_pool()` (16KB×3 → 真ん中を free → 8KB が入る / 途中ポインタ / mark_leaked /
+  枯渇 / `phys_out == virt`。**最後に `dma_pool_init()` で池を作り直す**ので `pci_bind_all` は
+  `kselftest_run` の後に置いた) と `test_memmap_pool_user()` (プールが `MM_RW`、PTE 1 本に USER を
+  立てると検査が落ちる、戻すと通る)。USER の変異は `paging_poke_user_bit()` を新設して PTE だけを
+  触る — `paging_set_page` は USER を **PDE にも伝播させる**ので、戻しても PDE に残ってしまう。
+  **PM が見るもの**: W5 の `docs/02_memory.md` (再生成済み) と kselftest の結果、カーネル増分。
 
 ### 1-4. PCI デバイスの結線表 — `drivers/pci_bind.c`
 
@@ -313,6 +352,27 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
 - Command の更新は**下位 16 ビットだけ**書く (`pci_cfg_write16` を足す。上位の Status は W1C)。
 - 表は静的 (`kernel/kernel.c`、最初は 82557 の 1 行)。`pci_bind_all` は **pgalloc と DMA プールの初期化の後**。
   §3 の動的読み込みが来たら `size` で版を確かめる。
+
+- **進捗 (2026-09-23、worktree `wt/hal-b`)**: 実装済み。`drivers/pci_bind.{c,h}` と純粋部
+  `drivers/pci_bind_match.c` (一致規則・候補探索・1 台ぶんの遷移)。`probe` は関数ポインタなので
+  遷移はホストで全部踏める。`drivers/pci.c` に `pci_cfg_write16` を追加 — CF8 の DWORD 書きと
+  **`CFC + (reg & 2)` の WORD 書き**を同じ `irq_save` の中に置き、奇数オフセットは
+  `OS32_ERR_INVAL`、PCI 不在は `OS32_ERR_NOSYS`、32 ビットの RMW は使わない (上位の Status は W1C)。
+  BDF ごとの記録 `struct pci_bind_info` (8 バイト: bus/dev/fn/result/irq/reason/line_state/pad) を
+  カーネル配列 `g_bind[PCI_MAX_DEVS]` (32 台 = **256 バイト**) に保存し、`pci_bind_info_get(idx, out)`
+  で読む。**`line_state` は保存せず読む時点で合成する** — `pci_bind_line_state_hook`
+  (既定 NULL = `PCI_LINE_OK`) に実装 A の `irq_line_quarantined` / `irq_storm_masked` を写す 3 行の
+  アダプタを PM が合流時に差す。hook は `PCI_LINE_BIT_STORM` / `PCI_LINE_BIT_QUARANTINED` の
+  ビットを返し、**両方立てば QUARANTINED が勝つ**規則は `pci_bind_info_compose` が持つ
+  (irq が 0xFF か 16 以上ならシフト・配列参照より前に `LINE_OK` で戻る)。理由は候補ごとに `OK` へ
+  初期化してから probe を呼び、書かずに DECLINE したら `PCI_BIND_DECLINED_UNSPECIFIED`。
+  結線表 `pci_drivers[]` は `kernel/kernel.c` にあり **いまは空** (82557 は L-B)。
+  `pci_bind_all` は `pgalloc` と `dma_pool_init` の後 (実際には `kselftest_run` の後)。
+  ホスト試験 `make check-pci-bind-host` (7 ケース / 変異 10 本すべて RED)。
+  **KAPI は足していない** — `lspci` の注記に要る v60 は PM が末尾追記する契約で、いまは
+  カーネルの起動行 `[pci] bb:dd.f vvvv:dddd bound (ok) irq=xx` だけが外から読める。
+  `pci_bind_info_get` は **8 バイトちょうど**を書く (v60 の出力保護がこの大きさを通す)。
+  **PM が実機で見るもの**: 表が空でないときの結線 (L-B)、隔離の 2 経路 (W1/W3 の反例)。
 
 ### 1-5. µs 時計 — `sys_time_now(u32 *lo, u32 *hi)`
 

@@ -262,6 +262,19 @@ void paging_init(u32 mem_kb)
     /* カーネル予約域 (SQLite帯域後 〜 シェル帯域前): Not-Present */
     paging_set_not_present(MEM_KERNEL_RESV_START, MEM_KERNEL_RESV_END);
 
+    /* DMA プール (票 TASK_HAL_WIRING §1-3): 予約域の中に開ける 64KB の穴。
+     * present / supervisor / R/W。上下は予約域のまま NP がガードになる。
+     *
+     * **NP 化の範囲から外すのではなく、張り直す。** 除外で済ませると、
+     * ここが「上のメモリ量ループが決めた属性のまま」になり、プローブ量が
+     * 小さい機械では Not-Present のまま残る (= 割り込み文脈の DMA 設定で
+     * 三重フォルト)。順序も大事で、**NP の後**に張らないと消される。
+     *
+     * USER は立てない — CPL=3 から装置の記述子を書けてはいけない。
+     * 立っていないことは kselftest の MM 検査 (MM_RW vs MM_RWU) が見る。 */
+    paging_map_range(MEM_DMA_POOL_BASE, MEM_DMA_POOL_BASE + MEM_DMA_POOL_SIZE,
+                     MEM_DMA_POOL_BASE, PAGE_RW);
+
     /* シェルスタックガード: Not-Present */
     paging_set_not_present(MEM_SHELL_GUARD, MEM_SHELL_GUARD + PAGE_SIZE - 1);
 
@@ -1150,6 +1163,11 @@ int paging_app_band_selftest(void)
 #define MM_RW   1   /* present + RW, supervisor */
 #define MM_RO   2   /* present + RO, supervisor */
 #define MM_ROU  3   /* present + RO + USER (KAPI 踏み台だけ) */
+/* present + RW + **USER**。MM_RW と分けるまで、この検査は RW を見た時点で
+ * MM_RW を返していて **USER の混入を見分けられなかった** (票 §1-3、
+ * Codex 往復 3 B6)。DMA プールに USER が立つと CPL=3 のアプリが装置の
+ * 記述子を書ける — 見えない差なので、ここで名前を分ける。 */
+#define MM_RWU  4
 
 /* 期待値。**固定番地 (スタックとそのガード) を浮動番地 (SHM) より先に見る。**
  * 逆にすると、SHM がスタックを飲んでいる今の状態を「期待どおり」と読んで
@@ -1184,6 +1202,9 @@ static u8 memmap_want_at(u32 a, u32 tramp)
      * 予約域がスタックを飲んでいる状態を「期待どおり」と読んでしまう。 */
     if (a >= MEM_STACK_GUARD && a <= MEM_STACK_GUARD_END) return MM_NP;
     if (a >= MEM_KSTACK_BASE && a < MEM_SHELL_LOAD_ADDR) return MM_RW;
+    /* **予約域を NP とする分岐より先に** DMA プールを見る (票 §1-3)。
+     * 逆にすると、張り忘れて NP のままの池を「期待どおり」と読む。 */
+    if (a >= MEM_DMA_POOL_BASE && a <= MEM_DMA_POOL_END) return MM_RW;
     if (a >= MEM_KERNEL_RESV_START && a <= MEM_KERNEL_RESV_END) return MM_NP;
     if (a < MEM_SHELL_LOAD_ADDR) return MM_RW;  /* SQLite code+BSS+代替スタック */
 
@@ -1196,7 +1217,9 @@ static u8 memmap_want_at(u32 a, u32 tramp)
 static u8 memmap_seen_at(u32 pte)
 {
     if (!(pte & PTE_PRESENT)) return MM_NP;
-    if (pte & PTE_RW) return MM_RW;
+    /* **USER を先に見る。** RW を見た時点で MM_RW を返していたころは、
+     * 「present + RW + USER」が「present + RW」と同じに見えていた。 */
+    if (pte & PTE_RW) return (pte & PTE_USER) ? MM_RWU : MM_RW;
     return (pte & PTE_USER) ? MM_ROU : MM_RO;
 }
 
@@ -1204,6 +1227,20 @@ static u8 memmap_seen_at(u32 pte)
  * static にしないのは kselftest_pass と同じ理由 (ホストから読む)。 */
 u32 paging_memmap_bad[MM_BAD_MAX * 3];
 u32 paging_memmap_bad_count;
+
+/* 自己診断の変異専用 (paging.h の註)。PDE には触らない。 */
+int paging_poke_user_bit(u32 virt, int set_user)
+{
+    u32 idx;
+
+    if (!pg_enabled || !page_tables[0]) return -1;
+    if (virt >= (u32)PTE_COUNT * PAGE_SIZE) return -1;
+    idx = virt / PAGE_SIZE;
+    if (set_user) page_tables[0][idx] |= (u32)PTE_USER;
+    else          page_tables[0][idx] &= ~(u32)PTE_USER;
+    arch_mmu_flush_tlb();
+    return 0;
+}
 
 int paging_memmap_selftest(u32 tramp_page)
 {

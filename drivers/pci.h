@@ -24,6 +24,7 @@
 #define PCI_H
 
 #include "types.h"
+#include "os32_kapi_shared.h"   /* OS32_ERR_* (pci_cfg_write16 の戻り値) */
 #include "pci_decode.h"
 
 /* 記録の上限。io_pci.md 55〜58 行のとおり PC-98 の bus 0 に載るのは
@@ -76,6 +77,11 @@ u8  pci_cfg_read8(u32 bus, u32 dev, u32 fn, u32 reg);
 /* 書きは列挙では**使わない**。L-B (82557 ドライバ) が Command レジスタの
  * Bus Master を立てるために要るので口だけ開けておく。BAR には書かない。 */
 void pci_cfg_write32(u32 bus, u32 dev, u32 fn, u32 reg, u32 value);
+
+/* Command (04h) だけのための 16 ビット書き。同じ DWORD の上位は Status で
+ * **W1C** なので、32 ビットの read-modify-write で代用してはいけない。
+ *   0 = 書いた / OS32_ERR_INVAL = reg が奇数 / OS32_ERR_NOSYS = PCI 不在 */
+int pci_cfg_write16(u32 bus, u32 dev, u32 fn, u32 reg, u16 value);
 
 /* ======================================================================== */
 /*  初期化と参照                                                            */
