@@ -622,19 +622,16 @@ static void test_cpu_calibrate(void)
     check(cpu_calib_rounds < CALIBRATE_MAX_ROUNDS,
           "cpu calib: did not hit the round cap");
 
-    /* **周回と tick の辻褄。** 直す前のここは `|| cpu_calib_rounds > 1` が
-     * 付いていて、複数周回ったら **何であれ通る** ザルだった。
-     * 止め方 (cpu_calibrate_enough) は「5 tick に届いたか、周回の上限か」の
-     * 2 つだけなので、**2 周以上回ったなら必ず 5 tick 以上になっている**。
-     * それを言い直す — 上限に当たった場合は 1 つ上の check が落とす。 */
-    check(cpu_calib_rounds <= 1 || cpu_calib_ticks >= CALIBRATE_MIN_TICKS,
-          "cpu calib: more than one round implies MIN_TICKS were measured");
-
-    /* 1 周で確定した (遅い機械) なら、その 1 周ぶんが丸ごと結果になる。 */
-    check(cpu_calib_rounds != 1
-          || lpt == CALIBRATE_LOOPS / (cpu_calib_ticks ? cpu_calib_ticks : 1)
+    /* **結果が測った値そのものか。** `lpt == 合計ループ / 経過 tick` を
+     * 周回数に関わらず照合する。直す前のここは `|| cpu_calib_rounds > 1` が
+     * 付いていて、**複数周回ったら何であれ通る**ザルだった (往復 4 の非
+     * blocker)。合計は rounds × CALIBRATE_LOOPS = 最大 4000 万で u32 に収まる。
+     * フォールバックに倒れた場合だけ式から外れるので、それは別に許す
+     * (倒れたこと自体は下の check が落とす)。 */
+    check(cpu_calib_ticks == 0
+          || lpt == (cpu_calib_rounds * CALIBRATE_LOOPS) / cpu_calib_ticks
           || lpt == CALIBRATE_FALLBACK_LPT,
-          "cpu calib: a single round yields loops/ticks");
+          "cpu calib: loops_per_tick == total loops / ticks");
 
     /* **打ち切りに当たったら測れていない** (PIT が止まっている疑い)。
      * 上の `< CALIBRATE_MAX_ROUNDS` と同じことを「失敗」として言い直す —

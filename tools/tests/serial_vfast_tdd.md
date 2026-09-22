@@ -67,9 +67,8 @@ MUTATION 1..9 すべて RED (どれも実行時。コンパイルエラーに逃
 | `fifo_detect` | `0136h` を 2 回読んで bit6 が反転 + bit5 が 0。**0xFF も 0x00 も非搭載へ落ちる** | `io_rs.md` 304〜323 行 |
 | `real_hw_story` | 9600 起動 → `serial 115200` (`013Ah` に 0x81) → `serial 9600` で戻す | 票 §3 |
 | `refuse_inexact` | **出せない速度を適用しない**: 1.9968MHz の 38400 は拒否、2.4576MHz の 38400 は count 4 で適用、FIFO 無しの 115200 は**どちらのクロックでも**拒否。起動時の 9600 は両クロックで exact = 拒否の分岐を通らない | Codex レビュー blocker 2a |
-| `watchdog` | 切替後 500 tick **往復なし**なら REVERT、1 行往復すれば LINKED、**往復は期限より先に見る**。仕掛かっていないときは数えない / 答えは 2 度返らない / arm が数を 0 に戻す / NULL で落ちない / tick の巻き戻りで壊れない | 往復 1 blocker 2b + 往復 2 B1・B2 |
-| `line_qualifies` | **「往復した 1 行」の 16 通りの真偽表**。改行終端 / 全バイトがシリアル由来 / 実行した / EOT を送り終えた — 4 つ揃ったときだけ数える | 往復 3 ②③ |
-| `arm_after_switch` | **切替行そのものは数えない**。line_done → arm の順で回し、切替行のときは番犬が下りているので数に入らないこと。EOT が送れなかった切替でも仕掛けること | 往復 3 ① |
+| `watchdog` | 切替後 500 tick **`serial ack` が来なければ** REVERT、来れば LINKED、**ack は期限より先に見る**。仕掛かっていないときは印を立てない / 答えは 2 度返らない / arm が印を 0 に戻す / NULL で落ちない / tick の巻き戻りで壊れない | 往復 6 の設計変更 |
+| `watchdog_leave` | **rshell を抜けるとき**: 未確認なら期限前でも REVERT、確認済み・解除済み・仕掛けていない (ローカル CUI の切替) なら何もしない、2 度は戻さない | 往復 5 B3・B4 |
 
 ## 資料と NP21/W が食い違ったところ
 
@@ -97,6 +96,31 @@ MUTATION 1..9 すべて RED (どれも実行時。コンパイルエラーに逃
 (`SER_TX_SPIN_MAX` = 20 万) でスピンして諦める。`_halt()` は IF=0 では二度と
 起きないので踏まない。判定には `include/io.h` に足した `_irq_enabled()` を使う
 (`irq_save()` は cli する副作用があり、戻り値は不透明という契約なので使えない)。
+
+## 設計変更 (往復 6) — 暗黙の推定をやめて `serial ack` にした
+
+往復 1〜3 は「受信した」「1 行往復した」でホストとの足並みを**推定**しようとして、
+そのたびに穴が出た (切替行自身を数える ① / 断片を数える ② / EOT の送信失敗を数える ③ /
+ローカルキーで解除される ④ / 本文が落ちて EOT だけ通る B2)。**穴が尽きないのは推定だから**
+なので、PM が設計を変えた: 合図を明示にする。
+
+| どこ | 新しい約束 |
+|---|---|
+| arm | rshell 経由の `serial N` が**速度を変えた瞬間** (応答 EOT の前後を問わず、EOT の成否も見ない)。ローカル CUI の `serial N` は arm しない (戻す相手が居ない) |
+| 解除 | **新速度で `serial ack` の行を受けて実行したときだけ**。`serial ack` は `ACK <baud> <mode>` を 1 行返して EOT。**arm されていなくても同じ応答** (冪等) なので、ホストは何回でも投げてよい |
+| 戻す | 期限 (500 tick) まで ack が来ない / **arm 中に rshell を抜ける** |
+| ホスト | 切替 → 旧速度で最大 1 秒だけ待つ → 新速度で開き直す → `serial ack` を 0.5 秒ごとに最大 4 秒。**`ACK` を含む応答が読めるまで他の応答は読み飛ばす** (最初の EOT では判定しない)。読めなければ 6 秒待って旧速度で `ver` |
+
+消えたもの: `serial_watchdog_line_qualifies` (4 つの真偽の論理積)、`lines_completed` の計数、
+`rsh_line_terminated` / `_all_serial` / `_executed` の配線、`rsh_switch_pending` の遅延 arm。
+**数えるものが無くなったので、数え損ねる穴も無くなった。**
+
+| 見ているか | どこで |
+|---|---|
+| 判定 (`decide`) と状態 (`arm`/`ack`/`poll`/`leave`) | `serial_vfast_host.c` の `watchdog` / `watchdog_leave` |
+| ホストの `ACK` 判定と投げ直し | `test_rshell_serial.py` の `ack` / `wait_ack` |
+| 時間の辻褄 (話しかけ始め ≤ 1.5 秒 < 番犬 5 秒、ack の窓が番犬の内側) | 同 `switch` |
+| `serial ack` の応答そのもの (`ACK <baud> <mode>` + EOT) | いいえ — 実機 / NP21/W |
 
 ## Codex レビュー 往復 3 (47e9680、最終) の 6 件をどう閉じたか
 
@@ -162,13 +186,15 @@ PM が設計を確定し、①〜⑥ を一度に閉じた。
   見るなら実機で `serial 115200` → `serial 9600` を繰り返して 1 バイトのずれが
   出ないことを確かめる (票 S5 / S6)。
 - **番犬が実際に戻すところ** (`ser_wd_poll` → `serial_init`)。判定と状態遷移は
-  `watchdog` で押さえたが、rshell のループへの配線 (`rsh_getch` の由来判定、
-  `rshell_end_reply` での計上) と EOT の返しは実機。
+  `watchdog` / `watchdog_leave` で押さえたが、rshell のループへの配線
+  (`cmd_serial` の arm、`serial ack` の応答、抜け口の `ser_wd_leave`) と
+  EOT の返しは実機。
   **FIFO 非搭載機を用意できないので、`serial 115200` が拒否される経路も実機待ち。**
 - **`gfx_present_raster` の IF を戻す窓** (B4)。待ちの途中で割り込みが入ると
   ラスタの位置が数十µs ずれうる。呼び手は `kernel/boot_splash.c` の 2 か所だけ
   なので、**スプラッシュの見た目**で確かめる (NP21/W)。
 - **ホスト道具の `Build:` 判定・EOT の吸い出し・エコー検査** (B3)。pyserial と
   実際の COM ポートが要る。
-- **ホスト道具の `ver` 往復と失敗時の戻り** (`switch_speed`)。pyserial と
-  実際の COM ポートが要る。
+- **ホスト道具の `serial ack` の投げ直しと失敗時の戻り** (`switch_speed`)。
+  判定 (`ack_ok` / `wait_ack`) はホストで固定したが、実際の往復には pyserial と
+  COM ポートが要る。

@@ -37,7 +37,7 @@ TARGET_SRCS = [
 CASES = ["vfast_table", "compat_exact", "compat_inexact", "mode_choice",
          "tx_budget", "tx_budget_ticks", "status_bits", "fifo_detect",
          "refuse_inexact",
-         "watchdog", "line_qualifies", "arm_after_switch", "real_hw_story"]
+         "watchdog", "watchdog_leave", "real_hw_story"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl="]
@@ -89,47 +89,56 @@ MUTATIONS = [
      "予算の下限 3 tick を外す (保証 10ms では FTDI の遅延タイマ 16ms を"
      "またげず、結局 hlt に落ちて 1 バイト 2ms に戻る)"),
     ("userland/shell/serial_watchdog.c",
-     r"    if \(lines_completed > 0\) \{\n        return SER_WD_LINKED;\n    \}\n"
+     r"    if \(acked\) \{\n        return SER_WD_LINKED;\n    \}\n"
      r"[\s\S]*?    if \(elapsed_ticks >= \(unsigned long\)"
      r"SER_SWITCH_WATCHDOG_TICKS\) \{\n        return SER_WD_REVERT;\n    \}",
      "    if (elapsed_ticks >= (unsigned long)SER_SWITCH_WATCHDOG_TICKS) {\n"
      "        return SER_WD_REVERT;\n    }\n"
-     "    if (lines_completed > 0) {\n        return SER_WD_LINKED;\n    }",
-     "番犬が期限を往復より先に見る (期限ちょうどに成立した往復を無音と"
+     "    if (acked) {\n        return SER_WD_LINKED;\n    }",
+     "番犬が期限を ack より先に見る (期限ちょうどに届いた ack を無音と"
      "読み替えて、揃った足並みを自分で壊す)"),
     ("userland/shell/serial_watchdog.c",
      r"elapsed_ticks >= \(unsigned long\)SER_SWITCH_WATCHDOG_TICKS\) \{",
      "elapsed_ticks >= (unsigned long)SER_SWITCH_WATCHDOG_TICKS * 1000) {",
      "番犬の期限を 1000 倍にする (事実上いつまでも戻さない = 会話が死んだまま)"),
     ("userland/shell/serial_watchdog.c",
-     r"    if \(!terminated\) return 0;",
-     "    if (!terminated) return 1;",
-     "改行で終端していない断片も「行」と数える (化けた 1 バイトで解除される)"),
-    ("userland/shell/serial_watchdog.c",
-     r"    if \(!all_serial\) return 0;",
-     "    if (!all_serial) return 1;",
-     "ローカルキーの混じった行も数える (手元で打っただけで解除される)"),
-    ("userland/shell/serial_watchdog.c",
-     r"    if \(!executed\) return 0;",
-     "    if (!executed) return 1;",
-     "overflow で断った行も数える (実行していないのに往復したことにする)"),
-    ("userland/shell/serial_watchdog.c",
-     r"    if \(!eot_sent\) return 0;",
-     "    if (!eot_sent) return 1;",
-     "EOT の送信に失敗した行も数える (「応答したつもり」で解除される)"),
-    ("userland/shell/serial_watchdog.c",
-     r"    if \(!w \|\| !w->armed\) return;\n    w->lines\+\+;",
-     "    if (!w) return;\n    w->lines++;",
-     "仕掛かっていないときも往復を数える (前の切替の残りが次で即 LINKED)"),
+     r"    if \(!w \|\| !w->armed\) return;\n    w->acked = 1;",
+     "    if (!w) return;\n    w->acked = 1;",
+     "仕掛かっていないときも ack を立てる (前の切替の ack が次で即 LINKED)"),
     ("userland/shell/serial_watchdog.c",
      r"    w->armed = 0;\n    return d;",
      "    return d;",
      "答えを出したあと番犬を下ろさない (REVERT を 2 度返して "
      "serial_init を二重に呼ぶ)"),
     ("userland/shell/serial_watchdog.c",
-     r"    w->lines = 0;\n",
-     "",
-     "arm が往復の数を 0 に戻さない (前の切替の残りで次が即 LINKED になる)"),
+     r"    w->acked = 0;\n    w->start_tick = tick;",
+     "    w->start_tick = tick;",
+     "arm が ack の印を 0 に戻さない (前の切替の ack で次が即 LINKED になる)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    if \(w->acked\) \{\n        return SER_WD_WAIT;   /\* 確認済み = そのままでよい \*/\n    \}\n    return SER_WD_REVERT;",
+     "    return SER_WD_WAIT;",
+     "rshell を抜けるときに未確認でも戻さない (番犬が忘れられて、"
+     "確認の取れていない速度のまま会話が死ぬ — 往復 4 B4)"),
+    ("userland/shell/serial_watchdog.c",
+     r"int serial_watchdog_leave\(struct serial_watchdog \*w\)\n\{\n"
+     r"    if \(!w \|\| !w->armed\) return SER_WD_WAIT;",
+     "int serial_watchdog_leave(struct serial_watchdog *w)\n{\n"
+     "    if (!w) return SER_WD_WAIT;",
+     "仕掛けていなくても抜けるときに戻す (ローカル CUI で切り替えた速度が"
+     "rshell を抜けた拍子に巻き戻る — 往復 4 B3)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    if \(elapsed_ticks >= \(unsigned long\)SER_SWITCH_WATCHDOG_TICKS\) \{",
+     "    if (elapsed_ticks > (unsigned long)SER_SWITCH_WATCHDOG_TICKS) {",
+     "期限を 1 tick 甘くする (期限ちょうどでは戻さない = 境界が仕様とずれる)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    d = serial_watchdog_decide\(tick - w->start_tick, w->acked\);",
+     "    d = serial_watchdog_decide(tick - w->start_tick, 1);",
+     "poll がいつでも ack 済みとして聞く (番犬が一度も戻さない)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    w->armed = 0;\n    if \(w->acked\) \{",
+     "    if (w->acked) {",
+     "抜けるときに番犬を下ろさない (REVERT を 2 度返して serial_init を"
+     "二重に呼ぶ)"),
 ]
 
 

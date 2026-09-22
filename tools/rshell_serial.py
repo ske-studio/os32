@@ -16,15 +16,21 @@ Windows 側の Python (pyserial 入り) で動かす:
   ... --port COM3 --fast 115200 cmd hexdump /bin/cfg.bin
 ゲストは 9600 の互換モードで起動するので、
   1. --baud (既定 9600) で開いて `serial N` を送る
-  2. **応答は待たない** — その行を書いている途中で速度が変わるので必ず化ける
-  3. ポートを閉じて N で開き直し、**`ver` を投げて EOT まで返るか見る** (5 秒)
-  4. 返れば `linked at N`、以後のコマンドは N で送る
-  5. 返らなければ **元の速度へ戻って `ver` で確かめ**、
+  2. 旧速度で応答を待つのは **1 秒だけ** — その行を書いている途中で速度が
+     変わるので後半は必ず化ける。来なくても進む
+  3. ポートを閉じて N で開き直し、**`serial ack` を 0.5 秒ごとに投げて
+     `ACK` を含む応答が読めるまで最大 4 秒待つ** (他の応答は読み飛ばす)
+  4. 読めれば `linked at N`、以後のコマンドは N で送る
+  5. 読めなければ **ゲストの番犬が戻すのを 6 秒待ってから旧速度で `ver`**、
      `fast switch failed, back at 9600` と報告して終了コード 1
-ゲスト側にも番犬があり、**切替後 5 秒 (500 tick) 無音なら自力で元へ戻す**
-(userland/shell/serial_watchdog.c)。だから「FIFO 無し」「013Ah が効かない」
-「ケーブルが速度に耐えない」のどれでも会話は 9600 で生き残る。
-N が --baud と同じなら切り替えは行わない。
+ゲスト側にも番犬があり、**切替後 5 秒 (500 tick) 以内に `serial ack` が
+届かなければ自力で元へ戻す** (userland/shell/serial_watchdog.c)。だから
+「FIFO 無し」「013Ah が効かない」「ケーブルが速度に耐えない」のどれでも
+会話は 9600 で生き残る。N が --baud と同じなら切り替えは行わない。
+
+⚠ 確認は **明示の合図** で行う。往復 1〜3 は `ver` の応答を本文とエコーで
+識別しようとして、遅れて届く EOT・本文の欠落・1 つずれた応答と穴が尽きなかった
+(票 §4 の「設計変更 (往復 6)」)。
 """
 import argparse
 import sys
@@ -46,20 +52,34 @@ SPEED_SWITCH_SETTLE_S = 0.5
 # --fast が受ける速度 (drivers/serial_plan.c の表と同じ。V･FAST に入れるのは
 # FIFO 搭載機だけで、入れなければゲストは互換モードのまま = 速度が合わなくなる)。
 FAST_BAUDS = (9600, 14400, 19200, 28800, 38400, 57600, 115200)
-# 切替の確認に使う実コマンド。**副作用が無く、応答が短く、必ず EOT で閉じる**もの。
+# ---------------------------------------------------------------------------
+#  切替の確認は **専用の合図** で行う (Codex レビュー往復 4 で設計変更)
+#
+#  往復 1〜3 は `ver` の応答を本文とエコーで識別しようとしたが、遅れて届く
+#  切替の EOT・本文の欠落・1 つずれた応答……と穴が尽きなかった。
+#  いまはゲストに `serial ack` という専用の口があり、`ACK <baud> <mode>` を
+#  返す。**何回投げてもよい (冪等)** ので、
+#    - 0.5 秒ごとに投げ直す
+#    - 応答に `ACK` が含まれるまで **他の応答は読み飛ばす**
+#      (遅れた切替 EOT も、化けた行も、ここで自然に流れる)
+#  という形にできる。最初の EOT では判定しない。
+# ---------------------------------------------------------------------------
+ACK_CMD = "serial ack"
+ACK_EXPECT = "ACK"
+# ack を投げ直す間隔と、諦めるまでの上限 [秒]。
+ACK_RETRY_S = 0.5
+ACK_TOTAL_S = 4.0
+# 失敗したあと旧速度で生存を確かめるコマンド (本文で識別する)。
 PROBE_CMD = "ver"
-# **EOT だけで判定しない** (Codex レビュー B3)。`serial N` の終了処理が
-# SPEED_SWITCH_SETTLE_S を超えると、`ver` を送ったあとに **切替コマンドの EOT**
-# が届き、それを `ver` の成功と読んでしまう → 以後の応答が 1 コマンドずれる。
-# `ver` の本文にしか出ない文字列まで見る (userland/shell/cmd_base.c の
-#   kprintf("  Build: %s %s\n", __DATE__, __TIME__) )。
 PROBE_EXPECT = "Build:"
-# `serial N` の応答 (エコー行 + EOT) を **旧速度で** 待つ上限 [秒]。
-# **ここで待ち切らないと、遅れて届いた切替の EOT を新速度で拾って
-# `ver` の成功/失敗を取り違える** (Codex レビュー往復 3 ⑤)。
-# ゲストは切替の前に `> serial N` のエコーを出し、切替の後に EOT を出すので、
-# エコーは旧速度で読める。EOT は化けることがあるので、来なければ上限まで待つ。
-SWITCH_REPLY_S = 5.0
+# `serial N` の応答を **旧速度で** 待つ上限 [秒]。
+# **短い。** 往復 3 では 5 秒待っていたが、0.5 + 5 = 5.5 秒はゲストの番犬
+# (500 tick = 5 秒) を越えてしまい、**ホストが新速度で話しかける前に番犬が
+# 戻す**ことがあった (往復 4 B1)。いまは遅れた切替 EOT を読み飛ばせる
+# (ack を繰り返して `ACK` が見えるまで待つ) ので、ここで待ち切る必要が無い。
+# 切替後にホストが新速度で `serial ack` を投げ始めるのは
+# SPEED_SWITCH_SETTLE_S + SWITCH_REPLY_S = 最大 1.5 秒。番犬の 5 秒に余裕。
+SWITCH_REPLY_S = 1.0
 # エコーの無いコマンド。`exit` はゲストが rshell を閉じてから EOT を返すだけで
 # `> exit` を出さない (userland/shell/rshell.c の `break` が kprintf より先)。
 NO_ECHO_CMDS = ("exit",)
@@ -118,10 +138,21 @@ def check_echo(text, cmd):
     return first == echo_line(cmd)
 
 
+def ack_ok(text):
+    """`serial ack` の応答として受け取ってよいか (往復 4)。
+
+    見るのは **`ACK` が含まれること** だけ。EOT の対応も、エコー行も、
+    本文の完全さも要求しない — どれも「たまたま落ちる」ことがあり、
+    そのたびに穴になってきた。`serial ack` は冪等なので、**判定を緩くして
+    投げ直す回数で確実さを稼ぐ**方が素直。
+    """
+    return ACK_EXPECT in text
+
+
 def probe_ok(text, eot):
     """`ver` の応答として受け取ってよいか (往復 3 ⑤⑥)。
 
-    3 つ揃って初めて成功:
+    失敗後に **旧速度で生存を確かめる**のに使う。3 つ揃って初めて成功:
       - EOT まで届いた
       - `ver` の本文にしか出ない `Build:` がある (先行コマンドの EOT を
         拾っただけなら本文が無い)
@@ -147,14 +178,8 @@ def switch_reply_ok(text, baud):
 def probe(port, timeout_s):
     """実コマンド (`ver`) を投げて、**本文まで**返るか見る。
 
-    **受動待ちでは判定にならない。** 切替の行の EOT は化けて消えることがあり、
-    「来ないこと」は失敗の証拠にも成功の証拠にもならない。こちらから 1 行
-    送って往復が成立するかを見れば、速度が合っているかがそのまま分かる
-    (往復 1 blocker 3: 成功時に 15 秒待たされるのもこれで消える)。
-
-    **EOT だけを見てはいけない** (往復 2 B3)。先行コマンドの EOT が遅れて
-    届くと、それを `ver` の成功と読んで以後の応答が 1 コマンドずれる。
-    `ver` の本文にしか出ない `Build:` まで確かめる。
+    失敗後に旧速度で生存を確かめるのに使う。こちらから 1 行送って往復が
+    成立するかを見れば、速度が合っているかがそのまま分かる。
     """
     try:
         text, eot = send_cmd(port, PROBE_CMD, timeout_s)
@@ -163,15 +188,53 @@ def probe(port, timeout_s):
     return text, probe_ok(text, eot)
 
 
+def wait_ack(port, retry_s=None, total_s=None, now=None, sleep=None):
+    """`serial ack` を投げ直して `ACK` を含む応答を待つ (往復 4)。
+
+    **最初の EOT では判定しない。** 遅れて届いた切替の EOT や化けた行は
+    そのまま読み飛ばし、`ACK` が見えた時点で成功。`serial ack` は冪等なので
+    何回投げてもよく、本文の一部が落ちても次の回で読める (往復 4 B2)。
+
+    戻り値 (成功したか, 読めた本文の連結)。時計と sleep は試験のために
+    差し替えられるようにしてある。
+    """
+    now = now or time.monotonic
+    sleep = sleep or time.sleep
+    deadline = now() + (ACK_TOTAL_S if total_s is None else total_s)
+    step = ACK_RETRY_S if retry_s is None else retry_s
+    seen = []
+    while True:
+        started = now()
+        try:
+            text, _ = send_cmd(port, ACK_CMD, step)
+        except Exception:        # pragma: no cover — 速度不一致で化けたとき
+            text = ""
+        if text:
+            seen.append(text)
+        if ack_ok(text):
+            return True, "".join(seen)
+        if now() >= deadline:
+            return False, "".join(seen)
+        # **投げ直す間隔を守る。** 応答が即返ったとき (速度が合っていなくても
+        # 前のコマンドの EOT がすぐ拾えることがある) に上の read が待たずに
+        # 戻ると、ここが無ければ 4 秒間ひたすら `serial ack` を浴びせ続けて
+        # **ゲストの入力を埋める**。1 回 / ACK_RETRY_S より速くは投げない。
+        rest = step - (now() - started)
+        if rest > 0:
+            sleep(rest)
+
+
 def switch_speed(port_name, open_baud, fast_baud, timeout_s):
     """ゲストを fast_baud へ切り替える。戻り値 (port, baud, ok, note)。
 
-    **切替の応答は待たない。** ゲストは `serial N` の途中で 013Ah を書き換える
-    ので、そこから先のバイトは古い速度側では化ける。書いて掃けるのを待ったら
-    閉じ、N で開き直して **`ver` の往復**で足並みを確かめる。
+    **切替の応答は待ち切らない。** ゲストは `serial N` の途中で 013Ah を
+    書き換えるので、そこから先のバイトは古い速度側では化ける。旧速度で
+    見るのはエコー行だけ (1 秒)、来なくても新速度へ移る。
 
-    往復しなければ元の速度へ開き直してもう一度 `ver` を投げる。ゲスト側の
-    番犬 (userland/shell/serial_watchdog.c) が 5 秒で元へ戻しているはずなので、
+    新速度では **`serial ack` を 0.5 秒ごとに最大 4 秒**投げ、`ACK` を含む
+    応答が読めたら成功 (遅れた切替 EOT や化けた行は読み飛ばす)。
+    読めなければ元の速度へ開き直して `ver` を投げる。ゲスト側の番犬
+    (userland/shell/serial_watchdog.c) が 5 秒で元へ戻しているはずなので、
     ここが通れば会話は生き残っている。
     """
     port = open_port(port_name, open_baud)
@@ -181,11 +244,10 @@ def switch_speed(port_name, open_baud, fast_baud, timeout_s):
         port.flush()
         # 送信 FIFO が掃けて、ゲストが行を読み始めるまでの間合い。
         time.sleep(SPEED_SWITCH_SETTLE_S)
-        # **切替の応答を旧速度で待ち切る** (Codex レビュー往復 3 ⑤)。
-        # ゲストは切替の前にエコー行 `> serial N` を出し、切替の後に EOT を
-        # 出す。エコーは旧速度で読めるので、それが見えたら「応答は始まった」。
-        # ここで待ち切らずに新速度へ移ると、**遅れて届いた切替の EOT を
-        # `ver` の応答と取り違えて**、正常な接続を失敗と読んでしまう。
+        # **旧速度で待つのは 1 秒だけ** (往復 4 B1)。来ても来なくても進む。
+        # 遅れた切替 EOT は新速度側で `serial ack` を繰り返すあいだに
+        # 読み飛ばせるので、ここで待ち切る必要が無い。長く待つと
+        # ゲストの番犬 (5 秒) に間に合わなくなる。
         reply, _ = read_until_eot(port, SWITCH_REPLY_S)
         echoed = switch_reply_ok(reply.decode("utf-8", errors="replace"),
                                  fast_baud)
@@ -194,7 +256,8 @@ def switch_speed(port_name, open_baud, fast_baud, timeout_s):
 
     port = open_port(port_name, fast_baud)
     port.reset_input_buffer()
-    _, ok = probe(port, SWITCH_PROBE_TIMEOUT_S)
+    # **新速度では `serial ack` を投げ直す** (往復 4)。ACK が見えたら成功。
+    ok, _ = wait_ack(port)
     if ok:
         return port, fast_baud, True, "linked at %d" % fast_baud
     if not echoed:
@@ -252,8 +315,8 @@ def main():
             return 2
         port, baud, ok, note = switch_speed(args.port, args.baud, args.fast,
                                             args.timeout)
-        # **「切り替わった」と言い切らない** ([V4]) — `ver` が往復したかだけを
-        # 書く。失敗なら元の速度に戻っているので、そのまま終わる。
+        # **「切り替わった」と言い切らない** ([V4]) — `serial ack` が読めたか
+        # だけを書く。失敗なら元の速度に戻っているので、そのまま終わる。
         print("[rshell_serial] %s" % note)
         if not ok:
             port.close()

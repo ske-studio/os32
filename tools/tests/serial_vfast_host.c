@@ -391,37 +391,41 @@ static void refuse_inexact(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  (i) 切替後の番犬 (往復 1 blocker 2b / 往復 2 B1・B2)                */
+/*  (i) 切替後の番犬 — 明示の合図 `serial ack` (往復 4 で設計変更)      */
+/*                                                                      */
+/*  往復 1〜3 は「受信した」「1 行往復した」を証拠にしようとして、その   */
+/*  たびに穴が出た。**推定をやめて合図を明示にした**ので、ここで見るのは */
+/*  「ack が来たか」「期限が来たか」「抜けるときどうするか」の 3 つだけ。 */
 /* ------------------------------------------------------------------ */
 static void watchdog(void)
 {
     struct serial_watchdog w;
 
     /* ---- 判定そのもの ---- */
-    /* 切替直後。まだ往復していないし期限内 → 待つ。 */
+    /* 切替直後。ack がまだで期限内 → 待つ。 */
     CHECK(serial_watchdog_decide(0, 0) == SER_WD_WAIT);
     CHECK(serial_watchdog_decide(1, 0) == SER_WD_WAIT);
     CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS - 1, 0)
           == SER_WD_WAIT);
 
-    /* 1 往復でも成立すれば解除。 */
+    /* ack が来れば解除。 */
     CHECK(serial_watchdog_decide(0, 1) == SER_WD_LINKED);
     CHECK(serial_watchdog_decide(10, 1) == SER_WD_LINKED);
 
-    /* 期限まで往復なし → 元の設定へ戻す。 */
+    /* 期限まで ack なし → 元の設定へ戻す。 */
     CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS, 0)
           == SER_WD_REVERT);
     CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS + 100, 0)
           == SER_WD_REVERT);
 
-    /* **往復は期限より先に見る。** 期限ちょうどに成立した往復を
-     * 「無音だった」と読み替えて戻すと、揃った足並みを自分で壊す。 */
+    /* **ack は期限より先に見る。** 期限ちょうどに届いた ack を「無音だった」
+     * と読み替えて戻すと、揃った足並みを自分で壊す。 */
     CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS, 1)
           == SER_WD_LINKED);
     CHECK(serial_watchdog_decide(0xFFFFFFFFUL, 1) == SER_WD_LINKED);
 
-    /* 期限は 5 秒 (PIT 100Hz)。短すぎるとホストが `ver` の本文を確かめ
-     * 終える前に戻ってしまい、長すぎると失敗したまま待たされる。 */
+    /* 期限は 5 秒 (PIT 100Hz)。ホストは切替後 1.5 秒以内に `serial ack` を
+     * 投げはじめ 0.5 秒ごとに繰り返すので、期限内に 8 回ほど機会がある。 */
     CHECK(SER_SWITCH_WATCHDOG_TICKS == 500);
 
     /* 3 つの答えは別の値 (呼び手が待つ/解除/戻すを区別できること)。 */
@@ -429,20 +433,20 @@ static void watchdog(void)
     CHECK(SER_WD_WAIT != SER_WD_REVERT);
     CHECK(SER_WD_LINKED != SER_WD_REVERT);
 
-    /* ---- 状態つきの口 (B1: 数える場所が 1 か所であること) ---- */
+    /* ---- 状態つきの口 ---- */
     serial_watchdog_arm(&w, 1000UL, 0UL, 9600UL);
     CHECK(w.armed == 1);
-    CHECK(w.lines == 0);
+    CHECK(w.acked == 0);
     CHECK(w.prev_baud == 9600UL);
     CHECK(serial_watchdog_poll(&w, 1000UL) == SER_WD_WAIT);
 
-    /* **行頭の先読み経路で来た行でも数える。** 直す前はこの経路だけ
-     * 数え損ねていて、ホストの `ver\n` が切替コマンドの終了処理中に届くと
-     * `ver` は正常に返るのに 500 tick 後に旧速度へ戻っていた (B1)。
-     * いまは「1 行の往復が終わった」1 か所で数えるので、どの経路から
-     * 読んでも同じになる。 */
-    serial_watchdog_line_done(&w);
-    CHECK(w.lines == 1);
+    /* **切替行そのものでは下りない。** 切替の応答を送っただけでは ack では
+     * ないので、番犬は仕掛かったまま (往復 3 ① が構造的に起きない)。 */
+    CHECK(serial_watchdog_poll(&w, 1000UL + 100UL) == SER_WD_WAIT);
+
+    /* `serial ack` を受けて実行 → 解除。 */
+    serial_watchdog_ack(&w);
+    CHECK(w.acked == 1);
     CHECK(serial_watchdog_poll(&w, 1000UL) == SER_WD_LINKED);
     /* 解除したら下りる。**2 度は返らない。** */
     CHECK(w.armed == 0);
@@ -460,24 +464,25 @@ static void watchdog(void)
     CHECK(serial_watchdog_poll(&w, 1000UL + SER_SWITCH_WATCHDOG_TICKS + 500)
           == SER_WD_WAIT);
 
-    /* ---- 仕掛かっていないときは数えない ---- */
-    serial_watchdog_line_done(&w);
-    CHECK(w.lines == 0);
+    /* ---- 仕掛かっていないときは ack の印を立てない ---- */
+    serial_watchdog_ack(&w);
+    CHECK(w.acked == 0);
     CHECK(w.armed == 0);
 
-    /* arm は数を 0 に戻す (前の切替の残りが次の切替で即 LINKED にしない)。 */
+    /* arm は ack を 0 に戻す (前の切替の ack が次で即 LINKED にしない)。 */
     serial_watchdog_arm(&w, 2000UL, 0UL, 9600UL);
-    serial_watchdog_line_done(&w);
-    CHECK(w.lines == 1);
+    serial_watchdog_ack(&w);
+    CHECK(w.acked == 1);
     serial_watchdog_arm(&w, 3000UL, 0UL, 9600UL);
-    CHECK(w.lines == 0);
+    CHECK(w.acked == 0);
     CHECK(serial_watchdog_poll(&w, 3000UL) == SER_WD_WAIT);
 
     /* ---- NULL を渡しても落ちない ---- */
     serial_watchdog_arm((struct serial_watchdog *)0, 0UL, 0UL, 0UL);
-    serial_watchdog_line_done((struct serial_watchdog *)0);
+    serial_watchdog_ack((struct serial_watchdog *)0);
     CHECK(serial_watchdog_poll((struct serial_watchdog *)0, 0UL)
           == SER_WD_WAIT);
+    CHECK(serial_watchdog_leave((struct serial_watchdog *)0) == SER_WD_WAIT);
 
     /* ---- tick が一周しても壊れない (u32 の巻き戻り) ---- */
     serial_watchdog_arm(&w, 0xFFFFFF00UL, 0UL, 9600UL);
@@ -485,120 +490,47 @@ static void watchdog(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  (i2) 「往復した 1 行」の資格 — 16 通りの真偽表 (往復 3 ②③)         */
+/*  (i2) rshell を抜けるとき (往復 4 B4)                                */
 /*                                                                      */
-/*  4 つ**すべて**が要る。1 つでも欠けたら数えない:                     */
-/*    terminated 改行で終端 / all_serial 全バイトがシリアル由来 /        */
-/*    executed 実行した / eot_sent 応答の EOT を送り終えた               */
+/*  抜けたあとは `ser_wd_poll()` を呼ぶ者が居ない。番犬が仕掛かったまま   */
+/*  忘れられると、**確認の取れていない速度のまま会話が死ぬ**。            */
+/*  期限を待たずにその場で戻す — 待っても誰も見に来ないのだから。         */
 /* ------------------------------------------------------------------ */
-static void line_qualifies(void)
-{
-    int t, a, e, o;
-    int n_true = 0;
-
-    /* 16 通りを総当たりして、**4 つ揃ったときだけ 1** を確かめる。 */
-    for (t = 0; t <= 1; t++) {
-        for (a = 0; a <= 1; a++) {
-            for (e = 0; e <= 1; e++) {
-                for (o = 0; o <= 1; o++) {
-                    int want = (t && a && e && o) ? 1 : 0;
-                    int got = serial_watchdog_line_qualifies(t, a, e, o);
-                    CHECK(got == want);
-                    n_true += got;
-                }
-            }
-        }
-    }
-    /* 16 通りのうち真は 1 つだけ。 */
-    CHECK(n_true == 1);
-
-    /* 名前を付けて、実際に起きる落とし穴を個別に押さえる。 */
-
-    /* ② 化けた 1 バイト + 読み取り空振り = 改行で終わっていない断片。
-     *    数えると、速度不一致で流れ込むゴミで番犬が解除される。 */
-    CHECK(serial_watchdog_line_qualifies(0, 1, 1, 1) == 0);
-    /* ② ESC 中断も同じ (改行を見ていない)。 */
-    CHECK(serial_watchdog_line_qualifies(0, 1, 0, 1) == 0);
-
-    /* ローカルキーが 1 バイトでも混じった行。手元で打っただけで
-     * 「ホストがこちらの声を聞ける」証拠にはならない。 */
-    CHECK(serial_watchdog_line_qualifies(1, 0, 1, 1) == 0);
-
-    /* overflow で断った行 (EOT は返すが実行していない)。 */
-    CHECK(serial_watchdog_line_qualifies(1, 1, 0, 1) == 0);
-
-    /* ③ EOT の送信に失敗した行。`serial_putchar` が TxRDY の予算を
-     *    使い切って諦めた = **相手は応答を受け取っていない**。
-     *    ここを数えると「応答したつもり」で番犬が解除される。 */
-    CHECK(serial_watchdog_line_qualifies(1, 1, 1, 0) == 0);
-
-    /* 4 つ揃った行だけが数えられる。 */
-    CHECK(serial_watchdog_line_qualifies(1, 1, 1, 1) == 1);
-
-    /* 送信結果の値そのもの (呼び手が == KAPI_SER_TX_OK で見る)。 */
-    CHECK(SER_TX_OK == 0);
-    CHECK(SER_TX_DROPPED == -1);
-    CHECK(SER_TX_OK != SER_TX_DROPPED);
-}
-
-/* ------------------------------------------------------------------ */
-/*  (i3) 番犬を仕掛ける位置 — 切替行そのものは数えない (往復 3 ①)      */
-/*                                                                      */
-/*  直す前は `cmd_serial` の中で arm していたので、**切替行の応答の EOT  */
-/*  を送り終えた時点で 1 行目が数えられ**、新速度で一度も通信しないまま  */
-/*  解除されていた = 保険がまったく効かない。                            */
-/*  いまは「切替行の EOT を送り終えた後」に arm するので、数え始めるのは  */
-/*  その次の行から。                                                    */
-/* ------------------------------------------------------------------ */
-static void arm_after_switch(void)
+static void watchdog_leave(void)
 {
     struct serial_watchdog w;
 
-    /* 実物の rshell_end_reply と同じ順で回す:
-     *   1. EOT を送る
-     *   2. 資格があれば line_done()
-     *   3. 切替行だったら arm()
-     * 切替行のときは 2 で番犬がまだ下りているので数に入らない。 */
-
-    /* ---- 切替行 (`serial 115200`) ---- */
-    w.armed = 0;
-    w.lines = 0;
-    /* 2: 資格はある (改行終端・シリアル由来・実行した・EOT 成功) が…… */
-    CHECK(serial_watchdog_line_qualifies(1, 1, 1, 1) == 1);
-    serial_watchdog_line_done(&w);
-    /* ……番犬が下りているので数えない。**ここが ① の核心。** */
-    CHECK(w.lines == 0);
-    /* 3: ここで初めて仕掛ける。 */
+    /* 仕掛かっていて未確認 → **期限前でも戻す**。 */
     serial_watchdog_arm(&w, 1000UL, 0UL, 9600UL);
-    CHECK(w.armed == 1);
-    CHECK(w.lines == 0);
-    /* 切替直後は当然まだ往復していない。 */
-    CHECK(serial_watchdog_poll(&w, 1000UL) == SER_WD_WAIT);
+    CHECK(serial_watchdog_leave(&w) == SER_WD_REVERT);
+    /* 戻したら下りる (2 度は返らない)。 */
+    CHECK(w.armed == 0);
+    CHECK(serial_watchdog_leave(&w) == SER_WD_WAIT);
 
-    /* ---- 次の行 (`ver`) が新速度で往復して初めて解除 ---- */
-    serial_watchdog_line_done(&w);
-    CHECK(w.lines == 1);
-    CHECK(serial_watchdog_poll(&w, 1100UL) == SER_WD_LINKED);
+    /* 確認済みなら何もしない (速度はそのままでよい)。 */
+    serial_watchdog_arm(&w, 1000UL, 0UL, 9600UL);
+    serial_watchdog_ack(&w);
+    CHECK(serial_watchdog_leave(&w) == SER_WD_WAIT);
+    CHECK(w.armed == 0);
 
-    /* ---- 切替行の EOT が送れなかった場合でも仕掛ける ----
-     * ホストは切替の応答を受け取れていないかもしれず、**そういうときこそ
-     * 保険が要る**。資格が無いので数には入らない。 */
+    /* 一度 poll で解除済みなら、抜けるときには何もしない。 */
+    serial_watchdog_arm(&w, 1000UL, 0UL, 9600UL);
+    serial_watchdog_ack(&w);
+    CHECK(serial_watchdog_poll(&w, 1000UL) == SER_WD_LINKED);
+    CHECK(serial_watchdog_leave(&w) == SER_WD_WAIT);
+
+    /* 一度 poll で戻し済みなら、抜けるときに二重に戻さない。 */
+    serial_watchdog_arm(&w, 1000UL, 0UL, 9600UL);
+    CHECK(serial_watchdog_poll(&w, 1000UL + SER_SWITCH_WATCHDOG_TICKS)
+          == SER_WD_REVERT);
+    CHECK(serial_watchdog_leave(&w) == SER_WD_WAIT);
+
+    /* **仕掛けていなければ何もしない。** ローカル CUI で `serial N` を
+     * 打ったあと `rshell` に入って抜けても、そこで速度が戻ってはいけない
+     * (CUI の切替は arm しない = 戻す相手が居ない。往復 4 B3)。 */
     w.armed = 0;
-    w.lines = 0;
-    CHECK(serial_watchdog_line_qualifies(1, 1, 1, 0) == 0);
-    serial_watchdog_arm(&w, 2000UL, 0UL, 9600UL);
-    CHECK(w.armed == 1);
-    CHECK(w.lines == 0);
-    /* 新速度で誰も喋らなければ期限で戻る。 */
-    CHECK(serial_watchdog_poll(&w, 2000UL + SER_SWITCH_WATCHDOG_TICKS)
-          == SER_WD_REVERT);
-
-    /* ---- 切替の後に断片しか来なければ戻る (②と①の組み合わせ) ---- */
-    serial_watchdog_arm(&w, 3000UL, 0UL, 9600UL);
-    /* 化けた 1 バイトの断片: 資格が無いので line_done を呼ばない。 */
-    CHECK(serial_watchdog_line_qualifies(0, 1, 0, 1) == 0);
-    CHECK(serial_watchdog_poll(&w, 3000UL + SER_SWITCH_WATCHDOG_TICKS)
-          == SER_WD_REVERT);
+    w.acked = 0;
+    CHECK(serial_watchdog_leave(&w) == SER_WD_WAIT);
 }
 
 /* ------------------------------------------------------------------ */
@@ -653,8 +585,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "fifo_detect")) fifo_detect();
     else if (!strcmp(argv[1], "refuse_inexact")) refuse_inexact();
     else if (!strcmp(argv[1], "watchdog")) watchdog();
-    else if (!strcmp(argv[1], "line_qualifies")) line_qualifies();
-    else if (!strcmp(argv[1], "arm_after_switch")) arm_after_switch();
+    else if (!strcmp(argv[1], "watchdog_leave")) watchdog_leave();
     else if (!strcmp(argv[1], "real_hw_story")) real_hw_story();
     else return 2;
     if (failed) return 1;

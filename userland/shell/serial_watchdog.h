@@ -4,24 +4,27 @@
 /*  速度を上げたあと **ホストと足並みが揃ったかはゲストには分からない**。    */
 /*  013Ah が効かない機種、ケーブルが速度に耐えない、ホストが開き直しに       */
 /*  失敗した — どれでも「こちらは N、ホストは別の速度」になり、戻すための    */
-/*  `serial 9600` すら届かない。                                            */
+/*  `serial 9600` すら届かない。だから **確認が取れなければゲストが自力で    */
+/*  元へ戻す**。                                                            */
 /*                                                                          */
-/*  だから **切替後に会話が成立しなければゲストが自力で元へ戻す**。          */
+/*  ⚠ **合図は明示的にする** (Codex レビュー往復 4 で設計変更)。             */
+/*  往復 1〜3 では「受信した」「1 行往復した」を証拠に使おうとして、その     */
+/*  たびに穴が出た — 切替行自身を数える / 断片を数える / EOT の送信失敗を    */
+/*  数える / ローカルキーで解除される / 本文が落ちて EOT だけ通る……。       */
+/*  **暗黙の推定は尽きない**ので、推定をやめる:                             */
 /*                                                                          */
-/*  ⚠ **解除の条件は「1 バイト受信」ではない** (Codex レビュー往復 2 B2)。   */
-/*  新速度で `ver` は届くが返答の EOT が落ちた場合、受信で解除してしまうと    */
-/*  ゲストは新速度のまま、ホストは失敗と見て旧速度へ戻り、**二度と合わない**。 */
-/*  速度不一致で化けたバイトやローカルのキー入力でも解除されてしまう。       */
+/*    arm   : rshell 経由の `serial N` が速度を変えた瞬間 (EOT の前後も      */
+/*            成否も問わない)                                               */
+/*    解除  : **新速度で `serial ack` という行を受けて実行したときだけ**      */
+/*    戻す  : 期限 (SER_SWITCH_WATCHDOG_TICKS) まで ack が来なかったとき、   */
+/*            または **arm 中に rshell を抜けるとき**                        */
 /*                                                                          */
-/*  解除は **4 つが揃った行を 1 つ処理したとき**だけ (往復 3 ①②③):          */
-/*    (a) 改行 (`\n` / `\r`) で終端している — 化けた 1 バイト + 読み取り     */
-/*        空振りの断片や ESC 中断を「行」と数えない                          */
-/*    (b) 全バイトがシリアル由来 — ローカルキーが 1 バイトでも混じれば数えない */
-/*    (c) 実行した — overflow で断った行は数えない                           */
-/*    (d) 応答の EOT を **送り終えた** — `serial_putchar` が予算切れで諦めた  */
-/*        ら「応答したつもり」になるので数えない                             */
-/*  そして **切替行そのものは数えない** (①)。番犬を仕掛けるのは切替行の EOT  */
-/*  を送り終えた後なので、数え始めるのはその次の行から。                     */
+/*  `serial ack` はホストが投げる専用の合図で、ゲストは `ACK <baud> <mode>`  */
+/*  を 1 行返す。**arm されていなくても同じ応答** (冪等) — ホストは何回でも  */
+/*  投げてよく、どこかの回で読めればそれが確認になる。                       */
+/*                                                                          */
+/*  ローカル CUI で打った `serial N` は arm しない。**戻す相手が居ない**     */
+/*  ので、勝手に速度が戻ると手元の操作の方が驚く。                           */
 /*                                                                          */
 /*  ここは**依存を 1 つも持たない**。シェル (userland/shell/rshell.c) から   */
 /*  使い、ホスト試験 (tools/tests/serial_vfast_host.c) は .c をそのまま      */
@@ -35,46 +38,44 @@
 #define __SERIAL_WATCHDOG_H
 
 /* 期限 [tick]。PIT は 100Hz なので 500 tick = 5 秒。
- * ホスト道具は「`serial N` を送る → 閉じる → N で開き直す → `ver` を投げて
- * 本文まで確かめる」までに数秒かかるので、往復に十分な余裕がある。
- * **短すぎるとホストが開き直す前に戻ってしまい**、長すぎると失敗したまま
- * 待たされる。 */
+ * ホスト道具は切替後 **1.5 秒以内**に新速度で `serial ack` を投げはじめ、
+ * 0.5 秒ごとに 4 秒まで繰り返す (tools/rshell_serial.py)。つまり ack の
+ * 機会は期限内に 8 回ほどある。**短すぎるとホストが開き直す前に戻り**、
+ * 長すぎると失敗したまま待たされる。 */
 #define SER_SWITCH_WATCHDOG_TICKS 500
 
 #define SER_WD_WAIT   0   /* まだ期限内 — 待つ */
-#define SER_WD_LINKED 1   /* 往復が成立した — 解除 */
-#define SER_WD_REVERT 2   /* 期限切れで往復なし — 元の設定へ戻す */
+#define SER_WD_LINKED 1   /* ack が来た — 解除 */
+#define SER_WD_REVERT 2   /* 期限切れで ack なし — 元の設定へ戻す */
 
-/* 番犬の状態。**数える場所を 1 か所に閉じ込めるため**に構造体で持つ
- * (Codex レビュー B1: 行頭の先読み経路だけ数え損ねていた)。 */
 struct serial_watchdog {
-    int armed;                    /* 1 = 足並みの確認待ち */
+    int armed;                    /* 1 = ack 待ち */
+    int acked;                    /* 1 = `serial ack` を受けて実行した */
     unsigned long start_tick;     /* 切り替えた tick */
-    unsigned long lines;          /* 切替後に **往復し終えた** 行の数 */
     unsigned long prev_mode;      /* 戻し先のモード */
     unsigned long prev_baud;      /* 戻し先の速度 */
 };
 
-/* 切替直後に仕掛ける。lines は 0 に戻る。 */
+/* 切替直後に仕掛ける。acked は 0 に戻る。 */
 void serial_watchdog_arm(struct serial_watchdog *w, unsigned long tick,
                          unsigned long prev_mode, unsigned long prev_baud);
 
-/* **シリアル由来の有効な 1 行を処理し、その EOT を送り終えた**ときに呼ぶ。
- * ここだけが解除の材料を増やす。仕掛かっていなければ何もしない。 */
-void serial_watchdog_line_done(struct serial_watchdog *w);
-
-/* その行を「往復した 1 行」と数えてよいか。上の (a)〜(d) の論理積そのもの。
- * 4 つの真偽の組み合わせ 16 通りをホスト試験で固定してある。 */
-int serial_watchdog_line_qualifies(int terminated, int all_serial,
-                                   int executed, int eot_sent);
+/* **`serial ack` の行を受けて実行した**ときに呼ぶ。ここだけが解除の材料。
+ * 仕掛かっていなければ何もしない (`serial ack` 自体は冪等に応答する)。 */
+void serial_watchdog_ack(struct serial_watchdog *w);
 
 /* いま戻すべきか。SER_WD_WAIT / _LINKED / _REVERT。
  * LINKED か REVERT を返したら番犬は下ろされる (2 度は返らない)。 */
 int serial_watchdog_poll(struct serial_watchdog *w, unsigned long tick);
 
-/* 判定そのもの (状態を持たない)。**往復が先**: 期限を過ぎていても 1 行でも
- * 往復し終えていたら LINKED (遅れて成立した往復を「無音」と読み替えない)。 */
-int serial_watchdog_decide(unsigned long elapsed_ticks,
-                           unsigned long lines_completed);
+/* rshell を抜けるときに呼ぶ。**arm 中で未確認なら即座に REVERT**
+ * (Codex レビュー往復 4 B4: 抜けたあとは poll する者が居ないので、
+ * 番犬が仕掛かったまま忘れられて会話が死ぬ)。
+ * 戻り SER_WD_REVERT = 戻すこと / SER_WD_WAIT = 何もしなくてよい。 */
+int serial_watchdog_leave(struct serial_watchdog *w);
+
+/* 判定そのもの (状態を持たない)。**ack が先**: 期限を過ぎていても ack を
+ * 受けていたら LINKED (遅れて届いた ack を「無音」と読み替えない)。 */
+int serial_watchdog_decide(unsigned long elapsed_ticks, int acked);
 
 #endif /* __SERIAL_WATCHDOG_H */

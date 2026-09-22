@@ -9,21 +9,17 @@
 
 #include "serial_watchdog.h"
 
-int serial_watchdog_decide(unsigned long elapsed_ticks,
-                           unsigned long lines_completed)
+int serial_watchdog_decide(unsigned long elapsed_ticks, int acked)
 {
-    /* **往復の成立を期限より先に見る。** 期限ちょうどに成立した往復を
-     * 「無音だった」と読み替えて戻してしまうと、せっかく揃った足並みを
-     * 自分で壊す。
+    /* **ack を期限より先に見る。** 期限ちょうどに届いた ack を「無音だった」
+     * と読み替えて戻すと、せっかく揃った足並みを自分で壊す。
      *
-     * ⚠ 数えるのは「バイト」ではなく **往復し終えた行**。受信だけで解除すると、
-     * 新速度で `ver` が届いたのに応答の EOT が落ちた場合に、ゲストは新速度の
-     * まま・ホストは旧速度へ戻り、二度と合わなくなる (Codex レビュー B2)。
-     * 化けたバイトやローカルのキー入力で解除されるのも同じ理由で困る。 */
-    if (lines_completed > 0) {
+     * ⚠ 見るのは `serial ack` という **明示の合図** だけ。受信バイト数でも
+     * 往復した行数でもない (往復 1〜3 の設計はそこで穴が尽きなかった)。 */
+    if (acked) {
         return SER_WD_LINKED;
     }
-    /* 期限を過ぎても 1 往復もしていない = ホストは別の速度で喋っている
+    /* 期限を過ぎても ack が来ない = ホストは別の速度で喋っている
      * (こちらの応答が届いていない)。元へ戻すしかない。 */
     if (elapsed_ticks >= (unsigned long)SER_SWITCH_WATCHDOG_TICKS) {
         return SER_WD_REVERT;
@@ -31,43 +27,24 @@ int serial_watchdog_decide(unsigned long elapsed_ticks,
     return SER_WD_WAIT;
 }
 
-/* ======================================================================== */
-/*  その行を「往復した 1 行」と数えてよいか                                 */
-/*                                                                          */
-/*  4 つ**すべて**が要る。1 つでも欠けたら、番犬にとっては「往復していない」。 */
-/*    terminated : 改行で終端している (断片・ESC 中断を数えない — 往復 3 ②)  */
-/*    all_serial : 全バイトがシリアル由来 (ローカルキーの混入を数えない)     */
-/*    executed   : 実行した (overflow で断った行を数えない)                  */
-/*    eot_sent   : 応答の EOT を送り終えた (諦めた送信を数えない — ③)        */
-/* ======================================================================== */
-int serial_watchdog_line_qualifies(int terminated, int all_serial,
-                                   int executed, int eot_sent)
-{
-    if (!terminated) return 0;
-    if (!all_serial) return 0;
-    if (!executed) return 0;
-    if (!eot_sent) return 0;
-    return 1;
-}
-
 void serial_watchdog_arm(struct serial_watchdog *w, unsigned long tick,
                          unsigned long prev_mode, unsigned long prev_baud)
 {
     if (!w) return;
     w->armed = 1;
+    w->acked = 0;
     w->start_tick = tick;
-    w->lines = 0;
     w->prev_mode = prev_mode;
     w->prev_baud = prev_baud;
 }
 
-void serial_watchdog_line_done(struct serial_watchdog *w)
+void serial_watchdog_ack(struct serial_watchdog *w)
 {
-    /* **仕掛かっていないときは数えない。** 数えてしまうと、次の切替で
-     * arm する前の古い数が残って即 LINKED になる (arm が 0 に戻すので
-     * 実害は無いが、意味の無い加算はしない)。 */
+    /* **仕掛かっていないときは印を立てない。** 立てると、次の切替で arm する
+     * 前の古い ack が残って即 LINKED になる (arm が 0 に戻すので実害は無いが、
+     * 意味の無い代入はしない)。`serial ack` の応答自体は呼び手が冪等に返す。 */
     if (!w || !w->armed) return;
-    w->lines++;
+    w->acked = 1;
 }
 
 int serial_watchdog_poll(struct serial_watchdog *w, unsigned long tick)
@@ -75,10 +52,24 @@ int serial_watchdog_poll(struct serial_watchdog *w, unsigned long tick)
     int d;
 
     if (!w || !w->armed) return SER_WD_WAIT;
-    d = serial_watchdog_decide(tick - w->start_tick, w->lines);
+    d = serial_watchdog_decide(tick - w->start_tick, w->acked);
     if (d == SER_WD_WAIT) return SER_WD_WAIT;
     /* 答えが出たら下ろす。**2 度は返らない** — REVERT を 2 回返すと
      * 戻したあとにもう一度 serial_init を呼んでしまう。 */
     w->armed = 0;
     return d;
+}
+
+int serial_watchdog_leave(struct serial_watchdog *w)
+{
+    if (!w || !w->armed) return SER_WD_WAIT;
+
+    /* **抜けたあとは poll する者が居ない** (往復 4 B4)。番犬が仕掛かったまま
+     * 忘れられると、確認の取れていない速度のまま会話が死ぬ。期限を待たずに
+     * その場で戻す — 待っても誰も見に来ないのだから、待つ意味が無い。 */
+    w->armed = 0;
+    if (w->acked) {
+        return SER_WD_WAIT;   /* 確認済み = そのままでよい */
+    }
+    return SER_WD_REVERT;
 }
