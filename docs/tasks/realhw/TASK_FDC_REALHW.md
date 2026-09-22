@@ -87,3 +87,26 @@ NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `F
 | **R6** | **実機で FD 起動 → `root OK` → シェル** | **ユーザー**。失敗時は `[fdc]` の行を写真で |
 
 **エミュレータでは原因そのものは再現できない** (§2)。R3〜R5 は退行が無いことしか言わない。
+
+### 5-1. 結果 (2026-09-22)
+
+| ID | 結果 |
+|---|---|
+| R1 | **合格**。6 ケース、変異 4 本が全部 RED (`make check-fdc-seek-host`) |
+| R2 | `make all` / `make fd144` **合格** (本体で実行。worktree は `.env` が無く `/usr/local/cross` 既定になるので全体ビルドには使えない)。`make check` は往復 2 の着地後に再実行 |
+| R3 | **合格**。NP21/W を trial ini + `os32_boot.d88` 引数で起動 → `[fatfs] mounted: type=1 drv=0 pdrv=0 FAT12`、kselftest 85/85、`OS32 v1.0 (FDD Boot)`、`ver` の Build が新ビルド。`/bin/cfg.bin` (38,272B) がホスト原本と md5 一致、`/VMKRNL.LZ4` (484,794B、474 クラスタ) が**イメージ内のファイルと md5 一致** (原本との 2 バイト差はビルド時刻の秒。イメージ生成後に再リンクされたため)。`[fdc]` の失敗行は出ない |
+| R4 | **未実施**。trial ツールが `.d88` しか引数に取れず、1.44MB は生 `.img`。手で挿入するか、ツールの拡張が要る |
+| R5 | 未実施 (往復 2 の後、NHD 配備が要る → [D1]) |
+| R6 | **未実施** (ユーザー) |
+
+## 6. 独立レビュー (Codex `codex exec -s read-only`)
+
+**往復 1 (b95479d)**: Request changes。PM が反例の到達可能性を確かめて全部採用:
+
+| # | 所見 | 判断 |
+|---|---|---|
+| B1 (P1) | 最終 READ がタイムアウトしたまま戻ると DMA ch2 が動いたままで、次の WRITE が `dma_buffer` へ写した内容を遅れた旧転送が上書きし得る | 到達可能。最終失敗時に DMA マスク + FDC リセット (`fdc_abort_transfer`) |
+| B2 (P2) | `fdc_wait_seek_end` の IRQ 待ちが 1 回だけなので、別ドライブの通知 (drv1 の Ready 変化) で自ドライブの正常なシークを PENDING で打ち切る | 稀だが到達可能。期限までループ |
+| B3 (P2) | 媒体無しの `/fd0` 試行で NR 即失敗のたびに reset (NP21/W はリセット IRQ を出さない → 0.5s × 2) | 到達可能。NR は再試行しない + リセット待ち 100ms |
+| 非 blocker | `fdc_read_results` の `i--` が無限になり得る / 診断の ST0 が SEEK のものでない / NP21/W の時間説明 (`FDC_INT_DELAY`=6 の後に 512 サイクル) | 全部直す |
+| **非 blocker → 実機の第 2 原因** | **`I/O 0439h bit2` = 1MB 以上への DMA 禁止、ノーマルモードの起動時設定は 1** (`io_dma.md` 428 行〜)。`dma_buffer` は 0x156000 で 1MB 超。NP21/W は `necio_o0439` が値を保存するだけで DMA が見ない (`src/io/necio.c`) ので**エミュレータでは再現しない** | **blocker 4 として採用**: `fdc_init` で RMW して bit2 を落とす (bit7 はプリンタ I/F 選択なので他ビットを保つ、FF なら書かない)、読み戻しを `[fdc] dma>1MB: 0439h xx -> xx` で報告 |
