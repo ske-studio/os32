@@ -932,7 +932,7 @@ static void ksel_storm_wait_tick(void)
 {
     u32 t = tick_count;
     long spin = 500000L;   /* 0.6µs x 50 万 = 約 0.3 秒。1 tick の 30 倍 */
-    while (tick_count == t && spin-- > 0) io_wait();
+    while (tick_count == t && spin-- > 0) __asm__ volatile("nop");
 }
 
 static void test_irq_dynamic(void)
