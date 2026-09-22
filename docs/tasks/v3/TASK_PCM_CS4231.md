@@ -1,6 +1,6 @@
 # TASK_PCM_CS4231 — CS4231 (MATE-X PCM) の PCM 再生ドライバ (§5-5 の P1)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v7 (Codex 往復 6 の 7 件を反映: 連続性の証拠は TC ではなく PI (位置より先に読む)、drain の開始段階と staged==0、進行の番犬、切り替え判定の順序、満杯の write からの自動開始。往復 7 待ち)**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v8 (Codex 往復 7 の 2 件を反映: 位置で数えた境界の PI を `pi_owed` で区別、進行の判定は更新前の位置で。往復 8 待ち)**。
 > 正典の関係: [`PLAN.md`](PLAN.md) §5-5、土台は [`TASK_HAL_WIRING.md`](TASK_HAL_WIRING.md) (1-1 割り込み、1-2 8237、1-3 プール、1-5 時計)、
 > 出力保護は [`../memory/TASK_KAPI_OUTPUT_GUARD.md`](../memory/TASK_KAPI_OUTPUT_GUARD.md)。
 > 典拠: Crystal **CS4231A データシート DS139PP2** (`docs/hw/crystal/cs4231a.pdf`、gitignore のミラー、`pdftotext` 済み)、
@@ -105,18 +105,21 @@ frame を写し (`filled[0]`)、残りがあれば半分 1 へも (`filled[1]`)�
    `p1 = pos_bytes / 4`。`tc` は**使わない** (往復 6 R1/R2: NP21/W の CS4231 専用 DMA 経路は 8237 の TC を立てないし、HAL の
    `(left, tc)` は同時点の証拠ではない。`dma_chan_ack_tc(1)` は診断のために呼ぶだけ)。`now = sys_time_now` (負なら
    `tick_count × 10000`。単調性は前回値との max)。**`-EAGAIN` なら pos / half / filled は更新せず** `now` だけ取って 5 へ。
-2. **連続性の判定** (往復 6 R1/R2 で証拠を PI と位置に変更)。前回 `(h0, p0)` (start / restart 直後は `(0, 0)`、有効な基準)、
-   今回 `(h1, p1)`、`pi` = この呼び出しで消した PI:
-   - `pi = 0` かつ `h0 == h1` かつ `p1 >= p0`: 境界無し → **連続**。
-   - `pi = 0` かつ `h0 == h1` かつ `p1 < p0`: 同じ半分で戻った = 1 周回った (2 境界) → **喪失**。
-   - `pi = 0` かつ `h0 != h1`: 境界 1 回 (PI は位置の後に立ったので次回に残る) → **連続 (切り替え 1 回)**。
-   - `pi = 1` かつ `h0 != h1`: 境界 1 回 → **連続 (切り替え 1 回)**。**1 回と 3 回 (h0→h1→h0→h1) は区別できない** (PI は回数を
-     持たない)。曖昧さが残るのは観測の空白が 2 半周期 (92.9ms @44.1k、185.8ms @22.05k) 以上のときだけで、**保証外**として
-     記す (HAL の合格でも排除されない。W6 の残件)。
-   - `pi = 1` かつ `h0 == h1`: 境界 2 回 (h0→他→h0) 以上 = **未補充の半分を読んだ → 喪失**。
-   PI を「切り替えの必須条件」にはしない (PI を消した回の位置採取が `-EAGAIN` になり得る。その場合 `pi` を次回に持ち越す)。
-   喪失は `repeats` +1 → RUNNING なら **RS_STOP**、DRAINING なら **drain 失敗を記録して STOP_REQ**。連続なら **`changed = (h1 != h0)`、
-   `old = h0` を先に確定してから** `(h0, p0) = (h1, p1)` に更新 (往復 6 R6)。`p1 != p0 || changed` なら `last_progress = now`。
+2. **連続性の判定** (往復 6 R1/R2 で証拠を PI と位置に変更、往復 7 B1 で PI の対応づけを追加)。前回 `(h0, p0)` (start /
+   restart 直後は `(0, 0)`、有効な基準)、今回 `(h1, p1)`。`pi` = この呼び出しで消した PI **または `-EAGAIN` の回から持ち越した PI**
+   (ソフトウェアの状態。位置を処理した時点で消費する)。**`pi_owed`** = 「前回、位置の変化で数えた境界の PI がまだ装置に残っている」
+   印 (PI 読み → 境界 → 位置読み の順で前回の観測が済んだとき、その境界の PI は次回に現れる。それを 2 境界目と誤認しない):
+   - `h0 != h1` (位置で境界 1 回を観測): `pi = 1` かつ `pi_owed = 0` なら**この境界の PI** → `pi_owed = 0`。`pi = 1` かつ `pi_owed = 1`
+     なら**前回の境界の PI** (この境界の PI はまだ来る) → `pi_owed = 1` のまま。`pi = 0` なら → `pi_owed = 1`。いずれも **連続
+     (切り替え 1 回)**。1 回と 3 回 (h0→h1→h0→h1) は区別できない (PI は回数を持たない): 曖昧さが残るのは観測の空白が 2 半周期
+     (92.9ms @44.1k、185.8ms @22.05k) 以上のときだけで、**保証外**として記す (HAL の合格でも排除されない。W6 の残件)。
+   - `h0 == h1` かつ `p1 >= p0`: `pi = 1` かつ `pi_owed = 1` なら前回の境界の PI → 消費 (`pi_owed = 0`)、**連続**。`pi = 1` かつ
+     `pi_owed = 0` なら境界 2 回 (h0→他→h0) 以上 = **未補充の半分を読んだ → 喪失**。`pi = 0` なら **連続**。
+   - `h0 == h1` かつ `p1 < p0`: 同じ半分で戻った = 1 周回った → **喪失**。
+   PI を「切り替えの必須条件」にはしない。喪失は `repeats` +1 → RUNNING なら **RS_STOP**、DRAINING なら **drain 失敗を記録して
+   STOP_REQ**。連続なら **`changed = (h1 != h0)`、`old = h0`、`progressed = (changed || p1 != p0)` を先に確定してから**
+   `(h0, p0) = (h1, p1)` に更新 (往復 6 R6、往復 7 B2)。`progressed` なら `last_progress = now`。start / restart は `pi_owed = 0`、
+   持ち越し PI = 0、`last_progress = now` で初期化する。
 3. **切り替え** (`changed`): gen +1。**判定は消す前に**: RUNNING で `filled[h1] < 2048` なら `underruns` +1。DRAINING は末尾の 0 埋めを
    数えない。
 4. **補充** (切り替えを観測したときだけ): 装置の現在位置から `h1` の末尾まで **`REFILL_MARGIN` (512 frame) 以上**あることを確かめて
@@ -124,7 +127,7 @@ frame を写し (`filled[0]`)、残りがあれば半分 1 へも (`filled[1]`)�
    跨ぐときは 2 回に分ける — 往復 4 R6)、残りを 0 で埋め、`filled[old]` = 写した数、`stg_r` を進める。**正の frame 数を写したときだけ
    `last_data_half = old` とし、drain の段階を「入るのを待つ」に戻す** (0 frame の補充は更新しない — 往復 4 R4)。余裕が無ければ
    写さずに `repeats` +1 → 2 の喪失と同じ扱い。
-4'. **drain の段階** (RUNNING でも追跡し、完了の遷移は DRAINING だけ — 往復 6 R4): 補充の後に `h1` で進める: 「入るのを待つ」で
+4'. **drain の段階** (RUNNING でも追跡し、完了の遷移は DRAINING だけ — 往復 6 R4。**1 回の観測で 1 段階だけ**進める): 補充の後に `h1` で進める: 「入るのを待つ」で
    `h1 == last_data_half` → 「読んでいる」。「読んでいる」で `h1 != last_data_half` → 「無音の半分を読んでいる」。「無音の半分」で
    さらに切り替え → 「出た」。**DRAINING で「出た」かつ `staged == 0`** → drain 完了 → STOP_REQ (DMA 完了と DAC 出力は別なので
    無音の半分を丸ごと通す。ステージングにデータが残っていれば完了せず、次の切り替えで補充されて段階が戻る)。
@@ -180,7 +183,8 @@ int  pcm_set_volume(u32 percent);
 
 ### 2-3. 純粋関数 (ホスト試験)
 
-`pcm_advance` の判定 (left → pos → half、**連続性の判定表 (pi × h0 × h1 × p の全組、PI を先に読む順序、`-EAGAIN` での持ち越し)**、**補充の余裕 (REFILL_MARGIN)**、切り替えの検出と **消す前の**
+`pcm_advance` の判定 (left → pos → half、**連続性の判定表 (pi × pi_owed × h0 × h1 × p の全組、PI を先に読む順序、`-EAGAIN` での持ち越し、
+往復 7 B1 の 5 手順の列 = 位置で数えた境界の PI が次回に来ても喪失にしない、本物の 2 境界は喪失にする)**、**補充の余裕 (REFILL_MARGIN)**、切り替えの検出と **消す前の**
 underrun 判定、両半分満杯の正常切り替えで underrun 0、**drain の 3 段階** (start / restart / 補充で `last_data_half` を置いた各場合、0 frame の
 補充で動かない、`write(1 frame) → close`)、末尾後の無音、`-EAGAIN` でも番犬が動く、番犬の期間の計算、**遅れた観測 (PI + 同じ半分) で repeats +
 RS_STOP、DRAINING では STOP_REQ**、**進行の番犬 (同じ位置が続く)**、**満杯の write からの自動開始**、**「出た」+ staged > 0 は完了しない**)、ステージングの予約 / 公開 / 消費 (frame 倍数、空き、**物理末尾の
