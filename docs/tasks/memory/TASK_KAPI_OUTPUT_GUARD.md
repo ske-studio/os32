@@ -66,3 +66,10 @@
 実装で決めたこと: `"out": "target"` (自前で検査する `sys_time_now` / `pci_bind_info`) を第 3 の形として認め、二重の CR3 往復を避けた。
 対象は v58 の 43 本 + v59/v60 の 2 本 = 45 本。`dev_blk_read` は wrapper の 512 単位に加えて**本体で `sect_size` の実長を検査** (7ae93c7)。
 残る穴: `np2_recv_str` は `maxlen <= 0` でも 1 バイト書く (長さ 0 は検査しない規則の外。別途)。既知: NULL を渡すと死ぬ 4 本 (`np2_get_*` / `rtc_read` / `dev_get_info(name)` / `ide_read_sector`) は従来どおり。
+
+**実装レビュー (Codex、2026-09-23) → Request changes 5 件を反映 (コミット後の NP21/W 再確認: 194/194、`kout_test` PASS、`make check` 通過)**:
+(1) `dev_get_info` は `nm <= 0` で終端の 1 バイトを書いていた → 拒否。(2) `dev_blk_read` の負の `count` が CD-ROM 経路で大量読みになる → 拒否。
+(3) `sys_redirect_fd_buf` の `len > size` で検査範囲外へ書けた → 拒否。(4) リダイレクト登録後に `sys_shm_lock` でページが RO になっても書けた →
+書くたびに再検査 (ユーザ帯のバッファだけ。`fs/fd_redirect.c`)。(5) `dev_blk_read` の 512 単位の先行検査が 128/256 バイトセクタの正常呼び出しを
+殺す → 先行検査を外して本体の実長検査だけに。非 blocker のうち `np2_recv_str` の `maxlen <= 0` の 1 バイト書きも直した。
+残る非 blocker: 生成器の const 判定は文字列一致 (`char *const p` などを見分けない。現行 45 本には無い)、`kout_test` は RO 拒否そのものを踏まない (アプリから安全に作れない)。
