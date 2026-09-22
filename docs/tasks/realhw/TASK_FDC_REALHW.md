@@ -1,6 +1,6 @@
 # TASK_FDC_REALHW — 実機で FD から起動できない (root panic) を直す
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実装済み・エミュレータ検証中**。実機は未検証 (R6)
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実装済み・エミュレータ回帰 (2HD) 合格・Codex 往復 2 待ち**。実機は未検証 (R6)
 
 基点: `feat/gui` `ec48c6b`。実機計画は [`PLAN.md`](PLAN.md)、1.44MB の経緯は [`TASK_FD144.md`](TASK_FD144.md)、
 FDC ドライバの仕様表は [`../../05_drivers.md`](../../05_drivers.md) §5-2。
@@ -93,8 +93,8 @@ NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `F
 | ID | 結果 |
 |---|---|
 | R1 | **合格**。6 ケース、変異 4 本が全部 RED (`make check-fdc-seek-host`) |
-| R2 | `make all` / `make fd144` **合格** (本体で実行。worktree は `.env` が無く `/usr/local/cross` 既定になるので全体ビルドには使えない)。`make check` は往復 2 の着地後に再実行 |
-| R3 | **合格**。NP21/W を trial ini + `os32_boot.d88` 引数で起動 → `[fatfs] mounted: type=1 drv=0 pdrv=0 FAT12`、kselftest 85/85、`OS32 v1.0 (FDD Boot)`、`ver` の Build が新ビルド。`/bin/cfg.bin` (38,272B) がホスト原本と md5 一致、`/VMKRNL.LZ4` (484,794B、474 クラスタ) が**イメージ内のファイルと md5 一致** (原本との 2 バイト差はビルド時刻の秒。イメージ生成後に再リンクされたため)。`[fdc]` の失敗行は出ない |
+| R2 | `make all` / `make fd144` / **`make check` (exit 0) 合格** (b299ea9、本体で実行。worktree は `.env` が無く `/usr/local/cross` 既定になるので全体ビルドには使えない) |
+| R3 | **合格**。NP21/W を trial ini + `os32_boot.d88` 引数で起動 → `[fatfs] mounted: type=1 drv=0 pdrv=0 FAT12`、kselftest 85/85、`OS32 v1.0 (FDD Boot)`、`ver` の Build が新ビルド。`/bin/cfg.bin` (38,272B) がホスト原本と md5 一致、`/VMKRNL.LZ4` (484,794B、474 クラスタ) が**イメージ内のファイルと md5 一致** (原本との 2 バイト差はビルド時刻の秒。イメージ生成後に再リンクされたため)。`[fdc]` の失敗行は出ない。**往復 2 (b299ea9) でも再確認**: リセット後の画面に `[fdc] dma>1MB: 0439h ff -> ff` (新コードの印。NP21/W は 0439h を読めず FFh) → `[fatfs] mounted` → 85/85 → FDD Boot、`/VMKRNL.LZ4` (485,330B) がイメージ内容と md5 一致 |
 | R4 | **未実施**。trial ツールが `.d88` しか引数に取れず、1.44MB は生 `.img`。手で挿入するか、ツールの拡張が要る |
 | R5 | 未実施 (往復 2 の後、NHD 配備が要る → [D1]) |
 | R6 | **未実施** (ユーザー) |
