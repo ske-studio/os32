@@ -1,8 +1,8 @@
 # TASK_HAL_WIRING — 結線の土台 (割り込みの動的登録 / 8237 DMA の共通部 / DMA プール / PCI の結線表 / µs 時計)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v10 (Codex 往復 9 の R9-1〜R9-3 を反映。実装 A/B が並行中で、変更はコーダーに中継済み。往復 10 が最後)**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v11 — レビュー終了 (Codex 10 往復。往復 10 の残 blocker は R10-1 の 1 件で、PM が出力保護の方式を決めて固定。以後は実装レビュー)**。
 > ユーザー指示 2026-09-23: 「結線の土台の票の設計を先に起こす」。
-> 往復記録: v1 → Codex 往復 1 (B1〜B14、Request changes) → v2 → Codex 往復 2 (R1〜R9、Request changes) → v3 → Codex 往復 3 (B1〜B7、Request changes。R2/R3/R4/R6 は閉、R1/R5/R7/R8/R9 は部分) → v4 → Codex 往復 4 (R1〜R6、Request changes。B3/B6/B7 は閉、B1/B4/B5 は部分、B2 は未閉) → v5 → Codex 往復 5 (B1〜B4、Request changes。R1〜R6 は閉、R4 は残件移管) → v6 → Codex 往復 6 (R1〜R3、Request changes。B1/B3 は閉、B2/B4 は部分) → v7 → Codex 往復 7 (B1〜B3。R2 は閉、R1/R3 は部分。B1/B2 = 実装前に決める設計判断、B3 = 実装レビューで可) → v8 (PM の決定を固定) → Codex 往復 8 (R8-1〜R8-3、Request changes。B1〜B3 は閉、1-2/1-3 に新規 blocker 無し) → v9 → Codex 往復 9 (R9-1〜R9-3、Request changes。R8-1 は閉、R8-2/R8-3 は部分。1-1 の dispatch/EOI/storm と 1-2/1-3 に新規 blocker 無し) → v10。
+> 往復記録: v1 → Codex 往復 1 (B1〜B14、Request changes) → v2 → Codex 往復 2 (R1〜R9、Request changes) → v3 → Codex 往復 3 (B1〜B7、Request changes。R2/R3/R4/R6 は閉、R1/R5/R7/R8/R9 は部分) → v4 → Codex 往復 4 (R1〜R6、Request changes。B3/B6/B7 は閉、B1/B4/B5 は部分、B2 は未閉) → v5 → Codex 往復 5 (B1〜B4、Request changes。R1〜R6 は閉、R4 は残件移管) → v6 → Codex 往復 6 (R1〜R3、Request changes。B1/B3 は閉、B2/B4 は部分) → v7 → Codex 往復 7 (B1〜B3。R2 は閉、R1/R3 は部分。B1/B2 = 実装前に決める設計判断、B3 = 実装レビューで可) → v8 (PM の決定を固定) → Codex 往復 8 (R8-1〜R8-3、Request changes。B1〜B3 は閉、1-2/1-3 に新規 blocker 無し) → v9 → Codex 往復 9 (R9-1〜R9-3、Request changes。R8-1 は閉、R8-2/R8-3 は部分。1-1 の dispatch/EOI/storm と 1-2/1-3 に新規 blocker 無し) → v10 → Codex 往復 10 (R10-1 の 1 件のみ、Request changes。R9-1/R9-3 は閉。L-B 持ち越し無し) → v11 (PM の決定で固定、レビュー終了)。
 
 正典の関係: [`PLAN.md`](PLAN.md) §3-1 (HAL の棚卸し)、§3 (ドライバの動的読み込み — この票の「取り決め」を後で外部モジュールに開く)、
 [`../realhw/TASK_LAN_82557.md`](../realhw/TASK_LAN_82557.md) (L-B 82557 が最初の顧客)、§5-5 (PCM リングとタイマが 2 番目の顧客)。
@@ -77,8 +77,8 @@ int  irq_unregister(unsigned int irq, irq_handler_fn fn, void *arg);
 PIRQ → 8259 の経路は BIOS が設定し、Interrupt Line レジスタを書き換えても配線は変わらない。BIOS に変更 UI があるか、
 動的 IRQ (3/5/6/9/10/14/15) へ変えられるかは機種ごとの確認事項で、実機の R1〜R4 (TASK_LAN_82557 §5-2) に足す。`lspci` が `[irq N unsupported]` / `[irq N quarantined]` を出す。
 **診断の取得口 (往復 8 R8-2)**: 結果は BDF ごとに `struct pci_bind_info { u8 bus, dev, fn, result; u8 irq; u8 reason;
-u8 line_state; u8 pad; }` (8 バイト。`line_state` は **getter が読む時点で `irq_line_quarantined` / `irq_storm_masked` から
-合成する** (往復 9 R9-1: 先に BOUND した装置 X の線が後から別装置 Y で隔離されても X の `result` は BOUND のまま、
+u8 line_state; u8 pad; }` (8 バイト。`line_state` (LINE_OK = 0 / LINE_STORM_MASKED = 1 / LINE_QUARANTINED = 2、両方立っていれば QUARANTINED。pad は 0) は
+**getter が読む時点で `irq_line_quarantined` / `irq_storm_masked` から合成する** (irq = 0xFF や ≥ 16 はシフト・配列参照より前に除外して LINE_OK) (往復 9 R9-1: 先に BOUND した装置 X の線が後から別装置 Y で隔離されても X の `result` は BOUND のまま、
 `line_state` = QUARANTINED で「IRQ が来なくなった」を `lspci` が出す)。result = NONE / BOUND / DECLINED / QUARANTINED、reason = OK / IRQ_UNSUPPORTED / IRQ_QUARANTINED /
 RESET_FAILED / START_FAILED / NOISY / NOISY_UNMASKABLE / NO_DRIVER) に保存し、カーネル関数 `pci_bind_info_get(idx, *out)`
 (idx は `pci_get` と同じ列挙順) で読む。driver は `pci_bind_set_reason(dev, reason)` で理由を書く。上書き規則: 候補ごとに reason を OK に**初期化**してから probe を呼び、理由未設定で DECLINE なら `DECLINED_UNSPECIFIED`、
@@ -359,14 +359,21 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
   `*lo`/`*hi` を触らない。呼び手は `tick_count × 10000` に落とせるが、**その値は同じ tick の補間値より小さいので、
   fallback は単調性の保証に含めない** (呼び手が前回値と max を取る)。
 - **KAPI**: 64 ビットの戻り値は使えない (往復 1 の B14) ので**出力引数 2 本**で末尾追記 (版数 58 → 59)。
-  CPL=3 のポインタ検査 (往復 9 R9-2 で契約を限定): **既存の kill 規則を採る** — 生成される早期検査 (`kapi_argptr`、
-  `exec/exec.c` の `ring3_user_range_ok`) が帯の外の番地で `ring3_fault_kill()` するのは他の KAPI と同じで、
-  非 present / 読み取り専用ページへの書き込み fault もアプリの死として扱う (この KAPI だけ守らない)。
+  CPL=3 のポインタ検査 (往復 9 R9-2 で契約を限定、往復 10 R10-1 で出力保護を追加): **既存の kill 規則を採る** —
+  生成される早期検査 (`kapi_argptr` / `ring3_ptr_ok`。`ring3_user_range_ok` は偽を返すだけの関数) が帯の外の番地で
+  `ring3_fault_kill()` するのは他の KAPI と同じ。**ただし読み取り専用ページは fault しない**: OS32 は `CR0.WP = 0`
+  (`arch/x86/arch_cpu.h` の MMU 有効化、`kernel/shlib.c` がカーネルからの書き込みに依存) なので、CPL=0 の wrapper は
+  共有ライブラリの `.text` (RO、全アプリで共有) にも書けてしまう。**出力引数を持つ新設 KAPI (`sys_time_now`、
+  `pci_bind_info`) は、書く前に `ring3_user_range_writable(ptr, len)` (新設、`exec/exec.c`: 範囲の全ページの PTE が
+  present + RW + USER であることを master / 現在の PD で確かめる) を通し、通らなければ `ring3_fault_kill()`**
+  (出力バッファにコード番地を渡すのはアプリのバグ。負を返して続行させない)。既存の出力 KAPI への適用は別票 (残件)。
+  全体の WP 有効化は shlib の書き込み依存と対象 CPU の確認が要るので、この票では選ばない。
   wrapper が**負を返して出力不変**を保証するのは、早期検査を通った後に wrapper 自身が判定できる範囲だけ:
   `lo == NULL` / `hi == NULL`、各 4 バイトが帯境界を跨ぐ、**2 本の 4 バイト範囲が交差する** (`lo == hi` だけでなく差 1〜3 も)。
   この範囲内では 2 本とも検査してから、ローカルの 1 つのスナップショットを書く。受入 W4 は wrapper の直呼びではなく
   **CPL=3 のゲストから KAPI を呼ぶ試験** (`kselftest_run_post_exec` はカーネル関数なので、そこから CPL=3 の試験バイナリを
-  起動する) で、負が返る 3 種と kill される 1 種 (帯の外) を確かめる。
+  起動する) で、負が返る 3 種と kill される 2 種 (帯の外、**共有ライブラリ `.text` の番地を出力に指定** → kill され、共有内容が
+  不変 (2 本目だけ RO の場合も)) を確かめる。`pci_bind_info` (v60) も同じ試験。
 - 単調性: u64 に組み立てるので 71 分の桁あふれは無い。`tick_count` の u32 周回 (497 日) は扱わない (契約)。
 
 ### 1-6. 実装の注意 (往復 5・6 の非 blocker)
@@ -413,7 +420,7 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
 | W1 | 純粋関数のホスト試験 (変異つき): 集約と 2 巡 (同時要因、2 巡目の回収、`handled_any` の保持、`irq_deferred_count`、ストーム閾値)、**TC → ack → remaining の遷移表**、失敗した setup が旧 `done` / `tc_event` を保つこと、`irq_finish` の **EOI 送信列** (master / slave / IRQ15 スプリアスの ISR 検査を handled と独立に)、登録の一括有効化と拒否規則 (非対応 IRQ、SHARED 不一致、5 件目)、`dma_split_addr` / `dma_crosses_64k` / `bytes` の範囲 / `dma_accept_pair` / **TC の read-clear の保存**、プールの最初適合と整列と 64KB 跨ぎ (**境界直前から跨ぐ候補を飛ばして後半に置く、32KB × 2 が空プールに入る、LEAKED を free しても空きに戻らない**)、**隣接 span の free と途中ポインタ・二重解放**、PCI の一致規則 (任意 / 完全 / DECLINE で次へ / QUARANTINE で打ち切り / 複数装置)、時計の整数式と **p1/p2 の判定表** (両クロック、周期境界) | `check-par` |
 | W2 | FDC が `dma8237` 経由でも **NP21/W の 2HD 起動と md5 一致**、**書き込み → 読み戻しの一致**、`dma_chan_setup` が負のとき FDC コマンドを発行しない、読み失敗のタイムアウト → `fdc_abort_transfer` → 再試行。**実機の FD 起動** と 0439h の 3 値の表示 | NP21/W + 実機 |
 | W3 | 共通スタブに `irq_register` した偽装置 (`kselftest` / 試験用 KAPI): NP21/W の `/api/pic` で IRR/ISR を見ながら、master (3) と slave (9) の両方、連続、共有 (2 登録の集約と**残件の tick 回収の完了**)、共有者の**片方解除**後にもう片方が動く、解除後に callback が走らない、CPL=3 のアプリ実行中と V86 中、**要因を落とさずマスクもしない偽装置で 2 巡で戻ること** (救済しない契約の確認) と、**誰も受けないエッジを 201 回/tick 打ってマスクが入る (200 回では入らない)** ことを別の試験に、**正常に HANDLED を返す 2 つの偽装置で走査終了と新要因を重ねてエッジを失わせ、双方の tick フックが回収する** (B1 の反例)、**NE2000 の enter/leave の両方の窓への割り込み注入** (B2)、**82557 の巻き戻し中 (STOPPING) に共有線の別装置の IRQ を上げても、tick からも SCB に触らない** (B3、偽装置で代替)、**STARTING の観測点: (4) 登録直後・(6) 開始中・(7) M 解除直後のそれぞれで共有線の IRQ を上げ、(7) より前は装置アクセス無し、(7) の後は通常処理** (往復 9)、**NE2000 の再初期化直後の窓への注入** (往復 6 R1)、**noisy 隔離: 線が上がったままエッジが来ない / 共有者が HANDLED を返し続ける、の両方で `irq_quarantine_line` が入り再計算で解除されない** (往復 6 R3)、**`DEFERRED` を返した偽装置が自分の tick フックで残件を回収してマスクを外す**こと、**残った側が `DEFERRED`・装置マスク中のまま片方を解除しても残った側の tick フックが動き続ける**こと、IRQ0 の所要時間がこの票の前後で変わらないこと (`/api/prof`)、**LGY-98 をアダプタに移した後の rshell/LAN の通信** | NP21/W |
-| W4 | `sys_time_now`: 1 万回連続読みで逆行 0、両クロック (NP21/W 1.9968 / 実機 2.4576)、**境界注入**: IF=0 で PIT の残りが 1〜2 count の位相から読む試験 (`kselftest` が count を見て待ち合わせる) で p1/p2 の 3 分岐を全部踏む、**三分岐の網羅は hook で** (往復 8 R8-3: 既定の入力列 `{p1, p2, count}` を与える test hook と分岐カウンタで 0/0・1/x・0/1→再試行→成功・0/1×3→`-EAGAIN` を全部踏む。実 PIT では呼び出しから p1 読みまでに境界を越える機械があり、位相待ちだけでは 0/0 と 0/1 を踏めない)、**実 PIT の試験は期限付きの位相待ち** (**位相待ちは IF=1 で**行い、残り 1〜2 count を観測した瞬間だけ短く IF=0 にして採取する。IF=0 で待つと IRQ0 が止まって tick の期限が進まない (往復 9 R9-3)。期限は 100 tick、さらに IF=0 区間の中の観測ループにも独立した有限回数 (1000 回) の上限。実際に通った分岐を記録し、踏めなかった分岐は「未検証」と報告する。**三分岐の網羅は hook の方だけが必須**)、**PIT の残りが 0.1ms の位相から** IF=0 を 10.2ms 続けた後の読み (契約外の挙動を記録)、**CPL=3 の KAPI 経由の試験は post-exec 側** (`kselftest_run_post_exec`、`exec_init` の後)、CPL=3 から 64 ビットが揃って返る | NP21/W + 実機 |
+| W4 | `sys_time_now`: 1 万回連続読みで逆行 0、両クロック (NP21/W 1.9968 / 実機 2.4576)、**境界注入**: IF=0 で PIT の残りが 1〜2 count の位相から読む試験 (`kselftest` が count を見て待ち合わせる) で p1/p2 の 3 分岐を全部踏む、**三分岐の網羅は hook だけが必須** (往復 8 R8-3: 既定の入力列 `{p1, p2, count}` を与える test hook と分岐カウンタで 0/0・1/x・0/1→再試行→成功・0/1×3→`-EAGAIN` を全部踏む。実 PIT では呼び出しから p1 読みまでに境界を越える機械があり、位相待ちだけでは 0/0 と 0/1 を踏めない)、**実 PIT の試験は期限付きの位相待ち** (**位相待ちは IF=1 で**行い、残り 1〜2 count を観測した瞬間だけ短く IF=0 にして採取する。IF=0 で待つと IRQ0 が止まって tick の期限が進まない (往復 9 R9-3)。期限は 100 tick、さらに IF=0 区間の中の観測ループにも独立した有限回数 (1000 回) の上限。実際に通った分岐を記録し、踏めなかった分岐は「未検証」と報告する。**三分岐の網羅は hook の方だけが必須**)、**PIT の残りが 0.1ms の位相から** IF=0 を 10.2ms 続けた後の読み (契約外の挙動を記録)、**CPL=3 の KAPI 経由の試験は post-exec 側** (`kselftest_run_post_exec`、`exec_init` の後)、CPL=3 から 64 ビットが揃って返る | NP21/W + 実機 |
 | W5 | カーネル増分 ≤ 5KB、内訳: IRQ 表 8 × 4 × 12B = 384B、storm ビット + IRQ 別の tick 内発生数・deferred 回数 (8 × 2 × 4B = 64B)、bind 情報 32 件 × 8B = 256B + getter/KAPI/診断コード、pool ビットマップ + span 16 × 4B = 72B、DMA チャネル状態 4 × 16B、pit_setup 20B、コード (irq / dma8237 / dma_pool / pci_bind / sys_time ≒ 2.5KB、u64 の割り算は libgcc に既にある)、診断文字列 ≒ 0.5KB。`__bss_end` 差分と `docs/02_memory.md` の生成 (**新配置 0x2E8000〜0x2F7FFF が `MM_RW` で USER 無し、上下が NP**)、プールの枯渇 → 解放 → 再利用、**プールの PTE に USER を立てる変異で検査が落ちる** | `docs/02_memory.md` + kselftest |
 | W6 | **土台完了**の受入はここまで。82557 での連続 TX/RX・共有・再開は **L-B の受入**。土台完了は**システム全体の IF=0 時間保証ではない** (NE2000 の残件: 既存 ISR 経路に加え、変更後は foreground の leave → `irq_pending` → `service()` の経路も IF=0)。土台の合格と実機条件の合格 (W0 実機、W7、82557 の実 IRQ での共有) は分けて記録する。HAL 単体で未検証の実機条件を残件に明記: 82557 の実 IRQ 番号での共有、PCI バスマスタのキャッシュ整合 (W7)、CS4231 の DMA (§5-5)、**NE2000 の `wait_rdc` / `hw_reset` が ISR 文脈で回る既存の契約違反** (`ne2k_irq` と `ne2k_timer_tick` の両方から `service()` の失敗分岐 → `reinit_or_fail → bring_up → hw_reset` で到達。L-C で「要求の記録」と「foreground の実行」に分ける) | — |
 | W7 | **キャッシュ整合 (実機)**: CPU がパターンを書いて**フラッシュせずに** DMA で読ませる (FDC 書き込み → 読み戻し、82557 は L-B のループバック)、DMA で受けた直後に CPU が読む、を双方向で 100 回。所有権の移譲は「CPU 書き → 装置へ渡す → 装置完了の証拠 → CPU 読み」の順で、明示のフラッシュ命令は使わない。不一致が出たら対象 CPU と所有権移譲の手順を含めて再設計する (1-6。`wbinvd` は候補であって確定ではない) | 実機 |
