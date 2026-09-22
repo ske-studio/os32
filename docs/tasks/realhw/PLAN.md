@@ -23,8 +23,9 @@
 | ディスク | **8GB** (IDE)、健全性は未確認 | **上限未検証** (§2) |
 | FDD | **1.2MB / 1.44MB の両方が使える** | 1.2MB は対応済み。1.44MB は未対応だが**要らない** (§3) |
 | CD | 使える | **インストーラが既にある** (`userland/system/cdinst.c`、`make iso`) |
+| サウンド | **MATE-X PCM** (WSS 互換の CS4231、ステレオ 8/16 ビット録音再生)。C バスライザーに載るサブボードでマザーの一部 (交換不可)。**86 音源相当の FM は無い** (別途 86/118 が要る)。CD-DA は本体スピーカへ出せる (2026-09-23 調査、下記) | OS32 の `snd` は YM2203 (26K 相当) で PCM 未対応。**PCM は 8237 の DMA (0F40h で DMA#0/#1/#3 と INT0/2/41/5 を選ぶ)** → FDC と同じ 4 条件 (物理番地・64KB 境界・`0439h`・16MB)。設計は**カーネル所有の DMA リング + KAPI でアプリが書く** (直接 DMA は要らない)。ポートは `0F40h〜0F47h` (0C2Bh/0C2Dh で再配置可)、正典 `docs/hw/undocumented/io_sound.md` 「PC-9821X･N内蔵型」 |
 
-出典: [PC-9821Ra266 データベース](https://www.pc-9800.net/db_98/data/pc-9821ra266.htm)。
+出典: [PC-9821Ra266 データベース](https://www.pc-9800.net/db_98/data/pc-9821ra266.htm)。サウンドは NEC の仕様表 (support.nec-lavie.jp 98071001-1: 「PCM録音・再生機能 (ステレオ、量子化8ビット／16ビット)」) と 第三研究所 (nakajima-jr/com/rmate/ra40.htm: MATE-X PCM = CS4231、C バスサブボード、86 相当 FM 無し、CD-DA 出力可)。
 `docs/hw/` (Bible / UNDOCUMENTED) にこの機種の記述は**無い** (調査済み)。
 
 ## 2. ディスク — 8GB は未知の領域
