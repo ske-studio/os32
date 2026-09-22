@@ -1,5 +1,5 @@
 {
-  "version": 59,
+  "version": 60,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -59,7 +59,8 @@
     "extern int gfx_stats(void *out);",
     "extern int gfx_lease_palette(int first, int count, const u8 *rgb);",
     "extern int kapi_sys_set_mtime(const char *path, u32 mtime);",
-    "extern int kapi_sys_time_now(u32 *lo, u32 *hi);"
+    "extern int kapi_sys_time_now(u32 *lo, u32 *hi);",
+    "extern int kapi_pci_bind_info(u32 idx, void *out);"
   ],
   "api": [
     {
@@ -1535,6 +1536,12 @@
       "ret": "int",
       "args": ["u32 *lo", "u32 *hi"],
       "target": "kapi_sys_time_now"
+    },
+    {
+      "name": "pci_bind_info",
+      "ret": "int",
+      "args": ["u32 idx", "void *out"],
+      "target": "kapi_pci_bind_info"
     }
   ]
 }

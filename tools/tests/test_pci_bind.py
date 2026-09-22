@@ -27,7 +27,7 @@ SRC = ROOT / "drivers/pci_bind_match.c"
 TARGET_SRCS = ["drivers/pci_bind_match.c", "drivers/pci_bind.c"]
 
 CASES = ["match_rules", "next_order", "decline_chain", "quarantine_stops",
-         "reason_reset", "line_state", "multi_dev"]
+         "reason_reset", "line_state", "multi_dev", "info_get"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl="]
@@ -74,9 +74,14 @@ def host_build(tmp, source_text=None):
         mut.mkdir(exist_ok=True)
         (mut / "pci_bind_match.c").write_text(source_text, encoding="utf-8")
         shim = src_dir / "harness.c"
+        # 変異させるのは pci_bind_match.c だけ。pci_bind.c (記録の取得口) は
+        # **実物のまま**絶対パスで引く — 相対のままだと tmp から辿れない。
         shim.write_text(
-            HARNESS.read_text(encoding="utf-8").replace(
-                '"../../drivers/pci_bind_match.c"', '"drivers/pci_bind_match.c"'),
+            HARNESS.read_text(encoding="utf-8")
+            .replace('"../../drivers/pci_bind.c"',
+                     '"%s/drivers/pci_bind.c"' % ROOT)
+            .replace('"../../drivers/pci_bind_match.c"',
+                     '"drivers/pci_bind_match.c"'),
             encoding="utf-8")
         cmd = ["gcc", *FLAGS, *INCLUDES, "-I" + str(src_dir), str(shim),
                "-o", str(exe)]

@@ -304,6 +304,134 @@ static void line_state(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  記録の取得口 (KAPI v60 `pci_bind_info` の裏側)                      */
+/*                                                                    */
+/*  `drivers/pci_bind.c` は列挙表 (`pci_count` / `pci_get`) と kprintf */
+/*  しか外に頼らないので、その 3 本を偽物にすればホストでそのまま回る。*/
+/*  ここで固めるのは 2 つ: **8 バイトちょうど**しか書かないことと、    */
+/*  範囲外の idx で**出力に 1 バイトも書かない**こと。KAPI v60 の      */
+/*  wrapper (`kapi/kapi_sys.c`) は 8 バイトぶんだけ書き込み可を確かめて */
+/*  から呼ぶので、ここが増えると CPL=3 のバッファをはみ出す。          */
+/* ------------------------------------------------------------------ */
+#include "kprintf.h"
+
+static struct pci_dev fake_devs[4];
+static int fake_count;
+
+int pci_count(void) { return fake_count; }
+
+int pci_get(u32 idx, void *out)
+{
+    if (!out || idx >= (u32)fake_count) return -1;
+    memcpy(out, &fake_devs[idx], sizeof(struct pci_dev));
+    return 0;
+}
+
+void kprintf(u8 attr, const char *fmt, ...) { (void)attr; (void)fmt; }
+
+#include "../../drivers/pci_bind.c"
+
+/* 8 バイトの記録 + その後ろの見張り。union なので型の別名の心配が無い。 */
+static union { struct pci_bind_info info; u8 raw[16]; } out_buf;
+
+static void fill_guard(u8 v)
+{
+    memset(out_buf.raw, v, sizeof(out_buf.raw));
+}
+
+static int guard_intact(u8 v)
+{
+    int i;
+    for (i = PCI_BIND_INFO_SIZE; i < (int)sizeof(out_buf.raw); i++)
+        if (out_buf.raw[i] != v) return 0;
+    return 1;
+}
+
+static int all_untouched(u8 v)
+{
+    int i;
+    for (i = 0; i < (int)sizeof(out_buf.raw); i++)
+        if (out_buf.raw[i] != v) return 0;
+    return 1;
+}
+
+static void info_get(void)
+{
+    reset();
+
+    /* 2 台。1 台目は D0 が受け、2 台目は一致する driver が無い。 */
+    memset(fake_devs, 0, sizeof(fake_devs));
+    fake_devs[0] = DEV;                    /* 8086:1229 class 02.00 irq 5 */
+    fake_devs[1] = DEV;
+    fake_devs[1].dev = 9;
+    fake_devs[1].vendor = 0x1011;
+    fake_devs[1].device = 0x0019;
+    fake_devs[1].class = 0x01;
+    fake_devs[1].subclass = 0x00;
+    fake_devs[1].irq_line = 11;
+    fake_count = 2;
+
+    ret_of[0] = PCI_PROBE_OK;
+    CHECK(pci_bind_all(TBL3, 3) == 1);
+    CHECK(pci_quarantined() == 0);
+    CHECK(called[0] == 1);
+
+    /* **8 バイトちょうど**。9 バイト目から先は触らない。 */
+    fill_guard(0xAA);
+    CHECK(pci_bind_info_get(0, &out_buf.info) == 0);
+    CHECK(guard_intact(0xAA));
+    CHECK(out_buf.info.bus == 0);
+    CHECK(out_buf.info.dev == 8);
+    CHECK(out_buf.info.fn == 0);
+    CHECK(out_buf.info.result == PCI_BIND_BOUND);
+    CHECK(out_buf.info.reason == PCI_BIND_OK);
+    CHECK(out_buf.info.irq == 5);
+    CHECK(out_buf.info.line_state == PCI_LINE_OK);
+    CHECK(out_buf.info.pad == 0);
+
+    /* 2 台目は「一致する driver が無い」— これは失敗ではない。 */
+    fill_guard(0xAA);
+    CHECK(pci_bind_info_get(1, &out_buf.info) == 0);
+    CHECK(guard_intact(0xAA));
+    CHECK(out_buf.info.dev == 9);
+    CHECK(out_buf.info.result == PCI_BIND_NONE);
+    CHECK(out_buf.info.reason == PCI_BIND_NO_DRIVER);
+    CHECK(out_buf.info.irq == 11);
+
+    /* **範囲外は断り、出力に 1 バイトも書かない。** */
+    fill_guard(0x55);
+    CHECK(pci_bind_info_get(2, &out_buf.info) == -1);
+    CHECK(all_untouched(0x55));
+    CHECK(pci_bind_info_get(3, &out_buf.info) == -1);
+    CHECK(all_untouched(0x55));
+    CHECK(pci_bind_info_get(-1, &out_buf.info) == -1);
+    CHECK(all_untouched(0x55));
+    CHECK(pci_bind_info_get(PCI_MAX_DEVS, &out_buf.info) == -1);
+    CHECK(all_untouched(0x55));
+    /* NULL も断る (KAPI の wrapper より手前で落ちないこと) */
+    CHECK(pci_bind_info_get(0, (struct pci_bind_info *)0) == -1);
+
+    /* **線の様子は読む時点で合成する** — 結線のあとで隔離されても
+     * result は BOUND のまま line_state だけが変わる。 */
+    pci_bind_set_line_state_hook(line_hook);
+    hook_bits = PCI_LINE_BIT_QUARANTINED;
+    fill_guard(0xAA);
+    CHECK(pci_bind_info_get(0, &out_buf.info) == 0);
+    CHECK(guard_intact(0xAA));
+    CHECK(out_buf.info.result == PCI_BIND_BOUND);
+    CHECK(out_buf.info.line_state == PCI_LINE_QUARANTINED);
+    hook_bits = 0;
+    CHECK(pci_bind_info_get(0, &out_buf.info) == 0);
+    CHECK(out_buf.info.line_state == PCI_LINE_OK);
+    pci_bind_set_line_state_hook((pci_bind_line_state_fn)0);
+
+    /* 列挙が 0 件なら記録も 0 件 (NP21/W の姿)。 */
+    fake_count = 0;
+    CHECK(pci_bind_all(TBL3, 3) == 0);
+    CHECK(pci_bind_info_get(0, &out_buf.info) == -1);
+}
+
+/* ------------------------------------------------------------------ */
 /*  複数の装置 — 同じ driver が 2 台に当たってよい                     */
 /* ------------------------------------------------------------------ */
 static void multi_dev(void)
@@ -343,6 +471,7 @@ int main(int argc, char **argv)
     else if (!strcmp(c, "reason_reset"))      reason_reset();
     else if (!strcmp(c, "line_state"))        line_state();
     else if (!strcmp(c, "multi_dev"))         multi_dev();
+    else if (!strcmp(c, "info_get"))          info_get();
     else { fprintf(stderr, "unknown case: %s\n", c); return 2; }
     return failed ? 1 : 0;
 }

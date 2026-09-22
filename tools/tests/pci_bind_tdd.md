@@ -61,11 +61,12 @@ EXIT quarantine_stops=0
 EXIT reason_reset=0
 EXIT line_state=0
 EXIT multi_dev=0
-SUMMARY 7/7 PASS
+EXIT info_get=0
+SUMMARY 8/8 PASS
 MUTATION 1 RED (1 件): QUARANTINE で打ち切らない (状態不明の装置を次の driver に渡す)
 MUTATION 2 RED (1 件): QUARANTINE を記録だけして探索を続ける
 MUTATION 3 RED (1 件): 候補ごとに理由を初期化しない (前の driver の理由が後に残る)
-MUTATION 4 RED (3 件): class 欄を見ない (別の種類の装置に当たる)
+MUTATION 4 RED (4 件): class 欄を見ない (別の種類の装置に当たる)
 MUTATION 5 RED (1 件): subclass 欄を見ない
 MUTATION 6 RED (1 件): device 欄を見ない (同じベンダの別チップに当たる)
 MUTATION 7 RED (1 件): 隔離とストームで**弱いほう**を名乗る (隔離を復旧済みに見せる)
@@ -85,13 +86,21 @@ MUTATION 10 RED (1 件): 理由を書かなかった DECLINE を「問題なし�
 | `reason_reset` | 理由は**候補ごとに**初期化される。書かなかった DECLINE は `DECLINED_UNSPECIFIED` であって `OK` ではない |
 | `line_state` | **読む時点で合成する**: BOUND の後に線が隔離されても `result` は BOUND のまま `line_state` だけ変わり、線が戻れば OK に戻る (保存していない証拠)。両方立てば隔離が勝つ。**0xFF と 16 以上は hook を呼ばずに OK** |
 | `multi_dev` | 同じ driver が 2 台 (別 BDF) に当たってよい。記録は 8 バイトちょうど (KAPI v60 の出力保護がこの大きさを通す) |
+| `info_get` | **取得口** `pci_bind_info_get` (KAPI v60 の裏)。偽の列挙表 (`pci_count` / `pci_get`) で `pci_bind_all` を回し、**8 バイトちょうど**しか書かない (9 バイト目から先の見張りが無傷) / **範囲外の idx (2・3・-1・`PCI_MAX_DEVS`) と NULL は `-1` で出力に 1 バイトも書かない** / `line_state` は取得口を通しても**読む時点で合成される** / 列挙 0 件なら記録も 0 件 |
 
 ## この票で決めていないこと
 
 - **`pci_bind_line_state_hook` の実体は実装 A のもの。** `irq_line_quarantined`
   / `irq_storm_masked` (u16 ビットマスク) を `PCI_LINE_BIT_*` に写すだけの
   3 行のアダプタを PM が合流時に差す。既定は NULL = `PCI_LINE_OK`。
-- **`pci_bind_info` を CPL=3 へ出す KAPI (v60) は PM が末尾追記する。**
-  いまはカーネルの起動行 (`[pci] … bound (ok) irq=05`) だけが外から読める。
+- ~~**`pci_bind_info` を CPL=3 へ出す KAPI (v60) は PM が末尾追記する。**~~
+  → **2026-09-23 に追加済み** (slot 223 = 0x384、worktree `wt/hal-c`)。
+  wrapper は `kapi/kapi_sys.c` の `kapi_pci_bind_info` で、出力ポインタは
+  実装 A の `ring3_user_ranges_writable` で **8 バイトぶん**確かめてから書く
+  (読み取り専用の USER ページなら `ring3_fault_kill`)。`lspci` が
+  `bound (ok) irq=N` / `declined (<reason>)` / `quarantined (<reason>)` と
+  `[irq N quarantined]` / `[irq N storm-masked]` を 1 行の末尾に足す。
+  **実機で呼ぶまでは合格ではない** ([V1]) — ここまではホスト試験と
+  手元ビルドだけ。
 - 82557 の driver 本体 (probe の中身) は別票 (L-B)。この票の表は**空**で、
   「候補が 0 本でも安全に回る」ことを起動のたびに踏むためだけに呼んでいる。

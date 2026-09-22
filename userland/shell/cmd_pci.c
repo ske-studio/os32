@@ -45,6 +45,86 @@ typedef struct {
  * (カーネル側は drivers/pci.c の同名の検査)。ずれたらここで止まる。 */
 STATIC_ASSERT(sizeof(PciDev) == 40, shell_pci_dev_is_40);
 
+/* P-2: drivers/pci_bind.h の `struct pci_bind_info` と**同じ並び** (8 バイト)。
+ * `pci_bind_info` (KAPI v60) はカーネル側の定義で 8 バイトちょうど書くので、
+ * ここが違うと呼び手のスタックを踏む (P-1 の PciDev と同じ理由)。
+ * drivers/pci_bind.h はカーネル内部ヘッダなので写しをここに置く —
+ * 向こうを変えたら必ず一緒に直すこと。カーネル側は drivers/pci_bind.c の
+ * STATIC_ASSERT が 8 バイトを見張る。
+ * 票: docs/tasks/v3/TASK_HAL_WIRING.md §1-4 (診断の取得口) */
+typedef struct {
+    u8 bus;            /* 0 */
+    u8 dev;            /* 1 */
+    u8 fn;             /* 2 */
+    u8 result;         /* 3  PCI_BIND_NONE / BOUND / DECLINED / QUARANTINED */
+    u8 irq;            /* 4  列挙時の irq_line (0xFF = 未割り当て) */
+    u8 reason;         /* 5  PCI_BIND_OK / NO_DRIVER / ... */
+    u8 line_state;     /* 6  PCI_LINE_OK / STORM_MASKED / QUARANTINED */
+    u8 pad;            /* 7  常に 0 */
+} PciBindInfo;         /* 8 バイト */
+
+STATIC_ASSERT(sizeof(PciBindInfo) == 8, shell_pci_bind_info_is_8);
+
+#define SH_BIND_NONE        0
+#define SH_BIND_BOUND       1
+#define SH_BIND_DECLINED    2
+#define SH_BIND_QUARANTINED 3
+
+#define SH_LINE_OK           0
+#define SH_LINE_STORM_MASKED 1
+#define SH_LINE_QUARANTINED  2
+
+/* reason の短い名前。**添字は drivers/pci_bind.h の PCI_BIND_* の値**
+ * (OK 0 / NO_DRIVER 1 / IRQ_UNSUPPORTED 2 / IRQ_QUARANTINED 3 /
+ *  RESET_FAILED 4 / START_FAILED 5 / NOISY 6 / NOISY_UNMASKABLE 7 /
+ *  DECLINED_UNSPECIFIED 8)。switch ではなく表にするのは、常駐シェルの
+ * バイナリを膨らませないため (文字列は短い語だけ)。 */
+static const char *const bind_reason_name[] = {
+    "ok", "no-driver", "irq-unsupported", "irq-quarantined",
+    "reset-failed", "start-failed", "noisy", "noisy-unmaskable",
+    "unspecified"
+};
+
+static const char *bind_reason_text(u8 reason)
+{
+    /* 知らない値は「理由なし」ではなく unspecified に寄せる
+     * (カーネルが後から reason を増やしても嘘を出さない)。 */
+    if ((u32)reason >= (u32)(sizeof(bind_reason_name) /
+                             sizeof(bind_reason_name[0])))
+        return "unspecified";
+    return bind_reason_name[reason];
+}
+
+/* 1 行の末尾に結線の注記を足す (KAPI v60)。**何も無ければ 1 文字も出さない**
+ * — 一致する driver の無い装置 (result = NONE、線も正常) はふつうのこと。
+ * line_state は**カーネルが読む時点で合成**するので、結線のときは正常
+ * だった線が後から隔離されていれば result = bound のまま
+ * `[irq N quarantined]` が付く (票 §1-4 往復 9 R1)。 */
+static void pci_print_bind(int idx)
+{
+    PciBindInfo bi;
+
+    if (g_api->pci_bind_info((u32)idx, &bi) != 0) return;
+    if (bi.result == SH_BIND_NONE && bi.line_state == SH_LINE_OK) return;
+
+    if (bi.result == SH_BIND_BOUND) {
+        g_api->kprintf(ATTR_GREEN, "  bound (%s) irq=%u",
+                       bind_reason_text(bi.reason), (u32)bi.irq);
+    } else if (bi.result == SH_BIND_DECLINED) {
+        g_api->kprintf(ATTR_YELLOW, "  declined (%s)",
+                       bind_reason_text(bi.reason));
+    } else if (bi.result == SH_BIND_QUARANTINED) {
+        g_api->kprintf(ATTR_RED, "  quarantined (%s)",
+                       bind_reason_text(bi.reason));
+    }
+
+    if (bi.line_state == SH_LINE_QUARANTINED) {
+        g_api->kprintf(ATTR_RED, "  [irq %u quarantined]", (u32)bi.irq);
+    } else if (bi.line_state == SH_LINE_STORM_MASKED) {
+        g_api->kprintf(ATTR_YELLOW, "  [irq %u storm-masked]", (u32)bi.irq);
+    }
+}
+
 /* Interrupt Pin の 1〜4 を A〜D に。0 = 割り込みを使わない。
  * PC-98 ではこの Pin がスロットごとに違う PIRQ 線へ配線され
  * (io_pci.md 表3)、PnP BIOS が 8259 の入力へ落とした結果が
@@ -130,6 +210,8 @@ static int cmd_lspci(int argc, char **argv)
                            (kind == PCI_BAR_IO) ? "io" : "mem",
                            pci_bar_base(d.bar[b]));
         }
+        /* 結線の注記 (KAPI v60)。**同じ idx** で引ける (列挙順が同じ)。 */
+        pci_print_bind(i);
         g_api->kprintf(ATTR_WHITE, "%s", "\n");
     }
     return 0;

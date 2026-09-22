@@ -1,4 +1,4 @@
-# KernelAPI v59 仕様書
+# KernelAPI v60 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -101,6 +101,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v57 | **実装済み (2026-09-22、実機シリアル往復 4)** | ローカル打鍵だけの読み口 `kbd_trygetchar_local` 1 本 (slot 218 = 0x370、data_fields は 0x374 / 0x378 へ)。cooked リングだけを見て**シリアルも注入リングも見ない**。rshell の速度切替の番犬が「この 1 バイトはシリアル由来か」を**1 回の読みで**確定できるようにする (2 度読みの窓を消す)。⚠ 番号は PM が着地時に振り直す (同日に L-A も v57 を取得) | [tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md) |
 | v58 | **実装済み (2026-09-22、手元ビルドのみ)** | 実機の PCI 列挙 `pci_count` / `pci_get` / `pci_cfg_read32` の 3 本 (slot 219 = 0x374、220 = 0x378、221 = 0x37C、data_fields は 0x380 / 0x384 へ)。起動時に `pci_init()` が コンフィギュレーションメカニズム #1 (`0CF8h` DWORD / `0CFCh`) で bus 0 を走査し、vendor/device/class/BAR/Interrupt Line を静的表 (上限 32) に記録する。**読むだけ** — BAR のサイズ判定 (全 1 を書いて読み戻す) はしないので BIOS の割り当てを壊さない。シェルの `lspci` / `pcidump` がこの 3 本を使う。**NP21/W は PCI を実装していない**ので、エミュレータでは `[pci] mech#1 absent` と `lspci: no PCI` が正しい姿。実体は `drivers/pci.c` / `drivers/pci_decode.c` | [tasks/realhw/TASK_LAN_82557.md](tasks/realhw/TASK_LAN_82557.md) |
 | v59 | **実装済み (2026-09-23、手元ビルドのみ)** | µs 時計 `sys_time_now` 1 本 (slot 222 = 0x380、data_fields は 0x384 / 0x388 へ)。起動からの経過を µs で返す。**64 ビットは KAPI で返せない** (往復 1 の B14) ので、出力引数 2 本に**同じスナップショットの上下**を書く。時間源は `tick_count` (§1-0 の後はどちらのシステムクロックでもちょうど 10ms) と PIT ch0 のラッチ読みで、周期の境界はPIC1 の IRR bit0 をラッチの前後で挟んで判定する (最大 3 回やり直す)。戻り 0 = 成功 / `OS32_ERR_AGAIN` = 3 回とも判定できなかった / `OS32_ERR_NOSYS` = PIT 未初期化か mode 2 でない / `OS32_ERR_INVAL` = `lo` か `hi` が NULL・4 バイトが帯境界を跨ぐ・**2 本の範囲が交差する (差 0〜3)**。**負のときは 2 本とも書かない**。出力が読み取り専用の USER ページ (共有ライブラリの `.text`) なら `ring3_fault_kill` — OS32 は CR0.WP = 0 なのでハードウェアは止めない。実体は `kernel/ktime.c` / `kernel/time_math.c`、検証は `kapi/kapi_sys.c` の `kapi_sys_time_now` | [tasks/v3/TASK_HAL_WIRING.md](tasks/v3/TASK_HAL_WIRING.md) §1-5 |
+| v60 | **実装済み (2026-09-23、手元ビルドのみ)** | PCI 結線の診断の取得口 `pci_bind_info` 1 本 (slot 223 = 0x384、data_fields は 0x388 / 0x38C へ)。`idx` 番目 (**`pci_get` と同じ列挙順**) の結線結果を呼び手のバッファへ**8 バイトちょうど**写す。並びは `drivers/pci_bind.h` の `struct pci_bind_info`。`result` = NONE / BOUND / DECLINED / QUARANTINED、`reason` は上書き規則 1 つだけが正、`line_state` は**読む時点で合成**する (結線のときは正常だった線が後から隔離されても `result` は BOUND のまま `line_state` だけが QUARANTINED になる)。**既存 `pci_get` の 40 バイトは広げない** — 旧呼び手のバッファを踏むので別の口にした。戻り 0 = 成功 / `OS32_ERR_INVAL` = `out` が NULL・8 バイトが帯境界を跨ぐ・`idx` が範囲外 (**負のときは 1 バイトも書かない**)。出力が読み取り専用の USER ページなら `ring3_fault_kill` (v59 と同じ規則)。シェルの `lspci` が注記を出す。実体は `drivers/pci_bind.c`、検証は `kapi/kapi_sys.c` の `kapi_pci_bind_info` | [tasks/v3/TASK_HAL_WIRING.md](tasks/v3/TASK_HAL_WIRING.md) §1-4 |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -786,6 +787,45 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   shlib `.data`/`.bss` が master では USER 無しに見え、正常な出力を誤って拒否する)。
   2 本の出力は**1 回の往復でまとめて**見る (1 本ずつだと CR3 の書き込みが 4 回になる)。
 
+### PCI 結線の診断 (v60)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x384 | pci_bind_info | `int(u32 idx, void *out)` |
+
+- `idx` は **`pci_get` (v58) と同じ列挙順**。`pci_count()` 件まで。
+- 写すのは **8 バイトちょうど** (`PCI_BIND_INFO_SIZE`)。既存の `pci_get` の
+  40 バイトは**広げない** — 旧呼び手のバッファをはみ出すので別の口にした。
+
+  | Offset | 型 | 名前 |
+  |---|---|---|
+  | 0 / 1 / 2 | `u8` | bus / dev / fn |
+  | 3 | `u8` | result — NONE 0 / BOUND 1 / DECLINED 2 / QUARANTINED 3 |
+  | 4 | `u8` | irq — 列挙時の `irq_line` (0xFF = 未割り当て) |
+  | 5 | `u8` | reason — OK 0 / NO_DRIVER 1 / IRQ_UNSUPPORTED 2 / IRQ_QUARANTINED 3 / RESET_FAILED 4 / START_FAILED 5 / NOISY 6 / NOISY_UNMASKABLE 7 / DECLINED_UNSPECIFIED 8 |
+  | 6 | `u8` | line_state — OK 0 / STORM_MASKED 1 / QUARANTINED 2 |
+  | 7 | `u8` | pad (常に 0) |
+
+- **`line_state` は保存値ではない。** `pci_bind_info_get()` が読む時点で
+  `irq_line_quarantined` / `irq_storm_masked` から合成する (票 §1-4 往復 9 R1)。
+  先に BOUND した装置の線が後から別の装置のせいで隔離されても `result` は
+  BOUND のままで、`line_state` = QUARANTINED が「IRQ が来なくなった」を伝える。
+  **両方立っていれば QUARANTINED** (ストームのマスクは再計算で外れ得るが、
+  隔離は再起動まで戻らない。弱いほうを名乗ると復旧済みに見える)。
+- CPL=3 の検証は v59 と同じ 2 段。(1) 生成される `kapi_argptr` → `ring3_ptr_ok`
+  が先頭番地の帯を見る。(2) `kapi_pci_bind_info` が NULL と 8 バイトの帯境界跨ぎを
+  `OS32_ERR_INVAL` で断り、**書く前に** `ring3_user_ranges_writable` で
+  present + RW + USER を確かめる (落ちたら `ring3_fault_kill`)。
+  **OS32 は CR0.WP = 0** なので、共有ライブラリの `.text` を渡されても
+  ハードウェアは止めない。
+- `idx` が範囲外なら `OS32_ERR_INVAL` で、**出力は 1 バイトも書かない**。
+- シェルの `lspci` が 1 行の末尾に注記を足す: `bound (ok) irq=N` /
+  `declined (<reason>)` / `quarantined (<reason>)` と、線の様子の
+  `[irq N quarantined]` / `[irq N storm-masked]`。`result` が NONE で
+  `line_state` が OK のとき (= 一致する driver が無いふつうの装置) は何も出さない。
+- **NP21/W には PCI が無い**ので、エミュレータではこの口は常に 0 件
+  (`lspci: no PCI`)。規則はホスト試験 `make check-pci-bind-host` が固める。
+
 ### 排他的作成 (v53)
 
 **スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
@@ -925,8 +965,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x384 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x388 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x388 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x38C | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

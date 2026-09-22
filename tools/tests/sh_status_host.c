@@ -957,6 +957,9 @@ static int  __cdecl h_kbd_trygetchar_local(void) { return h_kbd_trygetchar(); }
  * 将来 lspci を叩く試験を足した日に静かに落ちる。 */
 static int  __cdecl h_pci_count(void) { return 0; }
 static int  __cdecl h_pci_get(u32 idx, void *out) { (void)idx; (void)out; return -1; }
+/* KAPI v60: 結線の診断。PCI が 0 件なので記録も無い (票 TASK_HAL_WIRING §1-4)。 */
+static int  __cdecl h_pci_bind_info(u32 idx, void *out)
+{ (void)idx; (void)out; return -1; }
 static u32  __cdecl h_pci_cfg_read32(u32 bus, u32 dev, u32 fn, u32 reg)
 { (void)bus; (void)dev; (void)fn; (void)reg; return 0xFFFFFFFFUL; }
 static int  __cdecl h_serial_init_vfast(u32 baud) { (void)baud; return -1; }
@@ -1026,6 +1029,7 @@ static void build_api(void)
     g_fake.kbd_trygetchar_local = h_kbd_trygetchar_local;
     g_fake.pci_count = h_pci_count;
     g_fake.pci_get = h_pci_get;
+    g_fake.pci_bind_info = h_pci_bind_info;
     g_fake.pci_cfg_read32 = h_pci_cfg_read32;
     g_fake.serial_init_vfast = h_serial_init_vfast;
     g_fake.serial_get_status = h_serial_get_status;

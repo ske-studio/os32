@@ -221,9 +221,10 @@ extern int __cdecl wrap_pci_count(void);
 extern int __cdecl wrap_pci_get(u32 idx, void *out);
 extern u32 __cdecl wrap_pci_cfg_read32(u32 bus, u32 dev, u32 fn, u32 reg);
 extern int __cdecl wrap_sys_time_now(u32 *lo, u32 *hi);
+extern int __cdecl wrap_pci_bind_info(u32 idx, void *out);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 59;
+kapi->version = 60;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -448,5 +449,6 @@ kapi->version = 59;
     kapi->pci_get = wrap_pci_get;
     kapi->pci_cfg_read32 = wrap_pci_cfg_read32;
     kapi->sys_time_now = wrap_sys_time_now;
+    kapi->pci_bind_info = wrap_pci_bind_info;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

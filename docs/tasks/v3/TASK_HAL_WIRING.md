@@ -412,11 +412,25 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
   初期化してから probe を呼び、書かずに DECLINE したら `PCI_BIND_DECLINED_UNSPECIFIED`。
   結線表 `pci_drivers[]` は `kernel/kernel.c` にあり **いまは空** (82557 は L-B)。
   `pci_bind_all` は `pgalloc` と `dma_pool_init` の後 (実際には `kselftest_run` の後)。
-  ホスト試験 `make check-pci-bind-host` (7 ケース / 変異 10 本すべて RED)。
+  ホスト試験 `make check-pci-bind-host` (**8 ケース** / 変異 10 本すべて RED)。
   **KAPI は足していない** — `lspci` の注記に要る v60 は PM が末尾追記する契約で、いまは
   カーネルの起動行 `[pci] bb:dd.f vvvv:dddd bound (ok) irq=xx` だけが外から読める。
   `pci_bind_info_get` は **8 バイトちょうど**を書く (v60 の出力保護がこの大きさを通す)。
   **PM が実機で見るもの**: 表が空でないときの結線 (L-B)、隔離の 2 経路 (W1/W3 の反例)。
+
+**進捗 (2026-09-23、worktree `wt/hal-c`)**: 診断の取得口を **KAPI v60 `pci_bind_info(u32 idx, void *out)`**
+として末尾追記した (slot 223 = 0x384、`sdk/kapi.json` から再生成。[ABI2] の追記のみ)。wrapper は
+`kapi/kapi_sys.c` の `kapi_pci_bind_info` で、実装 A の出力ポインタ保護を `sys_time_now` と同じ形で使う
+— NULL と 8 バイトの帯境界跨ぎは `OS32_ERR_INVAL` (**1 バイトも書かない**)、`ring3_user_ranges_writable`
+が落ちたら `ring3_fault_kill`、写しは**ローカルの 1 スナップショットから 8 バイトちょうど**。
+`idx` が範囲外も `OS32_ERR_INVAL`。`userland/shell/cmd_pci.c` の `lspci` が 1 行の末尾に
+`bound (ok) irq=N` / `declined (<reason>)` / `quarantined (<reason>)` と、線の様子の
+`[irq N quarantined]` / `[irq N storm-masked]` を足す (reason は短い小文字の語の静的表。
+`result` = NONE かつ `line_state` = OK のときは何も出さない)。`build/app.conf` は
+`userland/shell` / `userland/tests/kstr_bench` / `userland/tests/time_test` を **60** へ。
+ホスト試験は `check-pci-bind-host` に `info_get` を足して **8 ケース** (8 バイトちょうど / 範囲外と NULL は
+出力を書かない / 取得口を通しても `line_state` は合成 / 列挙 0 件)。変異 10 本は全て RED のまま。
+**未実施**: NP21/W と実機での実行 ([V1])、`make check` 全体、`make external` (PM)。
 
 ### 1-5. µs 時計 — `sys_time_now(u32 *lo, u32 *hi)`
 
