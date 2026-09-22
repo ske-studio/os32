@@ -31,6 +31,9 @@
 #include "kapi_db.h"
 #include "cpu_calibrate.h"
 #include "cpu_calibrate_math.h"
+#include "idt.h"          /* pit_get_setup / PIT_MODE_TIMER0 */
+#include "sysclk.h"       /* sysclk_hz / sysclk_detected */
+#include "memmap.h"       /* PIT_HZ */
 
 /* 結果はホストから読めるようにグローバルにする。
  * ブート時の出力はスプラッシュで流れてしまい、rshell も未起動なので
@@ -648,6 +651,43 @@ static void test_cpu_calibrate(void)
           "cpu calib: result is a real measurement, not the fallback");
 }
 
+/* PIT の分周が**判定したクロックに従っている**こと (票 TASK_HAL_WIRING §1-0)。
+ *
+ * 直す前の `pit_init()` は 1.9968MHz 決め打ちで割っていた。2.4576MHz 系
+ * (実機 PC-9821Ra266、0000:0501h bit7 = 0) では 24576 を積むべきところに
+ * 19968 が入り、100Hz のつもりの tick が **123Hz = 8.125ms** になる。
+ * tick を数える待ち・番犬・CPU 校正がまとめて 23% 速くなるが、
+ * **NP21/W は 1.9968MHz 設定なので一度も踏めない**。だからここで起動時に
+ * 実機の値そのものを見る (ホスト試験 tools/tests/test_pit_clock.py は
+ * 同じ算数を両クロックで見る)。 */
+static void test_pit_setup(void)
+{
+    const struct pit_setup *p = pit_get_setup();
+
+    /* 積んでいない (= pit_init が値を記録していない) なら以後は無意味。 */
+    check(p->valid != 0, "pit: setup recorded by pit_init");
+
+    /* **クロックを読んでいること。** 未判定のまま既定値で走ると、
+     * 2.4576MHz 機が直す前と同じ分周のままになる。 */
+    check(sysclk_detected() != 0, "sysclk: 0000:0501h read before pit_init");
+
+    /* 分周に使ったのが判定値そのものか (既定へ倒れていないか)。 */
+    check(p->clk_hz == sysclk_hz(), "pit: divided the detected clock");
+    check(p->hz == (unsigned int)PIT_HZ, "pit: programmed PIT_HZ");
+    check(p->reload == (unsigned int)(sysclk_hz() / (unsigned long)PIT_HZ),
+          "pit: reload == sysclk / PIT_HZ");
+
+    /* **どちらのクロックでもちょうど 10ms。** ここが 8125 なら 19968 を
+     * 2.4576MHz 機に積んでいる (直す前の姿)。 */
+    check(p->period_us == (unsigned int)(1000000UL / (unsigned long)PIT_HZ),
+          "pit: tick period is exactly 1/PIT_HZ second");
+
+    /* カウンタ#0 / LSB-MSB / モード2 (レートジェネレータ) / バイナリ。
+     * モードが変わると周期そのものの意味が変わる。 */
+    check(p->mode == (u8)PIT_MODE_TIMER0,
+          "pit: counter 0 in mode 2 (rate generator)");
+}
+
 int kselftest_run(void)
 {
     ksel_pass = 0;
@@ -671,6 +711,7 @@ int kselftest_run(void)
     test_launch();
     test_db_v50();
     test_cpu_calibrate();
+    test_pit_setup();
 
     if (ksel_fail == 0) {
         kprintf(0xA1, "[selftest] %d/%d passed\n", ksel_pass, ksel_pass);

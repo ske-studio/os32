@@ -154,11 +154,16 @@
 /*                                 (38400 → count 3.25 → 実効 41600、+8.3%) */
 /*    2.4576MHz (clk/16 = 153600): 9600 / 19200 / 38400 すべてちょうど       */
 /* ======================================================================== */
-#define BIOS_WORK_SYSCLK    0x00000501UL  /* BYTE: bit7=1 なら 8MHz系 */
-#define BIOS_SYSCLK_8MHZ    0x80
-
-#define TIMER_CLK_1997  1996800UL   /* 8MHz系 (0501h bit7 = 1) */
-#define TIMER_CLK_2458  2457600UL   /* 5/10MHz系 (0501h bit7 = 0) */
+/*  **番地・ビット・クロック値の定義は include/pc98.h 1 か所** ([C4])。      */
+/*  ここは従来名の別名だけ。0000:0501h を実際に読むのは kernel/sysclk.c で、 */
+/*  シリアルは `sysclk_hz()` / `sysclk_is_8mhz()` の保存値を見る。            */
+/*  **このヘッダから pc98.h は include しない** — serial.h を引くだけの TU   */
+/*  (kapi/kapi_generated.c) に pc98.h の定数が流れ込むと、tvram.h と         */
+/*  TVRAM_BPR が二重定義になって警告が出る。使う側 (drivers/serial.c) が     */
+/*  pc98.h を include しているので、別名はそこで展開される。                 */
+/* ======================================================================== */
+#define TIMER_CLK_1997  SYSCLK_1997   /* 8MHz系 (0501h bit7 = 1) */
+#define TIMER_CLK_2458  SYSCLK_2458   /* 5/10MHz系 (0501h bit7 = 0) */
 
 /* ======================================================================== */
 /*  拡張RS-232C制御レジスタ (I/O 0434h、Undocumented io_rs.md)              */
@@ -213,14 +218,6 @@ struct serial_setup {
 #define SER_POLLED_SPIN_MAX 50000
 
 /* ======== 公開API ======== */
-
-/* システムクロックを BIOS ワークエリアから判定してキャッシュする。
- *
- * **カーネル初期化から 1 回だけ呼ぶ。** `serial_init` は KAPI 経由 (CPL=3 の
- * アプリ文脈、CR3 はアプリの PD) でしか呼ばれないので、そこから物理 0x501 を
- * 読むのは安全でない。呼ばれていなければ `serial_init` は 1.9968MHz を使う
- * (従来の挙動)。 */
-void serial_detect_clock(void);
 
 /* 直前の `serial_init` の結果。まだ呼ばれていなければ want=0。 */
 const struct serial_setup *serial_get_setup(void);

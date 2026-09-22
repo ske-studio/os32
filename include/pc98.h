@@ -121,6 +121,13 @@
 #define SYSCLK_1997         1996800UL   /* 1.9968MHz (NP21/Wデフォルト) */
 #define SYSCLK_2458         2457600UL   /* 2.4576MHz */
 
+/* どちらのクロックかは BIOS ワークエリア 0000:0501h の bit7 で分かる。
+ * **定義はここ 1 か所** ([C4]) — 読むのは kernel/sysclk.c だけで、
+ * drivers/serial.h は別名 (TIMER_CLK_*) を張るだけにしてある。
+ * 根拠の資料と食い違いの決着は drivers/serial.h の注記を参照。 */
+#define BIOS_WORK_SYSCLK    0x00000501UL  /* BYTE: bit7=1 なら 8MHz系 */
+#define BIOS_SYSCLK_8MHZ    0x80
+
 
 /* ====================================================================== */
 /*  テキストGDC (µPD7220, テキスト用) — PC9800Bible §2-6-2, §4-3 #11      */

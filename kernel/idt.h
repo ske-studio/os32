@@ -9,6 +9,7 @@
 
 /* ======== 基本型 ======== */
 #include "types.h"
+#include "pit_math.h"   /* struct pit_setup / pit_compute */
 
 /* ======================================================================== */
 /*  IDT ゲートディスクリプタ (8バイト)                                      */
@@ -92,9 +93,10 @@ struct idt_ptr {
 #define PIT_CNTR2    0x75  /* カウンタ#2 (RS-232C) */
 #define PIT_MODE     0x77  /* モードレジスタ */
 
-/* システムクロック: NP21/W動作確認済み                                      */
-/* 注意: PC9800BibleとUNDOCUMENTEDでMHz系との対応が逆転 (値自体は正しい)     */
-#define PIT_CLOCK    1996800UL
+/* システムクロックは機種で 2 通り (1.9968MHz / 2.4576MHz)。**決め打ちしない** */
+/* — 判定は kernel/sysclk.c、分周の算数は kernel/pit_math.c。               */
+/* 直す前はここに PIT_CLOCK = 1996800 があり、2.4576MHz 系では 100Hz のつもり */
+/* の tick が 123Hz (8.125ms) になっていた (docs/POLICY_DEBUG.md §4-54)。    */
 
 /* PITモードバイト: カウンタ#0, LSB/MSB, モード2(レートジェネレータ), バイナリ */
 #define PIT_MODE_TIMER0  0x34  /* 00 11 010 0 */
@@ -105,7 +107,14 @@ struct idt_ptr {
 
 void idt_init(void);
 void pic_init(void);
-void pit_init(unsigned int hz);
+
+/* カウンタ#0 を hz で回す。戻り 0 = 頼まれたとおり / 負 = 出せないので
+ * **既定 PIT_HZ を積んだ** (タイマ無しで起動を続けない)。いまは PIT_HZ
+ * 以外を受けない (票 TASK_HAL_WIRING §1-0)。 */
+int pit_init(unsigned int hz);
+
+/* 直前の pit_init が積んだ設定。valid = 0 なら一度も積んでいない。 */
+const struct pit_setup *pit_get_setup(void);
 
 void idt_register_irq(unsigned int irq, void (*stub)(void));
 void irq_enable(unsigned int irq);

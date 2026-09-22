@@ -24,6 +24,7 @@
 #include "kcg.h"
 #include "boot_splash.h"
 #include "cpu_calibrate.h"
+#include "sysclk.h"   /* 0000:0501h のクロック判定 (pit_init より前に呼ぶ) */
 #include "paging.h"
 #include "memory_boot.h"
 #include "shlib.h"
@@ -190,9 +191,18 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     pic_init();
     tvram_print(30, 1, "OK  ", TATTR_WHITE);
 
+    /* PIT の分周は機械のシステムクロック次第 (1.9968MHz / 2.4576MHz)。
+     * **pit_init より前に 1 回だけ** 0000:0501h を読む。paging_init より
+     * 前なので PG=0、低位物理がそのまま見える (票 §1-0、§4-54)。 */
+    sysclk_detect();
+
     tvram_print(36, 1, "PIT...", TATTR_GREEN);
     pit_init(PIT_HZ);
     tvram_print(42, 1, "OK  ", TATTR_WHITE);
+    /* どちらのクロックで分周したかを出す。**NP21/W では常に 1.9968M** なので、
+     * 実機で 2.4576M が出ていることがこの修正の目視確認になる。 */
+    tvram_print(11, 2, sysclk_is_8mhz() ? "PIT 1.9968M" : "PIT 2.4576M",
+                TATTR_WHITE);
 
     /* タイマとカスケード有効化 */
     irq_enable(0);
@@ -220,12 +230,6 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     tvram_print(48, 1, "KBD...", TATTR_GREEN);
     kbd_init();
     tvram_print(54, 1, "OK", TATTR_WHITE);
-
-    /* シリアルのタイマクロックを BIOS ワークエリア (0000:0501h bit7) から
-     * 判定してキャッシュする。**ここで読むのは CR3 が master のあいだだから** —
-     * `serial_init` は KAPI 経由 (CPL=3 のアプリ文脈) でしか呼ばれないので、
-     * そこから低位物理を読むのは安全でない (drivers/serial.h の注記)。 */
-    serial_detect_clock();
 
     /* マウスドライバ初期化 (NP21/W検出→モード自動選択) */
     mouse_init();
