@@ -1,4 +1,4 @@
-# KernelAPI v57 仕様書
+# KernelAPI v58 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -99,6 +99,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v55 | **実装済み (2026-09-16、$?)** | 終了コードの配線 `exec_last_result` 1 本 (slot 215 = 0x364、data_fields は 0x368 / 0x36C へ)。直前の `exec_run` の結果を**種別 + 値**で返す。種別 (`EXEC_KIND_*`) は畳んだ側が渡すので `exit(-2)` / fault / CTRL+STOP を値ではなく種別で見分けられる。`exec_run` は**すべての return 点で**記録を書くので、起動しなかった場合に前回の記録が残らない。GUI 経路 (`exec_start` / `exec_resume`) の子は記録しない。実体は `exec/exec.c` | [tasks/shell/TASK_EXIT_STATUS.md](tasks/shell/TASK_EXIT_STATUS.md) |
 | v56 | **実装済み (2026-09-22、実機シリアル)** | V･FAST モード `serial_init_vfast` / `serial_get_status` の 2 本 (slot 216 = 0x368、217 = 0x36C、data_fields は 0x370 / 0x374 へ)。FIFO 搭載機 (`0136h` bit6 の反転で判定) で `013Ah` bit7 を立てて **8253 と無関係に** 115200bps まで出す。**起動時の既定 9600 は互換モードのまま** — V･FAST は `serial N` で明示的に入る。併せて `serial_putchar` の TxRDY 待ちを「10ms tick まで寝る」から「1 文字時間 × 2 の予算で `cpu_delay_us` を挟んで見る」へ。実体は `drivers/serial.c` / `drivers/serial_plan.c` | [tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md) |
 | v57 | **実装済み (2026-09-22、実機シリアル往復 4)** | ローカル打鍵だけの読み口 `kbd_trygetchar_local` 1 本 (slot 218 = 0x370、data_fields は 0x374 / 0x378 へ)。cooked リングだけを見て**シリアルも注入リングも見ない**。rshell の速度切替の番犬が「この 1 バイトはシリアル由来か」を**1 回の読みで**確定できるようにする (2 度読みの窓を消す)。⚠ 番号は PM が着地時に振り直す (同日に L-A も v57 を取得) | [tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md) |
+| v58 | **実装済み (2026-09-22、手元ビルドのみ)** | 実機の PCI 列挙 `pci_count` / `pci_get` / `pci_cfg_read32` の 3 本 (slot 219 = 0x374、220 = 0x378、221 = 0x37C、data_fields は 0x380 / 0x384 へ)。起動時に `pci_init()` が コンフィギュレーションメカニズム #1 (`0CF8h` DWORD / `0CFCh`) で bus 0 を走査し、vendor/device/class/BAR/Interrupt Line を静的表 (上限 32) に記録する。**読むだけ** — BAR のサイズ判定 (全 1 を書いて読み戻す) はしないので BIOS の割り当てを壊さない。シェルの `lspci` / `pcidump` がこの 3 本を使う。**NP21/W は PCI を実装していない**ので、エミュレータでは `[pci] mech#1 absent` と `lspci: no PCI` が正しい姿。実体は `drivers/pci.c` / `drivers/pci_decode.c` | [tasks/realhw/TASK_LAN_82557.md](tasks/realhw/TASK_LAN_82557.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -692,8 +693,7 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   「シリアルを 1 回読む → 空ならローカルを 1 回読む」と書ける口が要る。
   2 度読みのあいだに届いたバイトが由来の印を落とす窓が消える
   ([tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md) 往復 3 ④)。
-- ⚠ **スロット番号と版数は PM が着地時に振り直す** — 同じ日に別レーン
-  (L-A の `pci_*`) も v57 を取っている。
+- 同じ日に L-A (PCI 列挙) も版を取ったので、**着地時にそちらを v58 へ送った**。この節のスロット 0x370 はそのまま。
 
 **併せて `serial_putchar` (slot 38 = 0x98) の戻り値を `void` → `int` に広げた。**
 
@@ -710,6 +710,46 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   往復の証拠にしている。送信を諦めたのに成功と数えると「応答したつもり」で
   解除してしまう (往復 3 ③)。既存の呼び手 (`userland/lib/rt/dbgserial.c` など)
   は戻り値を無視してよい。
+### 実機の PCI 列挙 (v58)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x374 | pci_count | `int(void)` |
+| 0x378 | pci_get | `int(u32 idx, void *out)` |
+| 0x37C | pci_cfg_read32 | `u32(u32 bus, u32 dev, u32 fn, u32 reg)` |
+
+- 起動時に `pci_init()` (`kernel.c`、**`ide_init()` の直前**) が 1 回だけ走り、
+  コンフィギュレーションメカニズム #1 で bus 0 を走査する。ブリッヂの配下は
+  深さ 2 まで、しかも **secondary バス番号が現在のバスより大きいとき**だけ潜る。
+- `pci_count` は記録したデバイス (= ファンクション) の数。**PCI が無い機械では 0**。
+  PCI のある機械には必ずホストブリッヂが居る (`io_pci.md` 55 行) ので、
+  呼び手は `0` を「PCI 無し」と読んでよい。
+- `pci_get` は idx 番目の記録を **呼び手のバッファへ写す**。並びは
+  `drivers/pci.h` の `struct pci_dev` と同じで、i386 で **40 バイト固定**
+  (両側の `STATIC_ASSERT` が見張る)。**カーネルのポインタは返さない**
+  (POLICY_DEBUG §4-13 の `db_last_error` と同じ事故を繰り返さないため)。
+
+  | Offset | 型 | 名前 |
+  |---|---|---|
+  | 0 / 1 / 2 | `u8` | bus / dev / fn (3 の位置は padding) |
+  | 4 / 6 | `u16` | vendor / device |
+  | 8 / 9 / 10 / 11 | `u8` | class / subclass / progif / header (Header Type は bit7 込みの生値) |
+  | 12〜35 | `u32 [6]` | BAR0〜5 の **生値** (復号しない) |
+  | 36 / 37 | `u8` | irq_line (config 0x3C) / irq_pin (0x3D) |
+  | 38 | `u16` | command (config 0x04) |
+
+- `pci_cfg_read32` は config 空間の生読み (`pcidump` が 256 バイトを吸い出す)。
+  `reg` の下位 2 ビットは落ちる。**書きは KAPI に出していない** — BAR に
+  全 1 を書くサイズ判定も含めて、BIOS の割り当てを壊す操作は L-A の範囲外。
+- **BAR の生値 `0x00000001` は「無い」ではない。** I/O BAR はあるが番地が
+  割り当てられていない状態で、L-B (82557 ドライバ) が自分で割り当てるかを
+  決める材料になる (票 §5-2 R1)。
+- **NP21/W は `0CF8h` を実装していない。** `pci_init()` は読み戻しが一致しない
+  ことを見て `[pci] mech#1 absent` を出し、その場で戻る。これは失敗ではなく
+  正しい報告 ([V4])。復号の側はホスト試験 (`make check-pci-decode-host`) で
+  固めてある — 記録は `tools/tests/pci_decode_tdd.md`。
+- 資料は `docs/hw/undocumented/io_pci.md` (図2 = アドレス語、446〜479 行 =
+  `0CF8h` / `0CFCh`) と Intel 8255x SDM Table 1 (Type 0 ヘッダ)。
 
 ### 排他的作成 (v53)
 
@@ -850,8 +890,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x374 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x378 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x380 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x384 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

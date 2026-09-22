@@ -39,8 +39,17 @@ SHELL_DEPS = userland/shell/shell.h $(wildcard userland/shell/*.inc)
 userland/shell/%.o: userland/shell/%.c $(SHELL_DEPS)
 	$(CC) $(PROGRAM_FLAGS) -Iuserland/shell $(INC_libos32filer) -c $< -o $@
 
-userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ)
-	$(LD) -m elf_i386 -T sdk/link/app_sys.ld -nostdlib --nmagic --gc-sections -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
+# PCI の純粋な復号 (drivers/pci_decode.c) を `lspci` / `pcidump` からも使う。
+# **写さない** — BAR の種別と番地、クラス名、Header Type の切り出しは
+# カーネルと 1 文字も違ってはいけない。ホスト試験 (check-pci-decode-host) が
+# 見張っているのはこの 1 本だけなので、CPL=3 側でも同じソースをもう一度
+# コンパイルして繋ぐ。I/O も静的配列も触らないのでそのまま通る。
+PCI_DECODE_USER_OBJ = userland/shell/pci_decode_user.o
+$(PCI_DECODE_USER_OBJ): drivers/pci_decode.c drivers/pci_decode.h
+	$(CC) $(PROGRAM_FLAGS) -Idrivers -c drivers/pci_decode.c -o $@
+
+userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(PCI_DECODE_USER_OBJ) $(FILER_DRAW_OBJ)
+	$(LD) -m elf_i386 -T sdk/link/app_sys.ld -nostdlib --nmagic --gc-sections -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(PCI_DECODE_USER_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
 
 # === sh — 同じシェルのソースを CPL=3 の外部アプリとして (票 T9 D1) ===
 # 常駐 shell.bin (app_sys.ld = 0x300000) の規則は上のまま一切変えない。同じ
@@ -57,6 +66,12 @@ $(SH_OBJDIR)/%.o: userland/shell/%.c $(SHELL_DEPS)
 	@mkdir -p $(SH_OBJDIR)
 	$(CC) $(PROGRAM_FLAGS) -DSHELL_AS_APP -Iuserland/shell $(INC_libos32filer) -c $< -o $@
 
+# 常駐側と同じ drivers/pci_decode.c を、sh.bin 用の出力先へ。
+SH_PCI_DECODE_OBJ = $(SH_OBJDIR)/pci_decode_user.o
+$(SH_PCI_DECODE_OBJ): drivers/pci_decode.c drivers/pci_decode.h
+	@mkdir -p $(SH_OBJDIR)
+	$(CC) $(PROGRAM_FLAGS) -DSHELL_AS_APP -Idrivers -c drivers/pci_decode.c -o $@
+
 # main.c だけが #include する .inc の明示依存 (レシピ無し = 上のパターン規則に
 # 前提だけを足す)。$(SHELL_DEPS) の wildcard でも拾えるが、wildcard は
 # Makefile 読み込み時の 1 度しか評価されないので、新しく足した .inc が
@@ -65,8 +80,8 @@ $(SH_OBJDIR)/%.o: userland/shell/%.c $(SHELL_DEPS)
 userland/shell/main.o:    userland/shell/sh_exec.inc
 $(SH_OBJDIR)/main.o:      userland/shell/sh_exec.inc
 
-userland/sh.elf: sdk/link/app.ld $(CRT0_OBJ) $(SH_OBJ) $(FILER_DRAW_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(SH_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
+userland/sh.elf: sdk/link/app.ld $(CRT0_OBJ) $(SH_OBJ) $(SH_PCI_DECODE_OBJ) $(FILER_DRAW_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(SH_OBJ) $(SH_PCI_DECODE_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
 
 sh: $(CRT0_OBJ) userland/sh.bin
 

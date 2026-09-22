@@ -35,6 +35,18 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 | `os32gui` | `os32gui [on\|off]` | GUI シェル (/bin/gshell.bin) へ切り替え / 起動時 GUI の既定を `/etc/system.cfg` に書く (GUI v1.1 K4) |
 | `gfxmode` | `gfxmode pc98\|pegc\|cirrus\|auto` | 次回起動のグラフィクスバックエンドを `/etc/system.cfg` の `GFX=` に書く (GUI v1.1 H2b) |
 
+**PCI コマンド** (cmd_pci.c):
+
+実機 PC-9821Ra266 の内蔵 LAN (Intel 82557 = `8086:1229`) を見つけるための口
+(票 [`tasks/realhw/TASK_LAN_82557.md`](tasks/realhw/TASK_LAN_82557.md) L-A)。
+**NP21/W は PCI を実装していない**ので、エミュレータでは
+`lspci: no PCI (mechanism #1 not present)` が正しい応答。
+
+| コマンド | 書式 | 説明 |
+|---------|------|------|
+| `lspci` | `lspci` | PCI デバイス一覧 (vendor:device・クラス・Header Type・IRQ / Pin・BAR の生番地) を 1 行 1 デバイスで |
+| `pcidump` | `pcidump bus dev fn` | そのファンクションのコンフィギュレーション空間 256 バイトを 16 進ダンプ (Command / Subsystem / Cap ポインタを実機から持ち帰る用) |
+
 **ディレクトリコマンド** (cmd_dir.c):
 
 | コマンド | 書式 | 説明 |

@@ -1,5 +1,5 @@
 {
-  "version": 57,
+  "version": 58,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -49,7 +49,8 @@
     "kbd_inject.h",
     "memory_boot.h",
     "launch.h",
-    "kapi_host.h"
+    "kapi_host.h",
+    "pci.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -1512,6 +1513,21 @@
       "name": "kbd_trygetchar_local",
       "ret": "int",
       "args": []
+    },
+    {
+      "name": "pci_count",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "pci_get",
+      "ret": "int",
+      "args": ["u32 idx", "void *out"]
+    },
+    {
+      "name": "pci_cfg_read32",
+      "ret": "u32",
+      "args": ["u32 bus", "u32 dev", "u32 fn", "u32 reg"]
     }
   ]
 }

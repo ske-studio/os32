@@ -173,6 +173,7 @@ void shell_cmd_file_init(void);
 void shell_cmd_dir_init(void);
 void shell_cmd_mnt_init(void);
 void shell_cmd_sys_init(void);
+void shell_cmd_pci_init(void);   /* cmd_pci.c: lspci / pcidump */
 void shell_rshell_init(void);
 void shell_cmd_env_init(void);
 void shell_cmd_script_init(void);

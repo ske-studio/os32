@@ -36,6 +36,22 @@ static inline void outpw(unsigned int port, unsigned int value) {
     __asm__ volatile("outw %w0, %w1" : : "a"((unsigned short)value), "Nd"(port));
 }
 
+/* ---- I/Oポート操作 (32-bit) ---- */
+/* PCI コンフィギュレーション (0CF8h) が **DWORD アクセス必須**
+ * (io_pci.md 456 行: 0CF8h〜0CFBh へのバイト/ワードアクセスは通常の
+ * I/O アクセスとして扱われ、PCI ではなくチップセットの別レジスタに当たる)。
+ * `inl` / `outl` は 386 以降の命令で、OS32 の最低要件 (i386) を満たす。
+ * u32 は `unsigned long` なので引数と戻り値もそちらに合わせる。 */
+static inline unsigned long inpd(unsigned int port) {
+    unsigned int ret;
+    __asm__ volatile("inl %w1, %0" : "=a"(ret) : "Nd"(port));
+    return (unsigned long)ret;
+}
+
+static inline void outpd(unsigned int port, unsigned long value) {
+    __asm__ volatile("outl %0, %w1" : : "a"((unsigned int)value), "Nd"(port));
+}
+
 /* ---- I/Oポート操作 (REP INSW: バッファ読み込み) ---- */
 static inline void insw_rep(unsigned int port, void *buf, unsigned int count) {
     __asm__ volatile("rep insw"

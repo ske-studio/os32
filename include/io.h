@@ -49,6 +49,16 @@ static inline void outp(unsigned int port, unsigned int value);
 static inline unsigned int inpw(unsigned int port);
 static inline void outpw(unsigned int port, unsigned int value);
 
+/* 32-bit ポートから 1 ダブルワード読む / 書く。
+ * 契約: 転送はリトルエンディアンの 1 語。**1 回のバスサイクルで 32 ビット
+ *       まるごと**であること — 8/16 ビットに割っては**いけない**。
+ * これが要るのは PCI のコンフィギュレーションアドレスレジスタ (0CF8h)。
+ * バイト/ワードで叩くと「通常の I/O アクセス」として扱われ、PCI ではなく
+ * チップセットの別レジスタを触る (`docs/hw/undocumented/io_pci.md` 456 行)。
+ * I/O 空間を持たない移植先では、対応する 32 ビットのレジスタ読み書きになる。 */
+static inline unsigned long inpd(unsigned int port);
+static inline void outpd(unsigned int port, unsigned long value);
+
 /* 16-bit ポートから `count` ワードを `buf` へ連続で読む。
  * 契約: `buf` は `count * 2` バイト以上。読んだ順にそのまま並べる
  *       (inpw を count 回呼ぶのと同じ結果)。メモリを書き換えるので

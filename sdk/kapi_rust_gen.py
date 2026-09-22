@@ -53,6 +53,20 @@ def c_type_to_rust(c_type):
     return "u32"
 
 
+# Rust のキーワードのうち、**C の識別子として現れ得る**もの。C 自身の
+# キーワード (if / for / struct …) は C の引数名にならないので載せない。
+# r# を付ければ識別子として使える (raw identifier)。
+RUST_KEYWORDS = frozenset((
+    "abstract", "as", "async", "await", "become", "box", "do", "dyn",
+    "final", "fn", "impl", "in", "let", "loop", "macro", "match", "mod",
+    "move", "mut", "override", "priv", "pub", "ref", "trait", "try",
+    "type", "typeof", "unsized", "use", "virtual", "where", "yield",
+))
+
+# r# を付けられないキーワード (raw identifier にできない)。末尾に _ を足す。
+RUST_RAW_UNSAFE = frozenset(("crate", "self", "Self", "super"))
+
+
 def parse_arg(arg_str):
     """
     C引数文字列 (例: "u32 size", "const char *fmt") を
@@ -71,9 +85,16 @@ def parse_arg(arg_str):
     type_part = m.group(1).strip()
     name = m.group(2)
 
-    # Rust予約語のエスケープ
-    if name == "type":
-        name = "r#type"
+    # Rust予約語のエスケープ。
+    # C では普通の識別子でも Rust ではキーワードのものがある ("type" は
+    # 元からここで直していたが、KAPI v57 の pci_cfg_read32 が引数に "fn" を
+    # 使って**生成した .rs がコンパイルできなくなった**。1 語ずつ足していると
+    # 同じことが起きるので、表で持つ)。
+    if name in RUST_RAW_UNSAFE:
+        # r# を付けられないキーワード。名前を変えるしかない。
+        name = name + "_"
+    elif name in RUST_KEYWORDS:
+        name = "r#" + name
 
     rust_type = c_type_to_rust(type_part)
     return (name, rust_type)

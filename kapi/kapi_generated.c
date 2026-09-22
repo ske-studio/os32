@@ -37,6 +37,7 @@
 #include "memory_boot.h"
 #include "launch.h"
 #include "kapi_host.h"
+#include "pci.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -48,7 +49,7 @@ extern int kapi_sys_set_mtime(const char *path, u32 mtime);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[219];
+volatile u32 kapi_hits[222];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -273,6 +274,9 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     4,  /* serial_init_vfast */
     12,  /* serial_get_status */
     0,  /* kbd_trygetchar_local */
+    0,  /* pci_count */
+    8,  /* pci_get */
+    16,  /* pci_cfg_read32 */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -497,6 +501,9 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* serial_init_vfast */
     0x0007,  /* serial_get_status: mode,baud,fifo */
     0x0000,  /* kbd_trygetchar_local */
+    0x0000,  /* pci_count */
+    0x0002,  /* pci_get: out */
+    0x0000,  /* pci_cfg_read32 */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1805,5 +1812,23 @@ int __cdecl wrap_kbd_trygetchar_local(void)
 {
     KAPI_HIT(218);
     return kbd_trygetchar_local();
+}
+
+int __cdecl wrap_pci_count(void)
+{
+    KAPI_HIT(219);
+    return pci_count();
+}
+
+int __cdecl wrap_pci_get(u32 idx, void *out)
+{
+    KAPI_HIT(220);
+    return pci_get(idx, out);
+}
+
+u32 __cdecl wrap_pci_cfg_read32(u32 bus, u32 dev, u32 fn, u32 reg)
+{
+    KAPI_HIT(221);
+    return pci_cfg_read32(bus, dev, fn, reg);
 }
 

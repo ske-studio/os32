@@ -217,9 +217,12 @@ extern int __cdecl wrap_exec_last_result(int *kind, int *code);
 extern int __cdecl wrap_serial_init_vfast(u32 baud);
 extern int __cdecl wrap_serial_get_status(u32 *mode, u32 *baud, u32 *fifo);
 extern int __cdecl wrap_kbd_trygetchar_local(void);
+extern int __cdecl wrap_pci_count(void);
+extern int __cdecl wrap_pci_get(u32 idx, void *out);
+extern u32 __cdecl wrap_pci_cfg_read32(u32 bus, u32 dev, u32 fn, u32 reg);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 57;
+kapi->version = 58;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -440,5 +443,8 @@ kapi->version = 57;
     kapi->serial_init_vfast = wrap_serial_init_vfast;
     kapi->serial_get_status = wrap_serial_get_status;
     kapi->kbd_trygetchar_local = wrap_kbd_trygetchar_local;
+    kapi->pci_count = wrap_pci_count;
+    kapi->pci_get = wrap_pci_get;
+    kapi->pci_cfg_read32 = wrap_pci_cfg_read32;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

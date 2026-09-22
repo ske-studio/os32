@@ -228,13 +228,16 @@ pub struct KernelAPI {
     /* idx 218 */ pub serial_init_vfast: unsafe extern "C" fn(baud: u32) -> i32,
     /* idx 219 */ pub serial_get_status: unsafe extern "C" fn(mode: *mut u32, baud: *mut u32, fifo: *mut u32) -> i32,
     /* idx 220 */ pub kbd_trygetchar_local: unsafe extern "C" fn() -> i32,
+    /* idx 221 */ pub pci_count: unsafe extern "C" fn() -> i32,
+    /* idx 222 */ pub pci_get: unsafe extern "C" fn(idx: u32, out: *mut u8) -> i32,
+    /* idx 223 */ pub pci_cfg_read32: unsafe extern "C" fn(bus: u32, dev: u32, r#fn: u32, reg: u32) -> u32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 57;
+pub const KAPI_VERSION: u32 = 58;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

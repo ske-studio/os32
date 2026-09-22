@@ -40,6 +40,9 @@ BASE = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
 INCLUDES = ["-I" + str(ROOT / "sdk/include"), "-I" + str(ROOT / "sdk/include/os32"),
             "-I" + str(ROOT / "include"), "-I" + str(ROOT / "userland/shell"),
             "-I" + str(ROOT / "userland/lib"),
+            # cmd_pci.c が "drivers/pci_decode.h" を引く (実ビルドの
+            # PROGRAM_FLAGS の -I. と同じ)。L-A の lspci / pcidump。
+            "-I" + str(ROOT),
             "-I" + str(ROOT / "userland/lib/filer")]
 HOST_SRC = ROOT / "tools/tests/sh_status_host.c"
 

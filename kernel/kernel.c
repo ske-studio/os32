@@ -31,6 +31,7 @@
 #include "utf8.h"
 #include "kselftest.h"
 #include "exec.h"
+#include "pci.h"
 #include "ide.h"
 #include "atapi.h"
 #include "vfs.h"
@@ -305,6 +306,13 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* パレット初期化 */
     palette_init();
 
+
+    /* PCI の列挙 (読むだけ)。**IDE より前**に置く: 実機 PC-9821Ra266 の
+     * 内蔵 LAN (Intel 82557) を見つけるのが目的で、IDE の probe ログに
+     * 流される前に [pci] の行を出したい (票 TASK_LAN_82557 §2 L-A)。
+     * NP21/W には 0CF8h が無いので「mech#1 absent」の 1 行で終わる —
+     * 失敗ではなく正しい報告 ([V4])。 */
+    pci_init();
 
     /* IDE/HDD 初期化と登録 (4ドライブ: IDE#0-#3) */
     tvram_print(0, 3, "IDE...", TATTR_GREEN);

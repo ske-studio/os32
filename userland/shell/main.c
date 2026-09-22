@@ -108,6 +108,7 @@ int main(int argc, char **argv, KernelAPI *api)
     shell_cmd_dir_init();
     shell_cmd_mnt_init();
     shell_cmd_sys_init();
+    shell_cmd_pci_init();
 #ifndef SHELL_AS_APP
     /* D2(a): sh.bin はシリアル / rshell を持たない。登録もしないので
      * `serial` `terminal` `rshell` `send` … は最初から表に載らない。 */

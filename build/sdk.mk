@@ -205,6 +205,25 @@ check-vfs-fd-sqlite-host:
 check-fdc-seek-host:
 	python3 -B tools/tests/test_fdc_seek.py --target --mutate
 
+# PCI コンフィギュレーションの復号 (drivers/pci_decode.c)。実機 PC-9821Ra266 の
+# 内蔵 LAN (Intel 82557) を `lspci` で見つけるための土台 (票 TASK_LAN_82557 L-A)。
+# **NP21/W は PCI を実装していない** (`0CF8h` が無い) ので、ここはエミュレータ
+# では 1 ビットも踏めない — 走らせて確かめられるのは実機だけで、その 1 回は
+# シリアル 115200 での会話。読み違いは全部ここで潰す。
+# 見るのは 6 つ: 0CF8h のアドレス語の組み立て (欄をマスクしないと範囲外が隣の
+# 欄へ溢れて別のデバイスを読む)、有無を探る値が**本物が保持できる形**であること
+# (bit1〜0 を立てると PCI があっても「無い」と答える)、BAR の種別
+# (**生値 1 = 番地未割り当ての I/O BAR は「無い」ではない** — 票 R1 が消える)、
+# 番地のマスク (I/O は ~3。~0xF で切ると 0xE808 が 0xE800 に化ける)、
+# Header Type の bit7 (落とさないとマルチファンクションのブリッヂを見落とす)、
+# DWORD からの 8/16 ビットの切り出し。
+# --target はカーネルと同じ i386-elf で drivers/pci.c ごと通す
+# (列挙は I/O を触るのでホストでは回せないが、型のずれは手元で捕まえる)。
+# --mutate は写しの上で変異させるので並列 (check-par) で回せる。
+# 記録は tools/tests/pci_decode_tdd.md。
+check-pci-decode-host:
+	python3 -B tools/tests/test_pci_decode.py --target --mutate
+
 # シリアルの速度判定 (drivers/serial_plan.c)。実機 PC-9821Ra266 との会話が
 # シリアルしかなく、9600 で 490B/s しか出ていなかった件 (票 TASK_SERIAL_VFAST)。
 # **NP21/W は通信速度を模擬しない**ので、ここはエミュレータでは踏めない。
@@ -644,7 +663,7 @@ check:
 check-key-inject-host:
 	python3 -B tools/tests/test_key_inject.py
 
-check-par: check-kprintf-attr-host check-key-inject-host check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-lan-bridge-host
+check-par: check-kprintf-attr-host check-key-inject-host check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-lan-bridge-host check-pci-decode-host
 
 check-mut: check-edit-doc-host check-fstat-redir-host check-kstring-c-host check-kstr-bench-host check-sh-status-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host check-cat-linenum-host check-result-conv-host check-guest-host
 
@@ -664,4 +683,4 @@ check-edit-doc-host:
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host
+.PHONY: check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host

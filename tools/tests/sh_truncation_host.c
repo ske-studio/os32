@@ -766,6 +766,13 @@ static void __cdecl h_serial_puts(const char *s)
 static int  __cdecl h_serial_trygetchar(void) { return -1; }
 /* KAPI v57: rshell のローカル読み口。ハーネスの台本は同じ列から取る。 */
 static int  __cdecl h_kbd_trygetchar_local(void) { return h_kbd_trygetchar(); }
+/* PCI は「無い」で答える (票 TASK_LAN_82557 L-A)。ホストにも NP21/W にも
+ * PCI は無いので、lspci が通る道は「no PCI」のほう。NULL のままにすると
+ * 将来 lspci を叩く試験を足した日に静かに落ちる。 */
+static int  __cdecl h_pci_count(void) { return 0; }
+static int  __cdecl h_pci_get(u32 idx, void *out) { (void)idx; (void)out; return -1; }
+static u32  __cdecl h_pci_cfg_read32(u32 bus, u32 dev, u32 fn, u32 reg)
+{ (void)bus; (void)dev; (void)fn; (void)reg; return 0xFFFFFFFFUL; }
 static int  __cdecl h_serial_init_vfast(u32 baud) { (void)baud; return -1; }
 static int  __cdecl h_serial_get_status(u32 *mode, u32 *baud, u32 *fifo)
 { if (mode) *mode = 0; if (baud) *baud = 9600; if (fifo) *fifo = 0; return 0; }
@@ -824,6 +831,9 @@ static void build_api(void)
     g_fake.serial_puts = h_serial_puts;
     g_fake.serial_trygetchar = h_serial_trygetchar;
     g_fake.kbd_trygetchar_local = h_kbd_trygetchar_local;
+    g_fake.pci_count = h_pci_count;
+    g_fake.pci_get = h_pci_get;
+    g_fake.pci_cfg_read32 = h_pci_cfg_read32;
     g_fake.serial_init_vfast = h_serial_init_vfast;
     g_fake.serial_get_status = h_serial_get_status;
     g_fake.rshell_set_active = h_rshell_set_active;
@@ -907,6 +917,12 @@ u32 save_crc32(const void *data, u32 len)
 #include "../../userland/shell/cmd_mnt.c"
 #include "../../userland/shell/cmd_script.c"
 #include "../../userland/shell/cmd_sys.c"
+/* cmd_pci.c (lspci / pcidump、票 TASK_LAN_82557 L-A)。main.c が
+ * shell_cmd_pci_init() を呼ぶので**取り込まないとリンクが通らない**。
+ * 復号の実体 drivers/pci_decode.c は実ビルドでも同じ 1 本をリンクする
+ * (build/programs.mk の PCI_DECODE_USER_OBJ)。 */
+#include "../../userland/shell/cmd_pci.c"
+#include "../../drivers/pci_decode.c"
 #include "../../userland/shell/cmd_filer.c"
 #include "../../userland/shell/rshell.c"
 #include "../../userland/shell/serial_watchdog.c"   /* rshell.c の番犬 (往復 2) */
