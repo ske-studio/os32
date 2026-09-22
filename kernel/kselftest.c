@@ -1220,8 +1220,11 @@ static void test_time_now(void)
                       " (unhit = UNVERIFIED)\n",
                 (int)hit_t0, (int)hit_t1, (int)hit_retry);
     }
-    check(hit_t0 + hit_t1 + hit_retry > 0,
-          "time:real PIT read");
+    /* 位相窓を 1 度も捕まえられなくても失敗にしない (実装レビュー往復 1 の
+     * 非 blocker 3: 正常な時計でも狭い窓は取り逃がし得る。網羅は注入の表)。 */
+    if (hit_t0 + hit_t1 + hit_retry == 0) {
+        kprintf(0x07, "[selftest] time: real-PIT phase window not caught (UNVERIFIED)\n");
+    }
     time_branch_reset();
 
     /* --- CPL=0 の直呼びは書き込み検査の対象外 (Approve 後の注意 2) ---

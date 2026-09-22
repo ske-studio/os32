@@ -1,6 +1,6 @@
 # TASK_HAL_WIRING — 結線の土台 (割り込みの動的登録 / 8237 DMA の共通部 / DMA プール / PCI の結線表 / µs 時計)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **実装済み・NP21/W 受入済み (2026-09-23、§3-1)。実機の W0/W4/W7 と 82557 の実 IRQ は次の実機回。実装レビュー (Codex) 待ち**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **実装済み・NP21/W 受入済み (2026-09-23、§3-1)。Codex の実装レビュー往復 1 = Approve (非 blocker 5 件、うち 2 件はコード修正、3 件は本文に反映)。実機の W0/W4/W7 と 82557 の実 IRQ は次の実機回**。
 > ユーザー指示 2026-09-23: 「結線の土台の票の設計を先に起こす」。
 > 往復記録: v1 → Codex 往復 1 (B1〜B14、Request changes) → v2 → Codex 往復 2 (R1〜R9、Request changes) → v3 → Codex 往復 3 (B1〜B7、Request changes。R2/R3/R4/R6 は閉、R1/R5/R7/R8/R9 は部分) → v4 → Codex 往復 4 (R1〜R6、Request changes。B3/B6/B7 は閉、B1/B4/B5 は部分、B2 は未閉) → v5 → Codex 往復 5 (B1〜B4、Request changes。R1〜R6 は閉、R4 は残件移管) → v6 → Codex 往復 6 (R1〜R3、Request changes。B1/B3 は閉、B2/B4 は部分) → v7 → Codex 往復 7 (B1〜B3。R2 は閉、R1/R3 は部分。B1/B2 = 実装前に決める設計判断、B3 = 実装レビューで可) → v8 (PM の決定を固定) → Codex 往復 8 (R8-1〜R8-3、Request changes。B1〜B3 は閉、1-2/1-3 に新規 blocker 無し) → v9 → Codex 往復 9 (R9-1〜R9-3、Request changes。R8-1 は閉、R8-2/R8-3 は部分。1-1 の dispatch/EOI/storm と 1-2/1-3 に新規 blocker 無し) → v10 → Codex 往復 10 (R10-1 の 1 件のみ、Request changes。R9-1/R9-3 は閉。L-B 持ち越し無し) → v11 (PM の決定で固定) → Codex 往復 11 (R11-1 の 1 件。競合・shlib 属性・COW は新規無し) → v12 → **Codex 往復 12: Approve** (新規 blocker 無し、注意 7 点) → v13。
 
@@ -87,7 +87,9 @@ NO_DRIVER / DECLINED_UNSPECIFIED) は候補ごとに OK に**初期化**して�
 `lspci` へは**新しい KAPI `pci_bind_info(idx, void *out)` (8 バイト写し) を v60 として末尾追記** (v59 は 1-5 の
 `sys_time_now`。スロット順は PM が決める: A の着地後に PM が足す)。既存 `pci_get` の 40 バイトは広げない (旧呼び手のバッファ)。ポーリング稼働が要るなら L-B で
 別に設計する)。LGY-98 は `lgy98_init()` で `ne2k_irq` の**アダプタ**を
-`irq_register` する形に**この票で移す** (下記)。
+`irq_register` する形に**この票で移す** (下記)。**LGY-98 だけは登録拒否でも利用不可にしない** (実装時の PM 判断、実装レビュー
+往復 1 の非 blocker 1): 既存の `ne2k_timer_tick` が定期回収を持つのでポーリング稼働を続ける。「利用不可」の決定 (往復 7 B1) は
+PCI probe 経路 (82557) のもの。
 
 **共有の約束**: 2 つ目以降の登録は、**既存の全登録者と新規の両方が `IRQ_F_SHARED`** のときだけ受ける。1 IRQ あたり
 最大 4 登録。ハンドラは自分の装置のステータスを読み、要因があれば**落としてから** `IRQ_HANDLED` を返す
@@ -534,7 +536,13 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
   境界の count を撃ち分ける 2 本の読みは**同じ `irq_save` の中**に入れた (あいだに tick 境界が入ると
   補間の比較が偶発的に落ちる、10ms に数 µs の窓)。
 
-### 1-6. 実装の注意 (往復 5・6・12 の非 blocker)
+### 1-6. 実装の注意 (往復 5・6・12 の非 blocker、実装レビュー往復 1)
+
+- **ISR 文脈の登録拒否は共通 IRQ の中だけ**を検出する (`irq_in_irq` は `irq_dispatch` だけが増減)。固定 IRQ の ISR や tick フックから
+  `irq_register` / `irq_unregister` を呼ぶのも契約違反だが検出されない (現行にその呼び出しは無い)。将来 tick フックから
+  登録する driver を書くときは `timer_handler` でも `irq_in_irq` を立てる。
+- W4 の「1000 回の所要時間」は平均であって IF=0 の最長時間ではない (IF=1 の区間と割り込みを含み、KAPI の CR3 往復も測って
+  いない)。最長 IF=0 (`irq_off_max_us`) とハンドラの 1ms 超診断は未実装 (別に起こす)。
 
 - **出力保護 (`ring3_user_range_writable`、往復 12 の注意)**: (1) 「KAPI 入口でアプリ CR3 を保存する」機構は**既存に無い**
   (`exec/exec.c` の dispatcher も `kernel/ring3_entry.asm` の int80 入口も CR3 を触らない。`g_cur_app->as.pd_phys` は入口で

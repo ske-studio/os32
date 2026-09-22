@@ -450,7 +450,7 @@ void isr_unexpected_report(u32 irq)
 
     if (irq < 16 && !(reported & (u16)(1u << irq))) {
         reported |= (u16)(1u << irq);
-        kprintf(0xC1, "[isr] unclaimed IRQ%d (no handler registered)\n", (int)irq);
+        kprintf(0xC1, "[isr] unclaimed IRQ%d (no registrant claimed it)\n", (int)irq);
     }
 }
 
