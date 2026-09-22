@@ -45,11 +45,12 @@ extern void kapi_sys_get_build_info(char *buf, int size);
 extern int gfx_stats(void *out);
 extern int gfx_lease_palette(int first, int count, const u8 *rgb);
 extern int kapi_sys_set_mtime(const char *path, u32 mtime);
+extern int kapi_sys_time_now(u32 *lo, u32 *hi);
 
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[222];
+volatile u32 kapi_hits[223];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -277,6 +278,7 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     0,  /* pci_count */
     8,  /* pci_get */
     16,  /* pci_cfg_read32 */
+    8,  /* sys_time_now */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -504,6 +506,7 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* pci_count */
     0x0002,  /* pci_get: out */
     0x0000,  /* pci_cfg_read32 */
+    0x0003,  /* sys_time_now: lo,hi */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1830,5 +1833,11 @@ u32 __cdecl wrap_pci_cfg_read32(u32 bus, u32 dev, u32 fn, u32 reg)
 {
     KAPI_HIT(221);
     return pci_cfg_read32(bus, dev, fn, reg);
+}
+
+int __cdecl wrap_sys_time_now(u32 *lo, u32 *hi)
+{
+    KAPI_HIT(222);
+    return kapi_sys_time_now(lo, hi);
 }
 

@@ -23,6 +23,7 @@
 #include "ne2000_ring.h"
 #include "io.h"
 #include "idt.h"
+#include "irq.h"      /* IRQ_NONE / IRQ_HANDLED / IRQ_DEFERRED */
 #include "kprintf.h"
 #include "kstring.h"
 #include "cpu_calibrate.h"
@@ -72,7 +73,11 @@ struct ne2k_dev {
 
     volatile u8 busy;
     volatile u8 irq_pending;
-    u8  imr_mask;            /* leave() で戻す IMR (ne2k_irq_enable 後は NE2K_IMR_MASK) */
+    u8  imr_mask;            /* 復帰時に入れたい IMR (ne2k_irq_enable 後は NE2K_IMR_MASK) */
+    u8  imr_written;         /* **実 IMR に最後に書いた値** (ne2k_imr_sync だけが更新)。
+                              * 共有 IRQ のアダプタが「装置をマスク中か」を判定するのは
+                              * こちら — imr_mask は「戻したい値」であって実状態ではない
+                              * (票 TASK_HAL_WIRING §1-1 の R1 / 1-6 の往復 7 B3)。 */
     u8  irq_on;              /* IRQ 駆動 (IDT 登録 + IMR 有効化済み) */
     u8  in_irq;              /* IRQ / タイマ文脈で処理中 (待ちを tick で数える) */
     u8  rx_backlog;          /* 予算を使い切り、リングに未回収が残っている (IMR はマスク中) */
@@ -144,17 +149,36 @@ static int eflags_if(void)
 }
 
 /* ====================================================================== */
+/*  IMR と shadow の同期                                                    */
+/*                                                                          */
+/*  **IMR を書くのはここだけ** (票 1-6、往復 7 B3 / 往復 8 の中継 3)。       */
+/*  通常 IRQ の出口・foreground の leave・tick・OVW・FAILED・再初期化成功の  */
+/*  すべての最終出口がこれを通る。実 IMR と shadow がずれると、共有 IRQ の   */
+/*  アダプタが「復旧待ちで装置マスク中」を IRQ_HANDLED と誤判定し、残件が    */
+/*  誰にも回収されないまま線が上がったままになる。                          */
+/*  先に shadow、次に実 IMR — 間で NIC が割り込みを上げることは無い          */
+/*  (マスクを開ける向きでは実 IMR がまだ 0)。                               */
+/* ====================================================================== */
+static void ne2k_imr_sync(u8 value)
+{
+    nic.imr_written = value;
+    wr(NE2K_P0_IMR, value);
+}
+
+/* ====================================================================== */
 /*  排他                                                                    */
 /* ====================================================================== */
 
+/* **busy を立てるのと装置をマスクするのは 1 つの irq_save の中で**
+ * (票 §1-1「busy とマスクの境界」、往復 5 B2)。分かれていたころは
+ * 「busy だが装置は未マスク」の窓があり、そこで IRQ が来るとアダプタは
+ * IRQ_DEFERRED を返すのに装置側は要因を保持したままだった。 */
 static void ne2k_enter(void)
 {
     unsigned int f = irq_save();
     nic.busy = 1;
+    ne2k_imr_sync(0);
     irq_restore(f);
-    /* foreground の操作中は NIC の割り込みを止める (page0 は前回の leave が保証)。
-     * この直前に来た IRQ は ne2k_irq() が pending にして leave() へ回す。 */
-    if (nic.irq_on) wr(NE2K_P0_IMR, 0);
 }
 
 static void service(unsigned int budget);
@@ -166,8 +190,15 @@ static u8 read_curr(void);
  * 続きを回収して戻す (§5)。 */
 static void ne2k_leave(void)
 {
+    unsigned int f;
     int pass;
 
+    /* **irq_pending の処理 → IMR 復帰 → busy = 0 を 1 つの irq_save で**
+     * (往復 5 B2)。分かれていたころは「IMR は戻したが busy はまだ 1」の窓で
+     * 来た IRQ が DEFERRED になり、誰も回収しなかった。
+     * 残件 (W6): この区間が IF=0 なので、service() の失敗分岐から RDC 待ち・
+     * 再初期化が IF=0 で回る。L-C で foreground に分ける対象。 */
+    f = irq_save();
     cr_page0_idle();
     for (pass = 0; pass < NE2K_IRQ_RECHECK; pass++) {
         int need = nic.irq_pending;
@@ -181,10 +212,10 @@ static void ne2k_leave(void)
         service(NE2K_IRQ_BUDGET);
         cr_page0_idle();
     }
-    if (nic.irq_on && nic.state == NE2K_STATE_RUNNING && !nic.rx_backlog) {
-        wr(NE2K_P0_IMR, nic.imr_mask);
-    }
+    ne2k_imr_sync((nic.irq_on && nic.state == NE2K_STATE_RUNNING &&
+                   !nic.rx_backlog) ? nic.imr_mask : 0);
     nic.busy = 0;
+    irq_restore(f);
 }
 
 /* ====================================================================== */
@@ -453,7 +484,7 @@ static void program_ring(void)
     wr(NE2K_P0_PSTOP, nic.rx_stop);
     wr(NE2K_P0_BNRY, nic.rx_start);
     wr(NE2K_P0_ISR, NE2K_ISR_ALL);
-    wr(NE2K_P0_IMR, 0);
+    ne2k_imr_sync(0);
 
     wr(NE2K_CR, NE2K_CR_PAGE1 | NE2K_CR_RD2 | NE2K_CR_STP);
     for (i = 0; i < NE2K_ETH_ADDR_LEN; i++) wr((u8)(NE2K_P1_PAR0 + i), nic.mac[i]);
@@ -469,7 +500,10 @@ static void program_ring(void)
     if (nic.cfg.flags & NE2K_CFG_PROMISC) rcr |= NE2K_RCR_PRO;
     wr(NE2K_P0_RCR, rcr);
     wr(NE2K_P0_ISR, NE2K_ISR_ALL);
-    wr(NE2K_P0_IMR, nic.imr_mask);
+    /* **ここで IMR を戻さない** (往復 6 の R1)。再初期化は busy = 1 のまま
+     * 走るので、ここで開けると「busy = 装置マスク済み」という DEFERRED の
+     * 契約が破れる。復帰は呼び手の最終出口 (leave / アダプタの出口) が
+     * ne2k_imr_sync で行う。IMR はこの関数を抜けた時点で 0。 */
 }
 
 static void reset_soft_state(void)
@@ -529,7 +563,7 @@ int ne2k_init(const struct ne2k_config *config)
         /* 失敗したら NIC を止めて OS 起動は続けさせる */
         nic.state = NE2K_STATE_FAILED;
         wr(NE2K_CR, NE2K_CR_PAGE0 | NE2K_CR_RD2 | NE2K_CR_STP);
-        wr(NE2K_P0_IMR, 0);
+        ne2k_imr_sync(0);
         return rc;
     }
     return NE2K_OK;
@@ -539,7 +573,7 @@ void ne2k_stop(void)
 {
     if (nic.state == NE2K_STATE_OFF) return;
     ne2k_enter();
-    wr(NE2K_P0_IMR, 0);
+    ne2k_imr_sync(0);
     nic.irq_on = 0;
     nic.imr_mask = 0;
     wr(NE2K_CR, NE2K_CR_PAGE0 | NE2K_CR_RD2 | NE2K_CR_STP);
@@ -557,7 +591,7 @@ static void reinit_or_fail(void)
     if (nic.tx_reinit_run >= NE2K_TX_REINIT_MAX) {
         nic.state = NE2K_STATE_FAILED;
         wr(NE2K_CR, NE2K_CR_PAGE0 | NE2K_CR_RD2 | NE2K_CR_STP);
-        wr(NE2K_P0_IMR, 0);
+        ne2k_imr_sync(0);
         return;
     }
     nic.tx_reinit_run++;
@@ -565,7 +599,7 @@ static void reinit_or_fail(void)
     if (rc) {
         nic.state = NE2K_STATE_FAILED;
         wr(NE2K_CR, NE2K_CR_PAGE0 | NE2K_CR_RD2 | NE2K_CR_STP);
-        wr(NE2K_P0_IMR, 0);
+        ne2k_imr_sync(0);
     }
 }
 
@@ -672,7 +706,7 @@ static void ovw_begin(u8 isr)
     nic.ovw_txp_was = (u8)((rd(NE2K_CR) & NE2K_CR_TXP) ? 1 : 0);
     nic.ovw_tx_done = (u8)((isr & (NE2K_ISR_PTX | NE2K_ISR_TXE)) ? 1 : 0);
     wr(NE2K_CR, NE2K_CR_PAGE0 | NE2K_CR_RD2 | NE2K_CR_STP);
-    if (nic.irq_on) wr(NE2K_P0_IMR, 0);         /* 復旧完了まで NIC 割り込みは止める */
+    ne2k_imr_sync(0);                           /* 復旧完了まで NIC 割り込みは止める */
     nic.ovw_tick = tick_count;
     nic.ovw_used_delay = 0;
     nic.state = NE2K_STATE_OVW_WAIT;
@@ -872,17 +906,46 @@ void ne2k_poll(unsigned int budget)
     ne2k_leave();
 }
 
-void ne2k_irq(void)
+/* ======================================================================== */
+/*  ne2k_irq_shared — 共有 IRQ の口 (票 TASK_HAL_WIRING §1-1「LGY-98 のアダプタ」)
+ *
+ *  kernel/irq.c の表から呼ばれる。線は他の装置と共有され得るので、
+ *  **自分の要因が無ければ必ず IRQ_NONE を返す** (受けたふりをすると
+ *  相方の要因が残ったまま線が上がり続ける)。
+ *
+ *    IRQ_NONE     : 自分の要因ではない
+ *    IRQ_HANDLED  : 要因を落とし、残件も無い
+ *    IRQ_DEFERRED : 自分の要因だが残件がある。**装置はマスクしてある** —
+ *                   回収は ne2k_timer_tick (M4 の受信ウォッチドッグ。
+ *                   契約が要求する「定期回収」そのもの) が行い、
+ *                   回収し終えたら ne2k_imr_sync でマスクを外す。
+ * ======================================================================== */
+int ne2k_irq_shared(unsigned int irq, void *arg)
 {
     int pass;
 
+    (void)irq;
+    (void)arg;
+
     nic.st.irq_count++;
     if (nic.busy) {
-        /* busy 中の入口は NIC レジスタを変更しない。leave() が処理する。 */
+        /* busy 中の入口は NIC レジスタを変更しない (foreground のページ切替・
+         * remote DMA と衝突する)。leave() が irq_pending を見て処理する。 */
         nic.irq_pending = 1;
         nic.st.irq_deferred++;
-        return;
+        return IRQ_DEFERRED;
     }
+    /* 装置が止まっている状態 (OFF / STOPPED / FAILED) では IMR = 0 で、
+     * この線を上げているのは自分ではない。**票からの逸脱** (票は (b) の
+     * ISR 検査だけを書いている): ここを通さないと FAILED の NIC が
+     * IRQ_DEFERRED を返し続け、tick 回収を持たない状態 (ne2k_timer_tick は
+     * 非 RUNNING/OVW_WAIT で即戻る) と組み合わさって残件が永久に残る。 */
+    if (nic.state != NE2K_STATE_RUNNING && nic.state != NE2K_STATE_OVW_WAIT) {
+        return IRQ_NONE;
+    }
+    /* (b) ISR に要因が無く、リングにも未回収が無ければ自分ではない。 */
+    if (!(rd(NE2K_P0_ISR) & NE2K_IMR_MASK) && !nic.rx_backlog) return IRQ_NONE;
+
     nic.busy = 1;
     nic.in_irq = 1;
     for (pass = 0; pass < NE2K_IRQ_RECHECK; pass++) {
@@ -894,12 +957,16 @@ void ne2k_irq(void)
         if (!(rd(NE2K_P0_ISR) & NE2K_IMR_MASK) && read_curr() == nic.rx_next) break;
         nic.st.irq_rechecks++;
     }
-    if (nic.irq_on) {
-        /* 予算超過なら IMR をマスクしたまま返し、タイマ補助 / poll が続きを回収して戻す */
-        wr(NE2K_P0_IMR, (nic.rx_backlog || nic.state != NE2K_STATE_RUNNING) ? 0 : nic.imr_mask);
-    }
+    /* 予算超過なら IMR をマスクしたまま返し、tick / poll が続きを回収して戻す。
+     * **shadow と実 IMR は必ず一緒に動く** (1-6 / 往復 7 B3)。 */
+    ne2k_imr_sync((nic.irq_on && !nic.rx_backlog &&
+                   nic.state == NE2K_STATE_RUNNING) ? nic.imr_mask : 0);
     nic.in_irq = 0;
     nic.busy = 0;
+
+    /* **判定は imr_written (実 IMR)**。imr_mask は「戻したい値」なので、
+     * OVW 復旧待ちや FAILED で 0 を書いた直後でも非 0 のまま = 誤判定になる。 */
+    return (nic.rx_backlog || nic.imr_written == 0) ? IRQ_DEFERRED : IRQ_HANDLED;
 }
 
 void ne2k_irq_enable(void)

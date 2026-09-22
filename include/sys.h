@@ -67,4 +67,16 @@ u32 sys_usable_mem_end(void);
  * 戻り値 0 = 予約できなかった。→ kernel/sys.c の説明 */
 u32 sys_reserve_top(u32 bytes);
 
+/* ======================================================================== */
+/*  sys_time_now — 起動からの経過を µs で (票 TASK_HAL_WIRING §1-5)         */
+/*                                                                          */
+/*  tick_count + PIT ch0 のラッチ読みを 64bit の µs に組み、上下 2 本の出力  */
+/*  引数に**同じスナップショットから**書く (KAPI は 64bit を返せない)。      */
+/*  戻り 0 = 成功 / OS32_ERR_AGAIN = 周期境界で 3 回続けて判定できなかった / */
+/*  OS32_ERR_NOSYS = PIT 未初期化か mode 2 でない。**負なら出力は不変**。    */
+/*  実体は kernel/ktime.c、判定と算数は kernel/time_math.c。                 */
+/*  CPL=3 のポインタ検証は kapi/kapi_sys.c の kapi_sys_time_now が行う。     */
+/* ======================================================================== */
+int sys_time_now(u32 *lo, u32 *hi);
+
 #endif /* __SYS_H */

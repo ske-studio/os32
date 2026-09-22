@@ -141,6 +141,23 @@ int ring3_ptr_ok(u32 p);
  * 戻り値: 1 = 帯の中 / 0 = 拒否 (NULL・overflow・帯外)。 */
 int ring3_user_range_ok(u32 p, u32 len);
 
+/* 出力引数として渡された CPL=3 の番地に**書いてよいか**。
+ * OS32 は CR0.WP = 0 なので、読み取り専用の USER ページ (共有ライブラリの
+ * .text) への CPL=0 からの書き込みは #PF にならない — 帯の検証だけでは
+ * 止められない (Codex 往復 10)。戻り 0 のときは書かずに kill する。
+ * 詳しい理由と 2 段判定の根拠は exec/exec.c の関数冒頭。 */
+int ring3_user_range_writable(u32 p, u32 len);
+
+/* 同じことを**2 本まとめて 1 回の往復で**。出力引数が 2 本ある KAPI は
+ * こちらを使う — 1 本ずつ呼ぶと呼び出し 1 回で CR3 の書き込みが 4 回になる。
+ * 2 本目が不要なら pb = 0, lb = 0。 */
+int ring3_user_ranges_writable(u32 pa, u32 la, u32 pb, u32 lb);
+
+/* CPL=3 アプリを fault として畳む (fault_kill_count++ → master CR3 復帰 →
+ * AS 破棄 → longjmp)。**戻らない。** 実体は exec/exec.c。
+ * 帯違反と同じ扱いにしたい KAPI ラッパだけが呼ぶ。 */
+void ring3_fault_kill(void);
+
 /* 断った理由 (ring3_range_reject_last)。実機で KAPI が MISUSE を返したときに
  * どのサブ条件だったかを 1 回の起動で確定させるための観測点 — KAPI にはせず
  * カーネルシンボルとして `emu_read_mem` で読む (fault_kill_count と同じ形)。 */

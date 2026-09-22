@@ -34,6 +34,7 @@
 #include "exec.h"
 #include "pci.h"
 #include "pci_bind.h"   /* PCI の結線表 (票 TASK_HAL_WIRING §1-4) */
+#include "irq.h"        /* irq_line_quarantined / irq_storm_masked (§1-1、結線表の line_state に差す) */
 #include "dma8237.h"    /* 8237 の共通部 + 0439h (同 §1-2) */
 #include "dma_pool.h"   /* DMA プール (同 §1-3) */
 #include "ide.h"
@@ -154,6 +155,15 @@ static int dev_find_validator(const char *name)
  * ============================================================ */
 extern u32 sys_mem_kb;
 
+
+/* 結線表 (実装 B) が読む「線の様子」を実装 A の隔離ビットから答える (合流時に PM が差した 3 行)。 */
+static u8 kernel_pci_line_bits(unsigned int irq)
+{
+    u8 b = 0;
+    if (irq_line_quarantined & (1u << irq)) b |= PCI_LINE_BIT_QUARANTINED;
+    if (irq_storm_masked & (1u << irq)) b |= PCI_LINE_BIT_STORM;
+    return b;
+}
 
 void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 {
@@ -530,6 +540,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
      * 先に結線すると driver が取った span をそこで消してしまう。
      * 表はいまのところ空 (82557 の driver は別票 L-B) で、ここは
      * 「候補が 0 本でも安全に回る」ことを起動のたびに踏むための呼び出し。 */
+    pci_bind_set_line_state_hook(kernel_pci_line_bits);
     pci_bind_all(pci_drivers, PCI_DRIVER_COUNT);
 
     /* FDリダイレクト初期化 (プログラムローダーより前に) */

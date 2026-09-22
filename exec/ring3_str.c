@@ -11,6 +11,7 @@
 
 #include "ring3_str.h"
 #include "kstring.h"
+#include "paging.h"     /* PTE_PRESENT / PTE_RW / PTE_USER ([C4]: ビットは正典から) */
 
 const char *ring3_user_str(int in_syscall, char *scratch, u32 cap,
                            const char *src)
@@ -25,4 +26,33 @@ const char *ring3_user_str(int in_syscall, char *scratch, u32 cap,
      * 必ず NUL 終端する (cap - 1 文字まで写る)。 */
     kstrncpy(scratch, src, cap);
     return (const char *)scratch;
+}
+
+int ring3_pte_writable_ok(u32 pte_flags)
+{
+    u32 need = (u32)(PTE_PRESENT | PTE_RW | PTE_USER);
+    return ((pte_flags & need) == need) ? 1 : 0;
+}
+
+int ring3_pde_walkable_ok(u32 pde_flags)
+{
+    u32 need = (u32)(PTE_PRESENT | PTE_RW | PTE_USER);
+    if (pde_flags & (u32)PTE_PS) return 0;      /* 4MB ページ: 下に PT が無い */
+    /* **PDE の RW / USER も見る** — i386 の実効権限は PDE と PTE の論理積
+     * なので、PTE が RW + USER でも PDE が supervisor / RO ならアプリは
+     * 書けない (Approve 後の注意 4)。 */
+    return ((pde_flags & need) == need) ? 1 : 0;
+}
+
+int ring3_range_overlaps(u32 p, u32 len, u32 base, u32 end)
+{
+    u32 last;
+
+    if (len == 0) return 0;
+    if (end <= base) return 0;              /* 空の帯 (未ロードの shlib 等) */
+    if (p + len < p) return 1;              /* **桁あふれは重なり扱い** (安全側) */
+    last = p + len - 1u;
+    if (last < base) return 0;
+    if (p >= end) return 0;
+    return 1;
 }

@@ -14,14 +14,13 @@
 #include "config.h"
 #include "kprintf.h"
 #include "idt.h"
+#include "irq.h"       /* irq_register / IRQ_F_SHARED (票 TASK_HAL_WIRING §1-1) */
 #include "io.h"
 #include "kstring.h"
 #include "link.h"
 
-/* IRQ 入口 (kernel/isr_stub.asm)。どれを使うかは設定の PIC IRQ で決まる */
-extern void irq_stub_nic_3(void);
-extern void irq_stub_nic_5(void);
-extern void irq_stub_nic_6(void);
+/* IRQ 入口は共通スタブ (kernel/isr_stub.asm の irq_stub_common_*) に移した。
+ * どの線に結ぶかは irq_register() が決める (票 TASK_HAL_WIRING §1-1)。 */
 
 /* 反射モード (LGY98_FLAG_REFLECT)。static にするとホストから読めないので意図的にグローバル。 */
 static int lgy98_reflect_on = 0;
@@ -43,13 +42,6 @@ int lgy98_validate_irq(unsigned int irq)
     }
     if (irq == LGY98_INT5_IRQ) return NE2K_ERR_IRQ;   /* 音源 / V86 との排他が未決 */
     return NE2K_ERR_INVAL;
-}
-
-/* PIC の IMR でマスクされたまま (= OS32 の他のドライバが使っていない) ことを確認 */
-static int irq_is_free(unsigned int irq)
-{
-    u8 imr = (u8)inp((irq < 8) ? PIC1_DATA : PIC2_DATA);
-    return (int)((imr >> (irq & 7)) & 1);
 }
 
 static void print_mac(const u8 *mac)
@@ -81,10 +73,6 @@ int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags)
     if (rc) {
         kprintf(0xC1, "[lgy98] irq %d not usable (3/5/6 only; 12 is reserved)\n", (int)irq);
         return rc;
-    }
-    if (!irq_is_free(irq)) {
-        kprintf(0xC1, "[lgy98] irq %d already enabled in PIC -> conflict, NIC disabled\n", (int)irq);
-        return NE2K_ERR_IRQ;
     }
 
     cfg.reg_base       = (u16)(base + LGY98_OFS_REGS);
@@ -122,13 +110,27 @@ int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags)
      * リンク層のどちらか 1 つ (TASK_N0 §2a、往復 2 の R10)。link_init を
      * 呼ばなければ link_tick は何もせず戻る。 */
     if (!(flags & LGY98_FLAG_REFLECT)) link_init(mac);
-    /* IRQ 駆動へ: IDT 登録 → IMR 有効化 → PIC 有効化 (この順序、§4) */
+    /* IRQ 駆動へ (票 TASK_HAL_WIRING §1-1)。空きの判定は PIC の IMR を覗く
+     * irq_is_free() ではなく **irq_register の戻り** で行う — 共有登録では
+     * 「マスクが開いている = 使用中」が成り立たない。
+     *
+     * 順序: irq_register → ne2k_irq_enable。登録が先なら、PIC のマスクが
+     * 開いた時点でハンドラは既に表に居り、NIC はまだ IMR = 0 なので
+     * 要因を上げられない。IDT ゲートは起動時から共通スタブ。 */
     {
-        void (*stub)(void) = (irq == LGY98_INT0_IRQ) ? irq_stub_nic_3
-                           : (irq == LGY98_INT1_IRQ) ? irq_stub_nic_5 : irq_stub_nic_6;
-        idt_register_irq(irq, stub);
-        ne2k_irq_enable();
-        irq_enable(irq);
+        int irc = irq_register(irq, ne2k_irq_shared, NULL, IRQ_F_SHARED);
+        if (irc < 0) {
+            /* 登録を断られた線では IRQ 駆動に入らない。NIC 自体は初期化済みで、
+             * ne2k_timer_tick (100Hz の受信ウォッチドッグ) が回収を続けるので
+             * **ポーリングだけで動く**。
+             * ⚠ 票 §1-1 は「登録を拒否された装置はこの票では利用不可」と
+             * 書いている (往復 7 B1)。あちらは PCI の probe 経路の決定で、
+             * ここは PM の指示に従って従来どおり NIC を落とさない。 */
+            kprintf(0xC1, "[lgy98] irq %d registration refused (rc=%d) -> polling only\n",
+                    (int)irq, irc);
+        } else {
+            ne2k_irq_enable();
+        }
     }
     if (flags & LGY98_FLAG_LINKTEST) {
         link_selftest(10);          /* L0: HELLO + PING/PONG */

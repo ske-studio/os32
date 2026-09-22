@@ -434,35 +434,23 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
 }
 
 /* ======================================================================== */
-/*  isr_unexpected_irq — 未登録ハード IRQ の受け皿                          */
-/*  (isr_stub.asm の irq_stub_unexp_* から呼ばれる)                         */
+/*  isr_unexpected_report — 誰も受けなかった IRQ の**診断だけ**             */
+/*  (kernel/irq.c の irq_finish から呼ばれる)                               */
 /*                                                                          */
-/*  ここに来るのは OS32 が使っていない IRQ が上がった場合。EOI を送らないと */
-/*  PIC の ISR ビットが立ったままになり同順位以下が永久ブロックされるため、 */
-/*  正しいマスタ/スレーブ EOI を送り、初回のみ診断を表示する。              */
+/*  **EOI は送らない。** 動的経路で EOI を送るのは irq_finish() の 1 か所    */
+/*  だけで、IRQ15 のスプリアス検査 (スレーブ ISR の IR7) もそちらに移した    */
+/*  (票 TASK_HAL_WIRING §1-1 の 5)。2 か所から EOI が出ると、片方が          */
+/*  スプリアスを見落としてスレーブの ISR ビットを消してしまう。             */
+/*                                                                          */
+/*  元は isr_unexpected_irq() で、IRQ_UNEXP スタブから EOI ごと呼ばれていた。 */
 /* ======================================================================== */
-void isr_unexpected_irq(u32 irq)
+void isr_unexpected_report(u32 irq)
 {
     static u16 reported = 0;
 
-    if (irq == 15) {
-        /* スレーブ側スプリアス (IRQ15): ISR を読んで IR7 が立っていなければ
-         * スレーブへの EOI は送らない (マスタのカスケード分のみ)。 */
-        u8 slave_isr;
-        outp(PIC2_CMD, OCW3_ISR);
-        slave_isr = (u8)inp(PIC2_CMD);
-        outp(PIC2_CMD, OCW3_IRR);       /* 既定の IRR 読み出しに戻す */
-        if (!(slave_isr & 0x80)) {
-            outp(PIC1_CMD, OCW2_EOI);
-            return;
-        }
-    }
-
-    pic_eoi((unsigned int)irq);
-
     if (irq < 16 && !(reported & (u16)(1u << irq))) {
         reported |= (u16)(1u << irq);
-        kprintf(0xC1, "[isr] unexpected IRQ%d (EOI sent)\n", (int)irq);
+        kprintf(0xC1, "[isr] unclaimed IRQ%d (no handler registered)\n", (int)irq);
     }
 }
 

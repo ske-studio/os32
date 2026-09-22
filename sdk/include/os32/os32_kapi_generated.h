@@ -227,11 +227,12 @@ typedef struct {
     int (__cdecl *pci_count)(void);
     int (__cdecl *pci_get)(u32 idx, void *out);
     u32 (__cdecl *pci_cfg_read32)(u32 bus, u32 dev, u32 fn, u32 reg);
+    int (__cdecl *sys_time_now)(u32 *lo, u32 *hi);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     u32 shm_base;  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 } KernelAPI;
 
-#define KAPI_FUNC_COUNT 222
+#define KAPI_FUNC_COUNT 223
 extern const u16 kapi_argsize[KAPI_FUNC_COUNT];
 extern const u16 kapi_argptr[KAPI_FUNC_COUNT];
 

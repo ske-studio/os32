@@ -22,6 +22,7 @@
 #include "con_sink.h"
 #include "kbd_inject.h"   /* K7: GUI 中の kbd 待ちを満たす注入リング */
 #include "launch.h"      /* T9: 起動要求表 (GUI 中の起動を WM が仲介する) */
+#include "ring3_str.h"   /* ring3_pte_writable_ok / ring3_range_overlaps (往復 10) */
 #include "kapi_host.h"   /* N1: Host Services のハンドル回収 (host_owner_exit) */
 #include "ring3_str.h"   /* T9 §12 R1: KAPI が CPL=3 へ返す文字列の置き場 */
 #include "kapi_db.h"
@@ -547,6 +548,122 @@ static int ring3_range_refuse(u32 why, u32 p, u32 page)
     ring3_range_reject_page = page;
     ring3_range_reject_heap_top = (u32)RING3_HEAP_TOP;
     return 0;
+}
+
+/* ======================================================================== */
+/*  ring3_user_range_writable — CPL=3 へ**書き込む**前の最後の砦            */
+/*                              (票 TASK_HAL_WIRING、Codex 往復 10 / 11)    */
+/*                                                                          */
+/*  OS32 は **CR0.WP = 0** で走る (`arch/x86/arch_cpu.h` の MMU 有効化。     */
+/*  `kernel/shlib.c` が「カーネルからは RO ページにも書ける」ことに依存)。   */
+/*  そのため CPL=0 の KAPI ラッパは、アプリが出力引数として渡した**読み取り  */
+/*  専用の USER ページ** — 共有ライブラリの `.text` / `.rodata`、全アプリで  */
+/*  同じ物理 — にも #PF を起こさずに書けてしまう。早期検査                   */
+/*  (`kapi_argptr` → `ring3_ptr_ok`) は帯しか見ないのでここは素通りする。    */
+/*  (`ring3_ptr_ok` の「.text への書き込みは PTE が RO なので #PF で捕まる」 */
+/*   という注記は CR0.WP = 0 では成り立たない。)                            */
+/*                                                                          */
+/*  **表の歩き方** (往復 11 で固定):                                        */
+/*   - 見るのは**いまのアプリの PD**。`paging_pte_flags()` は master の      */
+/*     `page_tables[]` を引くので使えない — アプリでは RW + USER の shlib    */
+/*     `.data`/`.bss` が master では USER 無しに見え、**正常な出力を誤って   */
+/*     拒否する**。                                                          */
+/*   - かといって CR3 = アプリ PD のまま PD/PT の物理番地をポインタとして    */
+/*     辿ってもいけない。PD もアプリ PT も pgalloc から取られ               */
+/*     (`PGALLOC_BASE` は 0x400000 = **アプリ帯そのもの**)、アプリの PD では */
+/*     その仮想番地が per-app 物理へ張り替わっているので、表のつもりで       */
+/*     **アプリ自身のデータ**を読む (2026-09-13、実機 K2 で 2 回失敗。       */
+/*     この上の `ring3_user_range_ok` の記録と kernel/paging.h を参照)。     */
+/*   - したがって: IF=0 → 現在の CR3 を控える → **master へ切り替える**     */
+/*     (master は低位物理を恒等写像しているので、控えたアプリ PD の物理番地を */
+/*     そのまま読める) → アプリ PD の PDE → PT の PTE を範囲の全ページで     */
+/*     確かめる → **元の CR3 に戻す** → IF を戻す。                         */
+/*     **master に居るあいだはユーザー出力に 1 バイトも書かない。**          */
+/*                                                                          */
+/*  ビットの判定表そのもの (`ring3_pde_walkable_ok` / `ring3_pte_writable_ok`)*/
+/*  は exec/ring3_str.c にあり、ホストで組合せを網羅している。               */
+/*  戻り値: 1 = 書いてよい / 0 = 書いてはいけない (呼び手は kill する)。      */
+/* ======================================================================== */
+
+/* master CR3 の下でだけ呼ぶこと。pd_phys はアプリ PD の物理先頭。 */
+static int ring3_pd_range_writable(u32 pd_phys, u32 p, u32 len)
+{
+    u32 page, last_page;
+
+    if (!pd_phys) return 0;
+    /* 表そのものが読めなければ判定しない (安全側で拒否)。 */
+    if (!paging_is_present(pd_phys)) return 0;
+
+    last_page = (p + len - 1u) & ~(u32)(PAGE_SIZE - 1);
+    for (page = p & ~(u32)(PAGE_SIZE - 1); ; page += PAGE_SIZE) {
+        u32 pde = ((const volatile u32 *)pd_phys)[page >> 22];
+        u32 pt_phys, pte;
+
+        if (!ring3_pde_walkable_ok(pde)) return 0;
+        pt_phys = pde & ~(u32)0xFFFu;
+        if (!paging_is_present(pt_phys)) return 0;
+        pte = ((const volatile u32 *)pt_phys)[(page >> 12) & 0x3FFu];
+        if (!ring3_pte_writable_ok(pte)) return 0;
+
+        if (page >= last_page) break;
+    }
+    return 1;
+}
+
+/* 引数の早い段階の門番。1 = 見るまでもなく可 / 0 = 見るまでもなく不可 /
+ * -1 = 表を歩いて確かめる。 */
+static int ring3_writable_trivial(u32 p, u32 len)
+{
+    if (len == 0) return 1;
+    if (p == 0) return 0;
+    if (p + len < p) return 0;            /* 加算の桁あふれ */
+    return -1;
+}
+
+int ring3_user_ranges_writable(u32 pa, u32 la, u32 pb, u32 lb)
+{
+    unsigned int saved;
+    u32 app_cr3, master;
+    int ok, ta, tb;
+
+    /* **CPL=0 の直呼びは対象外** (常駐シェル / gshell はローカル変数を渡す)。
+     * 判定は「呼び出し経路」で決める — CR3 が master かどうかで代用しない
+     * (Approve 後の注意 2)。既存の ring3_user_range_ok と同じ門。 */
+    if (!ring3_in_syscall) return 1;
+
+    ta = ring3_writable_trivial(pa, la);
+    tb = ring3_writable_trivial(pb, lb);
+    if (ta == 0 || tb == 0) return 0;
+    if (ta == 1 && tb == 1) return 1;
+
+    /* **2 本を 1 回の往復でまとめて見る** (Approve 後の注意 3)。出力ごとに
+     * master を往復すると、時計 1 回あたり CR3 の書き込みが 4 回になる。 */
+    saved = irq_save();
+    /* CR3 は**この場で自分で読む** — KAPI 入口に控えを取る機構は無く、
+     * `g_cur_app->as.pd_phys` は入口で走っていた CR3 とは別物であり得る
+     * (Approve 後の注意 1)。共有グローバルには書かない。 */
+    app_cr3 = paging_current_cr3() & ~(u32)0xFFFu;
+    master  = paging_kernel_pd_phys() & ~(u32)0xFFFu;
+
+    if (app_cr3 == master) {
+        ok = (ta != -1 || ring3_pd_range_writable(app_cr3, pa, la)) &&
+             (tb != -1 || ring3_pd_range_writable(app_cr3, pb, lb));
+    } else {
+        paging_load_cr3(master);
+        ok = (ta != -1 || ring3_pd_range_writable(app_cr3, pa, la)) &&
+             (tb != -1 || ring3_pd_range_writable(app_cr3, pb, lb));
+        /* **CR3 を戻してから IF を戻す** (Approve 後の注意 1)。
+         * この区間は表を読むだけで、ユーザー出力には 1 バイトも書かない。
+         * 検査に落ちたときの kill も、復元を終えた呼び手が行う (注意 5)。 */
+        paging_load_cr3(app_cr3);
+    }
+    irq_restore(saved);
+    return ok;
+}
+
+int ring3_user_range_writable(u32 p, u32 len)
+{
+    return ring3_user_ranges_writable(p, len, 0, 0);
 }
 
 int ring3_user_range_ok(u32 p, u32 len)

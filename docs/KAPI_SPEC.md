@@ -1,4 +1,4 @@
-# KernelAPI v58 仕様書
+# KernelAPI v59 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -100,6 +100,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v56 | **実装済み (2026-09-22、実機シリアル)** | V･FAST モード `serial_init_vfast` / `serial_get_status` の 2 本 (slot 216 = 0x368、217 = 0x36C、data_fields は 0x370 / 0x374 へ)。FIFO 搭載機 (`0136h` bit6 の反転で判定) で `013Ah` bit7 を立てて **8253 と無関係に** 115200bps まで出す。**起動時の既定 9600 は互換モードのまま** — V･FAST は `serial N` で明示的に入る。併せて `serial_putchar` の TxRDY 待ちを「10ms tick まで寝る」から「1 文字時間 × 2 の予算で `cpu_delay_us` を挟んで見る」へ。実体は `drivers/serial.c` / `drivers/serial_plan.c` | [tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md) |
 | v57 | **実装済み (2026-09-22、実機シリアル往復 4)** | ローカル打鍵だけの読み口 `kbd_trygetchar_local` 1 本 (slot 218 = 0x370、data_fields は 0x374 / 0x378 へ)。cooked リングだけを見て**シリアルも注入リングも見ない**。rshell の速度切替の番犬が「この 1 バイトはシリアル由来か」を**1 回の読みで**確定できるようにする (2 度読みの窓を消す)。⚠ 番号は PM が着地時に振り直す (同日に L-A も v57 を取得) | [tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md) |
 | v58 | **実装済み (2026-09-22、手元ビルドのみ)** | 実機の PCI 列挙 `pci_count` / `pci_get` / `pci_cfg_read32` の 3 本 (slot 219 = 0x374、220 = 0x378、221 = 0x37C、data_fields は 0x380 / 0x384 へ)。起動時に `pci_init()` が コンフィギュレーションメカニズム #1 (`0CF8h` DWORD / `0CFCh`) で bus 0 を走査し、vendor/device/class/BAR/Interrupt Line を静的表 (上限 32) に記録する。**読むだけ** — BAR のサイズ判定 (全 1 を書いて読み戻す) はしないので BIOS の割り当てを壊さない。シェルの `lspci` / `pcidump` がこの 3 本を使う。**NP21/W は PCI を実装していない**ので、エミュレータでは `[pci] mech#1 absent` と `lspci: no PCI` が正しい姿。実体は `drivers/pci.c` / `drivers/pci_decode.c` | [tasks/realhw/TASK_LAN_82557.md](tasks/realhw/TASK_LAN_82557.md) |
+| v59 | **実装済み (2026-09-23、手元ビルドのみ)** | µs 時計 `sys_time_now` 1 本 (slot 222 = 0x380、data_fields は 0x384 / 0x388 へ)。起動からの経過を µs で返す。**64 ビットは KAPI で返せない** (往復 1 の B14) ので、出力引数 2 本に**同じスナップショットの上下**を書く。時間源は `tick_count` (§1-0 の後はどちらのシステムクロックでもちょうど 10ms) と PIT ch0 のラッチ読みで、周期の境界はPIC1 の IRR bit0 をラッチの前後で挟んで判定する (最大 3 回やり直す)。戻り 0 = 成功 / `OS32_ERR_AGAIN` = 3 回とも判定できなかった / `OS32_ERR_NOSYS` = PIT 未初期化か mode 2 でない / `OS32_ERR_INVAL` = `lo` か `hi` が NULL・4 バイトが帯境界を跨ぐ・**2 本の範囲が交差する (差 0〜3)**。**負のときは 2 本とも書かない**。出力が読み取り専用の USER ページ (共有ライブラリの `.text`) なら `ring3_fault_kill` — OS32 は CR0.WP = 0 なのでハードウェアは止めない。実体は `kernel/ktime.c` / `kernel/time_math.c`、検証は `kapi/kapi_sys.c` の `kapi_sys_time_now` | [tasks/v3/TASK_HAL_WIRING.md](tasks/v3/TASK_HAL_WIRING.md) §1-5 |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -751,6 +752,40 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 - 資料は `docs/hw/undocumented/io_pci.md` (図2 = アドレス語、446〜479 行 =
   `0CF8h` / `0CFCh`) と Intel 8255x SDM Table 1 (Type 0 ヘッダ)。
 
+### µs 時計 (v59)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x380 | sys_time_now | `int(u32 *lo, u32 *hi)` |
+
+- `us = tick × period_us + (reload − count) × period_us ÷ reload`。積は **64 ビット**で
+  組む (u32 だと 429496 tick = **71 分**で時刻が 0 に戻る)。`tick_count` の u32 周回
+  (497 日) は扱わない (契約)。
+- **スナップショットの採り方** (票 §1-5 R8、全体を `irq_save` の中で):
+  ラッチ**前**の PIC1 IRR bit0 (`p1`) → カウンタ#0 をラッチして下位 → 上位 →
+  ラッチ**後**の IRR bit0 (`p2`) → `tick_count`。判定は
+  `p1 == 0 && p2 == 0` → `t` / `p1 == 1` → `t + 1` (再ロードはラッチより前。
+  count は新しい周期のもの) / `p1 == 0 && p2 == 1` → **やり直し** (最大 3 回)。
+- **正しいのは IRQ0 が失われない範囲** = システム全体で IF=0 の区間が 1 周期
+  (10ms) 未満のとき。2 回以上の境界を IF=0 で跨ぐと tick が 1 つ落ち、この時計も
+  `tick_count` も 10ms 遅れる — 検出はしない。呼び手は `tick_count × 10000` に
+  落とせるが、その値は同じ tick の補間値より**小さい**ので、fallback は単調性の
+  保証に含めない (呼び手が前回値と max を取る)。
+- CPL=3 の検証は 2 段。(1) 生成される `kapi_argptr` → `ring3_ptr_ok` が**先頭番地の
+  帯**を見て、外れていれば `ring3_fault_kill` (他の KAPI と同じ)。(2) `kapi_sys_time_now`
+  が NULL・4 バイトの帯境界跨ぎ・**2 本の範囲の交差**を `OS32_ERR_INVAL` で断り、
+  **書く前に**両方の出力ページが present + RW + USER であることを
+  `ring3_user_ranges_writable` で確かめる (落ちたら kill)。
+  **OS32 は CR0.WP = 0 で走る** (`kernel/shlib.c` がカーネルからの書き込みに依存)
+  ので、読み取り専用の USER ページ = 共有ライブラリの `.text` へ CPL=0 から書いても
+  #PF は起きない。帯の検証だけでは止まらない。
+- 表を歩くときは **master CR3 へ切り替えてからアプリ PD の物理を読む**。アプリ CR3 の
+  まま辿ると、PD もアプリ PT も `PGALLOC_BASE` (= アプリ帯) から取られているため
+  **表のつもりでアプリ自身のデータを読む** (2026-09-13、実機 K2 で 2 回失敗)。
+  `paging_pte_flags()` も使えない (master の PT を引くので、アプリでは RW + USER の
+  shlib `.data`/`.bss` が master では USER 無しに見え、正常な出力を誤って拒否する)。
+  2 本の出力は**1 回の往復でまとめて**見る (1 本ずつだと CR3 の書き込みが 4 回になる)。
+
 ### 排他的作成 (v53)
 
 **スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
@@ -890,8 +925,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x380 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x384 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x384 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x388 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

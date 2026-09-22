@@ -192,6 +192,71 @@ static void case_no_scratch(void)
           "4d CPL=0 経路は写し場を見ない");
 }
 
+/* ========================================================================
+ *  5. CPL=3 へ**書き込む**前の判定 (票 TASK_HAL_WIRING、Codex 往復 10)
+ *
+ *  OS32 は CR0.WP = 0 で走るので、CPL=0 のラッパは読み取り専用 USER ページ
+ *  (共有ライブラリの .text = 全アプリ共有) にも #PF を起こさずに書ける。
+ *  既存の早期検査は帯しか見ないので、ここが最後の砦になる。
+ *  **この表はホストでしか網羅できない** — 実機で試すには壊れた PTE を
+ *  わざと作るしかなく、それ自体がカーネルを壊す。
+ * ======================================================================== */
+static void case_writable(void)
+{
+    report("5 書き込んでよいページかの判定表\n");
+
+    /* 3 つとも立っていて初めて書ける */
+    check(ring3_pte_writable_ok(PTE_PRESENT | PTE_RW | PTE_USER) == 1,
+          "5a present + RW + USER なら書ける");
+    check(ring3_pte_writable_ok(PTE_PRESENT | PTE_RW | PTE_USER |
+                                PTE_ACCESSED | PTE_DIRTY) == 1,
+          "5b A / D が付いていても判定は変わらない");
+
+    /* **共有ライブラリの .text がこれ** (RO + USER)。CR0.WP = 0 だと
+     * ハードウェアは止めないので、ここで 0 を返さないと全アプリ共有の
+     * コードが書き換わる。 */
+    check(ring3_pte_writable_ok(PTE_PRESENT | PTE_USER) == 0,
+          "5c RO + USER (共有ライブラリの .text) には書かない");
+    /* カーネル帯 (USER 無し)。CPL=3 が指せる番地ではない。 */
+    check(ring3_pte_writable_ok(PTE_PRESENT | PTE_RW) == 0,
+          "5d USER の無いページには書かない");
+    /* ガードページ / sbrk 上限より上 */
+    check(ring3_pte_writable_ok(PTE_RW | PTE_USER) == 0,
+          "5e 非 present には書かない");
+    check(ring3_pte_writable_ok(0) == 0, "5f 張られていないページ (flags 0)");
+
+    /* --- PDE: 辿ってよいか --- */
+    check(ring3_pde_walkable_ok(PTE_PRESENT | PTE_RW | PTE_USER) == 1,
+          "5p present な PDE は辿れる");
+    /* **実効権限は PDE と PTE の論理積** — PDE 側が欠けていれば PTE が
+     * RW + USER でもアプリは書けない。 */
+    check(ring3_pde_walkable_ok(PTE_PRESENT) == 0,
+          "5q PDE に RW / USER が無ければ書けない");
+    check(ring3_pde_walkable_ok(PTE_PRESENT | PTE_RW) == 0, "5q2 USER が要る");
+    check(ring3_pde_walkable_ok(PTE_PRESENT | PTE_USER) == 0, "5q3 RW が要る");
+    check(ring3_pde_walkable_ok(0) == 0, "5r 非 present な PDE は辿れない");
+    check(ring3_pde_walkable_ok(PTE_RW | PTE_USER) == 0, "5s present が要る");
+    /* **4MB ページ**: その PDE の下に PT は無い。辿ると PT のつもりで
+     * データを読む — 表の読み違い (アプリ CR3 のまま歩いた等) の印。 */
+    check(ring3_pde_walkable_ok(PTE_PRESENT | PTE_PS) == 0,
+          "5t PS (4MB ページ) は拒否する");
+    check(ring3_pde_walkable_ok(PTE_PRESENT | PTE_PS | PTE_RW | PTE_USER) == 0,
+          "5u PS は RW + USER でも拒否");
+
+    /* --- 帯の重なり --- */
+    check(ring3_range_overlaps(0x1000, 4, 0x1000, 0x2000) == 1, "5g 先頭が中");
+    check(ring3_range_overlaps(0x1FFC, 4, 0x1000, 0x2000) == 1, "5h 末尾が中");
+    check(ring3_range_overlaps(0x1FFE, 4, 0x1000, 0x2000) == 1, "5i またぐ");
+    check(ring3_range_overlaps(0x2000, 4, 0x1000, 0x2000) == 0, "5j 終端は exclusive");
+    check(ring3_range_overlaps(0x0FFC, 4, 0x1000, 0x2000) == 0, "5k 直前は外");
+    check(ring3_range_overlaps(0x0FFD, 4, 0x1000, 0x2000) == 1, "5l 1 バイト重なる");
+    check(ring3_range_overlaps(0x1000, 0, 0x1000, 0x2000) == 0, "5m 長さ 0 は重ならない");
+    check(ring3_range_overlaps(0x1000, 4, 0x2000, 0x2000) == 0, "5n 空の帯 (shlib 未ロード)");
+    /* **桁あふれ**: p + len が巻き戻ると「帯の外」に見えてしまう */
+    check(ring3_range_overlaps(0xFFFFFFFCu, 8, 0x1000, 0x2000) == 1,
+          "5o 加算が巻き戻る範囲は安全側 (重なり扱い)");
+}
+
 int main(void)
 {
     failures = 0;
@@ -200,6 +265,7 @@ int main(void)
     case_overwrite();
     case_max_len();
     case_no_scratch();
+    case_writable();
     if (failures) {
         report("FAILURES\n");
         die(1);
