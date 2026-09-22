@@ -89,18 +89,31 @@ MUTATIONS = [
      "予算の下限 3 tick を外す (保証 10ms では FTDI の遅延タイマ 16ms を"
      "またげず、結局 hlt に落ちて 1 バイト 2ms に戻る)"),
     ("userland/shell/serial_watchdog.c",
-     r"    if \(bytes_seen > 0\) \{\n        return SER_WD_LINKED;\n    \}\n"
+     r"    if \(lines_completed > 0\) \{\n        return SER_WD_LINKED;\n    \}\n"
      r"[\s\S]*?    if \(elapsed_ticks >= \(unsigned long\)"
      r"SER_SWITCH_WATCHDOG_TICKS\) \{\n        return SER_WD_REVERT;\n    \}",
      "    if (elapsed_ticks >= (unsigned long)SER_SWITCH_WATCHDOG_TICKS) {\n"
      "        return SER_WD_REVERT;\n    }\n"
-     "    if (bytes_seen > 0) {\n        return SER_WD_LINKED;\n    }",
-     "番犬が期限を受信より先に見る (期限ちょうどに届いた応答を無音と"
+     "    if (lines_completed > 0) {\n        return SER_WD_LINKED;\n    }",
+     "番犬が期限を往復より先に見る (期限ちょうどに成立した往復を無音と"
      "読み替えて、揃った足並みを自分で壊す)"),
     ("userland/shell/serial_watchdog.c",
      r"elapsed_ticks >= \(unsigned long\)SER_SWITCH_WATCHDOG_TICKS\) \{",
      "elapsed_ticks >= (unsigned long)SER_SWITCH_WATCHDOG_TICKS * 1000) {",
      "番犬の期限を 1000 倍にする (事実上いつまでも戻さない = 会話が死んだまま)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    if \(!w \|\| !w->armed\) return;\n    w->lines\+\+;",
+     "    if (!w) return;\n    w->lines++;",
+     "仕掛かっていないときも往復を数える (前の切替の残りが次で即 LINKED)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    w->armed = 0;\n    return d;",
+     "    return d;",
+     "答えを出したあと番犬を下ろさない (REVERT を 2 度返して "
+     "serial_init を二重に呼ぶ)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    w->lines = 0;\n",
+     "",
+     "arm が往復の数を 0 に戻さない (前の切替の残りで次が即 LINKED になる)"),
 ]
 
 

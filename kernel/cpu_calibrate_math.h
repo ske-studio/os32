@@ -3,7 +3,10 @@
 /*                                                                          */
 /*  I/O も tick_count も触らない決め事だけを kernel/cpu_calibrate.c から    */
 /*  切り出してある。**ここが間違っていたことは実機でしか見えなかった** —    */
-/*  エミュレータは十分に遅いので 1 周で 5 tick を超え、丸めが起きない。     */
+/*  エミュレータでも 1 周では 5 tick に届かない (NP21/W 実測 rounds = 16)   */
+/*  が、1 周 ≒ 0.31 tick なので旧コードでも elapsed は 1 以上になり、       */
+/*  ずれは高々 3 倍ほど。実機 266MHz だけ 1 周が 0.1 tick 未満で 0 に落ち、  */
+/*  1/7〜1/13 という桁のずれになった。                                      */
 /*    試験: tools/tests/test_cpu_calibrate.py                               */
 /*    記録: tools/tests/cpu_calibrate_tdd.md                                */
 /*    票  : docs/tasks/realhw/TASK_SERIAL_VFAST.md (往復 3)                 */

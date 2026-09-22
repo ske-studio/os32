@@ -98,9 +98,15 @@
 
 /* **IF=0 で呼ばれたときの回数上限。** 割り込み禁止区間では tick_count が
  * 進まないので時間で測れない。しかも `_halt()` は IF=0 では二度と起きない
- * ので、スピンだけで諦めるしかない。20 万回は 266MHz で数十 ms、8MHz でも
- * 数百 ms 程度で、パニック経路の serial_puts_polled と同じ桁。 */
-#define SER_TX_SPIN_MAX      200000UL
+ * ので、スピンだけで諦めるしかない。
+ *
+ * 1 周は `cpu_delay_us(SER_TX_POLL_US)` + ポート読み 1 回なので、**校正が
+ * 正しければ 1 周 ≒ 5µs**。合計を 20ms 相当 (= 予算の下限 3 tick と同じ桁)
+ * に揃えると 4000 回。校正を直す前 (往復 3) は 1 周 0.5µs だったので 20 万回
+ * でも 0.1 秒だったが、**校正が正しくなったいま 20 万回は 1 秒/文字**になり、
+ * パニック経路で画面が止まる。 */
+#define SER_TX_SPIN_BUDGET_US 20000UL
+#define SER_TX_SPIN_MAX      (SER_TX_SPIN_BUDGET_US / SER_TX_POLL_US)
 
 /* 8253 カウンタ#2 は 16 ビット。 */
 #define SER_COUNT_MAX    0xFFFFU

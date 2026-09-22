@@ -339,6 +339,31 @@ static inline void _raster_delay(void)
     cpu_delay_us(RASTER_LINE_US);
 }
 
+/* ======================================================================== */
+/*  _raster_delay_open — 待つあいだは **割り込みを戻す**                    */
+/*                                                                          */
+/*  ⚠ ここで割り込みを止め続けてはいけない (Codex レビュー往復 2 B4)。       */
+/*  ラスタ期間は IF=0 で守られているが、待ちは 100〜400 回繰り返される。     */
+/*  cpu_calibrate() の丸めを直して cpu_delay_us が**本来の長さ**を待つように */
+/*  なったので (票 TASK_SERIAL_VFAST 往復 3)、この待ちの合計は実機で         */
+/*  **12〜48ms** になる。そのあいだ割り込みを止めると:                      */
+/*    - 38400 以上の受信を取りこぼす (FIFO は 16 バイトしかない)             */
+/*    - PIT の tick を失う → drivers/serial.c の送信予算 (tick を数える)     */
+/*      の前提が崩れる                                                      */
+/*                                                                          */
+/*  **IF=0 が要るのはパレット書き込みそのものだけ** (4 ポートへの連続 out が */
+/*  割り込みで分断されると色がずれる)。待ちのあいだは戻す。                  */
+/*  引き換えに、待ちの途中で割り込みが入るとラスタの位置が数十µs ずれうる    */
+/*  — 呼び手は kernel/boot_splash.c の 2 か所だけなので、スプラッシュの      */
+/*  見た目で確かめる。                                                      */
+/* ======================================================================== */
+static void _raster_delay_open(unsigned int *flags)
+{
+    irq_restore(*flags);
+    _raster_delay();
+    *flags = irq_save();
+}
+
 void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
 {
     int entry_idx, line;
@@ -375,7 +400,7 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
             _out(PAL_G_PORT, e->g & 0x0F);
             _out(PAL_R_PORT, e->r & 0x0F);
             _out(PAL_B_PORT, e->b & 0x0F);
-            _raster_delay();
+            _raster_delay_open(&flags);
         }
         irq_restore(flags);
         return;
@@ -408,7 +433,7 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
                 _out(PAL_B_PORT, e->b & 0x0F);
                 entry_idx++;
             }
-            _raster_delay();
+            _raster_delay_open(&flags);
         }
     } else {
         /* パレット書き換えのみ (VRAM転送なし) */
@@ -418,7 +443,7 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
             _out(PAL_G_PORT, e->g & 0x0F);
             _out(PAL_R_PORT, e->r & 0x0F);
             _out(PAL_B_PORT, e->b & 0x0F);
-            _raster_delay();
+            _raster_delay_open(&flags);
         }
     }
 

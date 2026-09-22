@@ -260,9 +260,16 @@ static void tx_budget_ticks(void)
     CHECK(serial_tx_budget_ticks(600UL) >= serial_tx_budget_ticks(1200UL));
     CHECK(serial_tx_budget_ticks(1200UL) >= serial_tx_budget_ticks(9600UL));
 
-    /* IF=0 の回数上限は 0 でない (1 回も見ないうちに諦めない)。 */
+    /* IF=0 の回数上限は 0 でない (1 回も見ないうちに諦めない)。
+     * **合計 20ms 相当** — 1 周が cpu_delay_us(5µs) + ポート読みなので
+     * 4000 回。校正を直した (往復 3) いま、20 万回だと 1 秒/文字になって
+     * パニック経路で画面が止まる。 */
     CHECK(SER_TX_SPIN_MAX > 0);
-    CHECK(SER_TX_SPIN_MAX >= 1000UL);
+    CHECK(SER_TX_SPIN_MAX == 4000UL);
+    CHECK(SER_TX_SPIN_MAX * SER_TX_POLL_US == SER_TX_SPIN_BUDGET_US);
+    CHECK(SER_TX_SPIN_BUDGET_US == 20000UL);
+    /* 予算の下限 (3 tick = 30ms) と同じ桁であること。 */
+    CHECK(SER_TX_SPIN_BUDGET_US <= SER_TX_BUDGET_TICKS_MIN * SER_TICK_US);
 }
 
 /* ------------------------------------------------------------------ */
@@ -384,40 +391,97 @@ static void refuse_inexact(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  (i) 切替後の番犬 (Codex レビュー blocker 2b)                        */
+/*  (i) 切替後の番犬 (往復 1 blocker 2b / 往復 2 B1・B2)                */
 /* ------------------------------------------------------------------ */
 static void watchdog(void)
 {
-    /* 切替直後。まだ何も来ていないし期限内 → 待つ。 */
+    struct serial_watchdog w;
+
+    /* ---- 判定そのもの ---- */
+    /* 切替直後。まだ往復していないし期限内 → 待つ。 */
     CHECK(serial_watchdog_decide(0, 0) == SER_WD_WAIT);
     CHECK(serial_watchdog_decide(1, 0) == SER_WD_WAIT);
     CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS - 1, 0)
           == SER_WD_WAIT);
 
-    /* 1 バイトでも来れば足並みが揃った → 解除。 */
+    /* 1 往復でも成立すれば解除。 */
     CHECK(serial_watchdog_decide(0, 1) == SER_WD_LINKED);
     CHECK(serial_watchdog_decide(10, 1) == SER_WD_LINKED);
 
-    /* 期限まで無音 → 元の設定へ戻す。 */
+    /* 期限まで往復なし → 元の設定へ戻す。 */
     CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS, 0)
           == SER_WD_REVERT);
     CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS + 100, 0)
           == SER_WD_REVERT);
 
-    /* **受信は期限より先に見る。** 期限ちょうどに応答が届いた場合に
+    /* **往復は期限より先に見る。** 期限ちょうどに成立した往復を
      * 「無音だった」と読み替えて戻すと、揃った足並みを自分で壊す。 */
     CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS, 1)
           == SER_WD_LINKED);
     CHECK(serial_watchdog_decide(0xFFFFFFFFUL, 1) == SER_WD_LINKED);
 
-    /* 期限は 5 秒 (PIT 100Hz)。短すぎるとホストが開き直す前に戻ってしまい、
-     * 長すぎると失敗したまま待たされる。 */
+    /* 期限は 5 秒 (PIT 100Hz)。短すぎるとホストが `ver` の本文を確かめ
+     * 終える前に戻ってしまい、長すぎると失敗したまま待たされる。 */
     CHECK(SER_SWITCH_WATCHDOG_TICKS == 500);
 
     /* 3 つの答えは別の値 (呼び手が待つ/解除/戻すを区別できること)。 */
     CHECK(SER_WD_WAIT != SER_WD_LINKED);
     CHECK(SER_WD_WAIT != SER_WD_REVERT);
     CHECK(SER_WD_LINKED != SER_WD_REVERT);
+
+    /* ---- 状態つきの口 (B1: 数える場所が 1 か所であること) ---- */
+    serial_watchdog_arm(&w, 1000UL, 0UL, 9600UL);
+    CHECK(w.armed == 1);
+    CHECK(w.lines == 0);
+    CHECK(w.prev_baud == 9600UL);
+    CHECK(serial_watchdog_poll(&w, 1000UL) == SER_WD_WAIT);
+
+    /* **行頭の先読み経路で来た行でも数える。** 直す前はこの経路だけ
+     * 数え損ねていて、ホストの `ver\n` が切替コマンドの終了処理中に届くと
+     * `ver` は正常に返るのに 500 tick 後に旧速度へ戻っていた (B1)。
+     * いまは「1 行の往復が終わった」1 か所で数えるので、どの経路から
+     * 読んでも同じになる。 */
+    serial_watchdog_line_done(&w);
+    CHECK(w.lines == 1);
+    CHECK(serial_watchdog_poll(&w, 1000UL) == SER_WD_LINKED);
+    /* 解除したら下りる。**2 度は返らない。** */
+    CHECK(w.armed == 0);
+    CHECK(serial_watchdog_poll(&w, 9999UL) == SER_WD_WAIT);
+
+    /* ---- 期限切れの筋書き ---- */
+    serial_watchdog_arm(&w, 1000UL, 0UL, 9600UL);
+    CHECK(serial_watchdog_poll(&w, 1000UL + SER_SWITCH_WATCHDOG_TICKS - 1)
+          == SER_WD_WAIT);
+    CHECK(serial_watchdog_poll(&w, 1000UL + SER_SWITCH_WATCHDOG_TICKS)
+          == SER_WD_REVERT);
+    /* **REVERT も 2 度は返らない** — 返すと戻したあとにもう一度
+     * serial_init を呼んでしまう。 */
+    CHECK(w.armed == 0);
+    CHECK(serial_watchdog_poll(&w, 1000UL + SER_SWITCH_WATCHDOG_TICKS + 500)
+          == SER_WD_WAIT);
+
+    /* ---- 仕掛かっていないときは数えない ---- */
+    serial_watchdog_line_done(&w);
+    CHECK(w.lines == 0);
+    CHECK(w.armed == 0);
+
+    /* arm は数を 0 に戻す (前の切替の残りが次の切替で即 LINKED にしない)。 */
+    serial_watchdog_arm(&w, 2000UL, 0UL, 9600UL);
+    serial_watchdog_line_done(&w);
+    CHECK(w.lines == 1);
+    serial_watchdog_arm(&w, 3000UL, 0UL, 9600UL);
+    CHECK(w.lines == 0);
+    CHECK(serial_watchdog_poll(&w, 3000UL) == SER_WD_WAIT);
+
+    /* ---- NULL を渡しても落ちない ---- */
+    serial_watchdog_arm((struct serial_watchdog *)0, 0UL, 0UL, 0UL);
+    serial_watchdog_line_done((struct serial_watchdog *)0);
+    CHECK(serial_watchdog_poll((struct serial_watchdog *)0, 0UL)
+          == SER_WD_WAIT);
+
+    /* ---- tick が一周しても壊れない (u32 の巻き戻り) ---- */
+    serial_watchdog_arm(&w, 0xFFFFFF00UL, 0UL, 9600UL);
+    CHECK(serial_watchdog_poll(&w, 0xFFFFFF00UL + 10UL) == SER_WD_WAIT);
 }
 
 /* ------------------------------------------------------------------ */

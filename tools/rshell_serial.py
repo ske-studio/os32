@@ -46,6 +46,16 @@ SPEED_SWITCH_SETTLE_S = 0.5
 FAST_BAUDS = (9600, 14400, 19200, 28800, 38400, 57600, 115200)
 # 切替の確認に使う実コマンド。**副作用が無く、応答が短く、必ず EOT で閉じる**もの。
 PROBE_CMD = "ver"
+# **EOT だけで判定しない** (Codex レビュー B3)。`serial N` の終了処理が
+# SPEED_SWITCH_SETTLE_S を超えると、`ver` を送ったあとに **切替コマンドの EOT**
+# が届き、それを `ver` の成功と読んでしまう → 以後の応答が 1 コマンドずれる。
+# `ver` の本文にしか出ない文字列まで見る (userland/shell/cmd_base.c の
+#   kprintf("  Build: %s %s\n", __DATE__, __TIME__) )。
+PROBE_EXPECT = "Build:"
+# `serial N` を送ったあと、旧速度で EOT を 1 つ待つ上限 [秒]。旧速度で返る
+# EOT は切替の途中で化けるので**来ない前提**だが、来たならそこまでで切り替えて
+# よい。待つこと自体に意味がある (ゲストが 013Ah を書き終える時間)。
+SWITCH_DRAIN_S = 2.0
 # 確認の往復に許す秒数。[V3] の 15 秒は「長いコマンド」の話で、ここは
 # 「速度が合っているか」の判定 — 合っていれば 1 秒で返り、合っていなければ
 # 何秒待っても返らない。5 秒はゲスト側の番犬 (500 tick) と同じ尺度。
@@ -83,18 +93,38 @@ def send_cmd(port, line, timeout_s):
 
 
 def probe(port, timeout_s):
-    """実コマンド (`ver`) を投げて EOT まで返るか見る。
+    """実コマンド (`ver`) を投げて、**本文まで**返るか見る。
 
     **受動待ちでは判定にならない。** 切替の行の EOT は化けて消えることがあり、
     「来ないこと」は失敗の証拠にも成功の証拠にもならない。こちらから 1 行
     送って往復が成立するかを見れば、速度が合っているかがそのまま分かる
-    (Codex レビュー blocker 3: 成功時に 15 秒待たされるのもこれで消える)。
+    (往復 1 blocker 3: 成功時に 15 秒待たされるのもこれで消える)。
+
+    **EOT だけを見てはいけない** (往復 2 B3)。先行コマンドの EOT が遅れて
+    届くと、それを `ver` の成功と読んで以後の応答が 1 コマンドずれる。
+    `ver` の本文にしか出ない `Build:` まで確かめる。
     """
     try:
         text, ok = send_cmd(port, PROBE_CMD, timeout_s)
     except Exception:            # pragma: no cover — 速度不一致で化けたとき
         return "", False
-    return text, ok
+    if not ok:
+        return text, False
+    if PROBE_EXPECT not in text:
+        # EOT は来たが `ver` の応答ではない = 先行コマンドの EOT を拾った、
+        # または化けている。**成功に数えない。**
+        return text, False
+    return text, True
+
+
+def check_echo(text, line):
+    """応答が `> <送ったコマンド>` のエコー行で始まっているか。
+
+    ゲストの rshell は実行前に `> <コマンド>` を出す (userland/shell/rshell.c)。
+    ここがずれていたら EOT の対応が 1 つずれている (往復 2 B3)。
+    """
+    head = text.lstrip("\r\n")
+    return head.startswith("> " + line)
 
 
 def switch_speed(port_name, open_baud, fast_baud, timeout_s):
@@ -114,8 +144,14 @@ def switch_speed(port_name, open_baud, fast_baud, timeout_s):
         port.write(("serial %d\n" % fast_baud).encode("ascii"))
         port.flush()
         # 送信 FIFO が掃けて、ゲストが 013Ah を書き終えるまでの間合い。
-        # 9600 で 1 文字 ≒ 1.04ms、行は 14 文字。余裕を見て 0.5 秒待つ。
+        # 9600 で 1 文字 ≒ 1.04ms、行は 14 文字。余裕を見て 0.5 秒。
         time.sleep(SPEED_SWITCH_SETTLE_S)
+        # **切替コマンドの EOT をここで吸っておく** (往復 2 B3)。
+        # 残したまま新速度へ移ると、次に投げる `ver` の EOT と取り違える。
+        # 旧速度で返る EOT は切替の途中で化けるので来ない方が普通だが、
+        # 来たならそこまでで切り上げる。来なくても 2 秒で進む
+        # (この待ち自体がゲストの終了処理を追い越さないための間合い)。
+        read_until_eot(port, SWITCH_DRAIN_S)
     finally:
         port.close()
 
@@ -188,10 +224,16 @@ def main():
             print("\n[sync] EOT %s" % ("ok" if ok else "TIMEOUT"))
             return 0 if ok else 1
         if args.mode == "cmd":
-            text, ok = send_cmd(port, " ".join(args.line), args.timeout)
+            line = " ".join(args.line)
+            text, ok = send_cmd(port, line, args.timeout)
             sys.stdout.write(text)
             if not ok:
                 print("\n[rshell_serial] timeout waiting for EOT (%.0fs)" % args.timeout)
+                return 1
+            # **応答がこのコマンドのものか確かめる** (往復 2 B3)。EOT の対応が
+            # 1 つずれていると、以後ずっと前のコマンドの応答を読み続ける。
+            if not check_echo(text, line):
+                print("[rshell_serial] desync: expected echo of %r" % line)
                 return 1
             return 0
         # repl
@@ -210,6 +252,10 @@ def main():
                 print()
             if not ok:
                 print("[rshell_serial] timeout waiting for EOT")
+            elif not check_echo(text, line):
+                # EOT の対応が 1 つずれている (往復 2 B3)。対話は続けられるが
+                # **黙って進まない** — 読んでいる応答が別のコマンドのもの。
+                print("[rshell_serial] desync: expected echo of %r" % line)
             if line.strip() == "exit":
                 return 0
     finally:

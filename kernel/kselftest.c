@@ -600,9 +600,10 @@ static void test_db_v50(void)
  * 待てずに `_halt()` へ落ちて **1 バイト約 2ms の固定費**になる
  * (実機実測: 9600 で 389B/s、38400 でも 437B/s)。
  *
- * **NP21/W では踏めない** (十分に遅いので 1 周で 5 tick を超える) ので、
- * ここで実機の起動時に自分で見る。丸めが起きていれば ticks が
- * CALIBRATE_MIN_TICKS に届いていない。 */
+ * **NP21/W では症状が出ない** (実測 rounds = 16 / ticks = 5。1 周 ≒ 0.31
+ * tick なので旧コードでも elapsed が 1 以上になり、ずれは高々 3 倍ほど)。
+ * 実機 266MHz だけ 1 周が 0.1 tick 未満で 0 に落ちていた。だからここで
+ * 実機の起動時に自分で見る。 */
 static void test_cpu_calibrate(void)
 {
     u32 lpt = cpu_loops_per_tick();
@@ -627,6 +628,20 @@ static void test_cpu_calibrate(void)
     check(lpt >= CALIBRATE_LOOPS / (cpu_calib_ticks ? cpu_calib_ticks : 1)
           || cpu_calib_rounds > 1,
           "cpu calib: result is consistent with the rounds it ran");
+
+    /* **打ち切りに当たったら測れていない** (PIT が止まっている疑い)。
+     * 上の `< CALIBRATE_MAX_ROUNDS` と同じことを「失敗」として言い直す —
+     * 当たったときに何が起きたかを名前で残すため。 */
+    check(cpu_calib_rounds != CALIBRATE_MAX_ROUNDS,
+          "cpu calib: did NOT give up at the round cap");
+
+    /* **フォールバック値そのものだったら測れていない。**
+     * cpu_calibrate_compute() は ticks == 0 か極端に小さい結果のときだけ
+     * この値を返すので、一致したら測定が成立していない
+     * (8MHz 実機でたまたま一致する確率は無視する — その場合も
+     *  「測れたかどうか分からない」ので落ちてよい)。 */
+    check(lpt != CALIBRATE_FALLBACK_LPT,
+          "cpu calib: result is a real measurement, not the fallback");
 }
 
 int kselftest_run(void)
