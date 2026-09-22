@@ -36,6 +36,7 @@
 | **L-B** | **82557 ドライバ (最小)**: PCI から I/O BAR と IRQ、SCB 経由で reset / EEPROM から MAC / Configure / IA setup / CU (TX: 1 コマンドずつ) / RU (RX: RFD 連結、簡略モード)、割り込みは RU の Frame Received + CU 完了。参照は Intel の SDM (§6 SCB、§7 RFD) と Linux e100 の作法 | 10〜15KB | **実機**: MAC が読める → 自己送信 (ループバック) → ホストへ HELLO |
 | **L-C** | **NIC 境界の一般化**: `lgy98.c` ↔ `net/link.c` の結びつきを関数表 (`net/nic.h`: tx / mac / irq / poll) にして 82557 を 2 つ目の NIC に。起動時は PCI に 82557 が居ればそれ、無ければ LGY-98 (設定は手動でよい、v3 §3) | 1〜2KB | NP21/W (LGY-98 の回帰 L0〜L3) + 実機 |
 | **L-D** | **ホストの橋** `tools/lan_bridge.py` (Windows 側 Python + scapy/Npcap): LAN アダプタで EtherType 0x88B5 を拾い、`host_agent.py --listen` の FrameStream へ流し、逆も返す | ホストのみ | 実機 ↔ ホスト |
+| **L-D2** | **Ubuntu 向けのホスト側バックエンド**: `host_agent.py` のクリップボード (`clip.exe`/PowerShell) と印刷 (win32print) は Windows 前提。Linux では `xclip`/`wl-copy` と `lp` (CUPS) に差し替える (無ければ 503、既存の方針どおり) | ホストのみ | Ubuntu 機で `hclip` / `lpr` |
 | **L-E** | **Host Services の疎通**: 実機で `link_selftest` (L0〜L3 相当) → クリップボード / 印刷 / `wget` / TIME | — | 実機 |
 
 L-A と L-D は独立 (並行できる)。L-B は L-A の上、L-C は L-B と同時、L-E は全部の上。
