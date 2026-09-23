@@ -27,6 +27,11 @@ Windows 側の Python (pyserial 入り) で動かす:
 届かなければ自力で元へ戻す** (userland/shell/serial_watchdog.c)。だから
 「FIFO 無し」「013Ah が効かない」「ケーブルが速度に耐えない」のどれでも
 会話は 9600 で生き残る。N が --baud と同じなら切り替えは行わない。
+  6. **終わる前に `serial <--baud>` を送って --baud で `serial ack` を待ち、
+     `restored to 9600` と報告する** (repl は `exit` を送る前に戻す)。
+     `--keep-fast` で戻さずに残せる — そのときは次の呼び出しを
+     `--baud N` で開く。実機 (2026-09-23) で戻し忘れたまま 9600 で開いて
+     3 回続けて化けた。
 
 ⚠ 確認は **明示の合図** で行う。往復 1〜3 は `ver` の応答を本文とエコーで
 識別しようとして、遅れて届く EOT・本文の欠落・1 つずれた応答と穴が尽きなかった
@@ -280,6 +285,27 @@ def switch_speed(port_name, open_baud, fast_baud, timeout_s):
     return port, open_baud, False, note + note_extra
 
 
+def restore_speed(port_name, fast_baud, open_baud, timeout_s):
+    """`--fast` で上げたゲストを **終わる前に `--baud` へ戻す**。
+
+    実機 (2026-09-23) で `--fast 115200 cmd ver` のあとゲストが 115200 に
+    残り、次の 9600 の呼び出しが 3 回とも化けて timeout になった。切替は
+    対称なので `switch_speed` を逆向きに使う: 115200 で `serial 9600` を
+    送り、9600 で `serial ack` を待つ。戻り値は switch_speed と同じ
+    (port, baud, ok, note)。失敗しても例外にしない — 結果は呼び手が
+    [V4] のとおり表示する (ゲストの番犬が 5 秒で戻すはずだが、それも
+    「戻った」とは言わない)。
+    """
+    port, baud, ok, note = switch_speed(port_name, fast_baud, open_baud,
+                                        timeout_s)
+    if ok:
+        note = "restored to %d" % open_baud
+    else:
+        note = "restore to %d FAILED: %s (guest may still be at %d)" % (
+            open_baud, note, fast_baud)
+    return port, baud, ok, note
+
+
 def main():
     # Windows のコンソール (cp932) でも化けた応答で落ちないようにする
     try:
@@ -296,6 +322,9 @@ def main():
                     help="繋いだあと `serial N` でゲストを N bps へ上げてから"
                          " cmd / repl を回す (%s)"
                          % "/".join(str(b) for b in FAST_BAUDS))
+    ap.add_argument("--keep-fast", action="store_true",
+                    help="終わるときに --baud へ戻さず、ゲストを --fast の"
+                         " 速度に残す (次の呼び出しは --baud N で開く)")
     sub = ap.add_subparsers(dest="mode", required=True)
     p_cmd = sub.add_parser("cmd", help="1 コマンドを送って応答を出す")
     p_cmd.add_argument("line", nargs="+")
@@ -304,6 +333,7 @@ def main():
     args = ap.parse_args()
 
     baud = args.baud
+    switched = False
     if args.fast and args.fast != args.baud:
         if args.fast not in FAST_BAUDS:
             sys.stderr.write(
@@ -321,53 +351,85 @@ def main():
         if not ok:
             port.close()
             return 1
+        switched = True
     else:
         port = open_port(args.port, baud)
+    rc = 1
     try:
-        if args.mode == "sync":
-            port.reset_input_buffer()
-            body, ok = read_until_eot(port, args.timeout)
-            sys.stdout.write(body.decode("utf-8", errors="replace"))
-            print("\n[sync] EOT %s" % ("ok" if ok else "TIMEOUT"))
-            return 0 if ok else 1
-        if args.mode == "cmd":
-            line = " ".join(args.line)
-            text, ok = send_cmd(port, line, args.timeout)
-            sys.stdout.write(text)
-            if not ok:
-                print("\n[rshell_serial] timeout waiting for EOT (%.0fs)" % args.timeout)
-                return 1
-            # **応答がこのコマンドのものか確かめる** (往復 2 B3)。EOT の対応が
-            # 1 つずれていると、以後ずっと前のコマンドの応答を読み続ける。
-            if not check_echo(text, line):
-                print("[rshell_serial] desync: expected echo of %r" % line)
-                return 1
-            return 0
-        # repl
-        print("[rshell_serial] %s %dbps — 'exit' でゲストの rshell も閉じる" % (args.port, baud))
-        while True:
-            try:
-                line = input("os32> ")
-            except (EOFError, KeyboardInterrupt):
-                print()
-                return 0
-            if not line.strip():
-                continue
-            text, ok = send_cmd(port, line, args.timeout)
-            sys.stdout.write(text)
-            if not text.endswith("\n"):
-                print()
-            if not ok:
-                print("[rshell_serial] timeout waiting for EOT")
-            elif not check_echo(text, line):
-                # EOT の対応が 1 つずれている (往復 2 B3)。対話は続けられるが
-                # **黙って進まない** — 読んでいる応答が別のコマンドのもの。
-                print("[rshell_serial] desync: expected echo of %r" % line)
-            if line.strip() == "exit":
-                return 0
+        rc, port, baud = run_mode(args, port, baud)
     finally:
+        # **上げたら戻す。** ゲストを --fast に残すと、次の呼び出しが
+        # --baud で開いて化ける (実機 2026-09-23)。repl の `exit` は
+        # run_mode の中で先に戻してから送る (rshell が居なくなると
+        # `serial N` を受ける相手が無い) ので、ここでは baud を見る。
+        if switched and not args.keep_fast and baud == args.fast:
+            port.close()
+            port, baud, ok, note = restore_speed(args.port, args.fast,
+                                                 args.baud, args.timeout)
+            print("[rshell_serial] %s" % note)
+            if not ok:
+                rc = rc or 1
         port.close()
+    return rc
 
+
+def run_mode(args, port, baud):
+    """sync / cmd / repl の本体。戻り値 (終了コード, port, baud)。
+
+    port は閉じない。repl の `exit` で速度を戻したときは新しい port と
+    baud を返す (main の finally が二重に戻さないため)。
+    """
+    if args.mode == "sync":
+        port.reset_input_buffer()
+        body, ok = read_until_eot(port, args.timeout)
+        sys.stdout.write(body.decode("utf-8", errors="replace"))
+        print("\n[sync] EOT %s" % ("ok" if ok else "TIMEOUT"))
+        return (0 if ok else 1), port, baud
+    if args.mode == "cmd":
+        line = " ".join(args.line)
+        text, ok = send_cmd(port, line, args.timeout)
+        sys.stdout.write(text)
+        if not ok:
+            print("\n[rshell_serial] timeout waiting for EOT (%.0fs)" % args.timeout)
+            return 1, port, baud
+        # **応答がこのコマンドのものか確かめる** (往復 2 B3)。EOT の対応が
+        # 1 つずれていると、以後ずっと前のコマンドの応答を読み続ける。
+        if not check_echo(text, line):
+            print("[rshell_serial] desync: expected echo of %r" % line)
+            return 1, port, baud
+        return 0, port, baud
+    # repl
+    print("[rshell_serial] %s %dbps — 'exit' でゲストの rshell も閉じる" % (args.port, baud))
+    while True:
+        try:
+            line = input("os32> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0, port, baud
+        if not line.strip():
+            continue
+        if (line.strip() == "exit" and args.fast and baud == args.fast
+                and args.fast != args.baud and not args.keep_fast):
+            # rshell を閉じる前に速度を戻す (閉じた後では受け手が無い)。
+            port.close()
+            port, baud, ok, note = restore_speed(args.port, args.fast,
+                                                 args.baud, args.timeout)
+            print("[rshell_serial] %s" % note)
+            if not ok:
+                print("[rshell_serial] not sending 'exit' — guest speed unknown")
+                return 1, port, baud
+        text, ok = send_cmd(port, line, args.timeout)
+        sys.stdout.write(text)
+        if not text.endswith("\n"):
+            print()
+        if not ok:
+            print("[rshell_serial] timeout waiting for EOT")
+        elif not check_echo(text, line):
+            # EOT の対応が 1 つずれている (往復 2 B3)。対話は続けられるが
+            # **黙って進まない** — 読んでいる応答が別のコマンドのもの。
+            print("[rshell_serial] desync: expected echo of %r" % line)
+        if line.strip() == "exit":
+            return 0, port, baud
 
 if __name__ == "__main__":
     sys.exit(main())

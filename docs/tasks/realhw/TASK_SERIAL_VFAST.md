@@ -1,6 +1,6 @@
 # TASK_SERIAL_VFAST — 実機のシリアルを 115200bps まで上げる (V･FAST + FIFO)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実機で 115200 が通った** (2026-09-22、3.2 KB/s)。番犬は往復 6 で明示の `serial ack` に置換 (9625500、NP21/W で往復と戻りを確認)。実機での `--fast` は未確認。残件は出力側の固定費
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実機で 115200 が通った** (2026-09-22、3.2 KB/s)。番犬は往復 6 で明示の `serial ack` に置換 (9625500、NP21/W で往復と戻りを確認)。**実機で `--fast 115200` も通った (2026-09-23、Ubuntu ノート)**: `hexdump /bin/cfg.bin` 189,034 バイトを 48.7 秒 = **3.9 KB/s**。ホスト側の戻し忘れを直した (`restore_speed`)。残件は出力側の固定費
 
 正典: [`PLAN.md`](PLAN.md) §4 (ウェブ情報と資料の突き合わせ)、資料 `docs/hw/undocumented/io_rs.md`、
 実機の実測は [`TASK_FDC_REALHW.md`](TASK_FDC_REALHW.md) §9-1。
@@ -147,3 +147,14 @@ V-FAST が維持、ack を送らずに 5 秒放置 → `[ser] no ack after switc
 serial_vfast 12 ケース・変異 19 本、rshell_serial 6 ケース・変異 9 本。コーダーの注記: ack 窓の最後の試行 (切替から 5.5 秒) は
 番犬の 5 秒をはみ出すが、失敗時は 6 秒後に 9600 で拾い直すので取り残されない。**Codex の往復は 4 回で打ち止め** (ROLES §5)。
 実機での `--fast 115200` は次の実機の回で (TASK_LAN_82557 §6 の R1〜R4 と同じ回)。
+
+**実機 (2026-09-23、Ra266、Build Sep 23 10:20、Ubuntu 24.04 ノート + FTDI FT232、`sg dialout` 経由)**:
+
+| 項目 | 結果 |
+|---|---|
+| `--fast 115200 cmd ver` | 1 回目で `[rshell_serial] linked at 115200`、`ver` が返る (rc=0)。実機の 013Ah 切替と `serial ack` の往復が**ホスト側の道具ごと**通った |
+| `--fast 115200 --timeout 150 cmd "hexdump /bin/cfg.bin"` | **48.7 秒で完走** (rc=0)。出力 2,396 行・189,034 バイト = **3.9 KB/s** (往復 3 の 3.2 KB/s と同じ桁。回線 11.5 KB/s の 34% — 固定費は出力経路のまま)。既定の `--timeout 15` では足りない (15 秒で timeout、その後もダンプが流れ続けて次のコマンドと混線した) |
+| 番犬 | 混線のなかで `[ser] no ack after switch: reverted to 115200bps` が画面に出た = **実機でも番犬が直前の設定へ戻す**。どの `serial` 行が引き金だったかは混線で特定できず |
+| **道具の欠陥** | `--fast` で上げたゲストが**終了後も 115200 に残る**ので、次の通常 (9600) の呼び出しが 3 回とも化けて timeout。復旧は `--baud 115200 --fast 9600 cmd uptime` (`linked at 9600`)。→ 同日に直した: 終わる前に `serial <--baud>` を送って `--baud` で ack を待ち `restored to 9600` と報告、repl は `exit` の前に戻す、`--keep-fast` で残せる。ホスト試験に `restore` ケースと変異 2 本を追加 (11/11 RED) |
+
+**残件**: 出力側の固定費 (3.9 KB/s)。`hexdump` のような長い出力は `--timeout 60` 以上で。

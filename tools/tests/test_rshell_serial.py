@@ -15,6 +15,7 @@ import できるようにしてある)。
   python3 -B tools/tests/test_rshell_serial.py --mutate   # 否定側
 """
 import importlib.util
+import inspect
 import pathlib
 import re
 import subprocess
@@ -261,6 +262,50 @@ def case_switch(r):
 
 
 # ---------------------------------------------------------------------------
+#  (e) --fast で上げたら終わる前に --baud へ戻す (実機 2026-09-23)
+# ---------------------------------------------------------------------------
+def case_restore(r):
+    # **switch_speed を逆向きに呼ぶ** (fast で `serial 9600` → 9600 で ack)。
+    calls = []
+
+    def fake_switch(port_name, open_baud, fast_baud, timeout_s):
+        calls.append((port_name, open_baud, fast_baud))
+        return "PORT", fast_baud, True, "linked at %d" % fast_baud
+
+    real = r.switch_speed
+    r.switch_speed = fake_switch
+    try:
+        port, baud, ok, note = r.restore_speed("COM3", 115200, 9600, 15.0)
+    finally:
+        r.switch_speed = real
+    check(calls == [("COM3", 115200, 9600)],
+          "restore: sends the revert at the fast speed, acks at --baud")
+    check(ok and baud == 9600, "restore: reports the --baud speed")
+    check("restored to 9600" in note, "restore: note names the speed")
+
+    # 失敗は失敗と言う ([V4])。
+    def fake_switch_fail(port_name, open_baud, fast_baud, timeout_s):
+        return "PORT", open_baud, False, "fast switch failed, back at 115200"
+
+    r.switch_speed = fake_switch_fail
+    try:
+        port, baud, ok, note = r.restore_speed("COM3", 115200, 9600, 15.0)
+    finally:
+        r.switch_speed = real
+    check(not ok, "restore: failure is reported as failure")
+    check("FAILED" in note and "115200" in note,
+          "restore: failure note says the guest may still be fast")
+
+    # main は cmd の後で戻す。--keep-fast だけが省く。
+    src = inspect.getsource(r.main)
+    check("--keep-fast" in src, "restore: --keep-fast flag exists")
+    check("restore_speed(args.port, args.fast" in src,
+          "restore: main calls restore_speed with the fast speed")
+    check("restore_speed(args.port, args.fast" in inspect.getsource(r.run_mode),
+          "restore: repl restores before sending 'exit'")
+
+
+# ---------------------------------------------------------------------------
 #  (d) --fast が受ける速度は資料の表と同じ
 # ---------------------------------------------------------------------------
 def case_bauds(r):
@@ -275,6 +320,7 @@ CASES = {
     "probe": case_probe,
     "switch": case_switch,
     "bauds": case_bauds,
+    "restore": case_restore,
 }
 
 # 否定側。実装を 1 か所だけ壊して RED になることを見る。
@@ -306,6 +352,13 @@ MUTATIONS = [
     (r"    if PROBE_EXPECT not in text:\n        return False\n",
      "",
      "旧速度の生存確認で本文を見ない (先行の EOT を `ver` の成功と読む)"),
+    (r"    port, baud, ok, note = switch_speed\(port_name, fast_baud, open_baud,",
+     "    port, baud, ok, note = switch_speed(port_name, open_baud, fast_baud,",
+     "戻しを --baud で送る (ゲストは --fast で聞いているので届かない)"),
+    (r"        note = \"restore to %d FAILED: %s \(guest may still be at %d\)\" % \(\n"
+     r"            open_baud, note, fast_baud\)",
+     "        note = \"restored to %d\" % open_baud; ok = True",
+     "戻せなくても restored と言う ([V4])"),
 ]
 
 
