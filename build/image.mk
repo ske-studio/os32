@@ -24,7 +24,7 @@ args="--tree"; \
 		fi; \
 	done; \
 	args="$$args /sbin/install.bin=userland/system/install.bin"; \
-	args="$$args /bin/time_test.bin=userland/tests/time_test.bin"; \
+	args="$$args /bin/timetest.bin=userland/tests/time_test.bin"; \
 	args="$$args /sbin/cdinst.bin=userland/system/cdinst.bin"; \
 	if [ -f assets/profile_fdd ]; then args="$$args /etc/profile=assets/profile_fdd"; fi; \
 	args="$$args /etc/settings.db=$(BUILD_OUT)/settings.db"
