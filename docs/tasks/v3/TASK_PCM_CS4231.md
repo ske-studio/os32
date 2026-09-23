@@ -1,6 +1,6 @@
 # TASK_PCM_CS4231 — CS4231 (MATE-X PCM) の PCM 再生ドライバ (§5-5 の P1)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v9 (Codex 往復 8: PI は回数を持たず合流するので連続性の証拠から外し、判定は位置だけに。保証の範囲を「観測の間隔 < 1 半周期」と明記。往復 9 待ち)**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v10 — Codex 往復 9 で Approve (2026-09-23。往復 1〜8 で 15/11/8/8/6/7/2/1 件)。往復 9 の注意 5 点は本文に反映。実装は [D2] (trial ini) と E0 (NP21/W フォーク) の承認待ち**。
 > 正典の関係: [`PLAN.md`](PLAN.md) §5-5、土台は [`TASK_HAL_WIRING.md`](TASK_HAL_WIRING.md) (1-1 割り込み、1-2 8237、1-3 プール、1-5 時計)、
 > 出力保護は [`../memory/TASK_KAPI_OUTPUT_GUARD.md`](../memory/TASK_KAPI_OUTPUT_GUARD.md)。
 > 典拠: Crystal **CS4231A データシート DS139PP2** (`docs/hw/crystal/cs4231a.pdf`、gitignore のミラー、`pdftotext` 済み)、
@@ -64,10 +64,10 @@ RESYNC との競合を `gen` の検査では消せない (既に鳴ったデー�
 | RS_RESTART | `dma_chan_mask` → リング 0 化 → `filled[] = 0` → `dma_chan_setup` → I15/I14 → ステージングから半分 0 (と 1) へ写す → half = 0、gen +1、番犬と連続性の基準時刻を今に → unmask → PEN=1 → IEN=1 → RUNNING (`close_pending` なら DRAINING)、`resyncs` +1。setup が失敗したら STOP_REQ (失敗) | ステージングへ | |
 | STOP_REQ | 入口 (1 回): IEN=0 → PEN=0 → R2 に書いて INT を消し、I24 に 0、`deadline` = 今 + 3 tick。以後の tick (`advance_stop`): R0 != 0x80 を確かめてから DRS=0 を待つ → `dma_chan_mask` → **証拠**: I9 の PEN=0、I24 の PI=0、R0 != 0x80 → STOP_DONE。期限内に証拠が読めない → FAULTED | 拒否 | reclaim → 残りを引き継ぐ (下) |
 | STOP_DONE | PI だけ ack | 拒否 | foreground (close / reclaim) が **`irq_unregister` → `dma_pool_free` (リングとステージング)** → CLOSED |
-| FAULTED | PI だけ ack | 拒否 | foreground が `irq_unregister` → `dma_pool_mark_leaked` (両方)。再 open は `OS32_ERR_IO` (再起動まで) |
+| FAULTED | 何もしない (装置に触らない、Index 書きも 0 回) | 拒否 | foreground が `irq_unregister` → `dma_pool_mark_leaked` (両方)。再 open は `OS32_ERR_IO` (再起動まで) |
 
-`irq_unregister` と `dma_pool_free` は **foreground だけ** (ISR 文脈からの解除は 1-1 で `IRQ_ERR_CTX`)。**advance の構造** (往復 4 R1): 共通の
-PI の ack → 状態で分岐: RUNNING / DRAINING → `advance_run` (観測・連続性・補充・番犬)、RS_STOP / STOP_REQ → `advance_stop`
+`irq_unregister` と `dma_pool_free` は **foreground だけ** (ISR 文脈からの解除は 1-1 で `IRQ_ERR_CTX`)。**advance の構造** (往復 4 R1、往復 9): **まず CLOSED / OPENING / FAULTED / `s_mce_busy` 中なら装置に触らず `IRQ_NONE`** (Index 書きを
+含めてアクセス 0 回。E1 で数える) → 共通の PI の ack → 状態で分岐: RUNNING / DRAINING → `advance_run` (観測・連続性・補充・番犬)、RS_STOP / STOP_REQ → `advance_stop`
 (入口の 1 回の処理と、後続 tick の確認を分ける。期限は入口でだけ設定)、RS_RESTART → 再構成、それ以外 (OPEN / OPENING /
 STOP_DONE / FAULTED / CLOSED) → 何もしない。**新規の write を受けるのは OPEN と RUNNING と RS_* だけ**。
 
@@ -111,8 +111,10 @@ frame を写し (`filled[0]`)、残りがあれば半分 1 へも (`filled[1]`)�
    - `h0 == h1` かつ `p1 >= p0`: 境界無し → **連続 (0 回)**。
    - `h0 == h1` かつ `p1 < p0`: 同じ半分で戻った = 1 周回った (2 境界) → **喪失**。
    - `h0 != h1`: → **連続 (切り替え 1 回)**。
-   **保証の範囲**: この判定が正しいのは**観測の間隔が 1 半周期 (46.4ms @44.1k、92.9ms @22.05k) 未満**のとき。tick (10ms) が
-   それを与えるのは HAL の契約 (IF=0 の区間 < 10ms、TASK_HAL_WIRING 1-5) の中だけで、契約を大きく破る空白 (≥ 2 半周期) では
+   **保証の範囲**: この判定が正しいのは**成功した位置取得どうしの間隔が 1 半周期 (46.4ms @44.1k、92.9ms @22.05k) 未満**のとき
+   (`p` はリング全体の frame 番号 0..4095。`dma_chan_remaining` は `-EAGAIN` を返し得るので、呼び出しの間隔 10ms だけでは足りず、
+   連続した `-EAGAIN` による空白も保証条件に含める — 往復 9)。tick (10ms) がそれを与えるのは HAL の契約 (IF=0 の区間 < 10ms、
+TASK_HAL_WIRING 1-5) の中だけで、契約を大きく破る空白 (≥ 2 半周期) では
    **0 回と 2 回、1 回と 3 回は区別できない** (未補充の半分を再読しても `p1 >= p0` なら見逃す)。これは**保証外**として記し、
    救済は 5 の番犬 (進行が止まった場合) と `p1 < p0` の場合だけ (W6 の残件。HAL の合格でも排除されない)。
    喪失は `repeats` +1 → RUNNING なら **RS_STOP**、DRAINING なら **drain 失敗を記録して STOP_REQ**。連続なら **`changed = (h1 != h0)`、
@@ -181,8 +183,10 @@ int  pcm_set_volume(u32 percent);
 
 ### 2-3. 純粋関数 (ホスト試験)
 
-`pcm_advance` の判定 (left → pos → half、**連続性の判定表 (h0 × h1 × p の全組)**、**1 半周期未満の間隔なら 1 境界・0 境界・`p1 < p0`
-の喪失が正しく出ること、2 半周期以上の空白では 0/2 回・1/3 回が区別できないことを「保証外」として試験の期待に書く** (往復 8)、**補充の余裕 (REFILL_MARGIN)**、切り替えの検出と **消す前の**
+`pcm_advance` の判定 (left → pos → half、**連続性の判定表 (h0 × h1 × p の全組)**、**保証内の正常列 (1 半周期未満の間隔): 0 境界 (同じ半分で p 進む)・1 境界 (半分が変わる。1 → 0 の折り返しは p が戻って見えるが別の半分なので
+正常) が正しく出ること、喪失列 (同じ半分で p が戻る = 理想的な単調転送では 1 半周期未満に到達しないので、遅れた観測として与える) で repeats
++ RS_STOP、2 半周期以上の空白では 0/2 回・1/3 回が区別できないことを「保証外」として試験の期待に書く。座標は票と同じリング全体の frame 番号**
+(往復 8/9)、**補充の余裕 (REFILL_MARGIN)**、切り替えの検出と **消す前の**
 underrun 判定、両半分満杯の正常切り替えで underrun 0、**drain の 3 段階** (start / restart / 補充で `last_data_half` を置いた各場合、0 frame の
 補充で動かない、`write(1 frame) → close`)、末尾後の無音、`-EAGAIN` でも番犬が動く、番犬の期間の計算、**遅れた観測 (同じ半分で `p1 < p0`) で repeats +
 RS_STOP、DRAINING では STOP_REQ**、**進行の番犬 (同じ位置が続く)**、**満杯の write からの自動開始**、**「出た」+ staged > 0 は完了しない**)、ステージングの予約 / 公開 / 消費 (frame 倍数、空き、**物理末尾の
