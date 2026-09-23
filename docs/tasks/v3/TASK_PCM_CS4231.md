@@ -272,7 +272,7 @@ close / reclaim が各状態から 1 度だけ解放すること)。
 | E3 | 合格: `pcm_test` 5 秒 (左 1kHz / 右 frame 番号) → underruns 0、repeats 0、resyncs 0、close → 0、PI 累積 109 (= 5 × 44100 / 2048)、生 frame の照合: 右は 41,368 frame で欠落 0、左は 1,000Hz、末尾の 0 埋め 2,732 frame。`pcm_test short` (1 frame → close) → 0。停止後 PEN=0/IEN=0。**切り分けた欠陥 2 件**: (1) close の待ちループが ISR の書く `state` を素の読みで回していて、コンパイラが読みをループの外へ持ち上げ、期限まで回って毎回 IO/FAULTED になった → `volatile` 経由に (POLICY_DEBUG §4-56)。(2) 試験側の位相刻み `(1024 × 1000) << 16` が 32 ビットを溢れて左が 40Hz になっていた → 12 ビット先に上げて割る。**未実施**: 書き込みを 200ms 止めて underrun を数える経路 (試験に無い)、開始直後 / close 直前の採取区間、ミュートの別確認、8KB コピーの実時間 |
 | E4 | 未 (共有 IRQ の偽装置 hook は未実装) |
 | E5 | 未 (`/api/cmd` が返るまで `/api/key` を送れないので CTRL+STOP を注入できない。kselftest から `pcm_reclaim` を直接呼ぶ形に置き換える案) |
-| E6 | 未 (実機) |
+| E6 | **部分 (2026-09-23)**: 実機 Ra266 の起動画面に `[pcm] CS4231 v=101 irq 10 dma 1 fmt 0x5B` — 検出・ルート設定・I25 の版 (0x65 = 101、NP21/W の 0x80 と違う実チップ値)・初期化まで通った。再生 (音・XTAL2・DMA) は未 — FD に `pcmtest` (8.3 名) を足したので次の実機回で `pcmtest short` |
 
 残件 (実装レビュー往復 2 の非 blocker): 生成 wrapper 経由の `pcm_write` 契約試験 (範囲・あふれ・端数の順序)、交互試験の補強 (2 段目の期限境界で STOP_DONE、release → 再 open の claim 引き継ぎ、親 owner に戻った状態の reclaim)。
 
