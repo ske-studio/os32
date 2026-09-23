@@ -143,6 +143,14 @@ def read_kapi_version(base_dir):
     return 0
 
 
+def guest_path_ok(path):
+    """PKG に載せてよいゲストパスか: "/a/b" の形で、どの要素も空・"."・".." でない"""
+    if not path.startswith('/') or path == '/':
+        return False
+    parts = path[1:].split('/')
+    return all(p not in ('', '.', '..') for p in parts)
+
+
 def build_pkg(name, version, files, use_lzss, kapi_ver):
     """
     PKGファイルを構築する
@@ -150,6 +158,17 @@ def build_pkg(name, version, files, use_lzss, kapi_ver):
     files: [(guest_path, host_path), ...] のリスト
     戻り値: bytes (PKGファイル全体)
     """
+    # ゲストパスの検査 (票 TASK_EXT2_EMPTY_NAME)。cdinst は "/hd0" + パスで
+    # 展開し、pkg.c は各 "/" で mkdir するので、先頭 "/" 無し ("/hd0bin/…" に
+    # 化ける)・空の要素 ("//"、末尾 "/")・"." / ".." は媒体に妙な名前を作る。
+    bad = [g for g, _ in files if not guest_path_ok(g)]
+    if bad:
+        for g in bad:
+            print(f"ERROR: bad guest path {g!r} (package '{name}'): "
+                  "must start with '/', no empty / '.' / '..' component, "
+                  "no trailing '/'", file=sys.stderr)
+        raise SystemExit(1)
+
     # ファイルデータ連結
     raw_data = bytearray()
     entries = []

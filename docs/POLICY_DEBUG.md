@@ -1134,6 +1134,30 @@ read-modify-write で保つ。
   3. **`sh` の要求版**: `userland/sh` は常駐シェルと同じソース (`kbdstat` / `lspci` を含む) なのに app.conf が 55 のままで、
      v61 以前のカーネルでは kbdstat が表の外へ飛ぶ。62 に上げた (kbd_diag を呼ぶのは shell と sh の 2 本だけ)。
 
+### 4-58. OS32 の ext2 が読めることは**正しい ext2 である証拠にならない** — cdinst の NHD に名前の無いディレクトリ (2026-09-23)
+
+- **症状**: NP21/W 上の `cdinst` で作った NHD を Linux で ro マウントするとルートの stat が I/O エラー、`e2fsck -n -f` は
+  `Directory inode 2, block #0, offset 132: directory corrupted`。ルートに **inode 23・rec_len 8・name_len 0・type 2**
+  の項目があった。OS32 自身の読み手 (`ext2_list_dir`) は name_len 0 を読み飛ばすので、NP21/W 上では誰も気づかなかった。
+- **原因 (確定)**: パッケージ展開 (`userland/lib/rt/pkg.c` の `ensure_parent_dirs`) はファイルごとにパスの各 `/` で
+  `sys_mkdir` する — cdinst が付け替えた `/hd0/boot/vmkernel.lz4` なら最初に **`mkdir("/hd0")`**。VFS はこれを
+  `/hd0` のマウントへ相対パス `"/"` で渡し、`ext2_split_path` が親 `"/"` + 名前 `""` に分け、`ext2_mkdir` は空の名前を
+  断らずに作った (`find_entry("")` は一致する項目が無いので NOTFOUND → 作成へ)。2 回目以降は作った項目自身に一致して
+  EXIST なので 1 個だけ。inode 23 は cdinst の mkdir (11〜22) の直後、MINIMAL.PKG の最初のファイル vmkernel.lz4 (24) の
+  直前で、ホストで同じ並びを再現した像が**同じ `offset 132`** で e2fsck に落ちる (`make check-ext2-empty-name-host`)。
+  同じ形は `mkdir /`、マウント点で `mkdir .`、`tar -x` の `mkdir_parents` でも作れた。
+- **対策**: VFS はマウント点そのもの (相対 `"/"`) を FS へ渡さない — mkdir は **EXIST** (POSIX の `mkdir("/")`)、
+  rmdir / rename は INVAL、write / unlink は ISDIR。ext2 は `ext2_name_check` で空・`.`・`..`・255 超 (name_len は u8、
+  256 は 0 に回り込む)・`/` 入りの名前を**何も書く前に** INVAL で断る (mkdir / create / rename / rmdir / unlink /
+  add_entry)。`find_entry` は長さ 0 と 255 超を探さずに NOTFOUND — 既存の NHD に残っている名前の無い項目を
+  `""` で掴んで、ディレクトリ inode にファイルの中身を書かないため。末尾 `/` の `mkdir /a/b/` は `vfs_resolve_path` が
+  畳むので従来どおり作れる。`tools/mkpkg.py` はゲストパスの形 (先頭 `/`、空・`.`・`..` の要素なし) を検査する。
+- **既存の NHD**: `e2fsck -fy` で直る (写しで確認): offset 132 を salvage、inode 23 (空) は `/lost+found/#23` へ、
+  `lost+found` (OS32 のフォーマッタは作らない) と UUID が新しくでき、`db` (inode 43、`fep.db`) は残る。
+- **教訓**: 「OS32 で読める・動く」は自前の読み手が寛容なだけかもしれない。**FS を作る / 書く経路の受入には
+  本物の `e2fsck -fn` を当てる** (clean = 終了コード 0)。ホスト試験で像を書き出して当てる形は `test_b8_open.py` /
+  `test_ext2_empty_name.py`。インストーラの受入 (TASK_HDD_INSTALL) も、できた NHD をホストで `e2fsck -fn` する。
+
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 
 - **症状**: NHD 配備 (`os32-cycle deploy`) 直後に、試験用ファイルを 1 本足す目的でゲストの `hsync` を実行したら、

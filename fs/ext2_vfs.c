@@ -228,6 +228,17 @@ static int ext2_vfs_rename(void *ctx, const char *oldpath, const char *newpath)
     return ext2_to_vfs_err(ext2_rename(ec, old_ino, old_name, new_ino, new_name));
 }
 
+/* path が FS のルートそのもの ("", "/", "//" …) か */
+static int ext2_path_is_root(const char *path)
+{
+    int i;
+    if (!path) return 1;
+    for (i = 0; path[i]; i++) {
+        if (path[i] != '/') return 0;
+    }
+    return 1;
+}
+
 static int ext2_vfs_mkdir(void *ctx, const char *path)
 {
     Ext2Ctx *ec = (Ext2Ctx *)ctx;
@@ -236,6 +247,11 @@ static int ext2_vfs_mkdir(void *ctx, const char *path)
     u32 parent_ino;
     int rc;
 
+    /* ルートは必ず在る (POSIX の mkdir("/") = EEXIST)。以前はここで
+     * 親 "/" + 名前 "" に分かれ、名前の無いディレクトリを作っていた
+     * (票 TASK_EXT2_EMPTY_NAME)。末尾が "/" の "/a/b/" は VFS が正規化して
+     * から渡すので、ここへ来た時点で名前が空なら ext2_mkdir が INVAL で断る。 */
+    if (ext2_path_is_root(path)) return VFS_ERR_EXIST;
     ext2_split_path(path, dir_path, &dname);
 
     rc = ext2_resolve_path(ec, dir_path, &parent_ino);

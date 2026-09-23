@@ -59,6 +59,34 @@ int ext2_list_dir(Ext2Ctx *ctx, u32 dir_ino, ext2_dir_callback cb, void *user_ct
     return EXT2_OK;
 }
 
+/* ---- 名前の検査 (票 TASK_EXT2_EMPTY_NAME) --------------------------------
+ *
+ * 新しく載せる名前と、名指しで消す / 付け替える名前はここを通す。断るのは
+ *   - 長さ 0            … 媒体に name_len = 0 の項目ができる。OS32 の読み手は
+ *                          読み飛ばすが、Linux の e2fsck は「directory
+ *                          corrupted」と判定し、Linux の ext2 はルートの stat が
+ *                          I/O エラーになる (cdinst の NHD、2026-09-23)
+ *   - "." / ".."         … 自分 / 親を指す予約名。2 つ目の "." を作る・消すと
+ *                          ディレクトリの形が壊れる
+ *   - EXT2_NAME_LEN 超え … name_len は u8。256 文字は 0 に回り込む
+ *   - "/" を含む         … パスの区切り。ext2 の項目としては不正
+ * どれも**何も書く前に** EXT2_ERR_INVAL を返す。 */
+int ext2_name_check(const char *name)
+{
+    int i, n;
+
+    if (!name) return EXT2_ERR_INVAL;
+    n = ext2_str_len(name);
+    if (n == 0) return EXT2_ERR_INVAL;
+    if (n > EXT2_NAME_LEN) return EXT2_ERR_INVAL;
+    if (n == 1 && name[0] == '.') return EXT2_ERR_INVAL;
+    if (n == 2 && name[0] == '.' && name[1] == '.') return EXT2_ERR_INVAL;
+    for (i = 0; i < n; i++) {
+        if (name[i] == '/') return EXT2_ERR_INVAL;
+    }
+    return EXT2_OK;
+}
+
 int ext2_find_entry_loc(Ext2Ctx *ctx, u32 dir_ino, const char *name,
                         u32 *out_ino, u8 *out_type, u32 *out_phys, u32 *out_pos)
 {
@@ -68,6 +96,10 @@ int ext2_find_entry_loc(Ext2Ctx *ctx, u32 dir_ino, const char *name,
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
     name_len = ext2_str_len(name);
+    /* 長さ 0 と 255 超えの名前は媒体上に在り得ない (在れば壊れている)。
+     * 比べると (u8) の回り込みや、以前の版が作った名前の無い項目に一致して
+     * しまうので、探さずに「無い」と答える (票 TASK_EXT2_EMPTY_NAME)。 */
+    if (name_len == 0 || name_len > EXT2_NAME_LEN) return EXT2_ERR_NOTFOUND;
 
     ret = ext2_read_inode(ctx, dir_ino, &inode);
     if (ret != 0) return ret;
@@ -146,6 +178,10 @@ int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file
     u32 now;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    /* 最後の砦。呼び手 (create / mkdir / rename) は入口で検査済みなので、
+     * ここで断るのは新しい呼び手の取りこぼしだけ (何も書く前に返す) */
+    ret = ext2_name_check(name);   /* add_entry */
+    if (ret != 0) return ret;
 
     name_len = ext2_str_len(name);
     new_rec_len = (u16)((8 + name_len + 3) & ~3);
@@ -305,6 +341,7 @@ int ext2_delete_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name)
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
     name_len = ext2_str_len(name);
+    if (name_len == 0 || name_len > EXT2_NAME_LEN) return EXT2_ERR_NOTFOUND;
 
     ret = ext2_read_inode(ctx, dir_ino, &dir_inode);
     if (ret != 0) return ret;
@@ -368,6 +405,11 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     int ret;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    /* 空の名前はここまで素通りしていた。find_entry は長さ 0 の名前に一致する
+     * 項目を持たないので NOTFOUND になり、名前の無いディレクトリを作った
+     * (票 TASK_EXT2_EMPTY_NAME: cdinst の mkdir("/hd0") が作った inode 23) */
+    ret = ext2_name_check(name);   /* mkdir */
+    if (ret != 0) return ret;
     ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
     if (ret != 0) return ret;
 
@@ -530,6 +572,9 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     int dropped = 0;                  /* inode を手放せた (links 0 を書けた) */
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    /* "." / ".." を名指しで消すとディレクトリの形が壊れる */
+    ret = ext2_name_check(name);   /* rmdir */
+    if (ret != 0) return ret;
     ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
     if (ret != 0) return ret;
 
@@ -1006,7 +1051,10 @@ int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
     ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
     if (ret != 0) return ret;
-    if (!old_name[0] || !new_name[0]) return EXT2_ERR_INVAL;
+    ret = ext2_name_check(old_name);
+    if (ret != 0) return ret;
+    ret = ext2_name_check(new_name);   /* rename */
+    if (ret != 0) return ret;
 
     ret = ext2_find_entry(ctx, old_dir, old_name, &ino, &ftype);
     if (ret != 0) return ret;

@@ -120,6 +120,9 @@ int ext2_truncate_blocks(Ext2Ctx *ctx, u32 ino, Ext2Inode *inode, int *leaked);
 int ext2_release_blocks(Ext2Ctx *ctx, const u32 *blocks);
 
 /* -- ext2_dir.c -- */
+/* 項目の名前として載せてよいか。空・"."・".."・EXT2_NAME_LEN 超え・"/" 入りは
+ * EXT2_ERR_INVAL (票 TASK_EXT2_EMPTY_NAME)。 */
+int ext2_name_check(const char *name);
 int ext2_list_dir(Ext2Ctx *ctx, u32 dir_ino, ext2_dir_callback cb, void *user_ctx);
 int ext2_find_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 *out_ino, u8 *out_type);
 int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file_type);

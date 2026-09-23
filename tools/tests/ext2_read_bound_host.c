@@ -112,6 +112,8 @@ int ext2_add_entry(Ext2Ctx *c, u32 d, const char *n, u32 i, u8 t)
 { (void)c; (void)d; (void)n; (void)i; (void)t; return 0; }
 int ext2_delete_entry(Ext2Ctx *c, u32 d, const char *n)
 { (void)c; (void)d; (void)n; return 0; }
+/* 票 TASK_EXT2_EMPTY_NAME: create / unlink の入口の名前検査 (実物は ext2_dir.c) */
+int ext2_name_check(const char *n) { (void)n; return EXT2_OK; }
 int ext2_find_entry(Ext2Ctx *c, u32 d, const char *n, u32 *o, u8 *t)
 { (void)c; (void)d; (void)n; (void)o; (void)t; return EXT2_ERR_NOTFOUND; }
 u32 ext2_current_time(void) { return 0; }

@@ -136,6 +136,10 @@ int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u
     int ret;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    /* 空・"."・".."・長すぎる名前は inode を割り当てる前に断る
+     * (票 TASK_EXT2_EMPTY_NAME)。add_entry で断ると割り当て済みの inode が漏れる */
+    ret = ext2_name_check(name);   /* create */
+    if (ret != 0) return ret;
     ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
     if (ret != 0) return ret;
 
@@ -464,6 +468,8 @@ int ext2_unlink(Ext2Ctx *ctx, u32 dir_ino, const char *name)
     int ret;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    ret = ext2_name_check(name);   /* unlink */
+    if (ret != 0) return ret;
     ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
     if (ret != 0) return ret;
 

@@ -208,6 +208,14 @@ VfsOps *vfs_route(const char *path, char *rel_out, int max_rel, void **ctx_out)
     return mnt->ops;
 }
 
+/* vfs_route が返した相対パスがマウント点そのもの ("/") か。
+ * vfs_resolve_path が末尾の "/" と "//" と "." を畳むので、"/hd0"・"/hd0/"・
+ * "/hd0/." はどれもここで "/" になる。 */
+static int vfs_rel_is_root(const char *rel_path)
+{
+    return rel_path[0] == '/' && rel_path[1] == '\0';
+}
+
 /* ======== デバイス名パース ======== */
 
 int vfs_dev_parse(const char *name, int *dev_type, int *dev_id)
@@ -371,6 +379,7 @@ int vfs_write(const char *path, const void *data, u32 size)
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->write_file) return VFS_ERR_NOMOUNT;
+    if (vfs_rel_is_root(rel_path)) return VFS_ERR_ISDIR;
     return ops->write_file(fs_ctx, rel_path, data, size);
 }
 
@@ -382,6 +391,7 @@ int vfs_rm(const char *path)
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->unlink) return VFS_ERR_NOMOUNT;
+    if (vfs_rel_is_root(rel_path)) return VFS_ERR_ISDIR;
     return ops->unlink(fs_ctx, rel_path);
 }
 
@@ -404,6 +414,8 @@ int vfs_rename(const char *oldpath, const char *newpath)
     if (old_ops != new_ops || old_ctx != new_ctx) return VFS_ERR_INVAL;
 
     if (!old_ops->rename) return VFS_ERR_INVAL;
+    /* マウント点そのものは付け替えられないし、付け替え先にもならない */
+    if (vfs_rel_is_root(old_rel) || vfs_rel_is_root(new_rel)) return VFS_ERR_INVAL;
     return old_ops->rename(old_ctx, old_rel, new_rel);
 }
 
@@ -415,6 +427,12 @@ int vfs_mkdir(const char *path)
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->mkdir) return VFS_ERR_NOMOUNT;
+    /* マウント点 (= FS のルート) は必ず在る。POSIX の mkdir("/") と同じ EXIST。
+     * 以前は FS へ "/" のまま渡り、ext2 が名前の無いディレクトリを作っていた
+     * (票 TASK_EXT2_EMPTY_NAME: pkg 展開の ensure_parent_dirs が呼ぶ
+     * mkdir("/hd0") が cdinst の NHD のルートに inode 23 を作った)。
+     * mkdir -p 型の呼び手 (pkg.c / tar.c) は EXIST を「在る」と読む。 */
+    if (vfs_rel_is_root(rel_path)) return VFS_ERR_EXIST;   /* mkdir */
     return ops->mkdir(fs_ctx, rel_path);
 }
 
@@ -426,6 +444,7 @@ int vfs_rmdir(const char *path)
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->rmdir) return VFS_ERR_NOMOUNT;
+    if (vfs_rel_is_root(rel_path)) return VFS_ERR_INVAL;   /* マウント中のルート */
     return ops->rmdir(fs_ctx, rel_path);
 }
 
@@ -494,11 +513,6 @@ static void vfs_synth_root_stat(OS32_Stat *buf)
     kmemset(buf, 0, sizeof(OS32_Stat));
     buf->st_mode  = OS_S_IFDIR | OS_S_IRWXU;
     buf->st_nlink = 2;
-}
-
-static int vfs_rel_is_root(const char *rel_path)
-{
-    return rel_path[0] == '/' && rel_path[1] == '\0';
 }
 
 int vfs_stat(const char *path, OS32_Stat *buf)
