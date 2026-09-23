@@ -51,6 +51,13 @@ typedef struct {
     u32 generation;
     int sqlite_flags;
     int quarantined;
+    /* 票 TASK_VFS_FD_PATH 方針 v3。inode を持つ FS (ext2) の FD は open 時の
+     * inode で読み書きし、パスを引き直さない (has_ino = 1)。 */
+    int has_ino;
+    u32 ino;
+    int stale;          /* 1 = 失効 (unlink / 置き換え rename / umount の後) */
+    int pinned;         /* 1 = 使用中の loop イメージ (unlink・置き換えは BUSY) */
+    int sqlite_db;      /* 1 = SQLite の DB / ジャーナル (rename は BUSY) */
 } VfsFile;
 
 static VfsFile open_files[VFS_MAX_OPEN_FILES];
@@ -59,9 +66,12 @@ static VfsFile open_files[VFS_MAX_OPEN_FILES];
  * O_EXCL が付いていない open はここを通る。*out_size に開いた時点の長さ。
  * 戻り値 VFS_OK / 負値 = VFS_ERR_*。 */
 static int vfs_open_probe(VfsOps *ops, void *fs_ctx, const char *resolved,
-                          const char *rel_path, int mode, u32 *out_size)
+                          const char *rel_path, int mode, u32 *out_size,
+                          int *created)
 {
     int rc, kind;
+
+    *created = 0;
 
     /* ディレクトリは open できない。以前は get_file_size がディレクトリの
      * inode サイズを返すため open が通り、`cat /etc` が生のディレクトリ
@@ -101,8 +111,13 @@ static int vfs_open_probe(VfsOps *ops, void *fs_ctx, const char *resolved,
         rc = ops->write_file(fs_ctx, rel_path, "", 0);
         if (rc < 0) return rc;
         *out_size = 0;
+        *created = 1;
         return VFS_OK;
     }
+
+    /* inode を持つ FS は inode を取ってから inode で切り詰める
+     * (vfs_open_internal)。ここでパスで切り詰めない。 */
+    if (ops->ino) return VFS_OK;
 
     if ((mode & O_TRUNC) && (mode & (O_WRONLY | O_RDWR))) {
         /* 切り詰め：空ファイルで上書き。
@@ -123,7 +138,8 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     int i, fd = -1;
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     u32 file_size = 0;
-    int rc;
+    u32 ino = 0;
+    int rc, created = 0;
     void *fs_ctx;
     VfsOps *ops;
 
@@ -139,7 +155,8 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     }
     if (fd == -1) return VFS_ERR_NOSPC; /* FD上限 */
 
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    rc = vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops) return VFS_ERR_NOMOUNT;
 
@@ -156,6 +173,9 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     if (mode & O_EXCL) {
         if (!(mode & O_CREAT)) return VFS_ERR_INVAL;
         if (!ops->create_excl) return VFS_ERR_NOSYS;
+        /* マウント点は必ず在る — 契約 (vfs.h の create_excl) どおり EXIST。
+         * NOSYS の判定の後に置く (呼び手が NOSYS を方式の選択に使う) */
+        if (rel_path[0] == '/' && rel_path[1] == '\0') return VFS_ERR_EXIST;
 
         /* 「無いことの確認 → 作成」は FS 側の 1 回の呼び出しの中で行う。
          * ここで先に存在確認をしてから作ると、確認と作成の間に別の経路が
@@ -168,9 +188,30 @@ static int vfs_open_internal(const char *path, int mode, int owner,
         rc = ops->create_excl(fs_ctx, rel_path);
         if (rc != VFS_OK) return rc;
         file_size = 0;
+        created = 1;
     } else {
-        rc = vfs_open_probe(ops, fs_ctx, resolved, rel_path, mode, &file_size);
+        rc = vfs_open_probe(ops, fs_ctx, resolved, rel_path, mode, &file_size,
+                            &created);
         if (rc != VFS_OK) return rc;
+    }
+
+    /* inode を持つ FS は inode を記録する (票 TASK_VFS_FD_PATH 方針 v3 の 1)。
+     * **取れなければ open を失敗させる** — パスで動く FD に落とすと、失効の
+     * 印を付けられない FD ができる。O_CREAT で作った後なら作ったものを消す。 */
+    if (ops->ino) {
+        rc = (ops->ino->lookup) ? ops->ino->lookup(fs_ctx, rel_path, &ino)
+                                : VFS_ERR_IO;
+        if (rc == VFS_OK && !created &&
+            (mode & O_TRUNC) && (mode & (O_WRONLY | O_RDWR))) {
+            /* 切り詰めも inode で (戻り値を見る。ディレクトリは ISDIR) */
+            rc = (ops->ino->truncate) ? ops->ino->truncate(fs_ctx, ino)
+                                      : VFS_ERR_INVAL;
+            if (rc == VFS_OK) file_size = 0;
+        }
+        if (rc != VFS_OK) {
+            if (created && ops->unlink) (void)ops->unlink(fs_ctx, rel_path);
+            return rc;
+        }
     }
 
     open_files[fd].generation++;
@@ -188,6 +229,11 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     open_files[fd].cookie.generation = cookie ? cookie->generation : 0;
     open_files[fd].sqlite_flags = sqlite_flags;
     open_files[fd].quarantined = 0;
+    open_files[fd].has_ino = ops->ino ? 1 : 0;
+    open_files[fd].ino = ino;
+    open_files[fd].stale = 0;
+    open_files[fd].pinned = 0;
+    open_files[fd].sqlite_db = cookie ? 1 : 0;
     open_files[fd].in_use = 1;
 
     return fd;
@@ -260,10 +306,14 @@ int vfs_close_sqlite(const VfsSqliteLease *lease)
     VfsFile *f;
     if (vfs_validate_sqlite(lease) != VFS_OK) return VFS_ERR_INVAL;
     f = &open_files[lease->fd];
+    /* 失効の印が付いていても解放できる (印は fs_ctx を触らない) */
     f->in_use = 0;
     f->fs_ctx = (void *)0;
     f->protect = 0;
     f->owner = 0;
+    f->stale = 0;
+    f->pinned = 0;
+    f->sqlite_db = 0;
     return VFS_OK;
 }
 
@@ -275,6 +325,9 @@ void vfs_close(int fd)
         open_files[fd].fs_ctx = (void *)0;
         open_files[fd].protect = 0;
         open_files[fd].owner = 0;
+        open_files[fd].stale = 0;
+        open_files[fd].pinned = 0;
+        open_files[fd].sqlite_db = 0;
     }
 }
 
@@ -339,6 +392,7 @@ int vfs_read_fd(int fd, void *buf, u32 size)
     if (fd < 0 || fd >= VFS_MAX_OPEN_FILES) return VFS_ERR_INVAL;
     f = &open_files[fd];
     if (!f->in_use) return VFS_ERR_INVAL;
+    if (f->stale) return VFS_ERR_STALE;   /* fs_ctx より先に見る */
     if ((f->mode & 3) == O_WRONLY) return VFS_ERR_INVAL; /* 書き込み専用 */
 
     if (f->offset >= f->size) return 0; /* EOF */
@@ -346,6 +400,11 @@ int vfs_read_fd(int fd, void *buf, u32 size)
         size = f->size - f->offset;
     }
 
+    if (f->has_ino) {
+        rc = f->ops->ino->read(f->fs_ctx, f->ino, buf, size, f->offset);
+        if (rc > 0) f->offset += rc;
+        return rc;
+    }
     if (f->ops->read_stream) {
         rc = f->ops->read_stream(f->fs_ctx, f->path, buf, size, f->offset);
         if (rc > 0) {
@@ -376,10 +435,15 @@ int vfs_write_fd(int fd, const void *buf, u32 size)
     if (fd < 0 || fd >= VFS_MAX_OPEN_FILES) return VFS_ERR_INVAL;
     f = &open_files[fd];
     if (!f->in_use) return VFS_ERR_INVAL;
+    if (f->stale) return VFS_ERR_STALE;   /* 書かない。fs_ctx より先に見る */
     if ((f->mode & 3) == O_RDONLY) return VFS_ERR_INVAL; /* 読み込み専用 */
 
-    if (f->ops->write_stream) {
-        rc = f->ops->write_stream(f->fs_ctx, f->path, buf, size, f->offset);
+    if (f->has_ino || f->ops->write_stream) {
+        /* inode を持つ FS はパスを引き直さない (票 TASK_VFS_FD_PATH 欠陥 1:
+         * 同じ名前に作り直したディレクトリを上書きした) */
+        rc = f->has_ino
+           ? f->ops->ino->write(f->fs_ctx, f->ino, buf, size, f->offset)
+           : f->ops->write_stream(f->fs_ctx, f->path, buf, size, f->offset);
         if (rc > 0) {
             f->offset += rc;
             if (f->offset > f->size) {
@@ -400,6 +464,7 @@ int vfs_seek(int fd, int offset, int whence)
     if (fd < 0 || fd >= VFS_MAX_OPEN_FILES) return VFS_ERR_INVAL;
     f = &open_files[fd];
     if (!f->in_use) return VFS_ERR_INVAL;
+    if (f->stale) return VFS_ERR_STALE;
 
     if (whence == SEEK_SET) {
         new_pos = offset;
@@ -487,6 +552,15 @@ int vfs_fstat(int fd, OS32_Stat *buf)
 
     if (fd < 0 || fd >= VFS_MAX_OPEN_FILES) return VFS_ERR_INVAL;
     if (!open_files[fd].in_use) return VFS_ERR_INVAL;
+    /* umount 後の FD は fs_ctx が解放済み。印を先に見る */
+    if (open_files[fd].stale) return VFS_ERR_STALE;
+
+    if (open_files[fd].has_ino) {
+        int rc = open_files[fd].ops->ino->stat(open_files[fd].fs_ctx,
+                                               open_files[fd].ino, buf);
+        if (rc == VFS_OK) buf->st_dev = open_files[fd].dev;
+        return rc;
+    }
 
     if (!open_files[fd].ops || !open_files[fd].ops->stat) {
         return VFS_ERR_NOMOUNT;
@@ -500,6 +574,114 @@ int vfs_fstat(int fd, OS32_Stat *buf)
         if (rc == VFS_OK) buf->st_dev = open_files[fd].dev;
         return rc;
     }
+}
+
+/* ======================================================================== */
+/*  失効・使用中 (票 TASK_VFS_FD_PATH 方針 v3 / ラリー 3)                    */
+/* ======================================================================== */
+
+void vfs_fd_invalidate_ino(void *fs_ctx, u32 ino)
+{
+    int fd;
+    if (!fs_ctx) return;
+    for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
+        VfsFile *f = &open_files[fd];
+        if (f->in_use && f->has_ino && f->fs_ctx == fs_ctx && f->ino == ino)
+            f->stale = 1;
+    }
+}
+
+void vfs_fd_invalidate_mount(void *fs_ctx)
+{
+    int fd;
+    if (!fs_ctx) return;
+    for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
+        VfsFile *f = &open_files[fd];
+        if (f->in_use && f->fs_ctx == fs_ctx) {
+            f->stale = 1;
+            /* 解放される fs_ctx を持ち続けない (同じ番地に次のマウントが
+             * 来ても取り違えない) */
+            f->fs_ctx = (void *)0;
+        }
+    }
+}
+
+int vfs_fd_is_stale(int fd)
+{
+    if (fd < 3 || fd >= VFS_MAX_OPEN_FILES) return 0;
+    if (!open_files[fd].in_use) return 0;
+    return open_files[fd].stale;
+}
+
+int vfs_fd_set_pinned(int fd, int on)
+{
+    if (fd < 3 || fd >= VFS_MAX_OPEN_FILES) return VFS_ERR_INVAL;
+    if (!open_files[fd].in_use) return VFS_ERR_INVAL;
+    open_files[fd].pinned = on ? 1 : 0;
+    return VFS_OK;
+}
+
+int vfs_fd_set_sqlite_db(int fd)
+{
+    if (fd < 3 || fd >= VFS_MAX_OPEN_FILES) return VFS_ERR_INVAL;
+    if (!open_files[fd].in_use) return VFS_ERR_INVAL;
+    open_files[fd].sqlite_db = 1;
+    return VFS_OK;
+}
+
+/* a が b そのもの、または b の祖先ディレクトリなら 1 (どちらも同じマウントの
+ * 正規化済み相対名) */
+static int rel_covers(const char *a, const char *b)
+{
+    int i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    if (a[i] != '\0') return 0;
+    return b[i] == '\0' || b[i] == '/';
+}
+
+/* rel が「DB 名 + "-journal"」そのものなら 1。ジャーナルは DB と同じ
+ * ディレクトリに置かれるので、祖先は rel_covers(rel, DB) で判定済み */
+static int rel_is_journal(const char *rel, const char *db)
+{
+    static const char sfx[] = "-journal";
+    int i = 0, j;
+    while (db[i] && rel[i] == db[i]) i++;
+    if (db[i] != '\0') return 0;
+    for (j = 0; sfx[j] && rel[i + j] == sfx[j]; j++) { }
+    return sfx[j] == '\0' && rel[i + j] == '\0';
+}
+
+int vfs_fd_rename_busy(void *fs_ctx, const char *rel_old, const char *rel_new)
+{
+    int fd;
+    if (!fs_ctx) return 0;
+    for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
+        const VfsFile *f = &open_files[fd];
+        if (!f->in_use || !f->sqlite_db || f->stale || f->fs_ctx != fs_ctx)
+            continue;
+        if (rel_covers(rel_old, f->path) || rel_is_journal(rel_old, f->path))
+            return 1;
+        if (rel_new && (rel_covers(rel_new, f->path) ||
+                        rel_is_journal(rel_new, f->path)))
+            return 1;
+    }
+    return 0;
+}
+
+int vfs_fd_pinned_busy(void *fs_ctx, int has_ino, u32 ino, const char *rel)
+{
+    int fd;
+    if (!fs_ctx) return 0;
+    for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
+        const VfsFile *f = &open_files[fd];
+        if (!f->in_use || !f->pinned || f->stale || f->fs_ctx != fs_ctx) continue;
+        if (f->has_ino) {
+            if (has_ino && f->ino == ino) return 1;
+        } else if (rel && rel_covers(rel, f->path)) {
+            return 1;   /* パスで動く FS: 名前か祖先が動けば見失う */
+        }
+    }
+    return 0;
 }
 
 /* レガシー shell_print 互換ラッパー (Phase 2) */

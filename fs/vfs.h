@@ -62,6 +62,12 @@
  * 「できなかった」ではなく「持っていない」— 呼び手はエラーにせず
  * 省略したことを表示して続ける。 */
 #define VFS_ERR_NOSYS    OS32_ERR_NOSYS
+/* 失効した FD (unlink / 置き換え rename / umount の後、票 TASK_VFS_FD_PATH) */
+#define VFS_ERR_STALE    OS32_ERR_STALE
+/* パスが長すぎる / 深すぎる。切り詰めずに断る (票 TASK_VFS_FD_PATH) */
+#define VFS_ERR_NAMETOOLONG OS32_ERR_NAMETOOLONG
+/* 使用中 (開いている SQLite DB の rename、使用中の loop イメージ) */
+#define VFS_ERR_BUSY     OS32_ERR_BUSY
 
 /* ディレクトリエントリ (FS共通) */
 typedef struct {
@@ -72,6 +78,21 @@ typedef struct {
 
 /* ディレクトリ列挙コールバック */
 typedef void (*vfs_dir_cb)(const VfsDirEntry *entry, void *ctx);
+
+/* inode で動く口 (票 TASK_VFS_FD_PATH 方針 v3)。**任意実装** — 持つ FS
+ * (ext2 のみ) の FD は open 時の inode を記録し、以後の read / write / fstat /
+ * 切り詰めはパスを引き直さずこの口で行う (rename・親の rename の後も同じ実体を
+ * 指す)。持たない FS (FAT / HostDrv / ISO) は従来どおりパスで動く。
+ *   lookup   … パスの inode 番号 (種別を問わない)。無ければ VFS_ERR_NOTFOUND
+ *   read / write / stat / truncate … inode で。通常ファイル以外は VFS_ERR_ISDIR
+ * 戻り値は VFS 番号体系 (read / write は正ならバイト数)。 */
+typedef struct {
+    int (*lookup)(void *ctx, const char *path, u32 *ino);
+    int (*read)(void *ctx, u32 ino, void *buf, u32 size, u32 offset);
+    int (*write)(void *ctx, u32 ino, const void *buf, u32 size, u32 offset);
+    int (*stat)(void *ctx, u32 ino, OS32_Stat *buf);
+    int (*truncate)(void *ctx, u32 ino);
+} VfsInoOps;
 
 /* FS操作テーブル (各FSドライバが実装)
  *
@@ -136,6 +157,10 @@ typedef struct {
      * 同時に書ける FS では成り立たない**ので HostDrv / FAT / ISO9660 は
      * 実装しない。 */
     int  (*create_excl)(void *ctx, const char *path);
+
+    /* inode で動く口 (上の VfsInoOps)。**任意実装** — NULL の FS は FD が
+     * パスで動く。実装済みは ext2 だけ。 */
+    const VfsInoOps *ino;
 } VfsOps;
 
 /* ---- VFS API ---- */
@@ -246,8 +271,36 @@ int vfs_chdir(const char *path);   /* 存在するディレクトリ以外は VF
 #define VFS_KIND_DIR  1
 int vfs_path_kind(const char *path);
 
-/* パスの正規化 (相対→絶対) */
-void vfs_resolve_path(const char *input, char *output, int out_size);
+/* パスの正規化 (相対→絶対)。**切り詰めずに断る** (票 TASK_VFS_FD_PATH):
+ *   VFS_OK              … output に絶対名 (NUL 込み out_size 以内)
+ *   VFS_ERR_NAMETOOLONG … 入力が NUL 抜き VFS_MAX_PATH - 1 を超える /
+ *                         正規化の途中で要素が VFS_MAX_PATH_DEPTH を超える /
+ *                         要素 1 つが 255 バイトを超える / 結果が out_size に
+ *                         収まらない
+ *   VFS_ERR_INVAL       … output が NULL / out_size <= 0
+ * 相対パスは cwd + "/" + 入力を大きい一時領域で正規化してから判定する。
+ * 失敗したとき output は空文字列。 */
+int vfs_resolve_path(const char *input, char *output, int out_size);
+
+/* ---- vfs.c と vfs_fd.c の間だけで使う (KAPI ではない) ----
+ * FD 表は vfs_fd.c が持つので、名前空間を変える vfs.c がここを呼ぶ。 */
+/* (fs_ctx, ino) の開いた FD に失効の印を付ける */
+void vfs_fd_invalidate_ino(void *fs_ctx, u32 ino);
+/* そのマウントの全 FD に失効の印を付け、fs_ctx を外す (umount の前に呼ぶ) */
+void vfs_fd_invalidate_mount(void *fs_ctx);
+/* rel_old / rel_new (同じマウントの相対名、rel_new は NULL 可) の rename が
+ * 開いている SQLite DB・そのジャーナル・それらの祖先に当たるなら 1 */
+int  vfs_fd_rename_busy(void *fs_ctx, const char *rel_old, const char *rel_new);
+/* (fs_ctx, ino) か (inode を持たない FS なら) rel が使用中の固定 FD
+ * (loop イメージ) に当たるなら 1。has_ino = 0 なら rel で比べる */
+int  vfs_fd_pinned_busy(void *fs_ctx, int has_ino, u32 ino, const char *rel);
+/* 失効の問い合わせ (常駐 SQLite 接続の開き直し判断用)。1 = 失効 */
+int  vfs_fd_is_stale(int fd);
+/* 使用中の印 (loop_dev が付ける)。印の付いた実体の unlink と置き換えは BUSY */
+int  vfs_fd_set_pinned(int fd, int on);
+/* SQLite の DB / ジャーナルとして開いた印 (旧来の vfs_open 経路用)。
+ * vfs_open_sqlite の FD には最初から付いている */
+int  vfs_fd_set_sqlite_db(int fd);
 
 /* 内部ルーターの公開 (vfs_fd.c向け) */
 VfsOps *vfs_route(const char *path, char *rel_out, int max_rel, void **ctx_out);

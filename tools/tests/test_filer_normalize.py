@@ -93,7 +93,7 @@ class FilerNormalize(unittest.TestCase):
     def test_vfs_source_still_normalizes(self):
         """VFS 側が正規化をやめたらこの前提が崩れるので、実ソースを見張る。"""
         vfs = (ROOT / 'fs/vfs.c').read_text()
-        i = vfs.index('void vfs_resolve_path')
+        i = vfs.index('int vfs_resolve_path')
         body = vfs[i:i + 2600]
         self.assertIn("== '.'", body, 'VFS が . を畳まなくなった')
         self.assertIn("tmp[start+1] == '.'", body, 'VFS が .. を畳まなくなった')

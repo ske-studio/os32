@@ -664,6 +664,8 @@ static VfsOps fatfs_ops = {
      * FS では排他性が成り立たない**ので、持てないものは持たないと言う。
      * vfs_open が O_EXCL に OS32_ERR_NOSYS を返し、呼び手 (hsync) は
      * 直接上書きへ落ちずに replace_unsupported で断る。 */
+    0,
+    /* inode で動く口も持たない (票 TASK_VFS_FD_PATH)。FD はパスで動く */
     0
 };
 

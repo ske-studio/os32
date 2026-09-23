@@ -304,6 +304,24 @@ static int ext2_vfs_get_size(void *ctx, const char *path, u32 *size)
     return ext2_to_vfs_err(ext2_get_size_ino(ec, ino, size));
 }
 
+/* stat とFD の fstat (inode) で同じ値を返すための 1 か所 */
+static void ext2_fill_stat(u32 ino, const Ext2Inode *inode, OS32_Stat *buf)
+{
+    kmemset(buf, 0, sizeof(OS32_Stat));
+
+    buf->st_dev = 0;
+    buf->st_ino = ino;
+    /* ext2とOS32_StatのフラグはPOSIX互換のため直接代入可能 */
+    buf->st_mode = inode->mode;
+    buf->st_nlink = inode->links_count;
+    buf->st_uid = inode->uid;
+    buf->st_gid = inode->gid;
+    buf->st_size = inode->size;
+    buf->st_atime = inode->atime;
+    buf->st_mtime = inode->mtime;
+    buf->st_ctime = inode->ctime;
+}
+
 static int ext2_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
 {
     Ext2Ctx *ec = (Ext2Ctx *)ctx;
@@ -319,20 +337,7 @@ static int ext2_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
     rc = ext2_read_inode(ec, ino, &inode);
     if (rc != 0) return VFS_ERR_IO;
 
-    kmemset(buf, 0, sizeof(OS32_Stat));
-
-    buf->st_dev = 0;
-    buf->st_ino = ino;
-    /* ext2とOS32_StatのフラグはPOSIX互換のため直接代入可能 */
-    buf->st_mode = inode.mode;
-    buf->st_nlink = inode.links_count;
-    buf->st_uid = inode.uid;
-    buf->st_gid = inode.gid;
-    buf->st_size = inode.size;
-    buf->st_atime = inode.atime;
-    buf->st_mtime = inode.mtime;
-    buf->st_ctime = inode.ctime;
-
+    ext2_fill_stat(ino, &inode, buf);
     return VFS_OK;
 }
 
@@ -379,6 +384,49 @@ static int ext2_vfs_set_mtime(void *ctx, const char *path, os_time_t mtime)
     if (rc != 0) return ext2_to_vfs_err(rc);
     return VFS_OK;
 }
+
+/* ---- inode で動く口 (票 TASK_VFS_FD_PATH 方針 v3 の 1) ----
+ *
+ * VFS の FD は open 時にここで inode を取り、以後の read / write / fstat /
+ * 切り詰めはパスを引き直さずに inode で行う。内部はもともと inode で動く
+ * (ext2_read_stream / ext2_write_stream / ext2_write) ので、パスの解決を
+ * 外しただけの口。通常ファイル以外は各関数が ISDIR で断る。 */
+static int ext2_vfs_lookup_ino(void *ctx, const char *path, u32 *ino)
+{
+    Ext2Ctx *ec = (Ext2Ctx *)ctx;
+    if (!ec || !ino) return VFS_ERR_INVAL;
+    return ext2_resolve_path(ec, path, ino);
+}
+
+static int ext2_vfs_read_ino(void *ctx, u32 ino, void *buf, u32 size, u32 offset)
+{
+    return ext2_to_vfs_err(ext2_read_stream((Ext2Ctx *)ctx, ino, buf, size, offset));
+}
+
+static int ext2_vfs_write_ino(void *ctx, u32 ino, const void *buf, u32 size, u32 offset)
+{
+    return ext2_to_vfs_err(ext2_write_stream((Ext2Ctx *)ctx, ino, buf, size, offset));
+}
+
+static int ext2_vfs_stat_ino(void *ctx, u32 ino, OS32_Stat *buf)
+{
+    Ext2Inode inode;
+    if (!buf) return VFS_ERR_INVAL;
+    if (ext2_read_inode((Ext2Ctx *)ctx, ino, &inode) != 0) return VFS_ERR_IO;
+    ext2_fill_stat(ino, &inode, buf);
+    return VFS_OK;
+}
+
+/* 長さ 0 へ切り詰める (O_TRUNC)。ext2_write は通常ファイル以外を ISDIR で断る */
+static int ext2_vfs_truncate_ino(void *ctx, u32 ino)
+{
+    return ext2_to_vfs_err(ext2_write((Ext2Ctx *)ctx, ino, "", 0));
+}
+
+static const VfsInoOps ext2_ino_ops = {
+    ext2_vfs_lookup_ino, ext2_vfs_read_ino, ext2_vfs_write_ino,
+    ext2_vfs_stat_ino, ext2_vfs_truncate_ino
+};
 
 /* ---- マウント/アンマウント (kmalloc/kfree) ---- */
 
@@ -444,7 +492,8 @@ static VfsOps ext2_ops = {
     ext2_vfs_total_blocks, ext2_vfs_free_blocks, ext2_vfs_block_size,
     ext2_vfs_stat,
     ext2_vfs_set_mtime,         /* 票 H3。他の FS は埋めない = NOSYS */
-    ext2_vfs_create_excl        /* 票 H2。他の FS は埋めない = NOSYS */
+    ext2_vfs_create_excl,       /* 票 H2。他の FS は埋めない = NOSYS */
+    &ext2_ino_ops               /* 票 TASK_VFS_FD_PATH。FD は inode で動く */
 };
 
 

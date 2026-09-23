@@ -127,6 +127,13 @@ i32 sys_switch_shell(const char *path)
     if (path == 0 || path[0] == '\0') {
         return OS32_ERR_INVAL;
     }
+    /* 切り詰めて記録しない (票 TASK_VFS_FD_PATH v3 の追記)。切った名前は
+     * 別のシェルを起動し得る。上限まで数えて NUL が無ければ断る */
+    {
+        int n;
+        for (n = 0; n < OS32_MAX_PATH && path[n]; n++) { }
+        if (n >= OS32_MAX_PATH) return OS32_ERR_NAMETOOLONG;
+    }
     kstrncpy(g_next_shell, path, OS32_MAX_PATH);
     g_next_shell[OS32_MAX_PATH - 1] = '\0';
     return 0;

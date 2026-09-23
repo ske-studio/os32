@@ -126,6 +126,13 @@ PKG_HEADER_SIZE = 32
 PKG_FLAG_LZSS = 0x01
 PKG_TYPE_FILE = 0
 PKG_TYPE_DIR  = 1
+# 消費側 (userland/lib/rt/pkg.h) の上限。PKG_MAX_PATH は NUL 込み。
+PKG_MAX_PATH = 128
+PKG_MAX_ENTRIES = 128
+# cdinst は展開先へ "/hd0" を前置する。前置込みで PKG_MAX_PATH に収める
+# (票 TASK_VFS_FD_PATH 方針 v2 の 9: 格納パスは UTF-8 で 123 バイトまで)
+PKG_INSTALL_PREFIX = '/hd0'
+PKG_GUEST_PATH_MAX = PKG_MAX_PATH - 1 - len(PKG_INSTALL_PREFIX.encode('utf-8'))
 
 # KAPI_VERSION を os32_kapi_shared.h から読み取る
 def read_kapi_version(base_dir):
@@ -173,6 +180,21 @@ def build_pkg(name, version, files, use_lzss, kapi_ver):
     raw_data = bytearray()
     entries = []
 
+    # 長さ (票 TASK_VFS_FD_PATH 方針 v2 の 9)。**UTF-8 のバイト長**で、展開先の
+    # 前置 (/hd0) を含めて消費側の PKG_MAX_PATH (NUL 込み) に収まるか。以前は
+    # 形だけを見て、255 バイトで黙って切り詰めていた。消費側 (pkg.c) は 128
+    # 以上で読み位置がずれ、cdinst の前置で溢れた分は切り詰められて後の
+    # ファイルが前を上書きした。
+    long_paths = [g for g, _ in files
+                  if len(g.encode('utf-8')) > PKG_GUEST_PATH_MAX]
+    if long_paths:
+        for g in long_paths:
+            print(f"ERROR: guest path too long {g!r} (package '{name}'): "
+                  f"{len(g.encode('utf-8'))} bytes in UTF-8, limit "
+                  f"{PKG_GUEST_PATH_MAX} ({PKG_INSTALL_PREFIX!r} + path + NUL "
+                  f"<= {PKG_MAX_PATH})", file=sys.stderr)
+        raise SystemExit(1)
+
     # ディレクトリを自動収集
     dirs_seen = set()
     for guest_path, _ in files:
@@ -204,6 +226,12 @@ def build_pkg(name, version, files, use_lzss, kapi_ver):
         entries.append((guest_path, len(data), PKG_TYPE_FILE))
         raw_data.extend(data)
 
+    # 項目数 (ディレクトリ項目を含む) は消費側の表の大きさまで
+    if len(entries) > PKG_MAX_ENTRIES:
+        print(f"ERROR: too many entries in package '{name}': {len(entries)} "
+              f"(files + directories), limit {PKG_MAX_ENTRIES}", file=sys.stderr)
+        raise SystemExit(1)
+
     # LZSS圧縮
     orig_size = len(raw_data)
     if use_lzss and orig_size > 0:
@@ -220,9 +248,8 @@ def build_pkg(name, version, files, use_lzss, kapi_ver):
     for path, size, ftype in entries:
         path_bytes = path.encode('utf-8')
         path_len = len(path_bytes)
-        if path_len > 255:
-            path_len = 255
-            path_bytes = path_bytes[:255]
+        # 上で検査済み。切り詰めない (黙って別の名前にしない)
+        assert 0 < path_len <= PKG_GUEST_PATH_MAX, path
         file_table.append(path_len)
         file_table.extend(path_bytes)
         file_table.extend(struct.pack('<I', size))

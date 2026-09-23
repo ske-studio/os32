@@ -1125,9 +1125,21 @@ static void note_target(const char *dst)
     if (str_has_prefix(dst, "/boot/")) g_touched_boot = 1;
 }
 
+/* 票 TASK_VFS_FD_PATH で増えたエラーの名前 (番号だけでは読めないもの) */
+static const char *err_tag(int err)
+{
+    switch (err) {
+    case OS32_ERR_STALE:       return " (STALE)";
+    case OS32_ERR_NAMETOOLONG: return " (NAMETOOLONG)";
+    case OS32_ERR_BUSY:        return " (BUSY)";
+    default:                   return "";
+    }
+}
+
 static void fail_file(const char *dst, const char *reason, int err)
 {
-    api->kprintf(ATTR_RED, "  FAIL %s reason=%s err=%d\n", dst, reason, err);
+    api->kprintf(ATTR_RED, "  FAIL %s reason=%s err=%d%s\n", dst, reason, err,
+                 err_tag(err));
     g_errors++;
 }
 
@@ -1390,8 +1402,8 @@ static int replace_file(const char *src_path, const char *dst_path, u32 size,
             why = HR_REPLACE_FAILED;
             note = " (未公開: 宛先は作られていない)";
         }
-        api->kprintf(ATTR_RED, "  FAIL %s reason=%s err=%d%s\n",
-                     dst_path, why, rc, note);
+        api->kprintf(ATTR_RED, "  FAIL %s reason=%s err=%d%s%s\n",
+                     dst_path, why, rc, err_tag(rc), note);
         g_errors++;
         if (drop_temp(tmp) != 0) g_errors++; /* 後始末の失敗は独立した 1 件 */
         return -1;
@@ -1840,7 +1852,8 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
     fl.bad_name = 0;
     rc = api->sys_ls(src_dir, ls_cb, &fl);
     if (rc != 0) {
-        api->kprintf(ATTR_RED, "  FAIL: ls %s (err=%d)\n", src_dir, rc);
+        api->kprintf(ATTR_RED, "  FAIL: ls %s (err=%d%s)\n", src_dir, rc,
+                     err_tag(rc));
         g_errors++;
         return;
     }
@@ -1971,8 +1984,8 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
                      * ディレクトリであることを確かめてから入る (B3)。 */
                     if (dst_dir_type_ok(dst_path) != 0) continue;
                 } else if (mrc != 0) {
-                    api->kprintf(ATTR_RED, "  FAIL: mkdir %s (err=%d)\n",
-                                 dst_path, mrc);
+                    api->kprintf(ATTR_RED, "  FAIL: mkdir %s (err=%d%s)\n",
+                                 dst_path, mrc, err_tag(mrc));
                     g_errors++;
                     continue;
                 }

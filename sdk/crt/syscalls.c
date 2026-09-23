@@ -17,13 +17,43 @@ extern KernelAPI *kapi; /* CRT0 もしくはメインから初期化されて渡
 
 void __attribute__((weak)) _init(void) {}
 
+/* OS32 の負のエラーコード (OS32_ERR_*) を newlib の -1 + errno に直す
+ * (票 TASK_VFS_FD_PATH 方針 v3 の 7)。以前は負値をそのまま返していたので、
+ * newlib (stdio) は -11 を「-11 バイト書けた」などと読み、errno も立たなかった。
+ * 対応の無いものは EIO。非負はそのまま返す。 */
+static int os32_errno(int rc)
+{
+    switch (rc) {
+    case OS32_ERR_NOTFOUND:    return ENOENT;
+    case OS32_ERR_EXIST:       return EEXIST;
+    case OS32_ERR_NOSPC:       return ENOSPC;
+    case OS32_ERR_NOTDIR:      return ENOTDIR;
+    case OS32_ERR_NOTEMPTY:    return ENOTEMPTY;
+    case OS32_ERR_ISDIR:       return EISDIR;
+    case OS32_ERR_INVAL:       return EINVAL;
+    case OS32_ERR_NOSYS:       return ENOSYS;
+    case OS32_ERR_STALE:       return ESTALE;
+    case OS32_ERR_ROFS:        return EROFS;
+    case OS32_ERR_NAMETOOLONG: return ENAMETOOLONG;
+    case OS32_ERR_BUSY:        return EBUSY;
+    default:                   return EIO;
+    }
+}
+
+static int os32_ret(int rc)
+{
+    if (rc >= 0) return rc;
+    errno = os32_errno(rc);
+    return -1;
+}
+
 int _read(int fd, char *ptr, int len) {
-    return kapi->sys_read(fd, ptr, len);
+    return os32_ret(kapi->sys_read(fd, ptr, len));
 }
 int read(int fd, char *ptr, int len) ALIAS(_read);
 
 int _write(int fd, char *ptr, int len) {
-    return kapi->sys_write(fd, ptr, len);
+    return os32_ret(kapi->sys_write(fd, ptr, len));
 }
 int write(int fd, char *ptr, int len) ALIAS(_write);
 
@@ -36,7 +66,7 @@ int _open(const char *name, int flags, ...) {
     if (flags & O_CREAT) os32_flags |= KAPI_O_CREAT;
     if (flags & O_TRUNC) os32_flags |= KAPI_O_TRUNC;
     
-    return kapi->sys_open(name, os32_flags);
+    return os32_ret(kapi->sys_open(name, os32_flags));
 }
 int open(const char *name, int flags, ...) ALIAS(_open);
 
@@ -47,13 +77,14 @@ int _close(int fd) {
 int close(int fd) ALIAS(_close);
 
 int _lseek(int fd, int ptr, int dir) {
-    return kapi->sys_lseek(fd, ptr, dir);
+    return os32_ret(kapi->sys_lseek(fd, ptr, dir));
 }
 int lseek(int fd, int ptr, int dir) ALIAS(_lseek);
 
 int _fstat(int fd, struct stat *st) {
     OS32_Stat os_st;
-    if (kapi->sys_fstat(fd, &os_st) < 0) return -1;
+    int rc = kapi->sys_fstat(fd, &os_st);
+    if (rc < 0) return os32_ret(rc);
     st->st_mode = os_st.st_mode;
     st->st_size = os_st.st_size;
     return 0;
@@ -62,7 +93,8 @@ int fstat(int fd, struct stat *st) ALIAS(_fstat);
 
 int _stat(const char *name, struct stat *st) {
     OS32_Stat os_st;
-    if (kapi->sys_stat(name, &os_st) < 0) return -1;
+    int rc = kapi->sys_stat(name, &os_st);
+    if (rc < 0) return os32_ret(rc);
     st->st_mode = os_st.st_mode;
     st->st_size = os_st.st_size;
     return 0;
@@ -70,7 +102,7 @@ int _stat(const char *name, struct stat *st) {
 int stat_func(const char *name, struct stat *st) __attribute__((weak, alias("_stat")));
 
 int _unlink(char *name) {
-    return kapi->sys_unlink(name);
+    return os32_ret(kapi->sys_unlink(name));
 }
 int unlink(char *name) ALIAS(_unlink);
 

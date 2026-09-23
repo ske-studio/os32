@@ -10,10 +10,10 @@
 
 | 段 | 反例 | 期待 |
 |---|---|---|
-| vfs | `/hd0` に載せた ext2 へ `mkdir /hd0`・`/hd0/`・`/hd0//`・`/hd0/.`・`/hd0/tmp/..`・cwd=/hd0 で `.` / `""` | **EXIST**、1 セクタも書かない |
+| vfs | `/hd0` に載せた ext2 へ `mkdir /hd0`・`/hd0/`・`/hd0//`・cwd=/hd0 で `""` | **EXIST**、1 セクタも書かない。`/hd0/.`・`/hd0/tmp/..`・`.` は票 TASK_VFS_FD_PATH 以降 **INVAL** (最終要素の `.` / `..`) |
 | vfs | `mkdir /hd0/a/`・`/hd0//b`・`/hd0/a//c/` | 作れる (末尾 `/` と `//` は VFS が畳む) |
 | vfs | マウント点への write / open(O_CREAT) / open(O_EXCL) / rename (元・先) / rmdir / unlink | 負値、書かない |
-| root | `/` に載せた ext2 で `mkdir /`・`//`・`/.`・`/..`・`""`、write / rmdir / unlink `/` | 同上 |
+| root | `/` に載せた ext2 で `mkdir /`・`//`・`""`、write / rmdir / unlink `/` | 同上 (`/.`・`/..` は票 TASK_VFS_FD_PATH 以降 INVAL) |
 | ext2 | `ext2_mkdir` / `create` / `add_entry` / `rename` / `rmdir` / `unlink` に `""`・`.`・`..`・`x/y`・256 文字 | **INVAL**、書かない。255 文字は作れる |
 | ext2 | `ext2_vfs_mkdir("/")` / `("")` | EXIST。`"/d/"` と write `"/"` `"/d/"`、create_excl `"/d/"`、rename 先 `"/d/"` は負値 |
 | synth | 合成ドライバを `/syn` に載せて同じ操作 | ドライバまで**1 回も届かない**。`mkdir /syn/a/` は `"/a"` で届く |

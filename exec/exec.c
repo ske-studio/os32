@@ -1367,12 +1367,18 @@ static int exec_launch(const char *cmdline, int gui_arg)
         }
     }
 
-    /* コマンドラインからパスを抽出 */
+    /* コマンドラインからパスを抽出。**切り詰めない** (票 TASK_VFS_FD_PATH
+     * v3 の追記): 以前は 255 バイトで切って、切った名前の別のプログラムを
+     * 起動し得た。収まらなければ「見つからない」と同じ戻り方で断る。 */
     while (*p == ' ') p++;
     while (*p && *p != ' ' && i < (int)sizeof(path) - 1) {
         path[i++] = *p++;
     }
     path[i] = '\0';
+    if (*p && *p != ' ') {
+        shell_print("Error: command name too long\n", ATTR_RED);
+        return EXEC_ERR_NOT_FOUND;
+    }
 
     /* ====== Level に応じたメモリレイアウト決定 ====== */
     if (is_shell) {
@@ -1429,6 +1435,9 @@ static int exec_launch(const char *cmdline, int gui_arg)
             };
             int di;
             for (di = 0; search_dirs[di]; di++) {
+                /* 連結が溢れる候補は切り詰めて試さない (別の名前になる) */
+                if (kstrlen(search_dirs[di]) + kstrlen(path) + 1 > VFS_MAX_PATH)
+                    continue;
                 kstrncpy(resolved, search_dirs[di], VFS_MAX_PATH);
                 kstrncat(resolved, path, VFS_MAX_PATH);
                 sz = vfs_read(resolved, hdrbuf, (int)sizeof(hdrbuf));

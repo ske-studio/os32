@@ -503,9 +503,15 @@ int __cdecl kapi_db_open(const char *path)
     }
     if (i >= DB_MAX_CONNECTIONS) return -1;
 
-    /* パス文字列をカーネルバッファにコピー (外部プログラム空間からの読み取り問題回避) */
-    kstrncpy(path_copy_buf, path, PATH_COPY_BUF_SIZE - 1);
-    path_copy_buf[PATH_COPY_BUF_SIZE - 1] = '\0';
+    /* パス文字列をカーネルバッファにコピー (外部プログラム空間からの読み取り問題回避)。
+     * **切り詰めない** (票 TASK_VFS_FD_PATH v3 の追記)。以前は kstrncpy で
+     * 254 バイトに切っていたので、長い名前は別の DB (と別のジャーナル) を
+     * 開いた。上限内に NUL が無ければ断る。 */
+    if (!db_user_str_copy(path, path_copy_buf, PATH_COPY_BUF_SIZE)) {
+        open_fail_set(SQLITE_CANTOPEN);
+        shm_write_error_text("path too long or unreadable");
+        return -1;
+    }
 
     db_slots[i].cleanup_error = SQLITE_OK;
     db_slots[i].cleanup_message[0] = '\0';
@@ -961,8 +967,8 @@ int __cdecl kapi_db_open_existing(const char *path, int writable)
         return -1;
     }
     abs_path_buf[0] = '\0';
-    vfs_resolve_path(path_copy_buf, abs_path_buf, (int)sizeof(abs_path_buf));
-    if (abs_path_buf[0] == '\0') {
+    if (vfs_resolve_path(path_copy_buf, abs_path_buf, (int)sizeof(abs_path_buf))
+            != VFS_OK || abs_path_buf[0] == '\0') {
         open_fail_set(SQLITE_CANTOPEN);
         return -1;
     }
