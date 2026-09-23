@@ -32,8 +32,23 @@ jobs:
       artifact: ${{ steps.name.outputs.artifact }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      # apps/ と game/ (submodule) は private repo なので既定の GITHUB_TOKEN では clone できない。
+      # secret SUBMODULE_TOKEN (それら 2 つの Contents: read を持つ fine-grained PAT) があれば取って
+      # `make external` まで回し、無ければ core (FD・ISO・packages・配備ツリーの本体側) だけ作る。
+      - name: Submodules (apps/game are private — need SUBMODULE_TOKEN)
+        env:
+          TOKEN: ${{ secrets.SUBMODULE_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            git -c "url.https://x-access-token:${TOKEN}@github.com/.insteadOf=https://github.com/" \
+              submodule update --init --depth=1 --recursive
+            echo "EXTERNAL=external" >> "$GITHUB_ENV"
+            git submodule status --recursive
+          else
+            echo "::warning::SUBMODULE_TOKEN が無いので apps/ game/ (private submodule) を飛ばす — 成果物は core だけ"
+            echo "EXTERNAL=" >> "$GITHUB_ENV"
+          fi
 
       - name: Artifact name
         id: name
@@ -82,7 +97,7 @@ jobs:
           export PATH="$CROSS_DIR/bin:$PATH"
           i386-elf-gcc --version | head -1
           # NP21W_DIR は存在しない場所にしておく (コピーは Warning で続行する)
-          make -j"$(nproc)" all external fd144 \
+          make -j"$(nproc)" all $EXTERNAL fd144 \
             CROSS_DIR="$CROSS_DIR" NP21W_DIR="$RUNNER_TEMP/np21w"
 
       - name: Deploy tree (make deploy into a temp HOSTDRV_DIR)
@@ -109,7 +124,7 @@ jobs:
             echo "run:     $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "gcc:     $("$CROSS_DIR/bin/i386-elf-gcc" -dumpversion)"
             echo "rustc:   $(rustc --version 2>/dev/null || echo '?')"
-            echo "submodules:"
+            echo "submodules: (empty = apps/game skipped, no SUBMODULE_TOKEN)"
             git submodule status --recursive | sed 's/^/  /'
             echo
             echo "# size  path"
