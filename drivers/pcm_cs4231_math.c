@@ -28,7 +28,7 @@ int pcm_fmt_for_rate(u32 rate, u8 *fmt)
 u32 pcm_half_ms(u32 rate)
 {
     if (rate == 0) return 0;
-    return (PCM_HALF_FRAMES * 1000U) / rate;
+    return (PCM_HALF_FRAMES * PCM_MS_PER_SEC) / rate;
 }
 
 /* 番犬の期間 = 2 半周期のマイクロ秒。44.1k = 92879µs、22.05k = 185759µs。
@@ -37,7 +37,7 @@ u32 pcm_half_ms(u32 rate)
 u32 pcm_watchdog_us(u32 rate)
 {
     if (rate == 0) return 0;
-    return (PCM_HALF_FRAMES * 2U * 1000000U) / rate;
+    return (PCM_HALF_FRAMES * 2U * PCM_US_PER_SEC) / rate;
 }
 
 /* ======================================================================== */
@@ -54,8 +54,8 @@ u32 pcm_close_ticks(u32 staged_frames, u32 rate)
 
     if (rate == 0) return PCM_STOP_TICKS;
     halves = (staged_frames + PCM_HALF_FRAMES - 1U) / PCM_HALF_FRAMES;
-    num = (halves + 3U) * PCM_HALF_FRAMES * 1000U;
-    den = rate * 10U;
+    num = (halves + 3U) * PCM_HALF_FRAMES * PCM_MS_PER_SEC;
+    den = rate * PCM_MS_PER_TICK;
     return ((num + den - 1U) / den) + PCM_STOP_TICKS;
 }
 

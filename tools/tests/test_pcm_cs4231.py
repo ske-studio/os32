@@ -14,6 +14,7 @@
   (d) 初期化列 / 停止列 / RS の列の**順序**
   (e) 入口ガードで装置アクセスが **0 回** であること
   (f) close / reclaim が各状態から **1 度だけ** 解放すること
+  (g) foreground と tick の割り込み順序 (race_* — 割り込みの台本で交互に進める)
 
   python3 -B tools/tests/test_pcm_cs4231.py            # ホストで全ケース
   python3 -B tools/tests/test_pcm_cs4231.py --target   # + i386-elf で実物を通す
@@ -32,7 +33,9 @@ TARGET_SRCS = ["drivers/pcm_cs4231_math.c", "drivers/pcm_cs4231.c"]
 
 CASES = ["cont", "refill", "drain", "drain_short", "start", "rate",
          "close_dl", "vol", "stg", "pack", "pos", "obs", "seq",
-         "open", "write", "close", "rs", "guard", "reclaim", "volume", "init"]
+         "open", "write", "close", "rs", "guard", "reclaim", "volume", "init",
+         "race_reclaim", "race_close_rs", "race_close_restart",
+         "race_close_timeout", "race_volume", "clock", "write_contract"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl="]
@@ -157,20 +160,66 @@ MUTATIONS = [
      "resyncs を飽和させない (65536 回目で underruns の桁を汚す)"),
 ]
 
+# 否定側 (driver)。foreground と tick の競合の修正 (Codex 実装レビュー
+# blocker 1〜5、2026-09-23) を 1 つずつ元に戻し、交互の台本のケースが RED に
+# なることを見る。1 本に複数の置き換えを持てる (修正が 2 重の守りのとき)。
+DRIVER = "drivers/pcm_cs4231.c"
+DRIVER_MUTATIONS = [
+    ([(r"    if \(s_claimed \|\| s_mce_busy\) return IRQ_NONE;",
+       "    if (s_mce_busy) return IRQ_NONE;"),
+      (r"    if \(evid\) g_pcm.state = PCM_ST_STOP_DONE;\n"
+       r"    else pcm_enter_faulted\(PCM_DIAG_FAULT_RECLAIM\);\n", "")],
+     "reclaim が状態を残したまま IF を戻す (tick が RS_RESTART を実行してから "
+     "リングを free する — blocker 1)"),
+    ([(r"    f = irq_save\(\);\n    st = \(int\)g_pcm.state;\n"
+       r"    idle = \(st == PCM_ST_OPEN && g_pcm.stg.staged == 0\);\n"
+       r"    PCM_PREEMPT\(PCM_PP_CLOSE_ENTRY\);\n",
+       "    st = (int)g_pcm.state;\n"
+       "    idle = (st == PCM_ST_OPEN && g_pcm.stg.staged == 0);\n"
+       "    PCM_PREEMPT(PCM_PP_CLOSE_ENTRY);\n"
+       "    f = irq_save();\n")],
+     "close の入口で状態を禁止区間の外で読む (drain の要求を取り落とす — blocker 2)"),
+    ([(r"            g_pcm.state = PCM_ST_STOP_REQ;\n"
+       r"            PCM_PREEMPT\(PCM_PP_CLOSE_TIMEOUT\);\n"
+       r"            pcm_stop_entry\(\);\n",
+       "            g_pcm.state = PCM_ST_STOP_REQ;\n"
+       "            irq_restore(f);\n"
+       "            PCM_PREEMPT(PCM_PP_CLOSE_TIMEOUT);\n"
+       "            f = irq_save();\n"
+       "            pcm_stop_entry();\n")],
+     "close の期限切れで STOP_REQ を停止の入口より先に公開する "
+     "(古い期限で FAULTED — blocker 3)"),
+    ([(r"    if \(t < s_last_us\) t = s_last_us;",
+       "    if ((u32)((u32)t - (u32)s_last_us) >= 0x80000000U) t = s_last_us;"),
+      (r"    s_last_us = pcm_clock_us\(\);\n", "")],
+     "時計の巻き戻りを下位 32 ビットの差で推し量り、基準も置き直さない "
+     "(起動 35 分後の初回再生で番犬が死ぬ — blocker 4)"),
+    ([(r"    cs_write_locked\(PCM_I_LDA, r\);\n"
+       r"    cs_write_locked\(PCM_I_RDA, r\);\n    irq_restore\(f\);",
+       "    irq_restore(f);\n    cs_write(PCM_I_LDA, r);\n"
+       "    cs_write(PCM_I_RDA, r);")],
+     "set_volume の判定と I6/I7 の書きを別の禁止区間にする "
+     "(FAULTED の後に装置へ書く — blocker 5)"),
+    ([(r"    if \(!buf\) return OS32_ERR_INVAL;\n", "")],
+     "write が NULL を断らない (CPL=0 の直呼びで NULL から写す)"),
+]
 
-def host_build(tmp, source_text=None):
+
+def host_build(tmp, source_text=None, driver_text=None):
     src_dir = pathlib.Path(tmp)
     exe = src_dir / "pcm-host"
     inc = ["-I" + str(ROOT / p) for p in INC_DIRS]
-    if source_text is None:
+    if source_text is None and driver_text is None:
         cmd = ["gcc", *FLAGS, *inc, str(HARNESS), "-o", str(exe)]
     else:
         mut = src_dir / "drivers"
         mut.mkdir(exist_ok=True)
+        if source_text is None:
+            source_text = SRC.read_text(encoding="utf-8")
+        if driver_text is None:
+            driver_text = (ROOT / DRIVER).read_text(encoding="utf-8")
         (mut / "pcm_cs4231_math.c").write_text(source_text, encoding="utf-8")
-        (mut / "pcm_cs4231.c").write_text(
-            (ROOT / "drivers/pcm_cs4231.c").read_text(encoding="utf-8"),
-            encoding="utf-8")
+        (mut / "pcm_cs4231.c").write_text(driver_text, encoding="utf-8")
         (mut / "pcm_cs4231.h").write_text(
             (ROOT / "drivers/pcm_cs4231.h").read_text(encoding="utf-8"),
             encoding="utf-8")
@@ -219,28 +268,43 @@ def build_target(tmp):
     print("TARGET i386-elf GNU89 -Werror PASS", flush=True)
 
 
+def run_mutant(exe):
+    hits = 0
+    for c in CASES:
+        try:
+            rc = subprocess.run([str(exe), c], cwd=ROOT, timeout=60,
+                                stderr=subprocess.DEVNULL).returncode
+        except subprocess.TimeoutExpired:
+            rc = 1          # 止まらなくなるのも RED
+        hits += rc != 0
+    return hits
+
+
 def mutate(tmp):
     original = SRC.read_text(encoding="utf-8")
-    bad = 0
-    for i, (pattern, repl, why) in enumerate(MUTATIONS, 1):
+    driver = (ROOT / DRIVER).read_text(encoding="utf-8")
+    jobs = []
+    for pattern, repl, why in MUTATIONS:
         mutated, n = re.subn(pattern, repl, original, count=1)
-        if n != 1:
+        jobs.append((n == 1, mutated, None, why))
+    for edits, why in DRIVER_MUTATIONS:
+        mutated, ok = driver, True
+        for pattern, repl in edits:
+            mutated, n = re.subn(pattern, repl, mutated, count=1)
+            ok = ok and n == 1
+        jobs.append((ok, None, mutated, why))
+    bad = 0
+    for i, (ok, math_text, drv_text, why) in enumerate(jobs, 1):
+        if not ok:
             print(f"MUTATION {i} NOT APPLICABLE: {why}", flush=True)
             bad += 1
             continue
         try:
-            exe = host_build(tmp, mutated)
+            exe = host_build(tmp, math_text, drv_text)
         except subprocess.CalledProcessError:
             print(f"MUTATION {i} RED (compile): {why}", flush=True)
             continue
-        hits = 0
-        for c in CASES:
-            try:
-                rc = subprocess.run([str(exe), c], cwd=ROOT, timeout=60,
-                                    stderr=subprocess.DEVNULL).returncode
-            except subprocess.TimeoutExpired:
-                rc = 1          # 止まらなくなるのも RED
-            hits += rc != 0
+        hits = run_mutant(exe)
         status = "RED" if hits else "**GREEN (見逃し)**"
         print(f"MUTATION {i} {status} ({hits} 件): {why}", flush=True)
         bad += not hits

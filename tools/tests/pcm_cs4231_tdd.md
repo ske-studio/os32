@@ -33,8 +33,19 @@ NP21/W では**踏めない分岐**がこの層の中心にある。
 - **8237**: 残バイト数を `sim_set_pos(frame)` で置く。`-EAGAIN` も返せる。
 - **プール / KHEAP**: リングはプール (16KB)、ステージングは `kmalloc` (16KB)。
   解放・leaked・失敗注入を数える。
-- **時計**: `tick_count` と µs を手で進める。`sim_tick_per_read` を立てると
-  ポートを読むたびに tick が 1 進む (期限切れの経路を有限で終わらせるため)。
+- **時計**: `tick_count` と µs (**64 ビット**、`sys_time_now` と同じく lo / hi) を
+  手で進める。`sim_tick_per_read` を立てるとポートを読むたびに tick が 1 進む
+  (期限切れの経路を有限で終わらせるため)。
+- **割り込みの台本** (2026-09-23、Codex 実装レビューの後に追加): 実機では IF=1 の
+  命令の境目ならどこでも tick が入る。模型で「入り得る点」は 2 種類:
+  (1) `irq_restore` が深さ 0 に戻した瞬間 (shim の `pcm_shim_if_on`)、
+  (2) driver が置いた `PCM_PREEMPT(site)` (`pcm_cs4231.h` の `PCM_PP_*`、カーネルでは空)。
+  台本は「site に来たら tick を 1 つ保留し、**IF=1 の最初の点で**配る」。IF=0 の区間の
+  中の site では配らず、区間を出た最初の点で配る — だから「判定と公開が 1 つの禁止区間」
+  なら tick は公開の**後**に、そうでなければ**間**に入る。配った tick は ISR と同じく
+  深さ 1 (IF=0) で走る。`PCM_PP_WAIT` (close の停止待ちの 1 周) では時計を 1 tick
+  進め、`wait_tick` なら `pcm_tick` も回し、`dev_play` なら装置の位置も 1 tick ぶん
+  (441 frame @44.1k) 進める — close を最後まで通せる。
 
 ## RED → GREEN
 
@@ -48,10 +59,42 @@ NP21/W では**踏めない分岐**がこの層の中心にある。
 実装側は RED を 1 件も出さなかった (設計 v10 が 9 往復ぶん詰まっていたため)。
 **試験の側の誤りが 3 件、模型の不足が 1 件** — 記録としてはそちらが本体。
 
+### Codex 実装レビュー (2026-09-23) の後 — foreground と tick の競合
+
+上の 21 ケースは状態を手で進めていたので、foreground と tick の**割り込み順序**を
+1 つも見ていなかった (レビューの非 blocker)。台本 (模型の節) を足して 7 ケースを
+書き、**修正前の driver (`f2d1e78`) に同じ位置の `PCM_PREEMPT` だけを差し込んで**
+回した (差し込み点: close の RUNNING / RS_* 分岐の書きの直前、期限切れの
+`state = STOP_REQ` と `pcm_stop_entry()` の間、停止待ちのループ)。既存 21 は GREEN のまま。
+
+| # | ケース | RED (修正前 `f2d1e78`) | GREEN にした変更 |
+|---|---|---|---|
+| 5 | `race_reclaim` | reclaim が IF を戻した瞬間の tick が RS_RESTART を実行: unmask 1 回・PEN=1・IEN=1 のまま free。RUNNING / DRAINING / RS_STOP / STOP_REQ でも tick が装置を読み書き (`isr_io` > 0) | blocker 1: 禁止区間の中で `s_claimed = 1` と終端状態 (証拠あり STOP_DONE / 無し FAULTED) を置いてから IF を戻す。`pcm_advance` は `s_claimed` なら装置に 1 度も触らない。`pcm_release` も立てる |
+| 6 | `race_close_rs` | close が RUNNING を読んだ後の tick が喪失で RS_STOP (PEN=0) → close が DRAINING で上書き。停止待ちの間「DRAINING なのに PEN=0」を観測 (`probe_bad` > 0) | blocker 2: 状態の判定と DRAINING / `close_pending` の公開を 1 つの `irq_save` の中で |
+| 7 | `race_close_restart` | close が RS_RESTART を読んだ後の tick が restart を完了 (RUNNING) → close は `close_pending` だけ立てる → RUNNING が見ずに再生し終えても期限切れ、rc = IO、`df_site` = 4 | blocker 2: 同上。加えて `advance_run` が RUNNING + `close_pending` を DRAINING にする (二重の守り) |
+| 8 | `race_close_timeout` | 期限切れで STOP_REQ を公開 → 入口の前の tick が古い期限 (open の 0) と DRS=1 で FAULTED (site 2) → リング leaked、再 open は IO | blocker 3: 状態の公開と `pcm_stop_entry()` (新しい期限) を 1 つの `irq_save` の中で。`pcm_stop_entry` は FAULTED / claim の後は書かない。2 段目の期限切れも STOP_DONE を FAULTED で消さない |
+| 9 | `race_volume` | 判定の後 (I6 と I7 の間) の tick が FAULTED にし、その後で I7 を書く | blocker 5: 判定と I6 / I7 の書きを 1 つの `irq_save` の中で (`cs_write_locked`) |
+| 10 | `clock` | 起動 40 分後の open: 下位 32 ビットの差を巻き戻りと読んで時計が 0 に張り付き、15 tick 止めても RUNNING のまま (番犬が死ぬ)。50 分空けた再 open、2^32 µs 跨ぎでも同じ | blocker 4: 64 ビットで比べ、open と TIMEBASE (start / restart) で基準を置き直す |
+| 11 | `write_contract` | `pcm_write(NULL, 4)` が NULL から写して SIGSEGV | 非 blocker: driver に `pcm_write_check()` (owner と状態) と NULL の拒否。KAPI wrapper は検査 → NULL → 範囲 → 長さの順 |
+
 ## 変異 (否定側)
 
 `--mutate` は `drivers/pcm_cs4231_math.c` を**写しの上で 1 か所だけ**壊し、
-どれか 1 つのケースが RED になることを見る。24 本。票 §2-3 が名指しする順序の変異 5 つ
+どれか 1 つのケースが RED になることを見る。24 本。
+
+**driver の変異 6 本 (25〜30、2026-09-23)** は上の競合の修正を 1 つずつ元に戻す
+(1 本に複数の置き換えを持てる)。どれも交互の台本のケースで RED。
+
+- 25: reclaim の `s_claimed` のガードと終端状態の両方を外す — **片方だけ外しても
+  GREEN** (もう片方が守る。二重の守りなので、変異は両方を外す形にした)
+- 26: close の入口の読みを禁止区間の外へ / 27: STOP_REQ の公開と停止の入口の間で IF を戻す
+- 28: 時計を下位 32 ビットの差の推測に戻し、基準も置き直さない
+- 29: set_volume の書きを禁止区間の外へ / 30: write の NULL 拒否を外す
+
+**単独では観測できない守り** (防御として残す): `advance_run` の「RUNNING +
+`close_pending` → DRAINING」は、入口が原子的なら RS_RESTART の完了と入口の
+どちらの順でも到達しない。`pcm_stop_entry` の「FAULTED / claim の後は書かない」も、
+呼び手が全部禁止区間の中で状態を見てから呼ぶので到達しない。票 §2-3 が名指しする順序の変異 5 つ
 (I14 を I15 より先 / MCE 無しの I9 / MODE2 前の I24 / DRS を待たない mask /
 期限を毎 tick 入れ直す) はすべて RED。
 
@@ -87,9 +130,21 @@ NP21/W では**踏めない分岐**がこの層の中心にある。
 | `reclaim` | 全状態からの回収が **1 度だけ**、他人の ID では動かない、FAULTED は leaked |
 | `volume` | I6/I7 の両方に入ること、owner 照合 |
 | `init` | 起動時の検出。装置が無くても CLOSED のまま、tick が装置を触らない |
+| `race_reclaim` | reclaim が IF を戻した瞬間の tick が装置に 0 回、再始動しない (blocker 1) |
+| `race_close_rs` | close の入口と RUNNING → RS_STOP の tick。止まった装置の DRAINING が無い (blocker 2) |
+| `race_close_restart` | close の入口と RS_RESTART の完了の tick。最後まで再生して rc = 0 (blocker 2) |
+| `race_close_timeout` | close の期限切れと tick。古い期限で FAULTED にしない、リングを返す (blocker 3) |
+| `race_volume` | set_volume と FAULTED にする tick。FAULTED の後の書きが 0 回 (blocker 5) |
+| `clock` | 起動 40 分後の初回再生・50 分空けた再 open・2^32 µs 跨ぎで番犬が効く、代用時計で戻らない (blocker 4) |
+| `write_contract` | 未 open・非 owner・NULL は bytes = 0 でも負 (非 blocker) |
 
 ## ここで確かめていないこと ([V4])
 
 - 実際に音が出ること、PI の累積回数、左右の取り違え → 票 E2〜E5 (NP21/W、PM)
 - INIT 中の書き無視・校正時間・XTAL2 の有無・auto-init ビット → 票 E6 (実機)
 - `dma_chan_remaining` の合成そのもの → `tools/tests/test_dma8237.py`
+- 割り込みが入り得る点は模型では `irq_restore` と `PCM_PREEMPT` だけ。**置いていない
+  場所の競合はこの試験では見えない** — 見ているのはレビューが名指しした 4 つの順序
+- IF=0 の実時間 (restart のリングクリア 16KB + 写し 16KB) → NP21/W / 実機の測定 (未)
+- KAPI wrapper の本体 (`kapi/kapi_generated.c`) はホストで回していない。driver 側の
+  `pcm_write_check` / NULL 拒否だけを `write_contract` で見る

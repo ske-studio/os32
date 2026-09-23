@@ -32,14 +32,15 @@ extern int res_owner_get(void);
 /* ======================================================================== */
 struct pcm_core g_pcm;             /* 観測点 (kernel.map から読む) */
 /* 診断 (kernel.map から読む。E3 の切り分け): どこで FAULTED / drain_failed になったか。 */
-u8 pcm_diag_fault_site = 0;        /* 1 tail 失敗 / 2 tail の期限 / 3 証拠の期限 / 5 close の 2 段目 / 6 reclaim */
-u8 pcm_diag_evidence = 0;          /* 最後の証拠読み: bit0 INIT, bit1 PEN, bit2 PI */
-u8 pcm_diag_df_site = 0;
+/* 値の意味は pcm_cs4231.h の PCM_DIAG_*。 */
+u8 pcm_diag_fault_site = 0;        /* PCM_DIAG_FAULT_* (最初の 1 回) */
+u8 pcm_diag_evidence = 0;          /* 最後の証拠読み: PCM_DIAG_EV_* */
+u8 pcm_diag_df_site = 0;           /* drain_failed を立てた場所: PCM_DIAG_DF_* */
 u32 pcm_diag_stop_calls = 0;       /* advance_stop の呼び出し回数 */
 u32 pcm_diag_stop_at = 0;          /* 最後の pcm_run の戻り (tail) */
 u32 pcm_diag_deadline = 0;         /* s_deadline の写し */
 u32 pcm_diag_entry_tick = 0;       /* stop_entry を呼んだ tick */
-u32 pcm_diag_drs = 0;              /* 最後に読んだ I11 */           /* bit0 RS_STOP 期限 / bit1 restart 失敗 / bit2 close 期限 / bit3 obs (番犬・喪失) */
+u32 pcm_diag_drs = 0;              /* 最後に読んだ I11 */
 
 static u8  *s_ring;                /* DMA リング 16KB */
 static u32  s_ring_phys;
@@ -51,8 +52,17 @@ static u8   s_version;             /* I25 の V2-0 (シフト前) */
 static volatile int s_mce_busy;    /* MCE の列の途中 */
 static u32  s_deadline;            /* tick。停止の分割状態の期限 */
 static int  s_seq_at;              /* 停止列の再開位置 */
-static u32  s_last_now;            /* µs 時計の単調性 */
+static unsigned long long s_last_us;  /* µs 時計の単調性 (64 ビットで比べる) */
 static int  s_fault_sticky;        /* FAULTED を踏んだら再起動まで断る */
+/* 回収 / 解放が装置を引き取った印。立っている間、advance は装置に 1 度も
+ * 触らず、RS_RESTART / RS_STOP / STOP_REQ の続きも走らせない。**IF=0 の中で
+ * 立て**、次の open まで下ろさない (Codex 実装レビュー blocker 1)。 */
+static volatile int s_claimed;
+
+/* ホスト試験の割り込み点 (pcm_cs4231.h の PCM_PP_*)。カーネルでは空。 */
+#ifndef PCM_PREEMPT
+#define PCM_PREEMPT(site) ((void)0)
+#endif
 
 /* ======================================================================== */
 /*  1. レジスタアクセス — Index と Data は 1 つの irq_save の中             */
@@ -70,14 +80,21 @@ static u8 cs_read(u8 idx)
 }
 
 /* idx に **bit6 (MCE) を立てて渡せば MCE が保たれる**。素の idx なら落ちる —
- * I9 / I16 はそれだと反映されない (DS139PP2 p.34)。ハードの R0 の並びのまま。 */
+ * I9 / I16 はそれだと反映されない (DS139PP2 p.34)。ハードの R0 の並びのまま。
+ * _locked は**呼び手が irq_save の中**にいるとき用 (判定と複数の書きを 1 つの
+ * 禁止区間に入れる)。 */
+static void cs_write_locked(u8 idx, u8 val)
+{
+    outp(PCM_PORT_R0, idx);
+    outp(PCM_PORT_R1, val);
+}
+
 static void cs_write(u8 idx, u8 val)
 {
     unsigned int f;
 
     f = irq_save();
-    outp(PCM_PORT_R0, idx);
-    outp(PCM_PORT_R1, val);
+    cs_write_locked(idx, val);
     irq_restore(f);
 }
 
@@ -147,15 +164,34 @@ static void pcm_ring_fill(void)
     g_pcm.drain = (u8)ds;
 }
 
-/* µs 時計。取れなければ tick から。単調性は前回値との max (巻き戻り対応)。 */
-static u32 pcm_now(void)
+/* 起動からの µs を 64 ビットで。取れなければ tick から (同じ起点)。 */
+static unsigned long long pcm_clock_us(void)
 {
     u32 lo = 0, hi = 0;
 
-    if (sys_time_now(&lo, &hi) != 0) lo = tick_count * 10000U;
-    if ((u32)(lo - s_last_now) >= 0x80000000U) lo = s_last_now;
-    s_last_now = lo;
-    return lo;
+    if (sys_time_now(&lo, &hi) != 0)
+        return (unsigned long long)tick_count * PCM_US_PER_TICK;
+    return ((unsigned long long)hi << 32) | (unsigned long long)lo;
+}
+
+/* 単調性の基準を今に置く (open と TIMEBASE)。 */
+static void pcm_clock_rebase(void)
+{
+    s_last_us = pcm_clock_us();
+}
+
+/* µs 時計。**64 ビットで**前回値と比べ、戻った分だけ抑える (sys_time_now が
+ * 取れず tick の代用に落ちた回の端数ぶん)。下位 32 ビットの差で「巻き戻り」
+ * を推し量ると、起動 35 分 48 秒後からの初回再生で正しい時刻を巻き戻りと
+ * 読んで時計が止まり、番犬が死んでいた (Codex 実装レビュー blocker 4)。
+ * 返すのは下位 32 ビット — pcm_obs は u32 の差で見るので 71 分まで正しい。 */
+static u32 pcm_now(void)
+{
+    unsigned long long t = pcm_clock_us();
+
+    if (t < s_last_us) t = s_last_us;
+    s_last_us = t;
+    return (u32)t;
 }
 
 /* PCM_OP_TIMEBASE: 観測と番犬の基準を今に戻す。 */
@@ -164,6 +200,7 @@ static void pcm_timebase(void)
     g_pcm.half = 0;
     g_pcm.pos = 0;
     g_pcm.gen++;
+    pcm_clock_rebase();
     g_pcm.last_progress = pcm_now();
     g_pcm.now = g_pcm.last_progress;
     g_pcm.state = PCM_ST_RUNNING;
@@ -225,12 +262,15 @@ static int pcm_run(const struct pcm_op *ops, int n, int at, int blocking)
     return n;
 }
 
-/* 停止の入口の列 (期限もここで入る)。 */
+/* 停止の入口の列 (期限もここで入る)。**IF=0 で呼ぶ** (tick / IRQ の中か、
+ * foreground なら状態の公開と同じ irq_save の中)。FAULTED と回収の後は
+ * 装置に書かない (Codex 実装レビュー blocker 3)。 */
 static void pcm_stop_entry(void)
 {
     const struct pcm_op *ops;
     int n;
 
+    if (s_claimed || g_pcm.state == PCM_ST_FAULTED) return;
     n = pcm_seq_stop_entry(&ops);
     pcm_run(ops, n, 0, 0);
     s_seq_at = 0;
@@ -259,17 +299,17 @@ static void pcm_advance_stop(void)
     pcm_diag_stop_calls++;
     pcm_diag_stop_at = (u32)at;
     pcm_diag_deadline = s_deadline;
-    if (at < 0) { pcm_enter_faulted(1); return; }
+    if (at < 0) { pcm_enter_faulted(PCM_DIAG_FAULT_TAIL); return; }
     if (at < n) {
         s_seq_at = at;
         if (!pcm_past(s_deadline)) return;
         if (g_pcm.state == PCM_ST_RS_STOP) {
             g_pcm.drain_failed = 1;
-            pcm_diag_df_site |= 1;
+            pcm_diag_df_site |= PCM_DIAG_DF_RS_STOP_DL;
             g_pcm.state = PCM_ST_STOP_REQ;
             pcm_stop_entry();
         } else {
-            pcm_enter_faulted(2);
+            pcm_enter_faulted(PCM_DIAG_FAULT_TAIL_DL);
         }
         return;
     }
@@ -281,12 +321,12 @@ static void pcm_advance_stop(void)
     /* STOP_REQ の**証拠**: PEN=0、PI=0、R0 != 0x80。 */
     {
         u8 ev = 0;
-        if ((inp(PCM_PORT_R0) & PCM_R0_INIT) != 0) ev |= 1;
-        if ((cs_read(PCM_I_IFACE) & PCM_IFACE_PEN) != 0) ev |= 2;
-        if ((cs_read(PCM_I_ALTSTAT) & PCM_ALT_PI) != 0) ev |= 4;
+        if ((inp(PCM_PORT_R0) & PCM_R0_INIT) != 0) ev |= PCM_DIAG_EV_INIT;
+        if ((cs_read(PCM_I_IFACE) & PCM_IFACE_PEN) != 0) ev |= PCM_DIAG_EV_PEN;
+        if ((cs_read(PCM_I_ALTSTAT) & PCM_ALT_PI) != 0) ev |= PCM_DIAG_EV_PI;
         pcm_diag_evidence = ev;
         if (ev != 0) {
-            if (pcm_past(s_deadline)) pcm_enter_faulted(3);
+            if (pcm_past(s_deadline)) pcm_enter_faulted(PCM_DIAG_FAULT_EVID_DL);
             return;
         }
     }
@@ -301,7 +341,7 @@ static void pcm_advance_restart(void)
     n = pcm_seq_restart(&ops);
     if (pcm_run(ops, n, 0, 0) < 0) {
         g_pcm.drain_failed = 1;
-        pcm_diag_df_site |= 2;
+        pcm_diag_df_site |= PCM_DIAG_DF_RESTART;
         g_pcm.state = PCM_ST_STOP_REQ;
         pcm_stop_entry();
         return;
@@ -315,6 +355,11 @@ static void pcm_advance_run(void)
     struct pcm_act act;
     u32 left = 0, p1 = 0;
     int tc = 0, have = 0;
+
+    /* close が RS_* の途中で立てた close_pending を RUNNING でも拾う
+     * (RS_RESTART の完了と close の入口がどちらの順でも drain に入る)。 */
+    if (g_pcm.state == PCM_ST_RUNNING && g_pcm.close_pending)
+        g_pcm.state = PCM_ST_DRAINING;
 
     if (dma_chan_remaining(PCM_DMA_CHAN, &left, &tc) == 0) {
         p1 = pcm_pos_frames(left);
@@ -331,8 +376,9 @@ static int pcm_advance(void)
 {
     int handled = 0;
 
-    /* 0. **入口ガード**: ここでは装置に 1 度も触らない (Index 書きも 0 回)。 */
-    if (s_mce_busy) return IRQ_NONE;
+    /* 0. **入口ガード**: ここでは装置に 1 度も触らない (Index 書きも 0 回)。
+     *    回収 / 解放が引き取った後も同じ (再始動・補充を走らせない)。 */
+    if (s_claimed || s_mce_busy) return IRQ_NONE;
     if (g_pcm.state == PCM_ST_CLOSED || g_pcm.state == PCM_ST_OPENING ||
         g_pcm.state == PCM_ST_FAULTED) {
         return IRQ_NONE;
@@ -397,7 +443,8 @@ void pcm_init(void)
     }
     s_present = 1;
     kprintf(0x07, "[pcm] CS4231 v=%d irq %d dma %d fmt 0x%X\n",
-            (int)(s_version == PCM_VER_CS4231 ? 100 : 101),
+            (int)(s_version == PCM_VER_CS4231 ? PCM_VER_NAME_4231
+                                              : PCM_VER_NAME_4231A),
             (int)PCM_IRQ, (int)PCM_DMA_CHAN, (int)PCM_FMT_44100);
 }
 
@@ -411,6 +458,7 @@ static void pcm_release(int leak)
 {
     if (g_pcm.finalized) return;
     g_pcm.finalized = 1;
+    s_claimed = 1;              /* 以後 advance は装置にもリングにも触らない */
 
     if (s_irq_reg) {
         irq_unregister(PCM_IRQ, pcm_irq, 0);
@@ -421,7 +469,7 @@ static void pcm_release(int leak)
     if (s_stg) kfree(s_stg);
     if (leak) {
         if (s_ring) dma_pool_mark_leaked(s_ring);
-        pcm_enter_faulted(6);
+        pcm_enter_faulted(PCM_DIAG_FAULT_RECLAIM);
     } else {
         if (s_ring) dma_pool_free(s_ring);
         g_pcm.state = PCM_ST_CLOSED;
@@ -464,6 +512,7 @@ int pcm_open(u32 rate)
     /* 巻き戻しも pcm_release を通るので、**1 度だけ**の錠を先に外す。 */
     g_pcm.finalized = 0;
     g_pcm.state = PCM_ST_OPENING;
+    s_claimed = 0;
     rc = pcm_seq_prologue(&tbl);
     pcm_run(tbl, rc, 0, 1);
     if (!pcm_detect()) return pcm_open_fail(OS32_ERR_NOSYS);
@@ -491,6 +540,7 @@ int pcm_open(u32 rate)
     s_owner = res_owner_get();
     s_deadline = 0;
     s_seq_at = 0;
+    pcm_clock_rebase();         /* 長い空白の後でも時計の基準は今 */
     return 0;
 }
 
@@ -508,16 +558,30 @@ static void pcm_start(void)
     irq_restore(f);
 }
 
+/* 受付の検査 (owner と状態)。KAPI の wrapper は入力の検査より先にこれを呼ぶ。 */
+int pcm_write_check(void)
+{
+    int st;
+
+    if (!pcm_owner_ok()) return OS32_ERR_INVAL;
+    st = (int)g_pcm.state;
+    if (st != PCM_ST_OPEN && st != PCM_ST_RUNNING &&
+        st != PCM_ST_RS_STOP && st != PCM_ST_RS_RESTART) {
+        return OS32_ERR_INVAL;
+    }
+    return 0;
+}
+
 int pcm_write(const void *buf, u32 bytes)
 {
     unsigned int f;
     u32 frames, off = 0, n, a = 0, b = 0;
+    int rc;
 
-    if (!pcm_owner_ok()) return OS32_ERR_INVAL;
-    if (g_pcm.state != PCM_ST_OPEN && g_pcm.state != PCM_ST_RUNNING &&
-        g_pcm.state != PCM_ST_RS_STOP && g_pcm.state != PCM_ST_RS_RESTART) {
-        return OS32_ERR_INVAL;
-    }
+    /* 順序: owner と状態 → NULL → 長さ (bytes = 0 でも未 open は負)。 */
+    rc = pcm_write_check();
+    if (rc != 0) return rc;
+    if (!buf) return OS32_ERR_INVAL;
     frames = bytes / PCM_FRAME_BYTES;      /* frame の倍数だけ受ける */
     if (frames == 0) return 0;
 
@@ -556,11 +620,22 @@ int pcm_set_volume(u32 percent)
 {
     u8 r = 0;
 
+    unsigned int f;
+
     if (!pcm_owner_ok()) return OS32_ERR_INVAL;
     if (pcm_vol_reg(percent, &r) != 0) return OS32_ERR_INVAL;
-    if (s_mce_busy || g_pcm.state == PCM_ST_FAULTED) return OS32_ERR_AGAIN;
-    cs_write(PCM_I_LDA, r);
-    cs_write(PCM_I_RDA, r);
+    /* 判定と I6 / I7 の 2 つの書きを**1 つの禁止区間**に入れる。別々だと
+     * 判定の後や I6 と I7 の間で tick が FAULTED にし、その後に装置へ書いて
+     * いた (「FAULTED では Index 書きも 0 回」を破る。Codex 実装レビュー
+     * blocker 5)。 */
+    f = irq_save();
+    if (s_claimed || s_mce_busy || g_pcm.state == PCM_ST_FAULTED) {
+        irq_restore(f);
+        return OS32_ERR_AGAIN;
+    }
+    cs_write_locked(PCM_I_LDA, r);
+    cs_write_locked(PCM_I_RDA, r);
+    irq_restore(f);
     return 0;
 }
 
@@ -577,39 +652,67 @@ static int pcm_wait_stopped(u32 ticks)
 
     while (*st != PCM_ST_STOP_DONE && *st != PCM_ST_FAULTED) {
         if (pcm_past(dl)) return 0;
+        PCM_PREEMPT(PCM_PP_WAIT);
     }
     return 1;
 }
 
 int pcm_close(void)
 {
-    int rc;
+    unsigned int f;
+    int rc, st, idle;
 
     if (!pcm_owner_ok()) return OS32_ERR_INVAL;
-    if (g_pcm.state == PCM_ST_FAULTED) { pcm_release(1); return OS32_ERR_IO; }
 
-    if (g_pcm.state == PCM_ST_OPEN) {
-        if (g_pcm.stg.staged == 0) { pcm_release(0); return 0; }
-        g_pcm.close_pending = 1;
-        pcm_start();                       /* 短いストリームは close で始める */
-    } else if (g_pcm.state == PCM_ST_RUNNING) {
+    /* 入口: 状態の判定と DRAINING / close_pending の公開を**1 つの禁止区間**で。
+     * 外で読むと、読んでから書くまでに tick が RUNNING → RS_STOP や
+     * RS_RESTART → RUNNING を挟み、止まった装置を DRAINING で上書きしたり
+     * close_pending を誰も見なくなったりした (Codex 実装レビュー blocker 2)。 */
+    f = irq_save();
+    st = (int)g_pcm.state;
+    idle = (st == PCM_ST_OPEN && g_pcm.stg.staged == 0);
+    PCM_PREEMPT(PCM_PP_CLOSE_ENTRY);
+    if (st == PCM_ST_OPEN) {
+        if (!idle) {
+            g_pcm.close_pending = 1;
+            pcm_start();                   /* 短いストリームは close で始める */
+        }
+    } else if (st == PCM_ST_RUNNING) {
         g_pcm.state = PCM_ST_DRAINING;
-    } else if (g_pcm.state != PCM_ST_DRAINING) {
+    } else if (st != PCM_ST_DRAINING && st != PCM_ST_FAULTED) {
         g_pcm.close_pending = 1;           /* RS_* / STOP_* の途中 */
     }
+    irq_restore(f);
 
-    if (g_pcm.drain_failed) pcm_diag_df_site |= 8;
+    if (st == PCM_ST_FAULTED) { pcm_release(1); return OS32_ERR_IO; }
+    if (idle) { pcm_release(0); return 0; }
+
+    if (g_pcm.drain_failed) pcm_diag_df_site |= PCM_DIAG_DF_OBS;
     if (!pcm_wait_stopped(pcm_close_ticks(g_pcm.stg.staged, g_pcm.rate))) {
-        /* 期限切れは番犬と同じ扱い: drain 失敗 → STOP_REQ を待つ。 */
-        if (g_pcm.drain_failed) pcm_diag_df_site |= 8;
-        g_pcm.drain_failed = 1;
-        pcm_diag_df_site |= 4;
-        if (g_pcm.state != PCM_ST_STOP_REQ && g_pcm.state != PCM_ST_STOP_DONE &&
-            g_pcm.state != PCM_ST_FAULTED) {
+        /* 期限切れは番犬と同じ扱い: drain 失敗 → STOP_REQ を待つ。
+         * **判定・状態の公開・停止の入口 (新しい期限) を 1 つの禁止区間で**。
+         * STOP_REQ だけ先に見せると、入口の前の tick が古い期限で FAULTED に
+         * していた (Codex 実装レビュー blocker 3)。すでに STOP_* / FAULTED
+         * なら装置は止まりに向かっているので触らない。 */
+        f = irq_save();
+        st = (int)g_pcm.state;
+        if (st != PCM_ST_STOP_REQ && st != PCM_ST_STOP_DONE &&
+            st != PCM_ST_FAULTED) {
+            if (g_pcm.drain_failed) pcm_diag_df_site |= PCM_DIAG_DF_OBS;
+            g_pcm.drain_failed = 1;
+            pcm_diag_df_site |= PCM_DIAG_DF_CLOSE_DL;
             g_pcm.state = PCM_ST_STOP_REQ;
+            PCM_PREEMPT(PCM_PP_CLOSE_TIMEOUT);
             pcm_stop_entry();
         }
-        if (!pcm_wait_stopped(PCM_STOP_TICKS + 2U)) pcm_enter_faulted(5);
+        irq_restore(f);
+        if (!pcm_wait_stopped(PCM_STOP_TICKS + PCM_STOP_WAIT_SLACK)) {
+            /* 期限と tick の完了が重なっても STOP_DONE を FAULTED で消さない。 */
+            f = irq_save();
+            if (g_pcm.state != PCM_ST_STOP_DONE)
+                pcm_enter_faulted(PCM_DIAG_FAULT_CLOSE2);
+            irq_restore(f);
+        }
     }
 
     if (g_pcm.state == PCM_ST_FAULTED) { pcm_release(1); return OS32_ERR_IO; }
@@ -631,27 +734,27 @@ void pcm_reclaim(int owner)
 
     f = irq_save();
     st = (int)g_pcm.state;
+    if (st == PCM_ST_CLOSED || st == PCM_ST_OPENING) {
+        irq_restore(f);
+        return;
+    }
+    /* **IF を戻す前に**装置を引き取り、advance が再始動・補充しない終端の
+     * 状態へ移す。状態を残したまま IF を戻すと、tick が RS_RESTART を実行
+     * して (unmask、PEN=1) から foreground がリングを free していた
+     * (Codex 実装レビュー blocker 1)。`irq_unregister` は tick を止めない。 */
+    s_claimed = 1;
     evid = 1;
-    switch (st) {
-    case PCM_ST_CLOSED:
-    case PCM_ST_OPENING:
-        irq_restore(f);
-        return;
-    case PCM_ST_OPEN:
-    case PCM_ST_STOP_DONE:
-        break;                             /* 再生していない / もう止まった */
-    case PCM_ST_FAULTED:
-        irq_restore(f);
-        pcm_release(1);
-        return;
-    default:
+    if (st == PCM_ST_FAULTED) {
+        evid = 0;
+    } else if (st != PCM_ST_OPEN && st != PCM_ST_STOP_DONE) {
         /* RUNNING / DRAINING / RS_* / STOP_REQ: 境界は問わずに止める。 */
         n = pcm_seq_abort(&ops);
         pcm_run(ops, n, 0, 0);
         evid = ((inp(PCM_PORT_R0) & PCM_R0_INIT) == 0 &&
                 (cs_read(PCM_I_IFACE) & PCM_IFACE_PEN) == 0);
-        break;
     }
+    if (evid) g_pcm.state = PCM_ST_STOP_DONE;
+    else pcm_enter_faulted(PCM_DIAG_FAULT_RECLAIM);
     irq_restore(f);
     pcm_release(evid ? 0 : 1);
 }
