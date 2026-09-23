@@ -14,6 +14,10 @@
  *
  *  **この票の一番大事な規則**:
  *    (1) 名札が無い配備元でも**今までどおり動く** (後方互換)。
+ *        → 票 TASK_KAPI_DATA_FIELDS (KAPI v63) で**変わった**: 名札の kapi= で
+ *          配備物の KAPI 配置を確かめられないなら既定で断る (`--force-kapi`
+ *          で越える)。H4 の規則を見る既存の段は `--force-kapi` を付けて回し
+ *          (g_inject_force_kapi)、KAPI の門そのものは case_kapi が見る。
  *    (2) 壊れた名札は**捨てる**。ただし断るのは `--expect-build` かつ
  *        **全体同期**のときだけ。絞り込みでは表示して続ける。
  *    (3) **名札が読めないことを「一致」と扱わない** (往復 1 所見 2)。
@@ -407,15 +411,25 @@ static void fake_api_init(void)
 /*  小道具                                                                    */
 /* ========================================================================= */
 
+/* 1 = 引数の末尾に `--force-kapi` を足す (H4 の規則を見る既存の段)。
+ * KAPI の門そのものを見る case_kapi だけ 0 にする。 */
+static int g_inject_force_kapi = 1;
+
 static int run_hsync(int argc, char **argv)
 {
+    char *av[16];
+    int i;
+
     fk_log_len = 0;
     fk_log[0] = '\0';
     fk_write_calls = 0;
     fk_read_calls = 0;
     fk_rename_calls = 0;
     fk_mkdir_calls = 0;
-    return hsync_main(argc, argv, &g_fake);
+    for (i = 0; i < argc && i < 14; i++) av[i] = argv[i];
+    if (g_inject_force_kapi) av[i++] = (char *)"--force-kapi";
+    av[i] = 0;
+    return hsync_main(i, av, &g_fake);
 }
 
 static int run0(void)
@@ -487,6 +501,10 @@ static int wrote_nothing(void)
 
 /* ---- 足場: /host に 2 ファイル、/ 側は空 (= 全部 new_file) ---- */
 
+/* 名札の KAPI 行 (票 TASK_KAPI_DATA_FIELDS)。値は v63 の配置 0x4B8 = 1208 と
+ * 版 63 — main() の先頭で KAPI_DATA_FIELDS_OFF / KAPI_VERSION と突き合わせる。 */
+#define KL "kapi=1208\nkapi_version=63\n"
+
 #define MAN_DIR  "/host/.deploy"
 #define MAN_PATH "/host/.deploy/manifest.txt"
 
@@ -539,9 +557,10 @@ static void put_good_manifest(const char *build)
 {
     char buf[4096];
     sprintf(buf,
-            "format=1\n"
+            "format=2\n"
             "build=%s\n"
             "generated=2026-09-16T21:45:19Z\n"
+            KL
             "count=2\n"
             "---\n"
             "bin/a.bin %lu %08lx 111\n"
@@ -636,59 +655,77 @@ static void case_m6(void)
     printf("== M6 / M6b / M12: 壊れた名札 ==\n");
 
     broken_case("形式版が違う",
-                "format=2\nbuild=x\ngenerated=g\ncount=0\n---\n", "format");
+                "format=3\nbuild=x\ngenerated=g\n" KL "count=0\n---\n", "format");
     broken_case("--- が無い",
-                "format=1\nbuild=x\ngenerated=g\ncount=0\n", "separator");
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=0\n", "separator");
     broken_case("count が行数と合わない",
-                "format=1\nbuild=x\ngenerated=g\ncount=2\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=2\n---\n"
                 "bin/a.bin 1 00000000 1\n", "count");
     broken_case("count より行が多い",
-                "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n"
                 "bin/a.bin 1 00000000 1\nbin/b.bin 1 00000000 1\n", "count");
     broken_case("重複するパス",
-                "format=1\nbuild=x\ngenerated=g\ncount=2\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=2\n---\n"
                 "bin/a.bin 1 00000000 1\nbin/a.bin 2 00000000 2\n",
                 "duplicate");
     broken_case("絶対パス",
-                "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n"
                 "/bin/a.bin 1 00000000 1\n", "bad path");
     broken_case("'..' を含むパス",
-                "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n"
                 "../etc/passwd 1 00000000 1\n", "bad path");
     broken_case("'.' を含むパス",
-                "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n"
                 "bin/./a.bin 1 00000000 1\n", "bad path");
     broken_case("'\\' を含むパス",
-                "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n"
                 "bin\\a.bin 1 00000000 1\n", "bad path");
     broken_case("CRC の桁が足りない",
-                "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n"
                 "bin/a.bin 1 abc 1\n", "bad crc");
     broken_case("CRC が大文字",
-                "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n"
                 "bin/a.bin 1 ABCDEF01 1\n", "bad crc");
     broken_case("サイズが数字でない",
-                "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n"
                 "bin/a.bin xx 00000000 1\n", "bad size");
     broken_case("mtime が数字でない",
-                "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n"
                 "bin/a.bin 1 00000000 zz\n", "bad mtime");
     broken_case("区切りが空白 2 つ",
-                "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n"
                 "bin/a.bin  1 00000000 1\n", "field");
     broken_case("欄が 5 つ",
-                "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n"
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n"
                 "bin/a.bin 1 00000000 1 extra\n", "field");
     broken_case("build が無い",
-                "format=1\ngenerated=g\ncount=0\n---\n", "missing");
+                "format=2\ngenerated=g\n" KL "count=0\n---\n", "missing");
     broken_case("知らない鍵",
-                "format=1\nbuild=x\ngenerated=g\ncount=0\nweird=1\n---\n",
+                "format=2\nbuild=x\ngenerated=g\n" KL "count=0\nweird=1\n---\n",
                 "unknown key");
+    /* 票 TASK_KAPI_DATA_FIELDS: format=2 は kapi= / kapi_version= が必須 */
+    broken_case("kapi が無い",
+                "format=2\nbuild=x\ngenerated=g\nkapi_version=63\ncount=0\n---\n",
+                "missing");
+    broken_case("kapi_version が無い",
+                "format=2\nbuild=x\ngenerated=g\nkapi=1208\ncount=0\n---\n",
+                "missing");
+    broken_case("kapi が数字でない",
+                "format=2\nbuild=x\ngenerated=g\nkapi=0x4b8\nkapi_version=63\n"
+                "count=0\n---\n", "bad kapi");
+    broken_case("kapi が 0",
+                "format=2\nbuild=x\ngenerated=g\nkapi=0\nkapi_version=63\n"
+                "count=0\n---\n", "bad kapi");
+    broken_case("kapi が重複",
+                "format=2\nbuild=x\ngenerated=g\n" KL "kapi=1208\ncount=0\n---\n",
+                "duplicate");
+    broken_case("旧形式 format=1 (kapi を持たない)",
+                "format=1\nbuild=x\ngenerated=g\ncount=0\n---\n", "format");
     broken_case("build に空白",
-                "format=1\nbuild=a b\ngenerated=g\ncount=0\n---\n", "build");
+                "format=2\nbuild=a b\ngenerated=g\n" KL "count=0\n---\n", "build");
 
     /* 長すぎるパス (HS_MAN_PATH_CAP 超) */
-    at = sprintf(buf, "format=1\nbuild=x\ngenerated=g\ncount=1\n---\n");
+    at = sprintf(buf, "format=2\nbuild=x\ngenerated=g\n" KL "count=1\n---\n");
     for (i = 0; i < HS_MAN_PATH_CAP + 4; i++) buf[at++] = 'p';
     at += sprintf(buf + at, " 1 00000000 1\n");
     buf[at] = '\0';
@@ -696,7 +733,7 @@ static void case_m6(void)
 
     /* M9b: 名札が大きすぎる (表に収まらない) */
     printf("== M9b: 名札が大きすぎる -> 名札ごと捨てる ==\n");
-    at = sprintf(big, "format=1\nbuild=x\ngenerated=g\ncount=%d\n---\n",
+    at = sprintf(big, "format=2\nbuild=x\ngenerated=g\n" KL "count=%d\n---\n",
                  HS_MAN_MAX + 1);
     for (i = 0; i < HS_MAN_MAX + 1; i++)
         at += sprintf(big + at, "bin/f%d.bin 1 00000000 1\n", i);
@@ -975,7 +1012,7 @@ static void case_limits(void)
 
     printf("== 上限: ちょうど HS_MAN_MAX 件は通る ==\n");
     big = (char *)malloc(HS_MAN_MAX * 64 + 4096);
-    at = sprintf(big, "format=1\nbuild=B1\ngenerated=g\ncount=%d\n---\n",
+    at = sprintf(big, "format=2\nbuild=B1\ngenerated=g\n" KL "count=%d\n---\n",
                  HS_MAN_MAX);
     for (i = 0; i < HS_MAN_MAX; i++)
         at += sprintf(big + at, "bin/f%d.bin 1 00000000 1\n", i);
@@ -995,6 +1032,134 @@ static void case_limits(void)
           "パスの上限は NAME_CAP に揃える (票 §2-3)");
 }
 
+/* ========================================================================= */
+/*  K — KAPI の門 (票 TASK_KAPI_DATA_FIELDS、KAPI v63)                        */
+/*                                                                           */
+/*  名札の kapi= (配備物のデータ欄の配置) がカーネルと違う / kapi_version が  */
+/*  カーネルより新しい / 名札が無い・壊れている → **1 件も書かずに断る**。    */
+/*  絞り込み (`hsync sys`) でも断る。`--force-kapi` だけが越える (`-f` は      */
+/*  別の意味の旗なので越えない)。                                             */
+/* ========================================================================= */
+
+static void put_kapi_manifest(unsigned long off, unsigned long ver)
+{
+    char buf[4096];
+    sprintf(buf,
+            "format=2\n"
+            "build=K\n"
+            "generated=g\n"
+            "kapi=%lu\n"
+            "kapi_version=%lu\n"
+            "count=2\n"
+            "---\n"
+            "bin/a.bin %lu %08lx 111\n"
+            "bin/b.bin %lu %08lx 222\n",
+            off, ver,
+            (unsigned long)g_a_size, (unsigned long)g_a_crc,
+            (unsigned long)g_b_size, (unsigned long)g_b_crc);
+    put_manifest(buf);
+}
+
+static void kapi_refused(const char *label, const char *reason)
+{
+    char name[256];
+    sprintf(name, "%s: 理由を表示する", label);
+    check(log_has(reason), name);
+    sprintf(name, "%s: **1 件も書かない**", label);
+    check(wrote_nothing(), name);
+    sprintf(name, "%s: 宛先に何も現れない", label);
+    check(fs_find("/bin/a.bin") < 0 && fs_find("/bin/b.bin") < 0, name);
+}
+
+static void case_kapi(void)
+{
+    const char *why = 0;
+    u32 saved_ver = g_fake.version;
+    unsigned long off = (unsigned long)KAPI_DATA_FIELDS_OFF;
+    unsigned long ver = (unsigned long)KAPI_VERSION;
+
+    printf("== K: KAPI の門 (票 TASK_KAPI_DATA_FIELDS) ==\n");
+    g_inject_force_kapi = 0;
+    g_fake.version = KAPI_VERSION;
+
+    /* K0: 試験の KL が v63 の配置と一致している (ずれたら全段が嘘になる) */
+    check(KAPI_DATA_FIELDS_OFF == 1208, "K0 KL の kapi=1208 は KAPI_DATA_FIELDS_OFF");
+    check(KAPI_VERSION >= 63, "K0 KL の kapi_version=63 はこの SDK 以下");
+
+    /* K1: 一致 → 同期する */
+    setup_tree();
+    put_kapi_manifest(off, ver);
+    check(run0() == 0, "K1 配置・版が一致すれば同期する");
+    check(!log_has("reason=kapi") && !log_has("KAPI reason"), "K1 KAPI の門で断らない");
+    check(log_has("kapi=1208/v"), "K1 DEPLOY 行に kapi を出す");
+    check(fs_find("/bin/a.bin") >= 0, "K1 宛先に届く");
+
+    /* K1b: 配備物の版がカーネルより古い → 通す (v63 以降は配置が固定) */
+    setup_tree();
+    put_kapi_manifest(off, 63);
+    g_fake.version = 70;
+    check(run0() == 0, "K1b 配備物の版 < カーネルの版は通す (カーネルを先に配備した形)");
+    g_fake.version = KAPI_VERSION;
+
+    /* K2: 配置違い → 全体でも絞り込みでも断る */
+    setup_tree();
+    put_kapi_manifest(off - 4, ver);
+    check(run0() != 0, "K2 配置違いは非ゼロ終了");
+    kapi_refused("K2 reason=kapi_layout_mismatch", "reason=kapi_layout_mismatch");
+    setup_tree();
+    put_kapi_manifest(off - 4, ver);
+    check(run1("bin") != 0, "K2b 絞り込み (bin) でも断る");
+    kapi_refused("K2b reason=kapi_layout_mismatch", "reason=kapi_layout_mismatch");
+
+    /* K3: 配備物の版 > カーネルの版 → 断る (v64 以降はカーネルを先) */
+    setup_tree();
+    put_kapi_manifest(off, ver + 1);
+    check(run0() != 0, "K3 版がカーネルより新しいなら非ゼロ終了");
+    kapi_refused("K3 reason=kapi_newer_than_kernel", "reason=kapi_newer_than_kernel");
+
+    /* K4: 名札が無い → 確かめられない = 一致と扱わない */
+    setup_tree();
+    check(run0() != 0, "K4 名札が無ければ断る");
+    kapi_refused("K4 reason=manifest_absent", "reason=manifest_absent");
+
+    /* K5: 旧形式 (format=1、kapi が無い) → 壊れた名札と同じ扱いで断る */
+    setup_tree();
+    put_manifest("format=1\nbuild=x\ngenerated=g\ncount=0\n---\n");
+    check(run1("bin") != 0, "K5 旧形式の名札は絞り込みでも断る");
+    kapi_refused("K5 reason=manifest_invalid", "reason=manifest_invalid");
+
+    /* K6: -f / --force は KAPI の門を開けない */
+    setup_tree();
+    put_kapi_manifest(off - 4, ver);
+    check(run1("-f") != 0, "K6 -f では越えない");
+    kapi_refused("K6 reason=kapi_layout_mismatch", "reason=kapi_layout_mismatch");
+
+    /* K7: --force-kapi だけが越える。理由は黙らせない */
+    setup_tree();
+    put_kapi_manifest(off - 4, ver);
+    check(run1("--force-kapi") == 0, "K7 --force-kapi なら続ける");
+    check(log_has("NOTE: KAPI (kapi_layout_mismatch)"), "K7 越えた理由を表示する");
+    check(fs_find("/bin/a.bin") >= 0, "K7 宛先に届く");
+    setup_tree();
+    check(run1("--force-kapi") == 0, "K7b 名札が無くても --force-kapi なら続ける");
+    check(log_has("NOTE: KAPI (manifest_absent)"), "K7b 理由を表示する");
+
+    /* K8: 判定関数そのもの */
+    g_man_present = 1; g_man_valid = 1;
+    g_man_kapi = 1208; g_man_kapi_ver = 63;
+    check(man_kapi_check(1208, 63, &why) == 0 && why == 0, "K8 一致 → 通す");
+    check(man_kapi_check(1204, 63, &why) == 1 && why && strcmp(why, HR_KAPI_LAYOUT) == 0, "K8 配置違い → 断る");
+    check(man_kapi_check(1208, 62, &why) == 1 && why && strcmp(why, HR_KAPI_NEWER) == 0, "K8 版が新しい → 断る");
+    check(man_kapi_check(1208, 64, &why) == 0, "K8 版が古い → 通す");
+    g_man_valid = 0;
+    check(man_kapi_check(1208, 63, &why) == 1 && why && strcmp(why, HR_MANIFEST_INVALID) == 0, "K8 壊れた名札 → 断る");
+    g_man_present = 0;
+    check(man_kapi_check(1208, 63, &why) == 1 && why && strcmp(why, HR_MANIFEST_ABSENT) == 0, "K8 名札なし → 断る");
+
+    g_fake.version = saved_ver;
+    g_inject_force_kapi = 1;
+}
+
 int main(void)
 {
     printf("=== 票 H4: 配備マニフェストと世代の確認 (読む側) ===\n");
@@ -1007,6 +1172,7 @@ int main(void)
     case_m10();
     case_regression();
     case_limits();
+    case_kapi();
 
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

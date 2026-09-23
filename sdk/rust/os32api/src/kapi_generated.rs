@@ -239,13 +239,36 @@ pub struct KernelAPI {
     /* idx 229 */ pub pcm_close: unsafe extern "C" fn() -> i32,
     /* idx 230 */ pub pcm_set_volume: unsafe extern "C" fn(percent: u32) -> i32,
     /* idx 231 */ pub kbd_diag: unsafe extern "C" fn(out: *mut u8) -> i32,
+    /* idx 232..301 予約 (C の kapi_reserved[]) */ pub kapi_reserved: [u32; 70],
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 62;
+pub const KAPI_VERSION: u32 = 63;
+
+/* 関数表の容量とデータ欄の固定配置 (票 TASK_KAPI_DATA_FIELDS、v63) */
+pub const KAPI_FUNC_COUNT: u32 = 230;
+pub const KAPI_FUNC_CAPACITY: u32 = 300;
+pub const KAPI_DATA_FIELDS_OFF: u32 = 0x4B8;
+/// データ欄が固定になった KAPI 版 (= C の OS32X_HDR_V3_MIN_API)。これ未満の
+/// カーネルの KernelAPI はデータ欄が別の位置にある。
+pub const OS32X_HDR_V3_MIN_API: u32 = 63;
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::offset_of!(KernelAPI, sbrk_heap_limit) == KAPI_DATA_FIELDS_OFF as usize);
+
+/* 配置の刻印 (ヘッダ v3)。非ロードの .os32_kapi_layout に 1 語置き、
+ * mkos32x.py / mkshlib.py が OS32X ヘッダの kapi_data_off へ写す。
+ * フラグ "" = 非 alloc (平らなバイナリに入らない)。crt0 を持たない
+ * libos32gui.shlib はこの刻印だけで配置を示す。 */
+#[cfg(target_pointer_width = "32")]
+core::arch::global_asm!(
+    ".pushsection .os32_kapi_layout,\"\",@progbits",
+    ".p2align 2",
+    ".long 0x4B8",
+    ".popsection",
+);
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

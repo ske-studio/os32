@@ -1,4 +1,5 @@
 #include "exec.h"
+#include "os32x_hdr.h"
 #include "appslot.h"
 #include "exec_heap.h"
 #include "io.h"
@@ -48,8 +49,9 @@ static KernelAPI *kapi;
 /*  カーネル band (.bss, PDE0 共有) に置き PTE を RO+USER にする              */
 /*  (CR0.WP=0 なのでカーネルは RO でも書ける = per-launch のデータ更新可)。   */
 /*  レイアウト (CONTRACTS C3, KernelAPI と同一オフセット):                    */
-/*    0x00 magic / 0x04 version / 0x08+ 表[i]=STUB_BASE+i*8 /                */
-/*    データフィールド (値) / STUB_BASE: 各 8B スタブ B8<slot>CD80C3         */
+/*    0x00 magic / 0x04 version / 0x08+ 表[i]=STUB_BASE+i*8 (予約込みで       */
+/*    KAPI_FUNC_CAPACITY 本) / KAPI_DATA_FIELDS_OFF: データフィールド (値、   */
+/*    v63 から固定) / STUB_BASE: 各 8B スタブ B8<slot>CD80C3                 */
 /* ======================================================================== */
 static u8  ring3_tramp_raw[PAGE_SIZE * 2];   /* 4KB アライン用に 2 ページ分 */
 static u32 ring3_tramp_page = 0;             /* 4KB 境界に揃えた実アドレス (=物理) */
@@ -90,6 +92,24 @@ void exec_init(void) {
 STATIC_ASSERT(RING3_USTR_OFF + RING3_USTR_CAP <= (u32)PAGE_SIZE,
               ring3_ustr_fits_in_trampoline_page);
 
+/* データ欄の固定配置 (票 TASK_KAPI_DATA_FIELDS、KAPI v63)。生成器
+ * (sdk/gen_kapi.py) の KAPI_DATA_FIELDS_OFF と構造体の実際の並びが一致し、
+ * 1 ページの容量 (表 + スタブ 8B × 容量 + 写し場) を越えないことを静的に見る。
+ * ここが落ちたら関数表の容量 (kapi.json の func_capacity) を見直す票を起こす。 */
+STATIC_ASSERT(__builtin_offsetof(KernelAPI, sbrk_heap_limit) ==
+              (u32)KAPI_DATA_FIELDS_OFF, kapi_data_fields_fixed);
+STATIC_ASSERT(__builtin_offsetof(KernelAPI, shm_base) ==
+              (u32)KAPI_DATA_FIELDS_OFF + 4u, kapi_shm_base_fixed);
+STATIC_ASSERT((u32)KAPI_DATA_IDX_SBRK_HEAP_LIMIT * 4u == (u32)KAPI_DATA_FIELDS_OFF,
+              kapi_data_idx_sbrk);
+STATIC_ASSERT((u32)KAPI_DATA_IDX_SHM_BASE * 4u == (u32)KAPI_DATA_FIELDS_OFF + 4u,
+              kapi_data_idx_shm);
+STATIC_ASSERT((u32)KAPI_FUNC_COUNT <= (u32)KAPI_FUNC_CAPACITY, kapi_func_capacity);
+STATIC_ASSERT(sizeof(KernelAPI) + (u32)KAPI_FUNC_CAPACITY * 8u + RING3_USTR_CAP
+              <= (u32)PAGE_SIZE, kapi_trampoline_one_page);
+/* 本物の表は KAPI_ADDR からの 4KB (MEM_KAPI_SIZE) に置く (include/memmap.h)。 */
+STATIC_ASSERT(sizeof(KernelAPI) <= (u32)MEM_KAPI_SIZE, kapi_table_fits_reserve);
+
 /* ======================================================================== */
 /*  ring3_trampoline_init — トランポリンページの構築 (v2 M2b)               */
 /* ======================================================================== */
@@ -106,7 +126,11 @@ static void ring3_trampoline_init(void)
     tbl[0] = kapi->magic;
     tbl[1] = kapi->version;
 
-    for (i = 0; i < KAPI_FUNC_COUNT; i++) {
+    /* 予約スロット (KAPI_FUNC_COUNT..KAPI_FUNC_CAPACITY-1) にもスタブを置く
+     * (票 TASK_KAPI_DATA_FIELDS)。NULL にすると旧 SDK が新しい関数を呼んだ
+     * とき 0 番地へ飛ぶ。スタブならディスパッチャが slot >= KAPI_FUNC_COUNT
+     * でアプリだけ kill する。 */
+    for (i = 0; i < KAPI_FUNC_CAPACITY; i++) {
         u8 *st = (u8 *)(stub_base + i * 8u);
         /* ユーザ可視表: entry[i] = スタブ i の番地 (KernelAPI fn[i] と同一 offset) */
         tbl[2 + i] = stub_base + i * 8u;
@@ -121,11 +145,11 @@ static void ring3_trampoline_init(void)
         st[7] = 0xC3;   /* ret */
     }
 
-    /* データフィールド (値): KernelAPI 表と同一オフセット (fn 表の直後)。
-     * index 2+KAPI_FUNC_COUNT = sbrk_heap_limit, +1 = shm_base。
+    /* データフィールド (値): KernelAPI 表と同一オフセット。v63 から
+     * KAPI_DATA_FIELDS_OFF に固定 (関数の数ではなく容量の後ろ)。
      * sbrk_heap_limit は exec_run が launch 時に上書きする。 */
-    tbl[2 + KAPI_FUNC_COUNT + 0] = 0;
-    tbl[2 + KAPI_FUNC_COUNT + 1] = (u32)MEM_SHM_BASE;
+    tbl[KAPI_DATA_IDX_SBRK_HEAP_LIMIT] = 0;
+    tbl[KAPI_DATA_IDX_SHM_BASE] = (u32)MEM_SHM_BASE;
 
     /* 全 PD 共有で RO+USER マップ (kernel band PDE0)。i386 は NX なしなので
      * RO でも実行可能 (スタブ実行 OK)。ユーザは書けない = スタブ改竄不可。
@@ -268,6 +292,15 @@ static AppSlot *g_cur_app = 0;
  * PM の V4 検証が emu_read_mem で読む。 */
 volatile u32 fault_kill_count = 0;
 
+/* 直前の起動が「KAPI データ欄の配置違い」で断られたか (票 TASK_KAPI_DATA_FIELDS)。
+ * kernel.c のシェル起動ループが、常駐シェルを断ったときの案内に使う。 */
+static int g_layout_reject = 0;
+
+int exec_layout_rejected(void)
+{
+    return g_layout_reject;
+}
+
 /* sbrk 物理の二段構え (決裁 2026-09-11) の観測点。KAPI にはしない —
  * fault_kill_count と同じくカーネルシンボルを emu_read_mem で読む。
  *   exec_sbrk_tier_last  : 直近の CPL=3 起動が採った段 (1 = 従来式 / 2 = 最低分)
@@ -319,6 +352,61 @@ u32 exec_tramp_page_addr(void)
     return ring3_tramp_page;
 }
 
+/* ======================================================================== */
+/*  exec_kapi_layout_selftest — データ欄の固定配置と予約スロット              */
+/*  (票 TASK_KAPI_DATA_FIELDS)。exec_init の後に kselftest から呼ぶ。         */
+/*  ビット 0..3 が落ちた項目 (0 = 全部通った)。                               */
+/* ======================================================================== */
+extern i32 __cdecl kapi_reserved_nosys(void);
+
+u32 exec_kapi_layout_selftest(void)
+{
+    u32 bad = 0;
+    const u32 *real = (const u32 *)KAPI_ADDR;
+    const u32 *tbl = (const u32 *)ring3_tramp_page;
+    u32 i;
+    OS32Header h;
+
+    if (ring3_tramp_page == 0) return 0xFu;     /* exec_init より前 */
+
+    /* (0) データ欄は固定オフセット。本物の表とトランポリンの同じ語に値が居る */
+    if ((u32)&kapi->sbrk_heap_limit != (u32)KAPI_ADDR + (u32)KAPI_DATA_FIELDS_OFF ||
+        real[KAPI_DATA_IDX_SHM_BASE] != kapi->shm_base ||
+        tbl[KAPI_DATA_IDX_SHM_BASE] != kapi->shm_base ||
+        kapi->shm_base == 0) {
+        bad |= 1u << 0;
+    }
+    /* (1) 本物の表の予約スロットは NULL でなく「未実装」 (CPL=0 は NOSYS) */
+    for (i = 0; i < (u32)KAPI_FUNC_RESERVED; i++) {
+        if (kapi->kapi_reserved[i] != kapi_reserved_nosys) bad |= 1u << 1;
+    }
+    if (kapi->kapi_reserved[0]() != OS32_ERR_NOSYS) bad |= 1u << 1;
+    /* (2) トランポリンの予約スロットは int 0x80 のスタブ (CPL=3 は kill) */
+    for (i = (u32)KAPI_FUNC_COUNT; i < (u32)KAPI_FUNC_CAPACITY; i++) {
+        const u8 *st = (const u8 *)(ring3_tramp_page + RING3_USTR_STUB_OFF + i * 8u);
+        if (tbl[2 + i] != (u32)st || st[0] != 0xB8 || st[1] != (u8)(i & 0xFF) ||
+            st[2] != (u8)((i >> 8) & 0xFF) || st[5] != 0xCD || st[6] != 0x80) {
+            bad |= 1u << 2;
+        }
+    }
+    /* (3) ヘッダ v3 の照合: v2 → 断る / v3 値違い → 断る / 一致 → 通す */
+    kmemset(&h, 0, sizeof(h));
+    h.magic = OS32X_MAGIC;
+    h.version = 2;
+    h.header_size = OS32X_HDR_V2_SIZE;
+    if (os32x_layout_check(&h, 4096u, KAPI_DATA_FIELDS_OFF) != OS32X_LAYOUT_OLD)
+        bad |= 1u << 3;
+    h.version = 3;
+    h.header_size = OS32X_HDR_V3_SIZE;
+    h.kapi_data_off = (u32)KAPI_DATA_FIELDS_OFF - 4u;
+    if (os32x_layout_check(&h, 4096u, KAPI_DATA_FIELDS_OFF) != OS32X_LAYOUT_MISMATCH)
+        bad |= 1u << 3;
+    h.kapi_data_off = (u32)KAPI_DATA_FIELDS_OFF;
+    if (os32x_layout_check(&h, 4096u, KAPI_DATA_FIELDS_OFF) != OS32X_LAYOUT_OK)
+        bad |= 1u << 3;
+    return bad;
+}
+
 u32 exec_tramp_user_selftest(void)
 {
     u32 bad = 0;
@@ -337,7 +425,7 @@ u32 exec_tramp_user_selftest(void)
     }
     /* スタブの領域と重ならない */
     if (addr < ring3_tramp_page + RING3_USTR_STUB_OFF +
-               (u32)KAPI_FUNC_COUNT * 8u) {
+               (u32)KAPI_FUNC_CAPACITY * 8u) {
         bad |= 1u << 0;
     }
 
@@ -944,7 +1032,7 @@ static void exec_restore_context(int id)
     }
     kapi->sbrk_heap_limit = a->sbrk_heap_limit;
     if (a->cpl3) {
-        ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 0] = a->sbrk_heap_limit;
+        ((u32 *)ring3_tramp_page)[KAPI_DATA_IDX_SBRK_HEAP_LIMIT] = a->sbrk_heap_limit;
     }
     if (!a->cpl3 && a->guard_a != 0) {
         paging_set_not_present(a->guard_a, a->guard_a + PAGE_SIZE - 1);
@@ -1348,12 +1436,13 @@ static int exec_launch(const char *cmdline, int gui_arg)
     /* ヘッダだけを先に読むカーネル側バッファ。本体を読む先の物理は、
      * ヘッダの text_size / bss_size / heap_size を見るまで決まらない
      * (D1 の「起動時の順序」手順 2)。 */
-    static u8 hdrbuf[OS32X_HDR_V2_SIZE + 64];
+    static u8 hdrbuf[OS32X_HDR_V3_SIZE + 64];
     const char *p = cmdline;
     int i = 0;
 
     launcher_id = appslot_cur();
     is_shell = (exec_nest_level == 0);
+    g_layout_reject = 0;
 
     /* ---- ID の池 (D3)。物理の勘定はヘッダを読んでから ---- */
     if (is_shell) {
@@ -1456,6 +1545,24 @@ static int exec_launch(const char *cmdline, int gui_arg)
         hdr->min_api_ver > KAPI_VERSION) {
         shell_print("Error: invalid OS32X binary\n", ATTR_RED);
         return EXEC_ERR_INVALID;
+    }
+
+    /* ---- KAPI データ欄の配置の照合 (票 TASK_KAPI_DATA_FIELDS、ヘッダ v3) ----
+     * v62 以前のバイナリはデータ欄 (sbrk_heap_limit / shm_base) を別の
+     * オフセットで読む。走らせると malloc が全部 ENOMEM になったり共有メモリの
+     * 番地を取り違えたりするので、**常駐シェルも含めて**ここで断る
+     * (シェルの停止と案内は kernel.c が exec_layout_rejected() を見て出す)。 */
+    {
+        int lrc = os32x_layout_check(hdr, (u32)sz, (u32)KAPI_DATA_FIELDS_OFF);
+        if (lrc != OS32X_LAYOUT_OK) {
+            g_layout_reject = 1;
+            kprintf(0xC1, "[exec] %s: %s (bin=%x kernel=%x)\n", path,
+                    os32x_layout_reason(lrc),
+                    (lrc == OS32X_LAYOUT_MISMATCH) ? hdr->kapi_data_off : 0u,
+                    (u32)KAPI_DATA_FIELDS_OFF);
+            shell_print("Error: rebuild required (KAPI data layout)\n", ATTR_RED);
+            return EXEC_ERR_INVALID;
+        }
     }
 
     /* ---- ロードアドレスの照合 (K3) ---- */
@@ -1754,7 +1861,7 @@ static int exec_launch(const char *cmdline, int gui_arg)
          * — アプリの fault ではなくカーネルが飛ぶ。
          * レイアウトの検査が guard_a - code_end >= MEM_EXEC_SBRK_MIN を
          * 保証しているので、ヘッダ + text はこの範囲に必ず収まる。 */
-        u32 read_max = max_size + OS32X_HDR_V2_SIZE;
+        u32 read_max = max_size + OS32X_HDR_V3_SIZE;
         if (want_ring3 && (sbrk_end - load_base) < read_max) {
             read_max = sbrk_end - load_base;
         }
@@ -1876,8 +1983,8 @@ static int exec_launch(const char *cmdline, int gui_arg)
         if (want_ring3) {
             /* --- M2c: CPL=3 アプリには本物の表でなくトランポリン表を渡す ---
              * CPL=3 の sbrk 上限は guard_a (exec_heap の直下のガード)。 */
-            ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 0] = sbrk_end;
-            ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 1] = kapi->shm_base;
+            ((u32 *)ring3_tramp_page)[KAPI_DATA_IDX_SBRK_HEAP_LIMIT] = sbrk_end;
+            ((u32 *)ring3_tramp_page)[KAPI_DATA_IDX_SHM_BASE] = kapi->shm_base;
             ((u32 *)new_esp)[2] = ring3_tramp_page;   /* api = トランポリン */
 
             /* --- crt0 スタック規約合わせ (retaddr ズレ修正) ---

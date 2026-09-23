@@ -151,7 +151,19 @@ def generate_rust(data, output_path):
             lines.append("    /* idx {:>3} */ pub {}: unsafe extern \"C\" fn({}){},".format(
                 i + 2, name, args_str, ret_str))
 
-    # データフィールド (sbrk_heap_limit等)
+    # 予約スロット (票 TASK_KAPI_DATA_FIELDS、KAPI v63)。C の
+    # `kapi_reserved[]` と同じ本数の詰め物で、データ欄を 8 + 4R に固定する。
+    cap = data["func_capacity"]
+    if len(apis) > cap:
+        raise SystemExit("kapi_rust_gen: 関数 %d 本が容量 func_capacity=%d を超えた"
+                         % (len(apis), cap))
+    reserved = cap - len(apis)
+    if reserved > 0:
+        lines.append("    /* idx {:>3}..{:>3} 予約 (C の kapi_reserved[]) */ "
+                     "pub kapi_reserved: [u32; {}],".format(
+                         len(apis) + 2, cap + 1, reserved))
+
+    # データフィールド (sbrk_heap_limit等)。8 + 4 × func_capacity に固定。
     for df in data_fields:
         rust_type = c_type_to_rust(df["type"])
         comment = df.get("comment", "")
@@ -164,6 +176,33 @@ def generate_rust(data, output_path):
     lines.append("/* KernelAPI マジックナンバー */")
     lines.append("pub const KAPI_MAGIC: u32 = 0x4B415049;  /* \"KAPI\" */")
     lines.append("pub const KAPI_VERSION: u32 = {};".format(data["version"]))
+    lines.append("")
+
+    # --- 関数表の容量とデータ欄の固定配置 (票 TASK_KAPI_DATA_FIELDS) ---
+    data_off = 8 + 4 * cap
+    lines.append("/* 関数表の容量とデータ欄の固定配置 (票 TASK_KAPI_DATA_FIELDS、v63) */")
+    lines.append("pub const KAPI_FUNC_COUNT: u32 = {};".format(len(apis)))
+    lines.append("pub const KAPI_FUNC_CAPACITY: u32 = {};".format(cap))
+    lines.append("pub const KAPI_DATA_FIELDS_OFF: u32 = 0x{:X};".format(data_off))
+    lines.append("/// データ欄が固定になった KAPI 版 (= C の OS32X_HDR_V3_MIN_API)。これ未満の")
+    lines.append("/// カーネルの KernelAPI はデータ欄が別の位置にある。")
+    lines.append("pub const OS32X_HDR_V3_MIN_API: u32 = 63;")
+    if data_fields:
+        lines.append("#[cfg(target_pointer_width = \"32\")]")
+        lines.append("const _: () = assert!(core::mem::offset_of!(KernelAPI, {}) == "
+                     "KAPI_DATA_FIELDS_OFF as usize);".format(data_fields[0]["name"]))
+    lines.append("")
+    lines.append("/* 配置の刻印 (ヘッダ v3)。非ロードの .os32_kapi_layout に 1 語置き、")
+    lines.append(" * mkos32x.py / mkshlib.py が OS32X ヘッダの kapi_data_off へ写す。")
+    lines.append(" * フラグ \"\" = 非 alloc (平らなバイナリに入らない)。crt0 を持たない")
+    lines.append(" * libos32gui.shlib はこの刻印だけで配置を示す。 */")
+    lines.append("#[cfg(target_pointer_width = \"32\")]")
+    lines.append("core::arch::global_asm!(")
+    lines.append("    \".pushsection .os32_kapi_layout,\\\"\\\",@progbits\",")
+    lines.append("    \".p2align 2\",")
+    lines.append("    \".long 0x{:X}\",".format(data_off))
+    lines.append("    \".popsection\",")
+    lines.append(");")
     lines.append("")
 
     # --- テキスト属性定数 ---

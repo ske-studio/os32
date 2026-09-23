@@ -203,6 +203,12 @@ faultprobe: $(CRT0_OBJ) userland/tests/faultprobe.bin
 # から呼べないため。mkos32x に --ring3 を付け OS32X_FLAG_RING3 を立てる。
 # KAPI 不使用なので --api は最小でよい。explicit ルールなので generic の
 # %.elf / %.bin / %.raw パターンより優先される (crt0 リンクを回避)。
+# ヘッダ v3 (票 TASK_KAPI_DATA_FIELDS): crt0 を付けない 3 本 (ring3_hello /
+# ring3_fault / ring3_guard) は KAPI データ欄の配置の刻印を持たないので、
+# ソースに OS32_KAPI_LAYOUT_STAMP(); を明示して置く (mkos32x は刻印の無い ELF を
+# 断る)。--api 39 は mkos32x が v3 の最低版 63 へ引き上げる (旧カーネルでは
+# 走らない = v3 の照合を持たないカーネルに載せない)。hello_r3 / faultprobe_r3 は
+# crt0 をリンクした ELF の流用なので crt0 の刻印をそのまま持つ。
 userland/tests/ring3_hello.o: userland/tests/ring3_hello.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 

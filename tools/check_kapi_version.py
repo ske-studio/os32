@@ -57,7 +57,9 @@ def check_spec_table():
         return ["KAPI_SPEC.md または kapi.json が見つからない"]
 
     with open(kapi, encoding="utf-8") as f:
-        api = json.load(f)["api"]
+        kj = json.load(f)
+    api = kj["api"]
+    cap = kj.get("func_capacity", len(api))
 
     row = re.compile(r"^\|\s*(0x[0-9A-Fa-f]+)\s*\|\s*([A-Za-z_][A-Za-z0-9_]*)"
                      r"\s*\|\s*`([^`]*)`\s*\|")
@@ -97,15 +99,77 @@ def check_spec_table():
             problems.append("シグネチャ不一致 %s: json=%s / doc=%s"
                             % (e["name"], w, g))
 
-    # データフィールドは関数領域の直後に並ぶ
-    for i, df in enumerate(json.load(open(kapi, encoding="utf-8"))["data_fields"]):
-        off = end + 4 * i
+    # データフィールドは v63 から関数表の容量 (func_capacity) の後ろに固定
+    # (票 TASK_KAPI_DATA_FIELDS)。関数を足しても動かない。
+    data_off = 0x08 + 4 * cap
+    for i, df in enumerate(kj["data_fields"]):
+        off = data_off + 4 * i
         found = [o for o, n, _ in rows if n == df["name"]]
         if not found:
             problems.append("データフィールドが KAPI_SPEC.md に無い: %s" % df["name"])
         elif found[0] != off:
             problems.append("データフィールドのオフセットずれ %s: 期待 0x%X / 文書 0x%X"
                             % (df["name"], off, found[0]))
+    return problems
+
+
+def check_layout():
+    """データ欄の固定配置と crt の kapi の実名が、生成物と手書きの写しで
+    食い違っていないか (票 TASK_KAPI_DATA_FIELDS)。"""
+    import os
+
+    proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def read(rel):
+        with open(os.path.join(proj, rel), encoding="utf-8") as f:
+            return f.read()
+
+    kj = json.loads(read("sdk/kapi.json"))
+    n = len(kj["api"])
+    cap = kj.get("func_capacity")
+    problems = []
+    if not isinstance(cap, int) or cap < n:
+        problems.append("func_capacity (%r) が関数数 %d より小さいか無い" % (cap, n))
+        return problems
+    data_off = 8 + 4 * cap
+    sym = kj.get("crt_kapi_symbol", "")
+
+    gen = read("sdk/include/os32/os32_kapi_generated.h")
+    want = [
+        (r"#define\s+KAPI_FUNC_CAPACITY\s+(\d+)", str(cap), "KAPI_FUNC_CAPACITY"),
+        (r"#define\s+KAPI_DATA_FIELDS_OFF\s+(0x[0-9A-Fa-f]+)", "0x%X" % data_off,
+         "KAPI_DATA_FIELDS_OFF"),
+        (r"#define\s+kapi\s+(\w+)", sym, "#define kapi"),
+        (r"\.long 0x([0-9A-Fa-f]+)", "%X" % data_off, "刻印 (OS32_KAPI_LAYOUT_STAMP)"),
+    ]
+    for pat, val, label in want:
+        m = re.search(pat, gen)
+        if not m or m.group(1).upper() != val.upper():
+            problems.append("os32_kapi_generated.h の %s が %s でない (生成し直す)"
+                            % (label, val))
+
+    rs = read("sdk/rust/os32api/src/kapi_generated.rs")
+    m = re.search(r"KAPI_DATA_FIELDS_OFF: u32 = 0x([0-9A-Fa-f]+)", rs)
+    if not m or int(m.group(1), 16) != data_off:
+        problems.append("kapi_generated.rs の KAPI_DATA_FIELDS_OFF が 0x%X でない" % data_off)
+
+    # Rust の shlib が C の libos32cfg に供給する kapi の実名 (手書きの写し)
+    cfgro = read("userland/rust/libos32gui/src/cfgro.rs")
+    m = re.search(r'#\[export_name\s*=\s*"(\w+)"\]\s*pub static mut kapi', cfgro)
+    if not m or m.group(1) != sym:
+        problems.append("userland/rust/libos32gui/src/cfgro.rs の kapi の export_name が "
+                        "kapi.json の crt_kapi_symbol (%s) と違う" % sym)
+
+    # ヘッダ v3 の最低版 (C / Rust / 生成器の 3 か所の写し)
+    shared = read("sdk/include/os32/os32_kapi_shared.h")
+    hdrpy = read("sdk/os32x_hdr.py")
+    m1 = re.search(r"#define\s+OS32X_HDR_V3_MIN_API\s+(\d+)", shared)
+    m2 = re.search(r"OS32X_HDR_V3_MIN_API: u32 = (\d+);", rs)
+    m3 = re.search(r"^OS32X_HDR_V3_MIN_API = (\d+)", hdrpy, re.M)
+    vals = [x.group(1) if x else None for x in (m1, m2, m3)]
+    if None in vals or len(set(vals)) != 1:
+        problems.append("OS32X_HDR_V3_MIN_API の写しが食い違う (shared.h / "
+                        "kapi_generated.rs / sdk/os32x_hdr.py): %s" % vals)
     return problems
 
 
@@ -148,6 +212,15 @@ def main():
         return 1
 
     print("KAPI_SPEC.md の関数表: kapi.json と一致")
+
+    lay = check_layout()
+    if lay:
+        print("")
+        print("KAPI データ欄の固定配置 (票 TASK_KAPI_DATA_FIELDS) の写しが食い違っている")
+        for s in lay:
+            print("  - {}".format(s))
+        return 1
+    print("KAPI データ欄の固定配置: 生成物・写しと一致")
     return 0
 
 

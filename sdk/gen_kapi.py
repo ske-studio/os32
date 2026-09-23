@@ -202,6 +202,56 @@ if _out_errs:
     sys.stderr.write("  → %d 件。docs/KAPI_SPEC.md §3-3 を読む。\n" % len(_out_errs))
     sys.exit(1)
 
+# ======================================================================== #
+#  関数表の容量とデータ欄の固定配置 (票 TASK_KAPI_DATA_FIELDS、KAPI v63)
+#
+#  v62 まではデータ欄 (sbrk_heap_limit / shm_base) を関数表の直後に置いて
+#  いたので、関数を 1 つ足すたびにオフセットが 4 バイト動き、旧バイナリが
+#  黙って別の値を読んでいた。v63 から関数表の容量を `func_capacity` (R) で
+#  予約し、データ欄を 8 + 4 × R に**固定**する。
+#
+#  R はトランポリン 1 ページの容量から決めた (exec/exec.c の STATIC_ASSERT):
+#    sizeof(KernelAPI) + スタブ 8B × R + 写し場 256B ≤ 4096
+#    → 8 + 4R + 8 + 8R + 256 ≤ 4096 → R ≤ 318
+#  **関数数が R を超えたら生成を拒否する** — 越えるとデータ欄を動かすしか
+#  なくなり、全バイナリの作り直しになる (次の R を決める票を起こす)。
+# ======================================================================== #
+
+def layout_errors(data):
+    """容量と配置の検査。エラー文字列の配列を返す。"""
+    errs = []
+    n = len(data.get("api", []))
+    cap = data.get("func_capacity", None)
+    if cap is None:
+        errs.append("\"func_capacity\" が無い (関数表の容量 R。データ欄は 8 + 4R に固定)")
+        return errs
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+        errs.append("\"func_capacity\" は正の整数 (いま %r)" % (cap,))
+        return errs
+    if n > cap:
+        errs.append("関数が %d 本あり、容量 func_capacity=%d を超えた。データ欄を"
+                    "動かさずに足せるのは %d 本まで — 次の R を決める票を起こす"
+                    " (docs/ROADMAP.md の目安)" % (n, cap, cap))
+    sym = data.get("crt_kapi_symbol", None)
+    if not isinstance(sym, str) or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", sym or ""):
+        errs.append("\"crt_kapi_symbol\" は C の識別子 (crt の大域変数 kapi の実名)")
+    return errs
+
+
+_layout_errs = layout_errors(data)
+if _layout_errs:
+    sys.stderr.write("ERROR: sdk/kapi.json の関数表の容量 (票 TASK_KAPI_DATA_FIELDS):\n")
+    for e in _layout_errs:
+        sys.stderr.write("  - %s\n" % e)
+    sys.exit(1)
+
+FUNC_COUNT = len(data["api"])
+FUNC_CAPACITY = data["func_capacity"]
+RESERVED = FUNC_CAPACITY - FUNC_COUNT
+DATA_FIELDS_OFF = 8 + 4 * FUNC_CAPACITY
+CRT_KAPI_SYMBOL = data["crt_kapi_symbol"]
+LAYOUT_SECTION = ".os32_kapi_layout"
+
 if CHECK_ONLY:
     print("check-kapi-out: %s の \"out\" 記述 OK (%d エントリ)"
           % (JSON_PATH, len(data.get("api", []))))
@@ -222,7 +272,18 @@ for api in data["api"]:
     args = ", ".join(api["args"]) if api.get("args") else "void"
     header_content += f"    {ret} (__cdecl *{name})({args});\n"
 
-# データフィールド (関数ポインタではない u32 等のフィールド)
+# 予約スロット (票 TASK_KAPI_DATA_FIELDS)。カーネルは「未実装」の関数
+# (kapi_reserved_nosys = OS32_ERR_NOSYS) で埋め、CPL=3 のトランポリンは
+# int 0x80 のスタブを置く (ディスパッチャが slot >= KAPI_FUNC_COUNT で kill)。
+# どちらも NULL にしない — 旧 SDK のヘッダで新しい関数を呼んだ場合に
+# 0 番地へ飛ばないため。
+if RESERVED > 0:
+    header_content += (f"    /* 予約 (KAPI_FUNC_COUNT..KAPI_FUNC_CAPACITY-1、{RESERVED} 本)。"
+                       "末尾追記はここを削って使う */\n")
+    header_content += f"    i32 (__cdecl *kapi_reserved[{RESERVED}])(void);\n"
+
+# データフィールド (関数ポインタではない u32 等のフィールド)。
+# v63 から 8 + 4 × KAPI_FUNC_CAPACITY に固定 (関数を足しても動かない)。
 for field in data.get("data_fields", []):
     comment = field.get("comment", "")
     if comment:
@@ -236,6 +297,40 @@ header_content += "} KernelAPI;\n\n"
 # KAPI_FUNC_COUNT = 関数スロット数 (トランポリンのスタブ生成ループ / int 0x80
 # ディスパッチャの範囲チェックに使う)。データフィールドは含めない。
 header_content += f"#define KAPI_FUNC_COUNT {len(data['api'])}\n"
+# 関数表の容量 (予約込みのスロット数)。トランポリンのスタブはこの本数ぶん置く。
+header_content += f"#define KAPI_FUNC_CAPACITY {FUNC_CAPACITY}\n"
+header_content += f"#define KAPI_FUNC_RESERVED {RESERVED}\n"
+# データ欄の先頭オフセット (固定、票 TASK_KAPI_DATA_FIELDS)。OS32X ヘッダ v3 の
+# kapi_data_off と一致しなければ exec / shlib ローダが断る。
+header_content += f"#define KAPI_DATA_FIELDS_OFF 0x{DATA_FIELDS_OFF:X}\n"
+for _i, _field in enumerate(data.get("data_fields", [])):
+    # u32 単位の添字 (トランポリンの表 tbl[] を書くときに使う)
+    header_content += (f"#define KAPI_DATA_IDX_{_field['name'].upper()} "
+                       f"{DATA_FIELDS_OFF // 4 + _i}\n")
+header_content += f"#define OS32_KAPI_LAYOUT_SECTION \"{LAYOUT_SECTION}\"\n"
+header_content += """
+/* 配置の刻印 (票 TASK_KAPI_DATA_FIELDS、ヘッダ v3)。ELF の非ロードの
+ * セクション .os32_kapi_layout に KAPI_DATA_FIELDS_OFF を 1 語置く。
+ * mkos32x.py / mkshlib.py がそれを読んで OS32X ヘッダ v3 の kapi_data_off に
+ * 写す (刻印が無ければ生成を断る)。置くのは crt0 (sdk/crt/crt0_c.c) の 1 か所
+ * と、crt0 を使わない試験バイナリ・Rust の os32api。ファイルスコープに
+ * `OS32_KAPI_LAYOUT_STAMP();` と書く。フラグ "" = 非 alloc なので平らな
+ * バイナリには入らない。 */
+"""
+STAMP_DEFINE = ("#define OS32_KAPI_LAYOUT_STAMP() __asm__(\".pushsection "
+                f"{LAYOUT_SECTION},\\\"\\\",@progbits\\n\\t.p2align 2\\n"
+                f"\\t.long 0x{DATA_FIELDS_OFF:X}\\n\\t.popsection\")\n")
+header_content += STAMP_DEFINE
+header_content += f"""
+/* 作り直し忘れの検出 (ユーザー決裁 2026-09-24)。crt の大域変数 `kapi` の
+ * 実名を {CRT_KAPI_SYMBOL} にする。v62 以前にコンパイルしたオブジェクトは
+ * `kapi` を参照したままなので、新しい crt とリンクすると未定義参照で落ちる。
+ * カーネル (__KERNEL_BUILD__) は自前の kapi を持つので対象外。 */
+#ifndef __KERNEL_BUILD__
+#define OS32_KAPI_CRT_SYMBOL {CRT_KAPI_SYMBOL}
+#define kapi {CRT_KAPI_SYMBOL}
+#endif
+"""
 # kapi_argsize[slot] = 各スロットの cdecl 引数バイト数 (固定分)。i386 では
 # int/ポインタ/char/short いずれも 4B スタックスロット。可変長 (...) は
 # 固定分のみを数える (ディスパッチャが下限に使う)。カーネル側 (kapi_generated.c)
@@ -266,7 +361,13 @@ slots_content = """/* AUTOGENERATED FILE - DO NOT EDIT (sdk/gen_kapi.py, from sd
 """
 for i, api in enumerate(data["api"]):
     slots_content += f"#define KAPI_SLOT_{api['name'].upper()} {i}\n"
-slots_content += f"\n#define KAPI_SLOT_COUNT {len(data['api'])}\n\n#endif\n"
+slots_content += f"\n#define KAPI_SLOT_COUNT {len(data['api'])}\n"
+# crt0 を使わない試験バイナリ (ring3_hello 等) はこのヘッダだけを引くので、
+# 配置の刻印もここに出す (os32_kapi_generated.h と同じ字面 = 再定義しても可)。
+slots_content += f"#define KAPI_FUNC_CAPACITY {FUNC_CAPACITY}\n"
+slots_content += f"#define KAPI_DATA_FIELDS_OFF 0x{DATA_FIELDS_OFF:X}\n"
+slots_content += STAMP_DEFINE
+slots_content += "\n#endif\n"
 
 with open("sdk/include/os32/os32_kapi_slots.h", "w", encoding="utf-8") as f:
     f.write(slots_content)
@@ -377,6 +478,12 @@ def out_guard_c(api):
     return text
 
 
+# 予約スロットの「未実装」(CPL=0 の呼び手向け。CPL=3 はトランポリンの
+# スタブ → ディスパッチャが slot >= KAPI_FUNC_COUNT で kill)。
+c_content += "/* 予約スロット (KAPI_FUNC_COUNT..KAPI_FUNC_CAPACITY-1) の中身。\n"
+c_content += " * CPL=0 の呼び手 (常駐シェル・--cpl0) は NULL ではなくここへ来る。 */\n"
+c_content += "i32 __cdecl kapi_reserved_nosys(void)\n{\n    return OS32_ERR_NOSYS;\n}\n\n"
+
 for slot, api in enumerate(data["api"]):
     if api.get("direct", False):
         continue
@@ -420,6 +527,7 @@ for api in data["api"]:
         if not args_str: args_str = "void"
         inc_content += f"extern {ret} __cdecl wrap_{name}({args_str});\n"
 
+inc_content += "extern i32 __cdecl kapi_reserved_nosys(void);\n"
 inc_content += "\nkapi->magic = 0x4B415049UL;\n"
 inc_content += f"kapi->version = {data['version']};\n\n"
 
@@ -430,6 +538,11 @@ for api in data["api"]:
         inc_content += f"    kapi->{name} = (void *){target};\n"
     else:
         inc_content += f"    kapi->{name} = wrap_{name};\n"
+
+if RESERVED > 0:
+    inc_content += "    {\n        u32 _kr;\n"
+    inc_content += "        for (_kr = 0; _kr < (u32)KAPI_FUNC_RESERVED; _kr++)\n"
+    inc_content += "            kapi->kapi_reserved[_kr] = kapi_reserved_nosys;\n    }\n"
 
 # データフィールド初期化 (デフォルトは0、exec_run等で動的にセットされる)
 for field in data.get("data_fields", []):

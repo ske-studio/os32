@@ -638,7 +638,13 @@ pub fn bind() {
         /* ライブラリへ KAPI を渡す (ライブラリの .data にある os32api の実体)。 */
         let init: extern "C" fn(*mut KernelAPI) -> i32 =
             core::mem::transmute_copy(&(*tbl.add(E_SHLIB_INIT) as usize));
-        init(crate::api_ptr());
+        /* 初期化の失敗 (旧カーネルの KAPI を断った等、票 TASK_KAPI_DATA_FIELDS)
+         * を捨てない。以後の呼び出しはライブラリの門で失敗するだけなので、
+         * 黙って進まず理由を出して終わる。 */
+        let rc = init(crate::api_ptr());
+        if rc < 0 {
+            refuse(b"shlib init failed", rc, 0);
+        }
     }
 }
 

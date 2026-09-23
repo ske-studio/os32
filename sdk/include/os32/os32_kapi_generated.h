@@ -235,11 +235,37 @@ typedef struct {
     int (__cdecl *pcm_close)(void);
     int (__cdecl *pcm_set_volume)(u32 percent);
     int (__cdecl *kbd_diag)(KbdDiag *out);
+    /* 予約 (KAPI_FUNC_COUNT..KAPI_FUNC_CAPACITY-1、70 本)。末尾追記はここを削って使う */
+    i32 (__cdecl *kapi_reserved[70])(void);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     u32 shm_base;  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 } KernelAPI;
 
 #define KAPI_FUNC_COUNT 230
+#define KAPI_FUNC_CAPACITY 300
+#define KAPI_FUNC_RESERVED 70
+#define KAPI_DATA_FIELDS_OFF 0x4B8
+#define KAPI_DATA_IDX_SBRK_HEAP_LIMIT 302
+#define KAPI_DATA_IDX_SHM_BASE 303
+#define OS32_KAPI_LAYOUT_SECTION ".os32_kapi_layout"
+
+/* 配置の刻印 (票 TASK_KAPI_DATA_FIELDS、ヘッダ v3)。ELF の非ロードの
+ * セクション .os32_kapi_layout に KAPI_DATA_FIELDS_OFF を 1 語置く。
+ * mkos32x.py / mkshlib.py がそれを読んで OS32X ヘッダ v3 の kapi_data_off に
+ * 写す (刻印が無ければ生成を断る)。置くのは crt0 (sdk/crt/crt0_c.c) の 1 か所
+ * と、crt0 を使わない試験バイナリ・Rust の os32api。ファイルスコープに
+ * `OS32_KAPI_LAYOUT_STAMP();` と書く。フラグ "" = 非 alloc なので平らな
+ * バイナリには入らない。 */
+#define OS32_KAPI_LAYOUT_STAMP() __asm__(".pushsection .os32_kapi_layout,\"\",@progbits\n\t.p2align 2\n\t.long 0x4B8\n\t.popsection")
+
+/* 作り直し忘れの検出 (ユーザー決裁 2026-09-24)。crt の大域変数 `kapi` の
+ * 実名を os32_kapi_v63 にする。v62 以前にコンパイルしたオブジェクトは
+ * `kapi` を参照したままなので、新しい crt とリンクすると未定義参照で落ちる。
+ * カーネル (__KERNEL_BUILD__) は自前の kapi を持つので対象外。 */
+#ifndef __KERNEL_BUILD__
+#define OS32_KAPI_CRT_SYMBOL os32_kapi_v63
+#define kapi os32_kapi_v63
+#endif
 extern const u16 kapi_argsize[KAPI_FUNC_COUNT];
 extern const u16 kapi_argptr[KAPI_FUNC_COUNT];
 

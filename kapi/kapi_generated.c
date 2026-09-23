@@ -549,6 +549,13 @@ static u32 kapi_out_mul(u32 n, u32 unit)
     return n * unit;
 }
 
+/* 予約スロット (KAPI_FUNC_COUNT..KAPI_FUNC_CAPACITY-1) の中身。
+ * CPL=0 の呼び手 (常駐シェル・--cpl0) は NULL ではなくここへ来る。 */
+i32 __cdecl kapi_reserved_nosys(void)
+{
+    return OS32_ERR_NOSYS;
+}
+
 void __cdecl wrap_gfx_init(void)
 {
     KAPI_HIT(0);

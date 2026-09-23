@@ -4,7 +4,7 @@ HostDrv同期コマンド
 
 ## SYNOPSIS
 
-`hsync [-f] [--verify] [-n] [-v] [--unsafe-overwrite] [--expect-build ID] [dir]`
+`hsync [-f] [--verify] [-n] [-v] [--unsafe-overwrite] [--expect-build ID] [--force-kapi] [dir]`
 
 ## DESCRIPTION
 
@@ -225,7 +225,7 @@ VFS は上限 (32 要素) を越えた要素を黙って捨てるので、越え
 起動時にこれを読み、1 行目に世代を出す。
 
 ```
-DEPLOY build=9742a6b+dirty count=198 generated=2026-09-16T21:45:19Z
+DEPLOY build=9742a6b+dirty count=198 generated=2026-09-16T21:45:19Z kapi=1208/v63
 ```
 
 防ぎたい事故は **「古い配備元から新しい成果物へ戻してしまう」**。`make deploy`
@@ -233,7 +233,8 @@ DEPLOY build=9742a6b+dirty count=198 generated=2026-09-16T21:45:19Z
 上書きされ、しかも「同期が成功した」ように見える。内容の違いは内容比較で
 分かるが、**どちらが意図した版か**は分からない。
 
-名札の中身は行指向の平文 (`format` / `build` / `generated` / `count` の 4 行 +
+名札の中身は行指向の平文 (`format` / `build` / `generated` / `kapi` / `kapi_version` /
+`count` の 6 行 (format=2、KAPI v63〜) +
 `---` + 1 行 1 ファイル。ファイルの行は パス・サイズ・CRC-32 (8 桁 16 進、
 小文字)・mtime で、区切りは空白 1 つ)。`build` は `<短い SHA>` に作業ツリーが
 汚れていれば `+dirty` を付けたもので、**「同じか違うか」を見るための名札。
@@ -246,6 +247,10 @@ DEPLOY build=9742a6b+dirty count=198 generated=2026-09-16T21:45:19Z
 | 名札が**壊れている** | `manifest invalid` を表示して同期 | **1 件も書かずに断る** (`reason=manifest_invalid`) | 表示して同期する |
 | 名札が**無い** | 今までどおり動く (表示も出ない) | **1 件も書かずに断る** (`reason=manifest_absent`) | 表示して同期する |
 
+この表は `build` の門 (`--expect-build`) だけの扱い。KAPI v63 からは**その後に
+KAPI の門**があり、名札が無い・壊れている・`kapi=` が合わないときは既定で断る
+(下の「KAPI の門」。`--force-kapi` で越えたときにこの表のとおりになる)。
+
 **「確かめた結果おかしい」と「確かめられない」は別のもの。** 名札が読めて
 `build` が違うと**分かった**ときは、範囲を絞っていても断る — ここがこの旗の
 本体だから。一方、名札が壊れている / 無い場合は「確かめられない」であって、
@@ -257,6 +262,26 @@ DEPLOY build=9742a6b+dirty count=198 generated=2026-09-16T21:45:19Z
 止まるのも本末転倒なので、断るのは「利用者が `--expect-build` で世代を
 確かめると言った」ときだけにしてある。ただし**名札が読めないことを「一致」と
 扱うことはしない** — そこを素通りさせると H4 が防ぐはずの事故がそのまま起きる。
+
+### KAPI の門 (format=2、票 TASK_KAPI_DATA_FIELDS)
+
+`kapi=` は配備物の KernelAPI データ欄のオフセット (10 進、OS32X ヘッダ v3 の
+`kapi_data_off`)、`kapi_version=` は配備物を作った KAPI 版。`hsync` はこれを
+**このカーネル**と比べ、次のときは `--expect-build` の有無にも同期の範囲にも
+よらず **1 件も書かずに断る** (`hsync sys` こそ常駐シェルと共有ライブラリを
+差し替える一番危ない形なので、絞り込みでも見る):
+
+| 状態 | 理由 |
+|---|---|
+| `kapi=` がカーネルの配置と違う | `reason=kapi_layout_mismatch` |
+| `kapi_version` がカーネルの版より新しい (v64 以降は「カーネルを先」) | `reason=kapi_newer_than_kernel` |
+| 名札が無い | `reason=manifest_absent` |
+| 名札が壊れている・旧形式 (format=1 = `kapi=` が無い) | `reason=manifest_invalid` |
+
+**確かめられないことを一致と扱わない。** 越えるのは `--force-kapi` だけで、
+理由を `NOTE: KAPI (…)` で表示して続ける。`-f` / `--force` は同一判定の省略という
+別の意味の旗なので、この門は開けない。配備物の版がカーネルより**古い**のは通す
+(v63 以降はデータ欄が固定なので、新しいカーネルは古いユーザーランドを動かせる)。
 
 **名札を信じて内容比較を省くことはしない。** 名札の CRC が宛先と一致しても、
 宛先が同じである証明にはならない。永続 CRC キャッシュも持たない。
@@ -332,6 +357,10 @@ STALE  /bin/.hs~wc (一時ファイルを消せない err=-15。次の実行が�
   (`reason=manifest_absent` / `manifest_invalid`)、範囲を絞った同期のときは
   表示だけして続ける (名札はルートの世代であって、絞った範囲を保証しない)。
   **読めて不一致と分かった場合は絞り込みでも断る**
+- `--force-kapi` — KAPI の門 (上の表) で断る状態でも、理由を表示して続ける。
+  配置違いのユーザーランドを持ち込むと、アプリは exec で
+  `rebuild required (KAPI data layout)` と断られ、`/sys` の常駐シェルなら
+  次の起動で止まる。承知の上で使う
 - `-h`, `--help` — 使い方を表示する
 - `dir` — 同期対象ディレクトリ (例: `bin`, `sys`, `usr/bin`)。**1 つだけ**
 

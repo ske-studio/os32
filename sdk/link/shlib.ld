@@ -64,6 +64,13 @@ SECTIONS
     __shlib_text_pages = ABSOLUTE((__shlib_data_start - 0x400000) / 4096);
     __shlib_data_pages = ABSOLUTE((__shlib_data_end - __shlib_data_start) / 4096);
 
+    /* KAPI データ欄の配置の刻印 (票 TASK_KAPI_DATA_FIELDS、ヘッダ v3)。
+     * shlib は crt0 を持たないので os32api (Rust) の刻印がここに入る。
+     * mkshlib.py が OS32X ヘッダの kapi_data_off へ写す。INFO = 非ロード。 */
+    .os32_kapi_layout 0 (INFO) : {
+        KEEP(*(.os32_kapi_layout))
+    }
+
     /DISCARD/ : {
         *(.note.gnu.build-id)
         *(.eh_frame)

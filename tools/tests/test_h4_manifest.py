@@ -228,12 +228,42 @@ MUTATIONS = [
      "    if (0) return;"),
     # 変異 14: 世代の表示を落とす版 (受入 4-2 の 1 行目の否定側)。
     ("deploy_line_dropped",
-     "        api->kprintf(ATTR_CYAN, \"DEPLOY build=%s count=%d generated=%s\\n\",",
-     "        if (0) api->kprintf(ATTR_CYAN, \"DEPLOY build=%s count=%d generated=%s\\n\","),
+     "        api->kprintf(ATTR_CYAN, \"DEPLOY build=%s count=%d generated=%s kapi=%d/v%d\\n\",",
+     "        if (0) api->kprintf(ATTR_CYAN, \"DEPLOY build=%s count=%d generated=%s kapi=%d/v%d\\n\","),
     # 変異 15: 壊れた名札を黙って捨てる版 (M6 の「表示する」の否定側)。
     ("invalid_line_dropped",
      "        api->kprintf(ATTR_YELLOW, \"DEPLOY manifest invalid: %s\\n\",",
      "        if (0) api->kprintf(ATTR_YELLOW, \"DEPLOY manifest invalid: %s\\n\","),
+    # ---- 票 TASK_KAPI_DATA_FIELDS (KAPI の門、case_kapi) ----
+    # 変異 K1: KAPI の門を main に繋いでいない版。
+    ("kapi_gate_not_wired",
+     "    if (man_kapi_gate() != 0) {",
+     "    if (0 && man_kapi_gate() != 0) {"),
+    # 変異 K2: 配置違いを見逃す版 (この票の中心)。
+    ("kapi_layout_ignored",
+     "    if (g_man_kapi != kernel_off) { *why = HR_KAPI_LAYOUT; return 1; }",
+     "    if (0 && g_man_kapi != kernel_off) { *why = HR_KAPI_LAYOUT; return 1; }"),
+    # 変異 K3: 「host の版 > カーネルの版」を見逃す版 (決裁 2026-09-24)。
+    ("kapi_newer_ignored",
+     "    if (g_man_kapi_ver > kernel_ver) { *why = HR_KAPI_NEWER; return 1; }",
+     "    if (0 && g_man_kapi_ver > kernel_ver) { *why = HR_KAPI_NEWER; return 1; }"),
+    # 変異 K4: 名札が無いのを一致と扱う版。
+    ("kapi_absent_is_match",
+     "    if (!g_man_present) { *why = HR_MANIFEST_ABSENT;  return 1; }",
+     "    if (!g_man_present) { *why = 0; return 0; }"),
+    # 変異 K5: 壊れた名札を一致と扱う版。
+    ("kapi_invalid_is_match",
+     "    if (!g_man_valid)   { *why = HR_MANIFEST_INVALID; return 1; }",
+     "    if (!g_man_valid)   { *why = 0; return 0; }"),
+    # 変異 K6: -f が KAPI の門まで開けてしまう版。
+    ("force_opens_kapi_gate",
+     "                g_force = 1;\n",
+     "                g_force = 1;\n                g_force_kapi = 1;\n"),
+    # 変異 K7: kapi= を任意の鍵にする版 (欠落を一致と扱う)。
+    ("kapi_key_optional",
+     "    if (!have_format || !have_build || !have_gen || !have_count ||\n"
+     "        !have_kapi || !have_kapi_ver) {",
+     "    if (!have_format || !have_build || !have_gen || !have_count) {"),
     # 変異 16: CRC の大文字を通す版 (§2-1「8 桁 16 進、小文字」の否定側)。
     ("crc_uppercase_accepted",
      "        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;",

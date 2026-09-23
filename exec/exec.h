@@ -109,11 +109,20 @@ const char *vfs_cwd_user(void);
  * kselftest_run() は exec_init() より前に走るので、この項だけ
  * kselftest_run_post_exec() から呼ぶ。0 = 全部通った。 */
 u32 exec_tramp_user_selftest(void);
+/* データ欄の固定配置と予約スロット (票 TASK_KAPI_DATA_FIELDS)。
+ * ビット 0 = 固定オフセット、1 = 本物の表の予約 (NOSYS)、2 = トランポリンの
+ * 予約スタブ、3 = ヘッダ v3 の照合。0 = 全部通った。exec_init の後に呼ぶ。 */
+u32 exec_kapi_layout_selftest(void);
 
 /* KAPI 踏み台ページ (RO+USER、全 PD 共有) の番地。exec_init の前は 0。
  * ページ表と memmap.h の照合 (paging_memmap_selftest) が期待値に使う —
  * ここは .bss の中なのでビルドごとに動き、定数では書けない。 */
 u32 exec_tramp_page_addr(void);
+
+/* 直前の起動 (exec_run 等) が KAPI データ欄の配置違い (OS32X ヘッダ v3 の
+ * kapi_data_off、票 TASK_KAPI_DATA_FIELDS) で断られたなら 1。kernel.c が
+ * 常駐シェルを断ったときの案内 (「/sys を作り直して配備せよ」) に使う。 */
+int exec_layout_rejected(void);
 
 /* ======================================================================== */
 /*  ユーザポインタの検証 (票 S0-K §1a、KAPI v50)                             */

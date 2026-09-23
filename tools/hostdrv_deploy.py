@@ -74,11 +74,21 @@ HOSTDRV_DIR = _resolve_hostdrv_dir()
 # 形式は**行指向の平文** (ユーザー決裁 D1 2026-09-16)。ゲストに JSON パーサが
 # 無いので、`key=value` の 4 行 + `---` + 1 行 1 ファイルにする。
 #
-#   format=1
+#   format=2
 #   build=9742a6b+dirty
 #   generated=2026-09-16T21:45:19Z
+#   kapi=1208
+#   kapi_version=63
 #   count=198
 #   ---
+#
+# format=2 (票 TASK_KAPI_DATA_FIELDS、KAPI v63): `kapi=` は配備物の KernelAPI
+# データ欄のオフセット (10 進、OS32X ヘッダ v3 の kapi_data_off)、
+# `kapi_version=` は配備物を作った KAPI 版 (sdk/kapi.json)。ゲストの hsync は
+# 配置がカーネルと違う / 版がカーネルより新しい / 欠けている名札を既定で断る。
+# `kapi=` は**配備した OS32X バイナリのヘッダから**取る: v3 でないもの・値の
+# 食い違うものが 1 つでもあれば名札を書かない (= 配備失敗。古い成果物の
+# 混入を「確かめた」ことにしない)。
 #   bin/cat.bin 16428 3b7f2a10 1789520013
 #
 # ファイルの行は **パス / サイズ / CRC-32 (8 桁 16 進、小文字) / mtime (Unix 秒)**
@@ -86,9 +96,9 @@ HOSTDRV_DIR = _resolve_hostdrv_dir()
 # 書かない。CRC は lib/crc32_core.inc と同じ CRC-32 (= zlib.crc32)。
 MANIFEST_DIR = '.deploy'
 MANIFEST_NAME = 'manifest.txt'
-MANIFEST_FORMAT = '1'
+MANIFEST_FORMAT = '2'
 MANIFEST_SEP = '---'
-MANIFEST_HEAD_FMT = 'format=%s\nbuild=%s\ngenerated=%s\ncount=%d\n' \
+MANIFEST_HEAD_FMT = 'format=%s\nbuild=%s\ngenerated=%s\nkapi=%d\nkapi_version=%d\ncount=%d\n' \
                     + MANIFEST_SEP + '\n'
 # `build` の値は読む側 (hsync の HS_MAN_PATH_CAP) に収まる必要がある。
 MANIFEST_BUILD_CAP = 63
@@ -205,6 +215,59 @@ def manifest_line(rel, dest):
                               int(st.st_mtime))
 
 
+# OS32X ヘッダ (sdk/os32x_hdr.py、mkos32x.py / mkshlib.py と共通)。
+# SDK の場所はこのスクリプトから決める (試験は PROJ_DIR を差し替えるので)。
+SDK_SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'sdk')
+sys.path.insert(0, SDK_SRC_DIR)
+import os32x_hdr  # noqa: E402
+
+
+def kapi_json_layout():
+    """sdk/kapi.json の (データ欄のオフセット, 版)。"""
+    import json
+    with open(os.path.join(SDK_SRC_DIR, 'kapi.json'), encoding='utf-8') as f:
+        kj = json.load(f)
+    return 8 + 4 * int(kj['func_capacity']), int(kj['version'])
+
+
+def deployed_kapi_layout(deployed):
+    """配備した OS32X バイナリのヘッダから KAPI データ欄の配置を 1 つに決める。
+
+    戻り値 (kapi_data_off, None) か (None, 理由)。OS32X でないファイル
+    (データ・スクリプト) は見ない。OS32X が 1 本も無ければ sdk/kapi.json の値。
+    v3 でないもの・値が食い違うものがあれば理由を返す (名札を書かない)。
+    """
+    want, _ver = kapi_json_layout()
+    seen = {}
+    for guest_path, dest in deployed:
+        try:
+            with open(dest, 'rb') as f:
+                blob = f.read(os32x_hdr.OS32X_HDR_V3_SIZE)
+        except OSError as exc:
+            return None, "{} を読めない: {}".format(guest_path, exc)
+        if len(blob) < 4 or int.from_bytes(blob[:4], 'little') != os32x_hdr.OS32X_MAGIC:
+            continue
+        try:
+            h = os32x_hdr.parse_header(blob)
+        except os32x_hdr.HeaderError:
+            return None, "{} の OS32X ヘッダが短い".format(guest_path)
+        off = h.get('kapi_data_off')
+        if h['version'] < os32x_hdr.OS32X_HDR_VERSION or off is None:
+            return None, ("{} はヘッダ v{} (KAPI 配置を持たない古い成果物) — "
+                          "make clean で作り直す".format(guest_path, h['version']))
+        seen.setdefault(off, guest_path)
+    if not seen:
+        return want, None
+    if len(seen) != 1:
+        return None, "配備物の KAPI 配置が食い違う: {}".format(
+            ", ".join("0x%X (%s)" % (o, p) for o, p in sorted(seen.items())))
+    off = next(iter(seen))
+    if off != want:
+        return None, ("配備物の KAPI 配置 0x{:X} が sdk/kapi.json (0x{:X}) と違う — "
+                      "作り直す".format(off, want))
+    return off, None
+
+
 def write_manifest_file(deployed):
     """名札を書く。**全件成功の後にだけ呼ぶこと** (票 H4 §2-2)。
 
@@ -234,13 +297,20 @@ def write_manifest_file(deployed):
         print("Error: 名札の行を作れない: {}".format(exc), file=sys.stderr)
         return False
 
+    # KAPI の配置 (票 TASK_KAPI_DATA_FIELDS)。確かめられなければ名札を書かない。
+    kapi_off, why = deployed_kapi_layout(deployed)
+    if kapi_off is None:
+        print("Error: 名札に KAPI の配置を書けない: {}".format(why), file=sys.stderr)
+        return False
+    _off, kapi_ver = kapi_json_layout()
+
     # 並びを決めておく (同じ配備なら同じ名札になる = 差分が読める)
     lines.sort()
     build = build_id()
     generated = datetime.datetime.now(
         datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     head = MANIFEST_HEAD_FMT % (MANIFEST_FORMAT, build, generated,
-                                len(lines))
+                                kapi_off, kapi_ver, len(lines))
     text = head + ''.join(line + '\n' for line in lines)
 
     tmp = manifest_tmp_path()
@@ -259,8 +329,8 @@ def write_manifest_file(deployed):
             pass
         return False
 
-    print("  名札: {}/{} build={} count={}".format(
-        MANIFEST_DIR, MANIFEST_NAME, build, len(lines)))
+    print("  名札: {}/{} build={} kapi={}/v{} count={}".format(
+        MANIFEST_DIR, MANIFEST_NAME, build, kapi_off, kapi_ver, len(lines)))
     return True
 
 

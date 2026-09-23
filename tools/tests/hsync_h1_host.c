@@ -488,11 +488,21 @@ static u32 crc32_core_final(u32 state) { return state; }
 /*  小道具                                                                    */
 /* ========================================================================= */
 
+/* 票 TASK_KAPI_DATA_FIELDS: この試験は配備の名札 (.deploy/manifest.txt) を
+ * 置かないので、KAPI の門 (名札の kapi= を確かめられなければ断る) を
+ * `--force-kapi` で明示して越える。門そのものは h4_manifest_host.c の
+ * case_kapi が見る。 */
 static int run_hsync(int argc, char **argv)
 {
+    char *av[16];
+    int i;
+
     fk_log_len = 0;
     fk_log[0] = '\0';
-    return hsync_main(argc, argv, &g_fake);
+    for (i = 0; i < argc && i < 14; i++) av[i] = argv[i];
+    av[i++] = (char *)"--force-kapi";
+    av[i] = 0;
+    return hsync_main(i, av, &g_fake);
 }
 
 static int run1(const char *a1)
