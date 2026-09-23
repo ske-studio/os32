@@ -1,6 +1,6 @@
 # TASK_PCM_CS4231 — CS4231 (MATE-X PCM) の PCM 再生ドライバ (§5-5 の P1)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v10 — Codex 往復 9 で Approve (2026-09-23。往復 1〜8 で 15/11/8/8/6/7/2/1 件)。往復 9 の注意 5 点は本文に反映。実装は [D2] (trial ini) と E0 (NP21/W フォーク) の承認待ち**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **実装済み・NP21/W で E0〜E3 合格 (2026-09-23、§3-1)。E4/E5 は残件、E6 は実機。実装レビュー (Codex) 待ち**。
 > 正典の関係: [`PLAN.md`](PLAN.md) §5-5、土台は [`TASK_HAL_WIRING.md`](TASK_HAL_WIRING.md) (1-1 割り込み、1-2 8237、1-3 プール、1-5 時計)、
 > 出力保護は [`../memory/TASK_KAPI_OUTPUT_GUARD.md`](../memory/TASK_KAPI_OUTPUT_GUARD.md)。
 > 典拠: Crystal **CS4231A データシート DS139PP2** (`docs/hw/crystal/cs4231a.pdf`、gitignore のミラー、`pdftotext` 済み)、
@@ -261,6 +261,20 @@ close / reclaim が各状態から 1 度だけ解放すること)。
 | E4 | 共有 IRQ の実証 (証明範囲を明記): PCM だけ / 偽装置だけ / **同時 = 試験用 hook を実 PI の IRQ10 dispatch の入口 (PCM が I24 を ack する前) に置き、PI=1 を確認してから偽 pending を立て、同じ dispatch で両方の handler の結果を記録** / 2 巡目 = 偽 handler の初回走査の後に PCM handler が偽要因を立てる順序 / 偽装置の tick 回収 = IRQ を注入せず pending だけ立てる。偽装置は 2 つ目の物理要因ではない (電気的共有は実機の 82557 で) | NP21/W |
 | E5 | CPL=3・CUI の `pcm_test` を CTRL+STOP で殺す → `pcm_reclaim` で PEN=0・DMA マスク・次の open が通る。GUI の park 中の kill と CPL=0 は対象外と明記 | NP21/W |
 | E6 | 実機 (Ra266) — 独立した受入: MODE1 の初期状態、INIT 中の書き無視、MCE / 校正の待ち、Base 上位書きのロード、DAC の初期ミュート、**XTAL2 の有無** (44.1k が出るか)、BIOS の 0F40h 旧値、1MB 超 DMA、DRQ/FIFO の停止タイミング、auto-init ビット、実際の音 (耳) | 実機 |
+
+### 3-1. 受入の記録 (PM、2026-09-23、NP21/W。ユーザー承認: trial ini の複製に `SNDboard=64`、フォーク exe の配備)
+
+| ID | 結果 |
+|---|---|
+| E0 | 合格: NP21/W フォーク `wt/pcm-api` → main (2dca70f)、配備。`/api/sound` に `cs4231` (PEN/IEN/MODE2/I8/Base/経路/PI 累積/TC) と `?pcm=1` (DMA 直後の生 frame 1 秒、base64)。未 attach の防御も入った。`pu_count` は NP21/W に PUR/PU を立てる箇所が無いので無し |
+| E1 | 合格: ホスト試験 21 ケース、変異 24 本 RED、`make check` 通過 |
+| E2 | 合格: 新 trial ini (`np21w-trial-pcm-sndboard64.ini`、原本は無変更) で起動 → `[pcm] CS4231 v=100 irq 10 dma 1 fmt 0x5B`、kselftest 197/197。現行の trial (CS4231 無し) では `[pcm] none` と `pcm_test nodev` → NOSYS |
+| E3 | 合格: `pcm_test` 5 秒 (左 1kHz / 右 frame 番号) → underruns 0、repeats 0、resyncs 0、close → 0、PI 累積 109 (= 5 × 44100 / 2048)、生 frame の照合: 右は 41,368 frame で欠落 0、左は 1,000Hz、末尾の 0 埋め 2,732 frame。`pcm_test short` (1 frame → close) → 0。停止後 PEN=0/IEN=0。**切り分けた欠陥 2 件**: (1) close の待ちループが ISR の書く `state` を素の読みで回していて、コンパイラが読みをループの外へ持ち上げ、期限まで回って毎回 IO/FAULTED になった → `volatile` 経由に (POLICY_DEBUG §4-56)。(2) 試験側の位相刻み `(1024 × 1000) << 16` が 32 ビットを溢れて左が 40Hz になっていた → 12 ビット先に上げて割る。**未実施**: 書き込みを 200ms 止めて underrun を数える経路 (試験に無い)、開始直後 / close 直前の採取区間、ミュートの別確認、8KB コピーの実時間 |
+| E4 | 未 (共有 IRQ の偽装置 hook は未実装) |
+| E5 | 未 (`/api/cmd` が返るまで `/api/key` を送れないので CTRL+STOP を注入できない。kselftest から `pcm_reclaim` を直接呼ぶ形に置き換える案) |
+| E6 | 未 (実機) |
+
+診断: `pcm_diag_fault_site` / `pcm_diag_evidence` / `pcm_diag_df_site` / `pcm_diag_stop_calls` などを kernel.map から読める (E3 の切り分けで使った。残す)。
 
 ## 4. しないこと
 

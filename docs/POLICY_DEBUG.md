@@ -1083,6 +1083,18 @@ read-modify-write で保つ。
 - **教訓**: 待ちループに `io_wait()` を入れない (待ちたいだけなら `nop`、寝たいなら `hlt`)。「FS が NOTFOUND なのに I/O エラーが無い」は
   **データが届いていない**兆候で、直前に走ったコードの I/O ポート操作を疑う。
 
+### 4-56. ISR が書く状態を foreground で待つループは `volatile` で読む (PCM の close が毎回 IO になった、2026-09-23)
+
+- **症状**: `pcm_close` が 5 秒のストリームでも 1 frame のストリームでも `OS32_ERR_IO` → FAULTED (sticky)。NP21/W の `/api/sound` は
+  PEN=0 / IEN=0 / PI=0 で装置は止まっているのに、driver の証拠読みは 1 度も走らず (診断 `pcm_diag_evidence` = 0、`stop_calls` = 2)。
+- **原因**: `while (g_pcm.state != STOP_DONE && != FAULTED) { if (past(dl)) return 0; }` の `g_pcm.state` を素の読みで回していた。
+  ループの中に state を書く呼び出しが無いので GCC (-O2) が読みをループの外へ持ち上げ、ISR (tick / IRQ10) が STOP_DONE にしても
+  foreground は期限まで回って失敗を返した。`tick_count` は `volatile` だったので期限だけは進んだ。
+- **教訓**: ISR が書く変数を foreground が待つときは **`volatile` 経由で読む** (`volatile u8 *st = &g_pcm.state`) か、構造体の
+  その欄を `volatile` にする。`inp()` などの asm volatile が同じループにあれば持ち上げは起きないが、それに頼らない。
+  切り分けは「どこで失敗したか」を記録する診断 (fault site / 最後の証拠 / 呼び出し回数) を kernel.map から読むのが速かった —
+  `/api/mem` は `/api/cmd` の実行中は返らない (HTTP サーバは 1 本) ので、実行中の状態遷移は取れない。
+
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 
 - **症状**: NHD 配備 (`os32-cycle deploy`) 直後に、試験用ファイルを 1 本足す目的でゲストの `hsync` を実行したら、
