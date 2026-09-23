@@ -120,8 +120,10 @@ static void fill_chunk(u32 first_frame, u32 n)
 
     /* 位相の刻み = PCM_SINE_LEN × TONE_HZ / RATE を 16 ビット固定小数で。
      * 1024 × 1000 × 65536 / 44100 = 1521742 (44.1 frame で 1 周する)。 */
-    inc = (u32)(((unsigned long)PCM_SINE_LEN * PCM_TONE_HZ) << PCM_PHASE_BITS)
-          / (u32)PCM_RATE;
+    /* (1024 × 1000) << 16 は 32 ビットを溢れる (E3 で左が 40Hz になった)。
+     * 12 ビット分だけ先に上げて割り、残り 4 ビットを後で上げる。 */
+    inc = ((((u32)PCM_SINE_LEN * PCM_TONE_HZ) << (PCM_PHASE_BITS - 4)) / (u32)PCM_RATE)
+          << 4;
     ph = (u32)(first_frame * inc);
     for (i = 0; i < n; i++) {
         chunk[i].left = sine_tab[(ph >> PCM_PHASE_BITS) & (PCM_SINE_LEN - 1)];

@@ -31,6 +31,15 @@ extern int res_owner_get(void);
 /*  この driver が持つもの                                                  */
 /* ======================================================================== */
 struct pcm_core g_pcm;             /* 観測点 (kernel.map から読む) */
+/* 診断 (kernel.map から読む。E3 の切り分け): どこで FAULTED / drain_failed になったか。 */
+u8 pcm_diag_fault_site = 0;        /* 1 tail 失敗 / 2 tail の期限 / 3 証拠の期限 / 5 close の 2 段目 / 6 reclaim */
+u8 pcm_diag_evidence = 0;          /* 最後の証拠読み: bit0 INIT, bit1 PEN, bit2 PI */
+u8 pcm_diag_df_site = 0;
+u32 pcm_diag_stop_calls = 0;       /* advance_stop の呼び出し回数 */
+u32 pcm_diag_stop_at = 0;          /* 最後の pcm_run の戻り (tail) */
+u32 pcm_diag_deadline = 0;         /* s_deadline の写し */
+u32 pcm_diag_entry_tick = 0;       /* stop_entry を呼んだ tick */
+u32 pcm_diag_drs = 0;              /* 最後に読んだ I11 */           /* bit0 RS_STOP 期限 / bit1 restart 失敗 / bit2 close 期限 / bit3 obs (番犬・喪失) */
 
 static u8  *s_ring;                /* DMA リング 16KB */
 static u32  s_ring_phys;
@@ -89,6 +98,7 @@ static int pcm_ready(int kind)
     if ((inp(PCM_PORT_R0) & PCM_R0_INIT) != 0) return 0;
     if (kind == PCM_OP_WAIT_INIT) return 1;
     v = cs_read(PCM_I_ERRSTAT);
+    pcm_diag_drs = v;
     if (kind == PCM_OP_WAIT_ACI) return (v & PCM_ERR_ACI) == 0;
     return (v & PCM_ERR_DRS) == 0;
 }
@@ -224,10 +234,12 @@ static void pcm_stop_entry(void)
     n = pcm_seq_stop_entry(&ops);
     pcm_run(ops, n, 0, 0);
     s_seq_at = 0;
+    pcm_diag_entry_tick = tick_count;
 }
 
-static void pcm_enter_faulted(void)
+static void pcm_enter_faulted(u8 site)
 {
+    if (pcm_diag_fault_site == 0) pcm_diag_fault_site = site;
     g_pcm.state = PCM_ST_FAULTED;
     s_fault_sticky = 1;
 }
@@ -244,16 +256,20 @@ static void pcm_advance_stop(void)
 
     n = pcm_seq_stop_tail(&ops);
     at = pcm_run(ops, n, s_seq_at, 0);
-    if (at < 0) { pcm_enter_faulted(); return; }
+    pcm_diag_stop_calls++;
+    pcm_diag_stop_at = (u32)at;
+    pcm_diag_deadline = s_deadline;
+    if (at < 0) { pcm_enter_faulted(1); return; }
     if (at < n) {
         s_seq_at = at;
         if (!pcm_past(s_deadline)) return;
         if (g_pcm.state == PCM_ST_RS_STOP) {
             g_pcm.drain_failed = 1;
+            pcm_diag_df_site |= 1;
             g_pcm.state = PCM_ST_STOP_REQ;
             pcm_stop_entry();
         } else {
-            pcm_enter_faulted();
+            pcm_enter_faulted(2);
         }
         return;
     }
@@ -263,11 +279,16 @@ static void pcm_advance_stop(void)
         return;
     }
     /* STOP_REQ の**証拠**: PEN=0、PI=0、R0 != 0x80。 */
-    if ((inp(PCM_PORT_R0) & PCM_R0_INIT) != 0 ||
-        (cs_read(PCM_I_IFACE) & PCM_IFACE_PEN) != 0 ||
-        (cs_read(PCM_I_ALTSTAT) & PCM_ALT_PI) != 0) {
-        if (pcm_past(s_deadline)) pcm_enter_faulted();
-        return;
+    {
+        u8 ev = 0;
+        if ((inp(PCM_PORT_R0) & PCM_R0_INIT) != 0) ev |= 1;
+        if ((cs_read(PCM_I_IFACE) & PCM_IFACE_PEN) != 0) ev |= 2;
+        if ((cs_read(PCM_I_ALTSTAT) & PCM_ALT_PI) != 0) ev |= 4;
+        pcm_diag_evidence = ev;
+        if (ev != 0) {
+            if (pcm_past(s_deadline)) pcm_enter_faulted(3);
+            return;
+        }
     }
     g_pcm.state = PCM_ST_STOP_DONE;
 }
@@ -280,6 +301,7 @@ static void pcm_advance_restart(void)
     n = pcm_seq_restart(&ops);
     if (pcm_run(ops, n, 0, 0) < 0) {
         g_pcm.drain_failed = 1;
+        pcm_diag_df_site |= 2;
         g_pcm.state = PCM_ST_STOP_REQ;
         pcm_stop_entry();
         return;
@@ -399,7 +421,7 @@ static void pcm_release(int leak)
     if (s_stg) kfree(s_stg);
     if (leak) {
         if (s_ring) dma_pool_mark_leaked(s_ring);
-        pcm_enter_faulted();
+        pcm_enter_faulted(6);
     } else {
         if (s_ring) dma_pool_free(s_ring);
         g_pcm.state = PCM_ST_CLOSED;
@@ -548,8 +570,12 @@ int pcm_set_volume(u32 percent)
 static int pcm_wait_stopped(u32 ticks)
 {
     u32 dl = tick_count + ticks;
+    /* state は ISR (tick / IRQ10) が書く。**volatile で読む** — 素の読みだと
+     * コンパイラがループの外へ持ち上げ、期限まで回って必ず失敗した
+     * (E3 で close が毎回 IO になった、2026-09-23)。 */
+    volatile u8 *st = &g_pcm.state;
 
-    while (g_pcm.state != PCM_ST_STOP_DONE && g_pcm.state != PCM_ST_FAULTED) {
+    while (*st != PCM_ST_STOP_DONE && *st != PCM_ST_FAULTED) {
         if (pcm_past(dl)) return 0;
     }
     return 1;
@@ -572,15 +598,18 @@ int pcm_close(void)
         g_pcm.close_pending = 1;           /* RS_* / STOP_* の途中 */
     }
 
+    if (g_pcm.drain_failed) pcm_diag_df_site |= 8;
     if (!pcm_wait_stopped(pcm_close_ticks(g_pcm.stg.staged, g_pcm.rate))) {
         /* 期限切れは番犬と同じ扱い: drain 失敗 → STOP_REQ を待つ。 */
+        if (g_pcm.drain_failed) pcm_diag_df_site |= 8;
         g_pcm.drain_failed = 1;
+        pcm_diag_df_site |= 4;
         if (g_pcm.state != PCM_ST_STOP_REQ && g_pcm.state != PCM_ST_STOP_DONE &&
             g_pcm.state != PCM_ST_FAULTED) {
             g_pcm.state = PCM_ST_STOP_REQ;
             pcm_stop_entry();
         }
-        if (!pcm_wait_stopped(PCM_STOP_TICKS + 2U)) pcm_enter_faulted();
+        if (!pcm_wait_stopped(PCM_STOP_TICKS + 2U)) pcm_enter_faulted(5);
     }
 
     if (g_pcm.state == PCM_ST_FAULTED) { pcm_release(1); return OS32_ERR_IO; }
