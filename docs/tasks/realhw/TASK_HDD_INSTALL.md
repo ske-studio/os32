@@ -129,7 +129,7 @@
 | ID | 内容 | 場 |
 |---|---|---|
 | H1 | ホスト試験: 共有部の区画表 (標準配置、`PC98PartEntry` と一致) の書き→読み、8/17 と 16/63、32/33 グループ境界、最終グループ切り下げ、16 ビットシリンダ超過・幾何なし・範囲外の拒否、IPL の値 = 区画計算の幾何 | ホスト |
-| H2 | NP21/W: `deploy-kernel` 後の既存 NHD が新配置で起動・マウント、kselftest。FD 起動 (HDD 無し) で `[hdd] bios da=80 cf=1` → 幾何なし → 従来どおり | NP21/W |
+| H2 | NP21/W: `deploy-kernel` 後の既存 NHD が新配置で起動・マウント、kselftest。FD 起動 (HDD 無し) で `[hdd] bios da=80 cf=0 ah=0f len=0 C/H/S=0/0/0 (unusable)` → 幾何なし → 従来どおり (**NP21/W は未接続でも CF=0 で 0 を返す**、`np21w-src/src/bios/sxsibios.c` の `sasibios_sense`。実機は未確認) | NP21/W |
 | H3 | 実機: 段 0 の `[hdd]` 行を記録 | 実機 |
 | H4 | 実機: 承認後 `hdprep` → 再起動 → `/hd0` マウント → 書き → 再起動後 md5 一致 (区画の前半と末尾の両方のファイル) | 実機 |
 | H5 | 実機: CD インストール → HDD 起動 → kselftest | 実機 |

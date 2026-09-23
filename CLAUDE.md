@@ -165,7 +165,7 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 - ISR が書く状態を foreground で待つループは **`volatile` で読む** (PCM の close が期限まで回って毎回 IO になった)。`/api/mem` は `/api/cmd` の実行中は返らない。 → §4-56
 - キーボード 8251 のコマンド語は **BIOS の定常値 0x16** (DTR = 1 = RTY# HIGH)。0x14 は RTY# LOW = 再送要求で、
   実機で打鍵が一切届かなかった (2026-09-23)。**NP21/W は DTR・RTS・RxE を見ない**。切り分けは `kbdstat`。 → §4-57
-- Boot loaders: PM transition inlined in `loader_fat.asm`, `boot_fat.asm` is `.8086`, IPL calls INT 1Bh at most 4 times. → [`docs/10_notes.md`](docs/10_notes.md) §10-2, §10-3
+- Boot loaders: PM transition inlined in `loader_fat.asm`, `boot_fat.asm` is `.8086`; the HDD IPL (`boot_hdd.asm`) calls INT 1Bh 16 times (the old "at most 4" note no longer matches the source, cause of the limit unconfirmed). → [`docs/10_notes.md`](docs/10_notes.md) §10-2, §10-3
 - Physical 0x90000 is the auto-play mailbox: change the layout and `game/tools/autoplay/driver.py` in the same commit. → [`docs/02_memory.md`](docs/02_memory.md) §2-1
 - 9MB 構成の `v86 -t` は **2026-09-16 に再現しないことを確認** (原因は特定せず解消)。 → §4-28
 - 配備の成否は文言で判断しない。**ゲストの `ls -l /boot/vmkernel.lz4` と手元のサイズを
