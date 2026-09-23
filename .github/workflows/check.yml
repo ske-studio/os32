@@ -1,8 +1,8 @@
 # OS32 静的ゲート (2026-09-06)
 #
-# クロスコンパイラ (i386-elf-gcc + newlib nano) と NP21/W が要る本体ビルドと
-# 実機検証は WSL 側 (os32-cycle) で行う。ここではツールチェーン無しで回せる
-# 検査だけを自動ゲートにする:
+# 本体の完全ビルド (i386-elf-gcc + newlib nano、イメージ・パッケージ・配備ツリー) は
+# build.yml (docs/08_build.md §8-6)、NP21/W と実機での検証は WSL 側 (os32-cycle) で行う。
+# ここではツールチェーン無しで回せる検査だけを自動ゲートにする:
 #   - KAPI 版番号の 4 箇所一致 (tools/check_kapi_version.py)
 #   - kapi.json からの生成物がコミット済みのものと一致 ([ABI1] 生成物を手で触らない)
 #   - プロジェクト制約 (docs/CONSTRAINTS.md ⇄ CLAUDE.md) のずれ

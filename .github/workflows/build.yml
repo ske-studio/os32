@@ -1,0 +1,153 @@
+# OS32 本体の完全ビルド (2026-09-23、docs/08_build.md §8-6)
+#
+# 素の clone から FD イメージ・インストール ISO・パッケージ・vmkernel・配備ツリーを作り、
+# artifact として置く。実機に繋がった別マシンは tools/ci_fetch.sh で取りに来る。
+# 狙い: 開発ホストの回線が従量課金のことがあるので、ホストはソースを push するだけにし、
+# イメージの受け渡しは GitHub → 実機ホストで済ませる。
+#
+# i386-elf ツールチェーン (binutils 2.41 / GCC 13.2.0 / newlib nano) は
+# tools/ci/build_cross.sh でソースから作り、~/opt/cross をキャッシュする
+# (スクリプトが変わるとキーが変わって作り直し。初回は +30 分前後)。
+# 静的ゲートは check.yml、make check (試験) はここでは回さない。
+name: build
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    outputs:
+      artifact: ${{ steps.name.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Artifact name
+        id: name
+        run: |
+          ref="${GITHUB_REF_NAME//\//-}"
+          echo "artifact=os32-${ref}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "CROSS_DIR=$HOME/opt/cross" >> "$GITHUB_ENV"
+
+      - name: apt packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential nasm genisoimage \
+            python3-yaml python3-lz4 python3-pil python3-fonttools \
+            libgmp-dev libmpfr-dev libmpc-dev texinfo bison flex
+
+      # rust-toolchain.toml (nightly + rust-src) をそのまま使う。
+      # rustup 1.28 以降は `rustup show` が入れないので、引数なしの install で toml を解決する。
+      - name: Rust toolchain (from rust-toolchain.toml)
+        run: |
+          # 古い rustup (< 1.28) は引数なしの install を受けないので `rustup show` に落とす
+          rustup toolchain install --no-self-update || rustup show
+          rustup show active-toolchain
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            lib/os32_lz4
+            userland/gshell
+            userland/rust
+
+      - name: Cache i386-elf toolchain
+        id: cross-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/opt/cross
+          key: cross-i386-elf-${{ runner.os }}-${{ hashFiles('tools/ci/build_cross.sh') }}
+
+      - name: Build i386-elf toolchain (cache miss only)
+        if: steps.cross-cache.outputs.cache-hit != 'true'
+        run: tools/ci/build_cross.sh --prefix "$HOME/opt/cross" --work "$RUNNER_TEMP/cross-work" --jobs "$(nproc)"
+
+      - name: Build (all external fd144)
+        run: |
+          export PATH="$CROSS_DIR/bin:$PATH"
+          i386-elf-gcc --version | head -1
+          # NP21W_DIR は存在しない場所にしておく (コピーは Warning で続行する)
+          make -j"$(nproc)" all external fd144 \
+            CROSS_DIR="$CROSS_DIR" NP21W_DIR="$RUNNER_TEMP/np21w"
+
+      - name: Deploy tree (make deploy into a temp HOSTDRV_DIR)
+        run: |
+          export PATH="$CROSS_DIR/bin:$PATH"
+          mkdir -p "$RUNNER_TEMP/hostdrv"
+          make deploy CROSS_DIR="$CROSS_DIR" NP21W_DIR="$RUNNER_TEMP/np21w" \
+            HOSTDRV_DIR="$RUNNER_TEMP/hostdrv" NO_PRUNE=1
+
+      - name: Collect outputs
+        run: |
+          set -euo pipefail
+          rm -rf out && mkdir -p out/packages
+          cp images/os32_boot.d88 images/os32_boot.img images/os32_boot144.img \
+             images/os32_install.iso out/
+          cp packages/*.PKG out/packages/
+          cp build/out/vmkernel.lz4 build/out/kernel.map out/
+          tar -C "$RUNNER_TEMP" -czf out/hostdrv.tar.gz hostdrv
+          {
+            echo "commit:  $GITHUB_SHA"
+            echo "ref:     $GITHUB_REF_NAME"
+            echo "built:   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner:  $RUNNER_OS $(uname -m) (${ImageOS:-?} ${ImageVersion:-?})"
+            echo "run:     $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "gcc:     $("$CROSS_DIR/bin/i386-elf-gcc" -dumpversion)"
+            echo "rustc:   $(rustc --version 2>/dev/null || echo '?')"
+            echo "submodules:"
+            git submodule status --recursive | sed 's/^/  /'
+            echo
+            echo "# size  path"
+            (cd out && find . -type f ! -name BUILD_INFO.txt ! -name SHA256SUMS -printf '%s  %P\n' | sort -k2)
+          } > out/BUILD_INFO.txt
+          (cd out && find . -type f ! -name BUILD_INFO.txt ! -name SHA256SUMS -printf '%P\n' \
+             | sort | xargs sha256sum) > out/SHA256SUMS
+          { echo; echo "# sha256 (SHA256SUMS と同じ)"; cat out/SHA256SUMS; } >> out/BUILD_INFO.txt
+          cat out/BUILD_INFO.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.artifact }}
+          path: out/
+          retention-days: 30
+          if-no-files-found: error
+
+  # tag v* のときだけ、同じ中身を Release に載せる (認証なしの curl で取れる経路)。
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: out
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd out
+          (sha256sum -c SHA256SUMS)
+          # Release の asset は平らな名前になる (packages/X.PKG → X.PKG)
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --notes-file BUILD_INFO.txt --verify-tag \
+            BUILD_INFO.txt SHA256SUMS os32_boot.d88 os32_boot.img os32_boot144.img \
+            os32_install.iso vmkernel.lz4 kernel.map hostdrv.tar.gz packages/*.PKG

@@ -394,6 +394,15 @@ OS32 の外部プログラムをビルドするためには、標準Cライブ�
 
 #### ソースからの構築 (必須手順)
 
+下の 4 段をそのまま実行するスクリプトが `tools/ci/build_cross.sh` にある
+(tarball の sha256 検証と、出来上がりが nano 構成であることの検査つき。
+`--src-dir` に tarball があればダウンロードしない)。GitHub Actions も同じスクリプトで
+ツールチェーンを作る (§8-6)。
+
+```bash
+tools/ci/build_cross.sh --prefix $HOME/opt/cross --src-dir $HOME/opt/src --jobs $(nproc)
+```
+
 事前に必要な apt パッケージ:
 ```bash
 sudo apt install build-essential nasm libgmp-dev libmpfr-dev libmpc-dev \
@@ -464,3 +473,55 @@ OS32の `Makefile` は、ここで指定された `$CROSS_DIR/i386-elf/include` 
 > [!NOTE]
 > **コンパイラのバージョンについて**
 > PC-98ターゲットでは新しいコンパイラの最適化やABI変更による非互換リスク（およびバグ）のほうが大きいため、一度安定動作したGCCバージョンで**完全に固定化**して開発を継続するのがセオリーです。OS32では当面GCC 13.x系の利用を推奨しています。
+
+### §8-6 GitHub Actions での本体ビルド
+
+`.github/workflows/build.yml` (workflow 名 `build`) が、素の clone から本体を完全ビルドして
+成果物を artifact に置く。静的ゲートの `check.yml` とは別で、`make check` (試験) は回さない。
+
+**狙い**: 開発ホストの回線が従量課金のことがあるので、ホストからはソースを push する
+(小さい) だけにし、イメージの受け渡しは GitHub → 実機に繋がったホスト (Ubuntu ノート)
+で済ませる。
+
+| 項目 | 内容 |
+|---|---|
+| 起動 | `main` / `feat/**` への push、tag `v*` の push、手動 (workflow_dispatch)。同じ ref の古い run は打ち切る |
+| ビルド | `make -j$(nproc) all external fd144` → `make deploy HOSTDRV_DIR=$RUNNER_TEMP/hostdrv NO_PRUNE=1`。`NP21W_DIR` は存在しない場所で、コピー失敗は Warning で続行する |
+| ツールチェーン | `tools/ci/build_cross.sh` (§8-5) で `~/opt/cross` に作り、`actions/cache` で保存。キーは `cross-i386-elf-<OS>-<build_cross.sh のハッシュ>` なので、**スクリプトを変えたときだけ作り直す**。初回 (とキャッシュが消えたとき) は約 +30 分 |
+| Rust | `rust-toolchain.toml` を `rustup toolchain install` (引数なし) で解決。`Swatinem/rust-cache` で `target/` を保存 |
+| 上限 | `timeout-minutes: 150` |
+
+**成果物** (artifact 名 `os32-<ブランチ名の / を - に>-<sha7>`、保持 30 日):
+
+| ファイル | 中身 |
+|---|---|
+| `os32_boot.d88` / `os32_boot.img` | 2HD 1232KB の起動 FD (D88 / 生イメージ) |
+| `os32_boot144.img` | 1.44MB の起動 FD (生イメージ、[POLICY_DEBUG.md §4-47](POLICY_DEBUG.md)) |
+| `os32_install.iso` | インストール ISO |
+| `packages/*.PKG` | パッケージ |
+| `vmkernel.lz4` / `kernel.map` | カーネルとシンボル (kselftest の番地はこの map で引く) |
+| `hostdrv.tar.gz` | `make deploy` の配備ツリー (HostDrv の `C:\os32` に相当) |
+| `BUILD_INFO.txt` / `SHA256SUMS` | コミット・ref・日時・ランナー・gcc / rustc の版・submodule・各ファイルのサイズと sha256 |
+
+**実機ホスト側の取り方** — `tools/ci_fetch.sh` (要 `gh`、`gh auth login` を 1 回。
+public repo でも artifact の API ダウンロードには認証が要る):
+
+```bash
+tools/ci_fetch.sh                       # feat/gui の最新の成功 run
+tools/ci_fetch.sh --branch main
+tools/ci_fetch.sh --sha 0a5247f         # そのコミットの run (短縮 SHA 可)
+tools/ci_fetch.sh --dry-run             # 選ばれる run と artifact を表示するだけ
+```
+
+保存先は `./os32-ci/<artifact 名>/` (`--dir` で変更)。取得後に `BUILD_INFO.txt` を表示し、
+`SHA256SUMS` で全ファイルを照合する (不一致は終了 1、`gh` が無い / 未認証は終了 2)。
+
+**tag → Release**: tag `v*` を push したときだけ、別 job (`contents: write` はその job だけ)
+が同じファイルを GitHub Release に載せる。Release の asset は認証なしで取れる:
+
+```bash
+curl -fLO https://github.com/ske-studio/os32/releases/download/<tag>/os32_boot.d88
+```
+
+> ⚠️ artifact は「ビルドが通った」ことしか保証しない。NP21/W でも実機でも起動していない
+> ([V4])。実機へ入れたら kselftest の値を**その artifact の `kernel.map`** の番地で読む。
