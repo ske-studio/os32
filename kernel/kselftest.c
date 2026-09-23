@@ -35,6 +35,7 @@
 #include "sysclk.h"       /* sysclk_hz / sysclk_detected */
 #include "memmap.h"       /* PIT_HZ / MEM_DMA_POOL_* */
 #include "dma_pool.h"     /* DMA プール (票 TASK_HAL_WIRING §1-3) */
+#include "pcm_cs4231.h"
 #include "dma8237.h"      /* 8237 の共通部 (同 §1-2) */
 #include "irq.h"          /* 動的 IRQ 登録 (票 TASK_HAL_WIRING §1-1) */
 #include "time_math.h"    /* time_branch_hits (票 §1-5) */
@@ -585,6 +586,19 @@ static void test_memmap_pool_user(void)
           "mmu:map ok after");
 }
 
+/* ------------------------------------------------------------------------ */
+/*  PCM (票 TASK_PCM_CS4231): 起動時の検出が走った後、driver が CLOSED で    */
+/*  待っていること。装置の有無は機種で変わるので**状態だけ**を見る           */
+/*  (NP21/W の既定構成には CS4231 が無い — 無くても壊れないのが要件)。       */
+/*  ついでに、知らないレートは**装置に 1 バイトも書かずに**断ること。        */
+/* ------------------------------------------------------------------------ */
+static void test_pcm(void)
+{
+    check(pcm_state() == PCM_ST_CLOSED, "pcm:closed");
+    check(pcm_open(PCM_RATE_44100 + 1) == OS32_ERR_INVAL, "pcm:rate refused");
+    check(pcm_state() == PCM_ST_CLOSED, "pcm:still closed");
+}
+
 int kselftest_run_post_exec(void)
 {
     int before = ksel_fail;
@@ -592,6 +606,7 @@ int kselftest_run_post_exec(void)
     test_tramp_user_str();
     test_memmap();
     test_memmap_pool_user();
+    test_pcm();
 
     if (ksel_fail != before) {
         kprintf(0xC1, "[selftest] %d FAILED after exec_init\n",

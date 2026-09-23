@@ -62,6 +62,7 @@ extern void fatfs_init(void);
 #include "snd_engine.h"
 #include "mouse.h"
 #include "lgy98.h"
+#include "pcm_cs4231.h"
 #include "os32_sqlite_vfs.h"
 #include "kapi_db.h"
 
@@ -548,6 +549,10 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
      * 「候補が 0 本でも安全に回る」ことを起動のたびに踏むための呼び出し。 */
     pci_bind_set_line_state_hook(kernel_pci_line_bits);
     pci_bind_all(pci_drivers, PCI_DRIVER_COUNT);
+
+    /* CS4231 (MATE-X PCM) の検出だけ (票 TASK_PCM_CS4231 §2-1)。
+     * 無い機械では `[pcm] none` を出して静かに戻る — 以降の起動は変わらない。 */
+    pcm_init();
 
     /* FDリダイレクト初期化 (プログラムローダーより前に) */
     fd_redirect_init();

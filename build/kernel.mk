@@ -33,6 +33,7 @@ C_KERNEL = \
     drivers/fdc.c drivers/fdc_decide.c drivers/disk.c drivers/dma8237.c drivers/dma8237_math.c drivers/pci.c drivers/pci_decode.c drivers/pci_bind.c drivers/pci_bind_match.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c drivers/loop_dev.c \
     drivers/mouse.c drivers/mouse_bus.c drivers/mouse_seamless.c \
     drivers/lgy98.c drivers/ne2000.c drivers/ne2000_ring.c \
+    drivers/pcm_cs4231.c drivers/pcm_cs4231_math.c \
     drivers/wab_glue_xe10.c drivers/wab_cirrus.c \
     net/link.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c gfx/backend_pc98.c gfx/backend_pegc.c gfx/backend_cirrus.c \
@@ -72,6 +73,13 @@ drivers/ne2000.o: drivers/ne2000.c
 
 drivers/lgy98.o: drivers/lgy98.c .FORCE
 	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+# PCM: pcm_cs4231.c は irq.h / dma_pool.h / idt.h (kernel/) を参照するため
+# INC_KERNEL。純粋部 (pcm_cs4231_math.c) は既定の drivers/%.o (-O2) で通る
+# (票 TASK_PCM_CS4231 §2-1)。実装時の -Os は KHEAP 縮小 (予算 596KB) への
+# 合流で外した (2026-09-23)。
+drivers/pcm_cs4231.o: drivers/pcm_cs4231.c
+	$(CC) $(CFLAGS_BASE) -O2 $(INC_KERNEL) -c $< -o $@
 
 # net/ (リンク層。ne2000.h / idt.h / kstring.h を参照するため INC_KERNEL)
 net/%.o: net/%.c

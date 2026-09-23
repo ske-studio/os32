@@ -19,6 +19,7 @@
 #include "shm.h"
 #include "gui.h"
 #include "snd_engine.h"
+#include "pcm_cs4231.h"   /* pcm_reclaim (票 TASK_PCM_CS4231 §2-1) */
 #include "con_sink.h"
 #include "kbd_inject.h"   /* K7: GUI 中の kbd 待ちを満たす注入リング */
 #include "launch.h"      /* T9: 起動要求表 (GUI 中の起動を WM が仲介する) */
@@ -984,6 +985,10 @@ static void exec_reclaim_owned(int id)
     /* (6) サウンド: この ID の退避済み音だけを捨てる (D9-4)。
      * 鳴っているのがこの ID なら止める。他のアプリの音は無事。 */
     snd_owner_exit(id);
+    /* (6b) PCM: この ID が鳴らしていれば待たずに止めて資源を返す
+     * (票 TASK_PCM_CS4231 §2-1「所有と回収」)。保存した owner と id だけを
+     * 照合する — ここでは g_cur_app はもう親に戻っている。 */
+    pcm_reclaim(id);
     /* (7) GUI リソース回収 (契約 T4 / U8)。WM がこの owner のウィンドウ・
      * サーフェス・タイマ・スロットを回収する。畳む 3 経路すべてが
      * ここを通るので、WM は 1 か所で回収できる。 */

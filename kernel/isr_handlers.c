@@ -461,11 +461,13 @@ void isr_unexpected_report(u32 irq)
 extern void snd_tick(void);  /* kernel/snd_engine.c */
 #include "ne2000.h"          /* ne2k_timer_tick: 予算超過の残り・OVW 復旧・送信タイムアウト */
 #include "lgy98.h"           /* lgy98_tick: 反射モード (M2 試験) */
+#include "pcm_cs4231.h"      /* pcm_tick: PCM の観測と補充 (IRQ は加速器) */
 #include "link.h"            /* link_tick: リンクプロトコル v2 の唯一の駆動元 */
 
 void timer_handler(void)
 {
     snd_tick();
+    pcm_tick();
     ne2k_timer_tick();
     /* リンク層はここでしか進まない (TASK_N0 §2a)。KAPI からは呼ばない。
      * 反射モード (LGY98_FLAG_REFLECT) では drivers/lgy98.c が link_init を
