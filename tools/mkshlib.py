@@ -18,7 +18,10 @@ mkshlib.py — 共有ライブラリ (OS32X_FLAG_SHLIB) の先頭ページを検
      いれば検算だけ、0 のままなら書き込む。
      さらに entry[i] が i 番目のシンボルのアドレスと一致するかを見る。
 
-  3. **OS32X ヘッダ (40B)** を付けて出力する (`OS32X_FLAG_SHLIB` を立てる)。
+  3. **OS32X ヘッダ v3 (48B)** を付けて出力する (`OS32X_FLAG_SHLIB` を立てる)。
+     組み立ては `sdk/os32x_hdr.py` (`sdk/mkos32x.py` と共通)。`kapi_data_off` は
+     ELF の `.os32_kapi_layout` (os32api の刻印) から取り、無ければ失敗する。
+     `min_api_ver` は 63 未満なら 63 に引き上げる (票 TASK_KAPI_DATA_FIELDS)。
 
 使い方:
     python3 tools/mkshlib.py <in.raw> <out.shlib> --elf <lib.elf> [--api VER]
@@ -30,10 +33,11 @@ import re
 import struct
 import sys
 
-# --- OS32X (sdk/include/os32/os32_kapi_shared.h と一致させること) ---
-OS32X_MAGIC = 0x4F533332          # 'OS32'
-OS32X_HDR_V1_SIZE = 40
-OS32X_FLAG_SHLIB = 0x0008
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO, 'sdk'))
+import os32x_hdr as H  # noqa: E402  (OS32X ヘッダ v3 の共通モジュール)
+
+OS32X_FLAG_SHLIB = H.OS32X_FLAG_SHLIB
 
 # --- OS32ShlibHeader ---
 OS32_SHLIB_MAGIC = 0x42494C53     # 'SLIB'
@@ -44,7 +48,6 @@ OS32_SHLIB_MAX_FUNC = (OS32_SHLIB_HDR_SIZE - OS32_SHLIB_ENTRY_OFF) // 4
 MEM_SHLIB_BASE = 0x00400000
 PAGE = 4096
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHLIB_RS = os.path.join(REPO, 'userland', 'rust', 'libos32gui', 'src', 'shlib.rs')
 STUB_RS = os.path.join(REPO, 'sdk', 'rust', 'os32api', 'src', 'gui', 'stub.rs')
 PROTO_RS = os.path.join(REPO, 'sdk', 'rust', 'os32api', 'src', 'gui', 'proto.rs')
@@ -152,58 +155,14 @@ def check_table(verbose=True):
 #  2. ELF (32bit LE) の最小リーダ
 # ====================================================================
 
-class Elf32:
+class Elf32(H.Elf32):
+    """共通モジュールの ELF リーダ。失敗は mkshlib の終了に揃える。"""
+
     def __init__(self, path):
-        with open(path, 'rb') as f:
-            self.data = f.read()
-        d = self.data
-        if d[:4] != b'\x7fELF' or d[4] != 1 or d[5] != 1:
-            raise SystemExit(f"mkshlib: {path} は 32bit LE の ELF ではありません")
-        (self.e_shoff,) = struct.unpack_from('<I', d, 32)
-        (self.e_shentsize,) = struct.unpack_from('<H', d, 46)
-        (self.e_shnum,) = struct.unpack_from('<H', d, 48)
-        (self.e_shstrndx,) = struct.unpack_from('<H', d, 50)
-        self.sections = []
-        for i in range(self.e_shnum):
-            off = self.e_shoff + i * self.e_shentsize
-            (nm, ty, fl, addr, foff, size, link, info, align, entsz) = \
-                struct.unpack_from('<10I', d, off)
-            self.sections.append(dict(name_off=nm, type=ty, flags=fl, addr=addr,
-                                      offset=foff, size=size, link=link,
-                                      entsize=entsz))
-        shstr = self.sections[self.e_shstrndx]
-        self.shstrtab = d[shstr['offset']:shstr['offset'] + shstr['size']]
-        for s in self.sections:
-            s['name'] = self._str(self.shstrtab, s['name_off'])
-        self.symbols = {}
-        for s in self.sections:
-            if s['type'] != 2:          # SHT_SYMTAB
-                continue
-            strtab_s = self.sections[s['link']]
-            strtab = d[strtab_s['offset']:strtab_s['offset'] + strtab_s['size']]
-            n = s['size'] // 16
-            for i in range(n):
-                off = s['offset'] + i * 16
-                (st_name, st_value, st_size, st_info, st_other, st_shndx) = \
-                    struct.unpack_from('<IIIBBH', d, off)
-                nm = self._str(strtab, st_name)
-                if nm:
-                    self.symbols[nm] = st_value
-
-    @staticmethod
-    def _str(tab, off):
-        end = tab.find(b'\x00', off)
-        return tab[off:end].decode('ascii', errors='replace') if end >= 0 else ''
-
-    def section(self, name):
-        for s in self.sections:
-            if s['name'] == name:
-                return s
-        return None
-
-    def bss_size(self):
-        s = self.section('.bss')
-        return s['size'] if s else 0
+        try:
+            super().__init__(path)
+        except H.HeaderError as e:
+            raise SystemExit(f"mkshlib: {e}")
 
 
 # ====================================================================
@@ -311,19 +270,17 @@ def main():
     if image_end > data_end:
         die(f"生イメージが data 範囲を越えています ({image_end:#x} > {data_end:#x})")
 
-    # --- OS32X ヘッダ (エントリは使わない: 入口はジャンプ表) ---
+    # --- OS32X ヘッダ v3 (エントリは使わない: 入口はジャンプ表) ---
+    #   load_addr     = MEM_SHLIB_BASE (カーネルは見ないが v2 の欄として正しく埋める)
+    #   kapi_data_off = os32api の刻印 (票 TASK_KAPI_DATA_FIELDS)
     bss = elf.bss_size()
-    header = struct.pack('<10I',
-                         OS32X_MAGIC,
-                         OS32X_HDR_V1_SIZE,
-                         1,                     # version
-                         OS32X_FLAG_SHLIB,      # flags
-                         0,                     # entry_offset (使わない)
-                         len(raw),              # text_size
-                         bss,                   # bss_size
-                         0,                     # heap_size
-                         0,                     # stack_size
-                         min_api)               # min_api_ver
+    try:
+        kapi_data_off = H.read_kapi_layout(elf)
+        H.check_raw_matches_elf(elf, len(raw), in_path)
+        header = H.build_header(OS32X_FLAG_SHLIB, 0, len(raw), bss, 0,
+                                min_api, MEM_SHLIB_BASE, kapi_data_off)
+    except H.HeaderError as e:
+        die(str(e))
     with open(out_path, 'wb') as f:
         f.write(header)
         f.write(raw)
@@ -331,7 +288,8 @@ def main():
     print(f"  SHLIB: {os.path.basename(out_path)} "
           f"(nfunc={nfunc}, version={version}, "
           f"text_pages={tpages}, data_vaddr={vaddr:#x}, data_pages={dpages}, "
-          f"raw={len(raw)}, bss={bss})")
+          f"raw={len(raw)}, bss={bss}, api>={H.effective_min_api(min_api)}, "
+          f"kapi_data=0x{kapi_data_off:X})")
 
 
 if __name__ == '__main__':

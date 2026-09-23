@@ -33,6 +33,10 @@ int shlib_init(void);
 /* ライブラリが常駐しているか (1=常駐)。 */
 int shlib_loaded(void);
 
+/* shlib_init が KAPI データ欄の配置違い (OS32X ヘッダ v3、票
+ * TASK_KAPI_DATA_FIELDS) で断ったなら 1。GUI を CUI へ落とす案内に使う。 */
+int shlib_layout_rejected(void);
+
 /* 常駐しているライブラリの版 (OS32ShlibHeader.version)。未ロードなら 0。 */
 u32 shlib_version(void);
 

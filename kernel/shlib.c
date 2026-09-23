@@ -28,6 +28,7 @@
 #include "pgalloc.h"
 #include "vfs.h"
 #include "os32_kapi_shared.h"
+#include "os32x_hdr.h"      /* ヘッダ v3 の配置照合 (票 TASK_KAPI_DATA_FIELDS) */
 
 /* 帯域は PDE 1 (APP_BAND_PDE) の内側でなければならない。ここがずれると
  * 「アプリごとに差し替わる PT」の外へ出てしまい、.data の per-app 複製が
@@ -47,6 +48,9 @@ static u32 g_text_end = MEM_SHLIB_BASE;   /* .text/.rodata の終端 (exclusive)
 static u32 g_data_vaddr = 0;
 static u32 g_data_pages = 0;
 static u32 g_data_master = 0;  /* .data/.bss の原本 (帯域末尾、複製元) */
+/* KAPI データ欄の配置違いで断った (票 TASK_KAPI_DATA_FIELDS)。kernel.c が
+ * GUI を CUI へ落とすときの案内に使う。 */
+static int g_layout_reject = 0;
 
 /* attach したアドレス空間ごとの .data 複製ページ。
  * 現状 exec は CPL=3 アプリを 1 つしか同時に持たない (exec.c の g_ring3_as)
@@ -105,6 +109,20 @@ int shlib_init(void)
                 oh->magic, oh->header_size);
         pgalloc_free_n(MEM_SHLIB_BASE, band_pages);
         return -1;
+    }
+    /* ---- KAPI データ欄の配置 (票 TASK_KAPI_DATA_FIELDS、ヘッダ v3) ----
+     * ライブラリの .data にある os32api が KernelAPI のデータ欄 (shm_base =
+     * GUI スロットの番地) を読む。配置が違うライブラリを載せると GUI アプリが
+     * 別の番地を共有メモリと思い込むので、載せずに無効にする。 */
+    {
+        int lrc = os32x_layout_check(oh, (u32)sz, (u32)KAPI_DATA_FIELDS_OFF);
+        if (lrc != OS32X_LAYOUT_OK) {
+            g_layout_reject = 1;
+            kprintf(0xC1, "[shlib] %s: %s - rebuild required (GUI shlib disabled)\n",
+                    SYS_SHLIB_GUI, os32x_layout_reason(lrc));
+            pgalloc_free_n(MEM_SHLIB_BASE, band_pages);
+            return -1;
+        }
     }
     if ((oh->flags & OS32X_FLAG_SHLIB) == 0) {
         kprintf(0xC1, "[shlib] not a shared library (flags=%x)\n", oh->flags);
@@ -207,6 +225,7 @@ int shlib_init(void)
 }
 
 int shlib_loaded(void) { return g_loaded; }
+int shlib_layout_rejected(void) { return g_layout_reject; }
 u32 shlib_version(void) { return g_loaded ? g_version : 0; }
 u32 shlib_text_end(void) { return g_text_end; }
 u32 shlib_data_pages(void) { return g_loaded ? g_data_pages : 0; }

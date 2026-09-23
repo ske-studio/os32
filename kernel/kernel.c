@@ -726,6 +726,20 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
             is_gui = (kstrcmp(cur_shell, SYS_GSHELL_BIN) == 0);
 
+            /* 共有ライブラリを KAPI データ欄の配置違いで断っていたら GUI は
+             * 動かない (GUI アプリが共有メモリの番地を取り違える)。CUI に
+             * 落として案内する (票 TASK_KAPI_DATA_FIELDS)。 */
+            if (is_gui && shlib_layout_rejected()) {
+                kprintf(0xC1, "[boot] %s: rebuild required (KAPI data layout)"
+                        " -> CUI shell. rebuild /sys and deploy\n", SYS_SHLIB_GUI);
+                console_text_gdc_start();
+                tvram_clear();
+                tvram_print(0, 0, "GUI shlib: rebuild required (KAPI data layout) -> CUI shell",
+                            TATTR_RED);
+                cur_shell = SYS_SHELL_BIN;
+                is_gui = 0;
+            }
+
             /* GUI は全画面 GFX を握るのでテキストカーソルを消す。CUI は出す。 */
             if (is_gui) {
                 console_text_gdc_stop();
@@ -743,7 +757,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
             if (is_gui && rc < 0 && rc != EXEC_ERR_FAULT) {
                 console_text_gdc_start();
                 tvram_clear();
-                tvram_print(0, 0, "gshell load failed -> CUI shell", TATTR_RED);
+                tvram_print(0, 0, exec_layout_rejected()
+                            ? "gshell: rebuild required (KAPI data layout) -> CUI shell"
+                            : "gshell load failed -> CUI shell", TATTR_RED);
                 cur_shell = SYS_SHELL_BIN;
                 gui_fault_streak = 0;
                 continue;   /* ウェイト無しで即 CUI を起動 */
@@ -764,8 +780,26 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
                 }
             } else if (rc < 0 && rc != EXEC_ERR_FAULT) {
                 /* CUI シェルのロード自体が失敗 — FDD フォールバックを試す */
+                int layout_bad = exec_layout_rejected();
                 rc = exec_run(SYS_SHELL_BIN_FDD);
                 if (rc < 0 && rc != EXEC_ERR_FAULT) {
+                    layout_bad |= exec_layout_rejected();
+                    if (layout_bad) {
+                        /* 常駐シェルが KAPI データ欄の配置違い (票
+                         * TASK_KAPI_DATA_FIELDS)。走らせても malloc が壊れる
+                         * ので止める。直し方は /sys の作り直しと配備 — NHD は
+                         * エミュレータ停止中に一式、実機は FD / CD の入れ直し。 */
+                        kprintf(0xC1, "[boot] FATAL: shell.bin was built for another"
+                                " KAPI data layout (kernel %x)\n",
+                                (u32)KAPI_DATA_FIELDS_OFF);
+                        tvram_print(0, 0, "FATAL: shell.bin: rebuild required (KAPI data layout)",
+                                    TATTR_RED);
+                        tvram_print(0, 1, "  rebuild /sys (make clean && make all) and deploy it",
+                                    TATTR_RED);
+                        tvram_print(0, 2, "  (NHD: whole set while stopped / real HW: boot the new FD)",
+                                    TATTR_RED);
+                        for (;;) _halt();
+                    }
                     /* シェルバイナリのロード自体が失敗 — 致命的エラー */
                     tvram_print(0, 0, "FATAL: shell.bin load failed", TATTR_RED);
                     for (;;) _halt();

@@ -339,11 +339,20 @@ static void ls_cb(const DirEntry_Ext *entry, void *ctx)
  *
  * 形式は**行指向の平文** (ゲストに JSON パーサが無い):
  *
- *     format=1
+ *     format=2
  *     build=9742a6b+dirty
  *     generated=2026-09-16T21:45:19Z
+ *     kapi=1208
+ *     kapi_version=63
  *     count=198
  *     ---
+ *
+ * format=2 (票 TASK_KAPI_DATA_FIELDS、KAPI v63) で `kapi=` (配備物の KernelAPI
+ * データ欄のオフセット = OS32X ヘッダ v3 の kapi_data_off、10 進) と
+ * `kapi_version=` (配備物を作った KAPI 版) を足した。**配置がカーネルと違う**
+ * か **配備物の版がカーネルより新しい**なら既定で 1 件も書かずに断る
+ * (`--force-kapi` で越える)。名札が無い・壊れている・format=1 (kapi が無い)
+ * は「確かめられない」で、**一致とは扱わない** (同じく断る)。
  *     bin/cat.bin 16428 3b7f2a10 1789520013
  *
  * ファイルの行は **パス / サイズ / CRC-32 (8 桁 16 進、小文字) / mtime**、
@@ -364,7 +373,7 @@ static void ls_cb(const DirEntry_Ext *entry, void *ctx)
  * 文字列を 2 か所に書かず、連結で導く)。 */
 #define HS_MANIFEST_REL  ".deploy/manifest.txt"
 #define HS_MANIFEST_PATH "/host/" HS_MANIFEST_REL
-#define HS_MAN_FORMAT    "1"
+#define HS_MAN_FORMAT    "2"
 #define HS_MAN_SEP       "---"
 
 /* 名札の表のメモリ上限。**越えたら名札ごと捨てる** (§2-3、受入 M9b)。
@@ -405,6 +414,10 @@ static const char *g_man_bad;        /* 捨てた理由。**固定文字列**で
 static char g_man_build[HS_MAN_PATH_CAP];
 static char g_man_generated[HS_MAN_PATH_CAP];
 static const char *g_expect_build;   /* --expect-build の引数 */
+/* 票 TASK_KAPI_DATA_FIELDS: 名札の kapi= / kapi_version= */
+static u32 g_man_kapi;
+static u32 g_man_kapi_ver;
+static int g_force_kapi;             /* --force-kapi が指定された */
 
 /* 集計 (§2-3)。**`manifest_missing` は実装しない** — `hsync` は配備元を正と
  * して列挙するので、名札にあるのに配備元に無いファイルは列挙に現れず、
@@ -420,6 +433,9 @@ static int g_content_compares;
 #define HR_MANIFEST_INVALID "manifest_invalid"
 #define HR_MANIFEST_ABSENT  "manifest_absent"
 #define HR_MAN_EXTRA        "not_in_manifest"
+/* 票 TASK_KAPI_DATA_FIELDS (KAPI の門) */
+#define HR_KAPI_LAYOUT      "kapi_layout_mismatch"
+#define HR_KAPI_NEWER       "kapi_newer_than_kernel"
 
 /* 本文を行に割る。改行は '\0' に書き換える (その場で壊して読む)。
  * 戻り値 0 = もう行が無い。末尾の '\r' は落とす (ホストが CRLF で書いた
@@ -565,12 +581,16 @@ static int man_parse(char *text)
     int have_build = 0;
     int have_gen = 0;
     int have_count = 0;
+    int have_kapi = 0;
+    int have_kapi_ver = 0;
     u32 want = 0;
     u32 n;
 
     g_man_count = 0;
     g_man_build[0] = '\0';
     g_man_generated[0] = '\0';
+    g_man_kapi = 0;
+    g_man_kapi_ver = 0;
 
     for (;;) {
         char *eq;
@@ -622,6 +642,22 @@ static int man_parse(char *text)
             if (have_count) { g_man_bad = "duplicate key"; return 0; }
             have_count = 1;
             if (!man_parse_u32(val, &want)) { g_man_bad = "bad count"; return 0; }
+        } else if (str_cmp(key, "kapi") == 0) {
+            /* 配備物の KAPI データ欄の配置 (票 TASK_KAPI_DATA_FIELDS)。
+             * 0 は「分からない」と同じなので不正として捨てる。 */
+            if (have_kapi) { g_man_bad = "duplicate key"; return 0; }
+            have_kapi = 1;
+            if (!man_parse_u32(val, &g_man_kapi) || g_man_kapi == 0) {
+                g_man_bad = "bad kapi";
+                return 0;
+            }
+        } else if (str_cmp(key, "kapi_version") == 0) {
+            if (have_kapi_ver) { g_man_bad = "duplicate key"; return 0; }
+            have_kapi_ver = 1;
+            if (!man_parse_u32(val, &g_man_kapi_ver) || g_man_kapi_ver == 0) {
+                g_man_bad = "bad kapi_version";
+                return 0;
+            }
         } else {
             /* format=1 が形式を固定しているので、知らない鍵は「別の形式」。
              * 読めるふりをしない。 */
@@ -630,7 +666,8 @@ static int man_parse(char *text)
         }
     }
 
-    if (!have_format || !have_build || !have_gen || !have_count) {
+    if (!have_format || !have_build || !have_gen || !have_count ||
+        !have_kapi || !have_kapi_ver) {
         g_man_bad = "missing key";
         return 0;
     }
@@ -693,8 +730,9 @@ static void man_load(void)
 static int man_gate(void)
 {
     if (g_man_present && g_man_valid) {
-        api->kprintf(ATTR_CYAN, "DEPLOY build=%s count=%d generated=%s\n",
-                     g_man_build, g_man_count, g_man_generated);
+        api->kprintf(ATTR_CYAN, "DEPLOY build=%s count=%d generated=%s kapi=%d/v%d\n",
+                     g_man_build, g_man_count, g_man_generated,
+                     (int)g_man_kapi, (int)g_man_kapi_ver);
     } else if (g_man_present) {
         /* 名札の不備で作業が止まるのは本末転倒 — 既定は表示だけ (§2-3) */
         api->kprintf(ATTR_YELLOW, "DEPLOY manifest invalid: %s\n",
@@ -743,6 +781,58 @@ static int man_gate(void)
     api->kprintf(ATTR_RED,
                  "  --expect-build を指定した以上、世代を確かめられないなら\n"
                  "  進まない。**1 件も書かない**\n");
+    return 1;
+}
+
+/* KAPI の門 (票 TASK_KAPI_DATA_FIELDS)。**全体同期でも絞り込みでも**見る
+ * — `hsync sys` こそ常駐シェルと共有ライブラリを差し替える一番危ない形。
+ *
+ * 比べるのは名札の kapi= (配備物のデータ欄の配置) と**このカーネルの配置**。
+ * 動いている hsync 自身がこのカーネルに受け入れられた (exec が OS32X ヘッダ
+ * v3 の kapi_data_off を照合済み) ので、コンパイル時の KAPI_DATA_FIELDS_OFF
+ * がカーネルの配置に等しい。版は api->version。
+ *
+ * 断るのは:
+ *   - 配置が違う                    → kapi_layout_mismatch
+ *   - 配備物の版 > カーネルの版     → kapi_newer_than_kernel (v64 以降は
+ *     「カーネルを先、ユーザーランドを後」— 決裁 2026-09-24)
+ *   - 名札が無い / 壊れている / kapi が無い (format=1) → 確かめられない。
+ *     **一致とは扱わない**。
+ * `--force-kapi` で越える (理由を表示して続ける)。`-f` / `--force` は
+ * 同一判定の省略で別の意味なので、この門は開けない。
+ * 戻り値 0 = 続けてよい / 1 = **1 件も書かずに断る**。 */
+static int man_kapi_check(u32 kernel_off, u32 kernel_ver, const char **why)
+{
+    if (!g_man_present) { *why = HR_MANIFEST_ABSENT;  return 1; }
+    if (!g_man_valid)   { *why = HR_MANIFEST_INVALID; return 1; }
+    if (g_man_kapi != kernel_off) { *why = HR_KAPI_LAYOUT; return 1; }
+    if (g_man_kapi_ver > kernel_ver) { *why = HR_KAPI_NEWER; return 1; }
+    *why = 0;
+    return 0;
+}
+
+static int man_kapi_gate(void)
+{
+    const char *why = 0;
+    u32 koff = (u32)KAPI_DATA_FIELDS_OFF;
+    u32 kver = (u32)api->version;
+
+    if (man_kapi_check(koff, kver, &why) == 0) return 0;
+
+    if (g_force_kapi) {
+        api->kprintf(ATTR_YELLOW,
+                     "NOTE: KAPI (%s) を --force-kapi で越える "
+                     "(kernel kapi=%d/v%d)\n", why, (int)koff, (int)kver);
+        return 0;
+    }
+    api->kprintf(ATTR_RED,
+                 "Error: KAPI reason=%s host=%d/v%d kernel=%d/v%d\n", why,
+                 (int)g_man_kapi, (int)g_man_kapi_ver, (int)koff, (int)kver);
+    api->kprintf(ATTR_RED,
+                 "  配備元のユーザーランドがこのカーネルと合うか確かめられない。"
+                 "**1 件も書かない**。\n"
+                 "  配置違いは全部作り直し (make clean && make all) + NHD 一式か FD。\n"
+                 "  版が新しいならカーネルを先に配備する。承知の上なら --force-kapi\n");
     return 1;
 }
 
@@ -1999,6 +2089,8 @@ static void usage(void)
     api->kprintf(ATTR_WHITE, "      --expect-build <ID>  配備元の世代が ID と違えば 1 件も書かずに断る\n");
     api->kprintf(ATTR_WHITE, "                  (%s を読む。完全一致で見る)\n",
                  HS_MANIFEST_PATH);
+    api->kprintf(ATTR_WHITE, "      --force-kapi 配備物の KAPI 配置・版を確かめられなくても続ける\n");
+    api->kprintf(ATTR_WHITE, "                  (既定は名札の kapi= がカーネルと違う/新しい/無いなら断る)\n");
     api->kprintf(ATTR_WHITE, "  -h, --help      この表示\n");
     api->kprintf(ATTR_WHITE, "  dir             同期対象は 1 つだけ (例: bin, sys, usr/bin)\n");
     api->kprintf(ATTR_WHITE, "  既定: サイズか日時が違うものだけ内容を比較し、違えばコピーする\n");
@@ -2030,6 +2122,7 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     g_mtime_unknown = 0;
     g_mtime_nosys = 0;
     g_force = 0;
+    g_force_kapi = 0;
     g_dry_run = 0;
     g_verbose = 0;
     g_verify = 0;
@@ -2060,6 +2153,10 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
         if (a[0] == '-') {
             if (str_cmp(a, "-f") == 0 || str_cmp(a, "--force") == 0) {
                 g_force = 1;
+            } else if (str_cmp(a, "--force-kapi") == 0) {
+                /* 票 TASK_KAPI_DATA_FIELDS: KAPI の門を明示して越える。
+                 * `-f` とは別の旗 (短縮形も作らない)。 */
+                g_force_kapi = 1;
             } else if (str_cmp(a, "--verify") == 0) {
                 /* 票 H3 §8: 日時によるスキップをしない = H1 の現挙動。
                  * 確実さが要るときだけ払う費用 (短い別名は付けない — 誤って
@@ -2191,6 +2288,11 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
      * 断るときは**保護対象の走査にも入らず**、1 件も書かずに戻る。 */
     man_load();
     if (man_gate() != 0) {
+        api->mem_free(file_buf);
+        return 1;
+    }
+    /* 票 TASK_KAPI_DATA_FIELDS: 配備物の KAPI 配置と版 (1 件も書く前) */
+    if (man_kapi_gate() != 0) {
         api->mem_free(file_buf);
         return 1;
     }

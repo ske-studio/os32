@@ -24,6 +24,11 @@
 
 #include "os32_kapi_slots.h"
 
+/* crt0 を使わないので KAPI データ欄の配置の刻印を自分で置く (ヘッダ v3、票
+ * TASK_KAPI_DATA_FIELDS)。mkos32x.py は刻印の無い ELF を断る。この試験は
+ * データ欄を読まないが、exec は配置を照合するので v63 の値を持たせる。 */
+OS32_KAPI_LAYOUT_STAMP();
+
 /* app.ld の ENTRY(_start)。crt0 を link しないのでこれがエントリになる。 */
 void _start(void) __attribute__((section(".text.startup"), used, noreturn));
 

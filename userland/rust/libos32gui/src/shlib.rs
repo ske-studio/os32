@@ -410,10 +410,23 @@ fn r0(r: client::GuiResult<()>) -> i32 {
 /// `bind()` (アプリ側) が版照合の直後に 1 回呼ぶ。gshell 配下でないアプリ
 /// (`gdi_test`) は自前で GFX モードに入ってからここに来るので、`gfx_init` は
 /// しない — framebuffer 記述子とサーフェス/スプライトのプールだけ取り直す。
+///
+/// **旧カーネルでは断る** (票 TASK_KAPI_DATA_FIELDS、Codex B-R2-1)。v62 以前の
+/// カーネルの shlib ローダはヘッダ v3 の `min_api_ver` / `kapi_data_off` を
+/// 見ないので、このライブラリを載せてしまう。そのカーネルの KernelAPI は
+/// データ欄 (shm_base) が別の位置にあるので、`api->version` が 63 未満なら
+/// **`os32_init(api)` の前に**返し、旧 KAPI をライブラリに保存しない。
+/// 以後の全エクスポートは [`init_ok`] の門で失敗を返す (旧アプリの `bind()` は
+/// この戻り値を捨てるので、門が無いと NULL の KAPI を辿る)。
 #[no_mangle]
 pub extern "C" fn os32gui_shlib_init(api: *mut KernelAPI) -> i32 {
     if api.is_null() {
         return os32api::gui::proto::OS32_ERR_INVAL;
+    }
+    /* magic / version は全版で 0x00 / 0x04 (配置が変わる前でも読める)。 */
+    let ver = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*api).version)) };
+    if ver < os32api::OS32X_HDR_V3_MIN_API {
+        return os32api::gui::proto::OS32_ERR_VERSION;
     }
     os32api::os32_init(api);
     /* C の libos32cfg (`cfg_backend.c`) が見る `kapi` を供給する。shlib には
@@ -422,7 +435,39 @@ pub extern "C" fn os32gui_shlib_init(api: *mut KernelAPI) -> i32 {
      * NULL を辿らないよう、wrapper 側にも門がある。 */
     crate::cfgro::set_kapi(api as *mut core::ffi::c_void);
     client::attach_gfx();
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(SHLIB_INIT_OK), true) };
     0
+}
+
+/* ================================================================ */
+/*  初期化成功の門 (票 TASK_KAPI_DATA_FIELDS)                        */
+/*                                                                  */
+/*  `os32gui_shlib_init` が成功したときだけ立つ (アプリごとの .data)。 */
+/*  立っていなければ全エクスポートが何もせず失敗を返す:               */
+/*    i32 → OS32_ERR_VERSION / u32 → 0 / ポインタ → NULL / () → 何も */
+/*    しない。表 101..=110 (cfg / host) は `cfgro::kapi_ready()` が    */
+/*    同じ役 (`kapi` は成功したときだけ入る)。                         */
+/* ================================================================ */
+static mut SHLIB_INIT_OK: bool = false;
+
+/// `os32gui_shlib_init` が成功しているか。
+#[inline]
+fn init_ok() -> bool {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(SHLIB_INIT_OK)) }
+}
+
+/// 門。`gate!()` は `()` を返す関数、`gate!(v)` は値を返す関数に置く。
+macro_rules! gate {
+    () => {
+        if !init_ok() {
+            return;
+        }
+    };
+    ($v:expr) => {
+        if !init_ok() {
+            return $v;
+        }
+    };
 }
 
 /* ================================================================ */
@@ -431,6 +476,7 @@ pub extern "C" fn os32gui_shlib_init(api: *mut KernelAPI) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_client_init() -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match client::init() {
         Ok(slot) => slot as i32,
         Err(e) => e.code(),
@@ -439,31 +485,37 @@ pub extern "C" fn os32gui_client_init() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_dbg_print(p: *const u8, len: u32) {
+    gate!();
     client::dbg_print(unsafe { slice(p, len) })
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_dbg_print_num(p: *const u8, len: u32, v: i32) {
+    gate!();
     client::dbg_print_num(unsafe { slice(p, len) }, v)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_is_inited() -> u32 {
+    gate!(0);
     client::is_inited() as u32
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_slot() -> u32 {
+    gate!(0);
     client::slot()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_slot_base() -> *mut u8 {
+    gate!(core::ptr::null_mut());
     client::slot_base()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_raw_call(op: u32, arg: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match client::call(op, arg) {
         Ok(v) => v,
         Err(e) => e.code(),
@@ -472,11 +524,13 @@ pub extern "C" fn os32gui_raw_call(op: u32, arg: u32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_args_ptr() -> *mut u8 {
+    gate!(core::ptr::null_mut());
     client::args_ptr()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_read_header(out: *mut GuiSlotHeader) {
+    gate!();
     if out.is_null() {
         return;
     }
@@ -492,6 +546,7 @@ pub extern "C" fn os32gui_poll(
     dropped: *mut u16,
     overflow: *mut u8,
 ) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     if out.is_null() || cap == 0 {
         return os32api::gui::proto::OS32_ERR_INVAL;
     }
@@ -512,6 +567,7 @@ pub extern "C" fn os32gui_poll(
 
 #[no_mangle]
 pub extern "C" fn os32gui_wait(timeout_ticks: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match client::wait(timeout_ticks) {
         Ok(v) => v,
         Err(e) => e.code(),
@@ -520,26 +576,31 @@ pub extern "C" fn os32gui_wait(timeout_ticks: u32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_enter_handler() {
+    gate!();
     client::enter_handler()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_leave_handler() {
+    gate!();
     client::leave_handler()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_commit(window: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::commit(window))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_invalidate(window: u32, rect: Rect) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::invalidate(window, rect))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_client_stats(out: *mut Stats) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match client::stats() {
         Ok(v) => {
             if !out.is_null() {
@@ -554,6 +615,7 @@ pub extern "C" fn os32gui_client_stats(out: *mut Stats) -> i32 {
 /// 記録があれば `*out` に tick 下位 16bit を入れて 1、無ければ 0。
 #[no_mangle]
 pub extern "C" fn os32gui_trace_tick(serial: u16, out: *mut u16) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match client::trace_tick(serial) {
         Some(t) => {
             if !out.is_null() {
@@ -567,6 +629,7 @@ pub extern "C" fn os32gui_trace_tick(serial: u16, out: *mut u16) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_lease_palette(first: u16, entries: *const GuiRgb, n: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     if entries.is_null() || n == 0 {
         return os32api::gui::proto::OS32_ERR_INVAL;
     }
@@ -579,11 +642,13 @@ pub extern "C" fn os32gui_lease_palette(first: u16, entries: *const GuiRgb, n: u
 
 #[no_mangle]
 pub extern "C" fn os32gui_utf8_seq_len(b: u8) -> u32 {
+    gate!(0);
     client::utf8_seq_len(b) as u32
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_utf8_truncate(p: *const u8, len: u32, max: u32) -> u32 {
+    gate!(0);
     client::utf8_truncate(unsafe { slice(p, len) }, max as usize) as u32
 }
 
@@ -593,6 +658,7 @@ pub extern "C" fn os32gui_utf8_truncate(p: *const u8, len: u32, max: u32) -> u32
 
 #[no_mangle]
 pub extern "C" fn os32gui_win_create(spec: *const GuiWinSpec, out: *mut u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     if spec.is_null() {
         return os32api::gui::proto::OS32_ERR_INVAL;
     }
@@ -610,21 +676,25 @@ pub extern "C" fn os32gui_win_create(spec: *const GuiWinSpec, out: *mut u32) -> 
 
 #[no_mangle]
 pub extern "C" fn os32gui_win_destroy(window: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::win_destroy(window))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_win_raise(window: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::win_raise(window))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_win_set_focus(window: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::win_set_focus(window))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_win_client_rect(window: u32, out: *mut Rect) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match client::win_client_rect(window) {
         Ok(r) => {
             if !out.is_null() {
@@ -638,26 +708,31 @@ pub extern "C" fn os32gui_win_client_rect(window: u32, out: *mut Rect) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_win_move(window: u32, x: i32, y: i32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::win_move(window, x as i16, y as i16))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_win_resize(window: u32, w: i32, h: i32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::win_resize(window, w as i16, h as i16))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_win_show(window: u32, show: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::win_show(window, show != 0))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_win_set_title(window: u32, p: *const u8, len: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::win_set_title(window, unsafe { slice(p, len) }))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_win_set_text_cursor(window: u32, x: i32, y: i32, visible: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::win_set_text_cursor(
         window,
         x as i16,
@@ -668,6 +743,7 @@ pub extern "C" fn os32gui_win_set_text_cursor(window: u32, x: i32, y: i32, visib
 
 #[no_mangle]
 pub extern "C" fn os32gui_timer_set(window: u32, id: u32, interval_ticks: u32, repeat: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::timer_set(
         window,
         id as u8,
@@ -678,6 +754,7 @@ pub extern "C" fn os32gui_timer_set(window: u32, id: u32, interval_ticks: u32, r
 
 #[no_mangle]
 pub extern "C" fn os32gui_timer_kill(window: u32, id: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(client::timer_kill(window, id as u8))
 }
 
@@ -687,26 +764,31 @@ pub extern "C" fn os32gui_timer_kill(window: u32, id: u32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_set_base_clip(surface: u32, rect: Rect) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     crate::clip::set_base_clip(SurfaceId(surface), rect)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_clear_base_clip() {
+    gate!();
     crate::clip::clear_base_clip()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_push_clip(rect: Rect) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     crate::clip::push_clip(rect)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_pop_clip() {
+    gate!();
     crate::clip::pop_clip()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_current_clip(out: *mut Rect) {
+    gate!();
     if out.is_null() {
         return;
     }
@@ -719,21 +801,25 @@ pub extern "C" fn os32gui_current_clip(out: *mut Rect) {
 
 #[no_mangle]
 pub extern "C" fn os32gui_fill_rect(surface: u32, rect: Rect, style: u32) {
+    gate!();
     crate::draw::fill_rect(SurfaceId(surface), rect, style_of(style))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_draw_rect(surface: u32, rect: Rect, style: u32) {
+    gate!();
     crate::draw::draw_rect(SurfaceId(surface), rect, style_of(style))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_hline(surface: u32, x: i32, y: i32, w: i32, style: u32) {
+    gate!();
     crate::draw::hline(SurfaceId(surface), x, y, w, style_of(style))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_vline(surface: u32, x: i32, y: i32, h: i32, style: u32) {
+    gate!();
     crate::draw::vline(SurfaceId(surface), x, y, h, style_of(style))
 }
 
@@ -746,11 +832,13 @@ pub extern "C" fn os32gui_line(
     y1: i32,
     style: u32,
 ) {
+    gate!();
     crate::draw::line(SurfaceId(surface), x0, y0, x1, y1, style_of(style))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_blit(surface: u32, dx: i32, dy: i32, bitmap: u32, src_rect: Rect) {
+    gate!();
     crate::draw::blit(SurfaceId(surface), dx, dy, SurfaceId(bitmap), src_rect)
 }
 
@@ -763,11 +851,13 @@ pub extern "C" fn os32gui_text(
     len: u32,
     style: u32,
 ) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     crate::draw::text(SurfaceId(surface), x, y, unsafe { slice(p, len) }, style_of(style))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_measure_text(p: *const u8, len: u32, ow: *mut i32, oh: *mut i32) {
+    gate!();
     let (w, h) = crate::draw::measure_text(unsafe { slice(p, len) });
     if !ow.is_null() {
         unsafe { ptr::write_unaligned(ow, w) }
@@ -779,6 +869,7 @@ pub extern "C" fn os32gui_measure_text(p: *const u8, len: u32, ow: *mut i32, oh:
 
 #[no_mangle]
 pub extern "C" fn os32gui_screen_info(out: *mut ScreenInfo) {
+    gate!();
     if out.is_null() {
         return;
     }
@@ -787,6 +878,7 @@ pub extern "C" fn os32gui_screen_info(out: *mut ScreenInfo) {
 
 #[no_mangle]
 pub extern "C" fn os32gui_gfx_stats(out: *mut Stats) {
+    gate!();
     if out.is_null() {
         return;
     }
@@ -795,6 +887,7 @@ pub extern "C" fn os32gui_gfx_stats(out: *mut Stats) {
 
 #[no_mangle]
 pub extern "C" fn os32gui_base_violation_count() -> u32 {
+    gate!(0);
     crate::draw::base_violation_count()
 }
 
@@ -804,26 +897,31 @@ pub extern "C" fn os32gui_base_violation_count() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_create_surface(w: i32, h: i32) -> u32 {
+    gate!(0);
     crate::surface::create_surface(w, h).raw()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_destroy_surface(id: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     crate::surface::destroy_surface(SurfaceId(id))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_create_window_surface(rect: Rect) -> u32 {
+    gate!(0);
     crate::surface::create_window_surface(rect).raw()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_screen_surface() -> u32 {
+    gate!(0);
     crate::surface::screen_surface().raw()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_surface_size(id: u32, ow: *mut i32, oh: *mut i32) {
+    gate!();
     let (w, h) = crate::surface::surface_size(SurfaceId(id));
     if !ow.is_null() {
         unsafe { ptr::write_unaligned(ow, w) }
@@ -852,36 +950,43 @@ fn wid(r: client::GuiResult<WidgetId>, out: *mut u32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_row(pad: i32, gap: i32, out: *mut u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     wid(widget::row(pad as i16, gap as i16), out)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_column(pad: i32, gap: i32, out: *mut u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     wid(widget::column(pad as i16, gap as i16), out)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_label(p: *const u8, len: u32, out: *mut u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     wid(widget::label(unsafe { slice(p, len) }), out)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_button(p: *const u8, len: u32, out: *mut u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     wid(widget::button(unsafe { slice(p, len) }), out)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_checkbox(p: *const u8, len: u32, checked: u32, out: *mut u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     wid(widget::checkbox(unsafe { slice(p, len) }, checked != 0), out)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_textbox(p: *const u8, len: u32, out: *mut u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     wid(widget::textbox(unsafe { slice(p, len) }), out)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_listbox(out: *mut u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     wid(widget::listbox(), out)
 }
 
@@ -891,11 +996,13 @@ pub extern "C" fn os32gui_w_listbox(out: *mut u32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_textarea(out: *mut u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     wid(widget::textarea(), out)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_textarea_clear(id: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(widget::textarea_clear(WidgetId(id)))
 }
 
@@ -906,6 +1013,7 @@ pub extern "C" fn os32gui_w_textarea_add_row(
     len: u32,
     out: *mut i32,
 ) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match widget::textarea_add_row(WidgetId(id), unsafe { slice(p, len) }) {
         Ok(i) => {
             if !out.is_null() {
@@ -919,21 +1027,25 @@ pub extern "C" fn os32gui_w_textarea_add_row(
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_textarea_set_caret(id: u32, row: i32, col: i32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(widget::textarea_set_caret(WidgetId(id), row, col))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_textarea_visible_rows(id: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     widget::textarea_visible_rows(WidgetId(id))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_textarea_columns(id: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     widget::textarea_columns(WidgetId(id))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_textarea_take_input(id: u32, out: *mut u8, cap: u32) -> u32 {
+    gate!(0);
     widget::textarea_take_input(WidgetId(id), unsafe { slice_mut(out, cap) }) as u32
 }
 
@@ -941,6 +1053,7 @@ pub extern "C" fn os32gui_w_textarea_take_input(id: u32, out: *mut u8, cap: u32)
 /// `v` は Fixed の px / Flex の重み、`rect` は Absolute のときだけ意味を持つ。
 #[no_mangle]
 pub extern "C" fn os32gui_w_add(parent: u32, child: u32, kind: u32, v: i32, rect: Rect) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     let spec = match kind {
         SIZE_FIXED => crate::layout::SizeSpec::Fixed(v as i16),
         SIZE_FLEX => crate::layout::SizeSpec::Flex(v as u16),
@@ -952,46 +1065,55 @@ pub extern "C" fn os32gui_w_add(parent: u32, child: u32, kind: u32, v: i32, rect
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_set_cross(id: u32, v: i32) {
+    gate!();
     widget::set_cross(WidgetId(id), v as i16)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_set_min(id: u32, w: i32, h: i32) {
+    gate!();
     widget::set_min(WidgetId(id), w as i16, h as i16)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_set_text(id: u32, p: *const u8, len: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(widget::set_text(WidgetId(id), unsafe { slice(p, len) }))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_get_text(id: u32, out: *mut u8, cap: u32) -> u32 {
+    gate!(0);
     widget::text(WidgetId(id), unsafe { slice_mut(out, cap) }) as u32
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_set_checked(id: u32, on: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(widget::set_checked(WidgetId(id), on != 0))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_is_checked(id: u32) -> u32 {
+    gate!(0);
     widget::is_checked(WidgetId(id)) as u32
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_set_enabled(id: u32, on: u32) {
+    gate!();
     widget::set_enabled(WidgetId(id), on != 0)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_set_hidden(id: u32, hidden: u32) {
+    gate!();
     widget::set_hidden(WidgetId(id), hidden != 0)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_rect(id: u32, out: *mut Rect) {
+    gate!();
     if out.is_null() {
         return;
     }
@@ -1000,11 +1122,13 @@ pub extern "C" fn os32gui_w_rect(id: u32, out: *mut Rect) {
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_list_clear(id: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(widget::list_clear(WidgetId(id)))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_list_add(id: u32, p: *const u8, len: u32, out: *mut i32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match widget::list_add(WidgetId(id), unsafe { slice(p, len) }) {
         Ok(i) => {
             if !out.is_null() {
@@ -1018,27 +1142,32 @@ pub extern "C" fn os32gui_w_list_add(id: u32, p: *const u8, len: u32, out: *mut 
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_list_selection(id: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     widget::list_selection(WidgetId(id))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_list_set_selection(id: u32, index: i32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(widget::list_set_selection(WidgetId(id), index))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_list_item_text(id: u32, index: i32, out: *mut u8, cap: u32) -> u32 {
+    gate!(0);
     widget::list_item_text(WidgetId(id), index, unsafe { slice_mut(out, cap) }) as u32
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_set_focus(id: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(widget::set_focus(WidgetId(id)))
 }
 
 /// 窓スロット `win` でフォーカス中のウィジェット。無効なら 0。
 #[no_mangle]
 pub extern "C" fn os32gui_w_focused(win: u32) -> u32 {
+    gate!(0);
     let st = s();
     let i = win as usize;
     if i >= st.windows.len() || !st.windows[i].used {
@@ -1054,12 +1183,14 @@ pub extern "C" fn os32gui_w_focused(win: u32) -> u32 {
 /// 77 の意味は変えずに末尾へ足した (決裁 A1)。
 #[no_mangle]
 pub extern "C" fn os32gui_w_focused_in(window: u32) -> u32 {
+    gate!(0);
     widget::focused_of(window).raw()
 }
 
 /// `WidgetId` → スロット添字 (無効なら -1)。
 #[no_mangle]
 pub extern "C" fn os32gui_w_resolve(id: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match widget::resolve(WidgetId(id)) {
         Some(i) => i as i32,
         None => -1,
@@ -1068,6 +1199,7 @@ pub extern "C" fn os32gui_w_resolve(id: u32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_w_id_of(idx: u32) -> u32 {
+    gate!(0);
     let i = idx as usize;
     if i >= os32api::gui::proto::GUI_MAX_WIDGETS {
         return 0;
@@ -1081,6 +1213,7 @@ pub extern "C" fn os32gui_w_id_of(idx: u32) -> u32 {
 
 #[no_mangle]
 pub extern "C" fn os32gui_window_create(spec: *const GuiWinSpec, out: *mut u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     if spec.is_null() {
         return os32api::gui::proto::OS32_ERR_INVAL;
     }
@@ -1098,11 +1231,13 @@ pub extern "C" fn os32gui_window_create(spec: *const GuiWinSpec, out: *mut u32) 
 
 #[no_mangle]
 pub extern "C" fn os32gui_window_surface(id: u32) -> u32 {
+    gate!(0);
     window::surface_of(id).raw()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_window_client_size(id: u32, ow: *mut i16, oh: *mut i16) {
+    gate!();
     let (w, h) = window::client_size_of(id);
     if !ow.is_null() {
         unsafe { ptr::write_unaligned(ow, w) }
@@ -1114,32 +1249,38 @@ pub extern "C" fn os32gui_window_client_size(id: u32, ow: *mut i16, oh: *mut i16
 
 #[no_mangle]
 pub extern "C" fn os32gui_window_set_root(id: u32, root: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     r0(window::set_root_of(id, WidgetId(root)))
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_window_relayout(id: u32) {
+    gate!();
     window::relayout_of(id)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_window_invalidate(id: u32, rect: Rect) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     window::invalidate_of(id, rect);
     0
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_window_is_focused(id: u32) -> u32 {
+    gate!(0);
     window::is_focused_of(id) as u32
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_window_drop(id: u32) {
+    gate!();
     window::drop_window(id)
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_window_count() -> u32 {
+    gate!(0);
     window::count() as u32
 }
 
@@ -1150,6 +1291,7 @@ pub extern "C" fn os32gui_window_count() -> u32 {
 /// U3 ループ本体。ハンドラはアプリ側 (`vt` / `this`)。
 #[no_mangle]
 pub extern "C" fn os32gui_run(vt: *const AppVTable, this: *mut c_void, ui: *mut Ui) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     if vt.is_null() || ui.is_null() {
         return os32api::gui::proto::OS32_ERR_INVAL;
     }
@@ -1161,26 +1303,31 @@ pub extern "C" fn os32gui_run(vt: *const AppVTable, this: *mut c_void, ui: *mut 
 
 #[no_mangle]
 pub extern "C" fn os32gui_flush_damage() {
+    gate!();
     crate::app::flush_damage()
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_ui_quit() {
+    gate!();
     s().quit = true;
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_ui_is_quitting() -> u32 {
+    gate!(0);
     s().quit as u32
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_ui_input_unknown() -> u32 {
+    gate!(0);
     s().input_unknown as u32
 }
 
 #[no_mangle]
 pub extern "C" fn os32gui_ui_key_is_pressed(scan: u32) -> u32 {
+    gate!(0);
     unsafe { ((os32api::api().kbd_is_pressed)(scan as i32) != 0) as u32 }
 }
 
@@ -1195,6 +1342,7 @@ pub extern "C" fn os32gui_ui_key_is_pressed(scan: u32) -> u32 {
 /// `modal_open(parent, kind, message)` → DialogId (正) / 負のエラー。**待たない**。
 #[no_mangle]
 pub extern "C" fn os32gui_modal_open(parent: u32, kind: u32, msg: *const u8, len: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match crate::modal::modal_open(parent, kind as u16, unsafe { slice(msg, len) }) {
         Ok(id) => id as i32,
         Err(e) => e.code(),
@@ -1214,6 +1362,7 @@ pub extern "C" fn os32gui_modal_result(
     value_len: *mut u32,
     copied: *mut u32,
 ) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     let buf = unsafe { slice_mut(out, cap) };
     match crate::modal::modal_result(dialog as u16, buf) {
         Ok(r) => {
@@ -1232,6 +1381,7 @@ pub extern "C" fn os32gui_modal_result(
 /// `file_open(parent, prompt)` → DialogId (正) / 負のエラー。path は同期返却しない。
 #[no_mangle]
 pub extern "C" fn os32gui_file_open(parent: u32, prompt: *const u8, len: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match crate::modal::file_open(parent, unsafe { slice(prompt, len) }) {
         Ok(id) => id as i32,
         Err(e) => e.code(),
@@ -1241,6 +1391,7 @@ pub extern "C" fn os32gui_file_open(parent: u32, prompt: *const u8, len: u32) ->
 /// `input_open(parent, prompt)` → DialogId (正) / 負のエラー。text は同期返却しない。
 #[no_mangle]
 pub extern "C" fn os32gui_input_open(parent: u32, prompt: *const u8, len: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     match crate::modal::input_open(parent, unsafe { slice(prompt, len) }) {
         Ok(id) => id as i32,
         Err(e) => e.code(),
@@ -1253,6 +1404,7 @@ pub extern "C" fn os32gui_input_open(parent: u32, prompt: *const u8, len: u32) -
 /// `value` は 1〜255B の絶対パスで、不正なら **WM を呼ばずに** `ERR_INVAL`。
 #[no_mangle]
 pub extern "C" fn os32gui_session_request(action: u32, value: *const u8, len: u32) -> i32 {
+    gate!(os32api::gui::proto::OS32_ERR_VERSION);
     if action > 0xFF {
         return os32api::gui::proto::OS32_ERR_INVAL;
     }
@@ -1262,6 +1414,7 @@ pub extern "C" fn os32gui_session_request(action: u32, value: *const u8, len: u3
 /// `draw_icon16(surface, x, y, icon)` — 16x16 固定、mask=0 は描かない、拡大縮小なし。
 #[no_mangle]
 pub extern "C" fn os32gui_draw_icon16(surface: u32, x: i32, y: i32, icon: *const GuiIcon16) {
+    gate!();
     if icon.is_null() {
         return;
     }

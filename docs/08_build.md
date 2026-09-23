@@ -173,6 +173,27 @@ Makefile ターゲットとの対応 (`build/deploy.mk`)。**このリポジト�
 KernelAPI の構造体を変えたときは `make clean` → `make all` が必須
 (古い `.o` が残ると ABI 不整合で静かに壊れる)。
 
+<a id="kapi-v63-移行"></a>
+#### KAPI v63 への移行 (データ欄の固定配置、票 [TASK_KAPI_DATA_FIELDS](tasks/memory/TASK_KAPI_DATA_FIELDS.md))
+
+v63 で KernelAPI のデータ欄を 0x4B8 に固定し、OS32X ヘッダを v3 にした
+([KAPI_SPEC.md](KAPI_SPEC.md) §4-0)。**v62 以前のバイナリ (アプリ・常駐シェル・
+`libos32gui.shlib`) は一度だけ全部断られる**ので、初回は次の順で入れ替える:
+
+1. `make clean && make clean-external` — 古い `.o` は crt の `kapi` の改名
+   (`os32_kapi_v63`) でリンクが落ちるが、`.bin` は残るので必ず消す
+2. `make all external` (実機向けは `make fd144` も) — 全部ヘッダ v3 で作り直す
+3. **NHD は NP21/W を止めて一式** (`make deploy-nhd`、カーネル・`/sys`・shlib・
+   userland をまとめて。順序は問わない)。実機は **FD / CD を入れ直す**
+4. HostDrv + `hsync` だけでは移れない — 旧 `hsync` は名札の `kapi=` を見ないし、
+   `/sys` (常駐シェル) が旧いまま新カーネルに載ると起動時に止まる
+   (`FATAL: shell.bin: rebuild required (KAPI data layout)`、FDD の shell があればそちら)
+
+**v64 以降は「カーネルを先、ユーザーランドを後」** (ユーザー決裁 2026-09-24)。
+データ欄が固定になったので、新しいカーネルは古いユーザーランドをそのまま動かせる。
+逆 (新しいユーザーランド + 古いカーネル) は、`min_api_ver` と `hsync` の
+「配備物の版 > カーネルの版」の拒否 (`reason=kapi_newer_than_kernel`) が止める。
+
 <a id="配備3経路"></a>
 #### 配備 3 経路の使い分け (正典)
 
@@ -195,7 +216,10 @@ KernelAPI の構造体を変えたときは `make clean` → `make all` が必�
   `tools/prune_stale.py` で刈る (`NO_PRUNE=1` で一覧のみ)。
 - **配備元には世代の名札が付く** (票 H4)。`make deploy` は全件成功の後にだけ
   `C:\os32\.deploy\manifest.txt` を書き、1 件でも失敗したら既にある名札を消す。
-  中身は行指向の平文 (`format` / `build` / `generated` / `count` + `---` + 1 行 1 ファイル)。
+  中身は行指向の平文 (`format` / `build` / `generated` / `kapi` / `kapi_version` / `count`
+  + `---` + 1 行 1 ファイル)。format=2 (KAPI v63〜) の `kapi=` は配備した OS32X バイナリの
+  ヘッダ v3 から取る配置 (10 進) で、v3 でないもの・値の食い違うものが 1 つでもあれば
+  名札を書かない (= 配備失敗)。
   `build` は `<短い SHA>`(+`dirty`) で、**「同じか違うか」を見るための名札。順序は表さない**。
   ゲストの `hsync` は起動時にこれを読んで 1 行目に `DEPLOY build=… count=… generated=…` を出し、
   `hsync --expect-build <ID>` は名札が違えば**1 件も書かずに**断る
@@ -204,6 +228,11 @@ KernelAPI の構造体を変えたときは `make clean` → `make all` が必�
   (`hsync usr`) では表示だけして続ける — 名札はルートの世代を表すもので、
   絞った範囲の正しさは保証しないため。**読めて不一致と分かった場合は絞り込み
   でも断る** (「確かめた結果おかしい」と「確かめられない」は別)。
+  **KAPI の門** (v63〜): 名札の `kapi=` がカーネルの配置と違う
+  (`kapi_layout_mismatch`)、`kapi_version` がカーネルより新しい
+  (`kapi_newer_than_kernel`)、名札が無い・壊れている・旧形式 (format=1) のときは、
+  `--expect-build` の有無にも範囲にもよらず**既定で 1 件も書かずに断る**。
+  越えるのは `--force-kapi` だけ (`-f` は同一判定の省略で別の意味なので開けない)。
   防ぐのは **「`make deploy` を忘れたまま `hsync` して、ゲストの新しいファイルを
   ホストの古いもので上書きする」** 事故 — 内容の違いは内容比較で分かるが、
   どちらが意図した版かは分からないため。詳細は `docs/manpages/hsync.1`。

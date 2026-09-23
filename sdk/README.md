@@ -13,7 +13,7 @@ OS のソースツリーを持たなくても、この SDK だけでアプリを
 | `lib/` | 静的アーカイブ (`libos32gfx.a` など 25 本) |
 | `crt/` | スタートアップ (`crt0.o`, `crt0_c.o`, `syscalls.o`, `help.o`) |
 | `link/` | リンカスクリプト (`app.ld`) |
-| `bin/mkos32x.py` | OS32X 実行ファイルヘッダの付加 |
+| `bin/mkos32x.py` | OS32X 実行ファイルヘッダ (v3) の付加。`bin/os32x_hdr.py` を同じ場所に置いて使う |
 | `rust/` | Rust ターゲット定義と `os32api` クレート |
 | `example/hello/` | 動く最小例 |
 | `KAPI_VERSION` | この SDK が対応する KernelAPI バージョン |
@@ -50,7 +50,14 @@ void main(int argc, char **argv, KernelAPI *api);
 
 **OS32X ヘッダが要る。** リンクしただけの生バイナリは OS がロードしない。
 `mkos32x.py` で最低 API バージョンと要求ヒープサイズを埋め込む。
-最低 API バージョンは `KAPI_VERSION` 以下にすること。
+最低 API バージョンは `KAPI_VERSION` 以下にすること (63 未満を渡しても 63 に上がる)。
+
+**ヘッダは v3 (KAPI v63〜)。** `mkos32x.py` は `--elf <app.elf>` が必須で、ELF の
+`.os32_kapi_layout` (crt0 が置く KernelAPI のデータ欄の配置の刻印) をヘッダの
+`kapi_data_off` に写す。刻印が無い ELF (crt0 を付けずにリンクした等) は断る。
+OS はこの値が自分の配置と違うバイナリを `rebuild required (KAPI data layout)` で
+起動しない。v62 以前の SDK で作ったオブジェクトは crt の `kapi` の実名
+(`os32_kapi_v63`) が違うのでリンクで落ちる — SDK を差し替えたら全部作り直すこと。
 
 ### グラフィックスの注意
 

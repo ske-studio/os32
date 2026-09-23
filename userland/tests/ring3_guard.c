@@ -49,6 +49,11 @@
 /* スロット番号だけの生成ヘッダ (型に依存しないので自己完結のまま include できる)。 */
 #include "os32_kapi_slots.h"
 
+/* crt0 を使わないので KAPI データ欄の配置の刻印を自分で置く (ヘッダ v3、票
+ * TASK_KAPI_DATA_FIELDS)。mkos32x.py は刻印の無い ELF を断る。この試験は
+ * データ欄を読まないが、exec は配置を照合するので v63 の値を持たせる。 */
+OS32_KAPI_LAYOUT_STAMP();
+
 void _start(int argc, char **argv) __attribute__((section(".text.startup"), used, noreturn));
 
 void _start(int argc, char **argv)

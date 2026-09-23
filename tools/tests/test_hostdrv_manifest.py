@@ -101,7 +101,7 @@ class Bench(object):
         """前の世代の名札を置く。"""
         self.man().parent.mkdir(parents=True, exist_ok=True)
         self.man().write_text(
-            "format=1\nbuild=%s\ngenerated=2000-01-01T00:00:00Z\ncount=0\n---\n"
+            "format=1\nbuild=%s\ngenerated=2000-01-01T00:00:00Z\ncount=0\n---\n"  # 旧形式
             % build, encoding="utf-8")
 
 
@@ -133,7 +133,12 @@ def case_m1(tmp):
         if not b.man().is_file():
             return
         kv, lines = parse(b.man_text())
-        check(kv.get("format") == "1", "format=1")
+        check(kv.get("format") == "2", "format=2 (票 TASK_KAPI_DATA_FIELDS)")
+        off, ver = hd.kapi_json_layout()
+        check(kv.get("kapi") == str(off),
+              "kapi=%s は sdk/kapi.json の配置 (%d)" % (kv.get("kapi"), off))
+        check(kv.get("kapi_version") == str(ver),
+              "kapi_version=%s は sdk/kapi.json の版 (%d)" % (kv.get("kapi_version"), ver))
         check("build" in kv and kv["build"] != "", "build= がある")
         check(" " not in kv.get("build", " "), "build に空白が無い")
         check(kv.get("generated", "").endswith("Z"),
@@ -359,14 +364,81 @@ MUTATIONS = [
     # 変異 4: count を行数と別に数える版 (M1 の否定側)。
     ("count_not_lines",
      "    head = MANIFEST_HEAD_FMT % (MANIFEST_FORMAT, build, generated,\n"
-     "                                len(lines))",
+     "                                kapi_off, kapi_ver, len(lines))",
      "    head = MANIFEST_HEAD_FMT % (MANIFEST_FORMAT, build, generated,\n"
-     "                                len(lines) + 1)"),
+     "                                kapi_off, kapi_ver, len(lines) + 1)"),
+    # 変異 K1: 配備物のヘッダを見ず kapi.json の値を書く版 (旧成果物の混入を
+    #          「確かめた」ことにしてしまう)。
+    ("kapi_not_from_binaries",
+     "    kapi_off, why = deployed_kapi_layout(deployed)",
+     "    kapi_off, why = kapi_json_layout()[0], None"),
+    # 変異 K2: 値の食い違いを見逃す版。
+    ("kapi_mixed_allowed",
+     "    if len(seen) != 1:",
+     "    if False:"),
+    # 変異 K3: v3 でない (配置を持たない) 成果物を見逃す版。
+    ("kapi_old_header_allowed",
+     "        if h['version'] < os32x_hdr.OS32X_HDR_VERSION or off is None:",
+     "        if off is None:\n            continue\n        if False:"),
     # 変異 5: パスの空白を見逃す版 (§2-1 の否定側)。
     ("space_in_path_allowed",
      "        if not manifest_path_ok(rel):",
      "        if False:"),
 ]
+
+
+# --------------------------------------------------------------------------
+#  K — KAPI の配置 (票 TASK_KAPI_DATA_FIELDS)
+# --------------------------------------------------------------------------
+
+def os32x_blob(version, kapi_off, body=b"\x90" * 32):
+    """OS32X のヘッダを付けた最小の中身。version 2 は 44 バイト (kapi 無し)。"""
+    import struct
+    if version >= 3:
+        hdr = struct.pack("<12I", 0x4F533332, 48, 3, 0, 0, len(body), 0, 0, 0,
+                          63, 0x500000, kapi_off)
+    else:
+        hdr = struct.pack("<11I", 0x4F533332, 44, 2, 0, 0, len(body), 0, 0, 0,
+                          39, 0x500000)
+    return hdr + body
+
+
+def case_kapi(tmp):
+    print("== K: 名札の kapi= は配備した OS32X のヘッダから取る ==")
+    off, ver = hd.kapi_json_layout()
+
+    # K1: v3 で配置が一致 -> kapi= に書く
+    with Bench(tmp / "k1") as b:
+        pathlib.Path(b.proj / b.files[0]["host"]).write_bytes(os32x_blob(3, off))
+        pathlib.Path(b.proj / b.files[1]["host"]).write_bytes(os32x_blob(3, off))
+        ok = hd.do_sync()
+        check(ok is True, "K1 v3・一致なら配備は成功する")
+        kv, _lines = parse(b.man_text()) if b.man().is_file() else ({}, None)
+        check(kv.get("kapi") == str(off), "K1 kapi=%d" % off)
+
+    # K2: v2 の成果物が混ざる -> 名札を書かない (配備失敗)
+    with Bench(tmp / "k2") as b:
+        b.put_stale()
+        pathlib.Path(b.proj / b.files[0]["host"]).write_bytes(os32x_blob(3, off))
+        pathlib.Path(b.proj / b.files[1]["host"]).write_bytes(os32x_blob(2, 0))
+        ok = hd.do_sync()
+        check(ok is False, "K2 旧ヘッダ (v2) が混ざれば配備は失敗")
+        check(not b.man().is_file(), "K2 名札を書かない (古い名札も残さない)")
+
+    # K3: 配置の食い違い -> 名札を書かない
+    with Bench(tmp / "k3") as b:
+        pathlib.Path(b.proj / b.files[0]["host"]).write_bytes(os32x_blob(3, off))
+        pathlib.Path(b.proj / b.files[1]["host"]).write_bytes(os32x_blob(3, off - 4))
+        ok = hd.do_sync()
+        check(ok is False, "K3 配置が食い違えば配備は失敗")
+        check(not b.man().is_file(), "K3 名札を書かない")
+
+    # K4: 全部同じでも kapi.json と違う -> 名札を書かない
+    with Bench(tmp / "k4") as b:
+        pathlib.Path(b.proj / b.files[0]["host"]).write_bytes(os32x_blob(3, off + 4))
+        ok = hd.do_sync()
+        check(ok is False, "K4 sdk/kapi.json と違う配置なら配備は失敗")
+        check(not b.man().is_file(), "K4 名札を書かない")
 
 
 def run_mutations():
@@ -406,6 +478,7 @@ if __name__ == "__main__":
         case_m4(td)
         case_tag(td)
         case_build_id(td)
+        case_kapi(td)
 
     print("\n%d checks, %d failures" % (checks, failures))
     sys.exit(1 if failures else 0)

@@ -18,127 +18,29 @@ mkos32x.py - フラットバイナリに OS32X ヘッダを付加する
     --cui-only     CUI 専用フラグを設定 (GUI からの起動を断る, 票 T8-2)
     --launcher     起動要求 (launch_req) を出してよい宣言 (票 T9 D3)
     --load ADDR    リンク時のロードアドレス (--elf 指定時は ELF の .text から自動)
+
+ヘッダ v3 (48 バイト、票 docs/tasks/memory/TASK_KAPI_DATA_FIELDS.md):
+    末尾に kapi_data_off (KernelAPI のデータ欄のオフセット) を焼く。値は ELF の
+    非ロードのセクション .os32_kapi_layout (crt0 / os32api の刻印) から取る。
+    **--elf は必須**で、刻印が無ければ失敗する。min_api_ver は 63 未満なら 63 に
+    引き上げる (v3 の照合を持たない旧カーネルが受け入れないように)。
+    ヘッダの組み立ては同じディレクトリの os32x_hdr.py (tools/mkshlib.py と共通)。
 """
 
 import sys
-import struct
 import os
-import re
 
-OS32X_MAGIC = 0x4F533332  # 'OS32'
-OS32X_HDR_V1_SIZE = 40
-# v2: 末尾に load_addr (u32) を追記。sdk/include/os32/os32_kapi_shared.h の
-# OS32Header / OS32X_HDR_V2_SIZE / OS32X_HDR_VERSION と一致させること。
-OS32X_HDR_V2_SIZE = 44
-OS32X_HDR_VERSION = 2
-OS32X_FLAG_GFX = 0x0001
-OS32X_FLAG_RING3 = 0x0002
-OS32X_FLAG_FORCE_CPL0 = 0x0004
-OS32X_FLAG_SHLIB = 0x0008
-OS32X_FLAG_CUI_ONLY = 0x0010
-OS32X_FLAG_LAUNCHER = 0x0020
+# 共通モジュール (sdk/os32x_hdr.py、SDK では bin/os32x_hdr.py)。
+# このファイルと同じディレクトリに置く。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import os32x_hdr as H  # noqa: E402
 
-
-import subprocess
-
-def parse_elf_bss(elf_path):
-    """ELFファイルから .bss セグメントサイズを取得 (size -A コマンド使用)"""
-    try:
-        out = subprocess.check_output(['size', '-A', elf_path], text=True, errors='ignore')
-        for line in out.splitlines():
-            if line.startswith('.bss '):
-                # .bss        256     4194404  などの形式から数値を抽出
-                parts = line.split()
-                if len(parts) >= 2:
-                    return int(parts[1])
-        return 0
-    except Exception as e:
-        print(f"  警告: ELFのBSS読み取りに失敗しました ({elf_path}): {e}")
-        return 0
-
-
-def parse_elf_entry(elf_path):
-    """ELFファイルからエントリポイントのオフセットとロードアドレスを取得する。
-
-    ELFヘッダの e_entry (仮想アドレス) と .text セクションの開始アドレスの
-    差分を計算し、(バイナリ先頭からのオフセット, .text の仮想アドレス) を返す。
-    .text の仮想アドレスがそのままリンク時のロードアドレス
-    (sdk/link/app.ld の `. = 0x500000` 等) になる。
-    失敗時は None。
-    """
-    try:
-        with open(elf_path, 'rb') as f:
-            # ELFヘッダ (32bit)
-            ident = f.read(16)
-            if ident[:4] != b'\x7fELF':
-                print(f"  警告: ELF形式ではありません ({elf_path})")
-                return None
-            ei_class = ident[4]  # 1=32bit, 2=64bit
-            ei_data = ident[5]   # 1=LE, 2=BE
-            if ei_class != 1:
-                print(f"  警告: 32bit ELFのみサポート ({elf_path})")
-                return None
-            fmt = '<' if ei_data == 1 else '>'
-
-            # e_type(2) + e_machine(2) + e_version(4) + e_entry(4)
-            hdr = f.read(8)  # e_type, e_machine, e_version の先頭まで
-            e_entry = struct.unpack(fmt + 'I', f.read(4))[0]
-
-            # e_phoff(4) + e_shoff(4) + e_flags(4) + e_ehsize(2)
-            # + e_phentsize(2) + e_phnum(2) + e_shentsize(2) + e_shnum(2) + e_shstrndx(2)
-            f.read(4)   # e_phoff
-            e_shoff = struct.unpack(fmt + 'I', f.read(4))[0]
-            f.read(4)   # e_flags
-            f.read(2)   # e_ehsize
-            f.read(2)   # e_phentsize
-            f.read(2)   # e_phnum
-            e_shentsize = struct.unpack(fmt + 'H', f.read(2))[0]
-            e_shnum = struct.unpack(fmt + 'H', f.read(2))[0]
-            e_shstrndx = struct.unpack(fmt + 'H', f.read(2))[0]
-
-            # セクションヘッダテーブルを読み込み
-            f.seek(e_shoff)
-            sections = []
-            for _ in range(e_shnum):
-                sh_data = f.read(e_shentsize)
-                # sh_name(4) sh_type(4) sh_flags(4) sh_addr(4) sh_offset(4) ...
-                sh_name, sh_type, sh_flags, sh_addr = struct.unpack(fmt + 'IIII', sh_data[:16])
-                sections.append((sh_name, sh_type, sh_flags, sh_addr))
-
-            # セクション名文字列テーブル
-            if e_shstrndx < e_shnum:
-                str_sh = sections[e_shstrndx]
-                f.seek(e_shoff + e_shstrndx * e_shentsize + 16)  # sh_offset の位置
-                str_offset = struct.unpack(fmt + 'I', f.read(4))[0]
-                f.seek(str_offset)
-                strtab = f.read(4096)  # 十分なサイズを読む
-            else:
-                strtab = b''
-
-            # .text セクションの仮想アドレスを探す
-            text_addr = None
-            for sh_name, sh_type, sh_flags, sh_addr in sections:
-                if sh_name < len(strtab):
-                    end = strtab.index(b'\x00', sh_name) if b'\x00' in strtab[sh_name:] else sh_name
-                    name = strtab[sh_name:end].decode('ascii', errors='ignore')
-                    if name == '.text' or name == '.text.startup':
-                        if text_addr is None or sh_addr < text_addr:
-                            text_addr = sh_addr
-
-            if text_addr is None:
-                print(f"  警告: .text セクションが見つかりません ({elf_path})")
-                return None
-
-            entry_off = e_entry - text_addr
-            if entry_off < 0:
-                print(f"  警告: エントリポイントが .text より前にあります ({elf_path})")
-                return None
-
-            return (entry_off, text_addr)
-
-    except Exception as e:
-        print(f"  警告: ELFエントリポイント読み取りに失敗 ({elf_path}): {e}")
-        return None
+OS32X_FLAG_GFX = H.OS32X_FLAG_GFX
+OS32X_FLAG_RING3 = H.OS32X_FLAG_RING3
+OS32X_FLAG_FORCE_CPL0 = H.OS32X_FLAG_FORCE_CPL0
+OS32X_FLAG_SHLIB = H.OS32X_FLAG_SHLIB
+OS32X_FLAG_CUI_ONLY = H.OS32X_FLAG_CUI_ONLY
+OS32X_FLAG_LAUNCHER = H.OS32X_FLAG_LAUNCHER
 
 
 def main():
@@ -212,58 +114,62 @@ def main():
             print(f"不明なオプション: {sys.argv[i]}")
             sys.exit(1)
 
-    # ELFファイルからBSSサイズ自動検出 (--bss手動指定より優先)
-    if elf_path:
-        elf_bss = parse_elf_bss(elf_path)
-        if elf_bss > 0:
-            bss_size = elf_bss
+    # ヘッダ v3 は ELF の刻印からしか作らない (票 TASK_KAPI_DATA_FIELDS)。
+    if not elf_path:
+        print("mkos32x: --elf <file.elf> が要る (ヘッダ v3 の kapi_data_off を "
+              "ELF の .os32_kapi_layout から取る)", file=sys.stderr)
+        sys.exit(1)
 
-    # ELFファイルからエントリポイントとロードアドレスを自動取得
-    # --entry / --load で手動指定されていなければ ELF の値を使用
-    if elf_path:
-        elf_info = parse_elf_entry(elf_path)
-        if elf_info is not None:
-            elf_entry, elf_text_addr = elf_info
-            if entry_offset == 0:
-                entry_offset = elf_entry
-                if entry_offset != 0:
-                    print(f"  注意: ELFからエントリオフセット自動検出: 0x{entry_offset:X}")
-            if load_addr == 0:
-                load_addr = elf_text_addr
+    try:
+        elf = H.Elf32(elf_path)
 
-    # 入力ファイル読み込み
-    with open(input_path, 'rb') as f:
-        code_data = f.read()
+        # ELF から BSS サイズ (--bss 手動指定より優先)
+        if elf.bss_size() > 0:
+            bss_size = elf.bss_size()
 
-    text_size = len(code_data)
+        # ELF からエントリポイントとロードアドレス。--entry / --load で
+        # 手動指定されていなければ ELF の値を使う。
+        text_addr = elf.text_addr()
+        if text_addr is None:
+            print(f"  警告: .text セクションが見つかりません ({elf_path})")
+        else:
+            elf_entry = elf.e_entry - text_addr
+            if elf_entry < 0:
+                print(f"  警告: エントリポイントが .text より前にあります ({elf_path})")
+            else:
+                if entry_offset == 0:
+                    entry_offset = elf_entry
+                    if entry_offset != 0:
+                        print(f"  注意: ELFからエントリオフセット自動検出: 0x{entry_offset:X}")
+                if load_addr == 0:
+                    load_addr = text_addr
 
-    # ヘッダ構築 (v2 = 44バイト = 11 x u32)
-    header = struct.pack('<IIIIIIIIIII',
-        OS32X_MAGIC,        # magic
-        OS32X_HDR_V2_SIZE,  # header_size
-        OS32X_HDR_VERSION,  # version
-        flags,              # flags
-        entry_offset,       # entry_offset
-        text_size,          # text_size
-        bss_size,           # bss_size
-        heap_size,          # heap_size
-        0,                  # stack_size (予約)
-        min_api_ver,        # min_api_ver
-        load_addr,          # load_addr (v2)
-    )
+        # KAPI データ欄の配置 (刻印が無い・食い違うなら失敗)
+        kapi_data_off = H.read_kapi_layout(elf)
 
-    assert len(header) == OS32X_HDR_V2_SIZE, f"Header size mismatch: {len(header)}"
+        # 入力ファイル読み込み。ELF と世代が違えば止める。
+        with open(input_path, 'rb') as f:
+            code_data = f.read()
+        H.check_raw_matches_elf(elf, len(code_data), input_path)
+
+        text_size = len(code_data)
+        eff_api = H.effective_min_api(min_api_ver)
+        header = H.build_header(flags, entry_offset, text_size, bss_size,
+                                heap_size, min_api_ver, load_addr, kapi_data_off)
+    except H.HeaderError as e:
+        print(f"mkos32x: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # 出力
     with open(output_path, 'wb') as f:
         f.write(header)
         f.write(code_data)
 
-    total = OS32X_HDR_V2_SIZE + text_size
+    total = len(header) + text_size
     print(f"  OS32X: {os.path.basename(output_path)} "
           f"(text={text_size}, bss={bss_size}, heap={heap_size}, "
           f"entry=0x{entry_offset:X}, load=0x{load_addr:X}, "
-          f"api>={min_api_ver}, total={total})")
+          f"api>={eff_api}, kapi_data=0x{kapi_data_off:X}, total={total})")
 
 if __name__ == '__main__':
     main()

@@ -18,8 +18,9 @@
 /*  ページの中身 (`ring3_trampoline_init` が組む順):                         */
 /*                                                                          */
 /*    +0                      : ユーザ可視の KernelAPI 表 (magic/version/    */
-/*                              関数ポインタ KAPI_FUNC_COUNT 本/データ 2 個) */
-/*    +RING3_USTR_STUB_OFF    : int 0x80 スタブ 8 B × KAPI_FUNC_COUNT       */
+/*                              関数ポインタ KAPI_FUNC_CAPACITY 本/データ 2 個) */
+/*    +RING3_USTR_STUB_OFF    : int 0x80 スタブ 8 B × KAPI_FUNC_CAPACITY    */
+/*                              (予約スロット込み、票 TASK_KAPI_DATA_FIELDS)  */
 /*    +RING3_USTR_OFF         : ここ (写し場 RING3_USTR_CAP バイト)          */
 /*                                                                          */
 /*  写しは **呼ばれるたびに上書き**する。呼び手は次の KAPI 呼び出しより前に   */
@@ -37,7 +38,7 @@
 #define RING3_USTR_STUB_OFF  ((u32)((sizeof(KernelAPI) + 3u) & ~3u))
 /* スタブの終わり = 写し場の先頭 (4B 整列)。 */
 #define RING3_USTR_OFF       ((u32)((RING3_USTR_STUB_OFF + \
-                                     (u32)KAPI_FUNC_COUNT * 8u + 3u) & ~3u))
+                                     (u32)KAPI_FUNC_CAPACITY * 8u + 3u) & ~3u))
 /* 写し場の大きさ。cwd が入れば足りる (いま返すのは sys_getcwd だけ)。 */
 #define RING3_USTR_CAP       ((u32)OS32_MAX_PATH)
 

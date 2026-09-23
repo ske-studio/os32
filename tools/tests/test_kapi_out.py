@@ -33,6 +33,10 @@ KAPI_JSON = ROOT / "sdk/kapi.json"
 # 合成した最小の kapi.json。実物の並びに依存せず解釈だけを見る。
 SYNTH = {
     "version": 1,
+    # 票 TASK_KAPI_DATA_FIELDS (v63) で必須になった関数表の容量と crt の kapi の実名。
+    # この試験は `out` の解釈だけを見るので、関数数より十分大きい値にしておく。
+    "func_capacity": 32,
+    "crt_kapi_symbol": "os32_kapi_synth",
     "includes": [],
     "externs": [],
     "data_fields": [],

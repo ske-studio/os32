@@ -1,7 +1,16 @@
 #include "os32api.h"
 #include "os32/help.h"
 
+/* 実名は os32_kapi_v63 (生成ヘッダの `#define kapi OS32_KAPI_CRT_SYMBOL`)。
+ * v62 以前にコンパイルした .o は `kapi` を参照したままなので、ここと
+ * リンクすると未定義参照で落ちる = 作り直し忘れの検出 (票
+ * TASK_KAPI_DATA_FIELDS、ユーザー決裁 2026-09-24)。 */
 KernelAPI *kapi;
+
+/* KAPI データ欄の配置の刻印 (ヘッダ v3)。非ロードの .os32_kapi_layout に
+ * KAPI_DATA_FIELDS_OFF を置き、mkos32x.py が OS32X ヘッダの kapi_data_off
+ * へ写す。crt0 を通るバイナリはすべてここで刻印を持つ。 */
+OS32_KAPI_LAYOUT_STAMP();
 
 extern int main(int argc, char **argv, KernelAPI *api);
 extern void _init(void);

@@ -1,4 +1,4 @@
-# KernelAPI v62 仕様書
+# KernelAPI v63 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -8,7 +8,7 @@
 
 | 項目 | 値 |
 |------|------|
-| バイナリ形式 | OS32X (40バイトヘッダ + フラットバイナリ) |
+| バイナリ形式 | OS32X (ヘッダ v3 = 48 バイト + フラットバイナリ。§4-0) |
 | ヘッダマジック | 0x4F533332 ('OS32') |
 | KAPIテーブルアドレス | 動的算出 (KHEAP_BASE + KHEAP_SIZE) |
 | KAPIマジック | 0x4B415049 ('KAPI') |
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **52** |
-| 合計エントリ数 | **219** (ヘッダ2 + 関数ポインタ215 + データフィールド2) |
+| 現在のバージョン | **63** |
+| 合計エントリ数 | **304** (ヘッダ 2 + 関数表の容量 300 (うち実装 230・予約 70) + データフィールド 2)。データ欄は **0x4B8 に固定** (§4-0) |
 
 ---
 
@@ -105,6 +105,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v59 | **実装済み (2026-09-23、手元ビルドのみ)** | µs 時計 `sys_time_now` 1 本 (slot 222 = 0x380、data_fields は 0x384 / 0x388 へ)。起動からの経過を µs で返す。**64 ビットは KAPI で返せない** (往復 1 の B14) ので、出力引数 2 本に**同じスナップショットの上下**を書く。時間源は `tick_count` (§1-0 の後はどちらのシステムクロックでもちょうど 10ms) と PIT ch0 のラッチ読みで、周期の境界はPIC1 の IRR bit0 をラッチの前後で挟んで判定する (最大 3 回やり直す)。戻り 0 = 成功 / `OS32_ERR_AGAIN` = 3 回とも判定できなかった / `OS32_ERR_NOSYS` = PIT 未初期化か mode 2 でない / `OS32_ERR_INVAL` = `lo` か `hi` が NULL・4 バイトが帯境界を跨ぐ・**2 本の範囲が交差する (差 0〜3)**。**負のときは 2 本とも書かない**。出力が読み取り専用の USER ページ (共有ライブラリの `.text`) なら `ring3_fault_kill` — OS32 は CR0.WP = 0 なのでハードウェアは止めない。実体は `kernel/ktime.c` / `kernel/time_math.c`、検証は `kapi/kapi_sys.c` の `kapi_sys_time_now` | [tasks/v3/TASK_HAL_WIRING.md](tasks/v3/TASK_HAL_WIRING.md) §1-5 |
 | v60 | **実装済み (2026-09-23、手元ビルドのみ)** | PCI 結線の診断の取得口 `pci_bind_info` 1 本 (slot 223 = 0x384、data_fields は 0x388 / 0x38C へ)。`idx` 番目 (**`pci_get` と同じ列挙順**) の結線結果を呼び手のバッファへ**8 バイトちょうど**写す。並びは `drivers/pci_bind.h` の `struct pci_bind_info`。`result` = NONE / BOUND / DECLINED / QUARANTINED、`reason` は上書き規則 1 つだけが正、`line_state` は**読む時点で合成**する (結線のときは正常だった線が後から隔離されても `result` は BOUND のまま `line_state` だけが QUARANTINED になる)。**既存 `pci_get` の 40 バイトは広げない** — 旧呼び手のバッファを踏むので別の口にした。戻り 0 = 成功 / `OS32_ERR_INVAL` = `out` が NULL・8 バイトが帯境界を跨ぐ・`idx` が範囲外 (**負のときは 1 バイトも書かない**)。出力が読み取り専用の USER ページなら `ring3_fault_kill` (v59 と同じ規則)。シェルの `lspci` が注記を出す。実体は `drivers/pci_bind.c`、検証は `kapi/kapi_sys.c` の `kapi_pci_bind_info` | [tasks/v3/TASK_HAL_WIRING.md](tasks/v3/TASK_HAL_WIRING.md) §1-4 |
 | v61 | **実装済み (2026-09-23、手元ビルドのみ)** | CS4231 (MATE-X PCM) の再生 `pcm_open` / `pcm_write` / `pcm_status` / `pcm_close` / `pcm_set_volume` の 5 本 (slot 224〜228 = 0x388〜0x398、data_fields は 0x39C / 0x3A0 へ)。16 ビット・ステレオ・44.1k / 22.05kHz の**再生だけ**で、単位は frame (左右 1 組 = 4 バイト)。カーネルが DMA リング 16KB (`dma_pool`) とステージング 16KB (`kmalloc`) を持ち、**アプリのバッファを IRQ から読むことはしない** — `pcm_write` はステージングへ写すだけで、リングを書くのは `pcm_advance` (IRQ / tick、IF=0) と停止中の `pcm_start` / RS_RESTART に限る。所有者は既存の資源 owner と同じアプリ ID で、異常終了は `exec_reclaim_owned` の `pcm_reclaim` が**待たずに**止めて返す。実体は `drivers/pcm_cs4231.c` / `drivers/pcm_cs4231_math.c` | [tasks/v3/TASK_PCM_CS4231.md](tasks/v3/TASK_PCM_CS4231.md) |
+| v63 | **実装済み (2026-09-24、手元ビルドのみ)** | **データ欄の固定配置** (票 TASK_KAPI_DATA_FIELDS)。関数は増えていない。関数表の容量を **R = 300** 予約し (予約スロット 230〜299)、`sbrk_heap_limit` / `shm_base` を **0x4B8 / 0x4BC に固定** — 以後の関数追加でデータ欄は動かない。OS32X ヘッダを **v3** (末尾に `kapi_data_off`) にし、exec / shlib ローダ / 常駐シェルの起動は値がカーネルと違えば断る。crt の `kapi` の実名を `os32_kapi_v63` に変えた。**旧バイナリは一度だけ全部断られる** — 移行は [08_build.md](08_build.md) §8-4 | [tasks/memory/TASK_KAPI_DATA_FIELDS.md](tasks/memory/TASK_KAPI_DATA_FIELDS.md) |
 | v62 | **実装済み (2026-09-23、手元ビルドのみ)** | キーボード 8251 の診断 `kbd_diag` 1 本 (slot 229 = 0x39C、data_fields は 0x3A0 / 0x3A4 へ)。`KbdDiag` (24 バイト、`os32_kapi_shared.h`) を呼び手のバッファへ写す — IRQ1 回数・空 IRQ (RxRDY = 0)・エラー (PE/FE)・オーバーラン (OE だけ、バイトは使う)・起動時に読み捨てたバイト数・`kbd_init` の前後の 0043h・直近の 0043h とスキャンコード・書いたコマンド語・呼んだ時点の 0043h。戻り 0 / `OS32_ERR_INVAL` (`out` が NULL)。出力は生成ラッパの `out` 検査 (読み取り専用の USER ページなら `ring3_fault_kill`)。シェルの `kbdstat` が 1 行で出す。同じ変更でカーネルが 0043h に書くコマンド語を **0x14 → 0x16** (DTR = 1 = RTY# HIGH、BIOS の定常値) に直した — 実機 PC-9821Ra266 で打鍵が一切届かなかった件。実体は `drivers/kbd.c` / `drivers/kbd_status.c` | [POLICY_DEBUG.md](POLICY_DEBUG.md) §4-57 |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
@@ -159,12 +160,54 @@ CPL=3 が出力引数に渡した**読み取り専用の USER ページ** — �
 
 ## §4 KernelAPI 構造体レイアウト
 
+### §4-0 データ欄の固定配置とヘッダ v3 (v63、票 TASK_KAPI_DATA_FIELDS)
+
+v62 まではデータ欄 (`sbrk_heap_limit` / `shm_base`) を関数表の**直後**に置いていたので、
+関数を 1 つ足すたびにオフセットが 4 バイト動き、旧バイナリが黙って別の値を読んでいた
+(v61 のアプリを v62 で走らせると malloc が全部 ENOMEM)。v63 から:
+
+| 項目 | 値 | 正典 |
+|---|---|---|
+| 関数表の容量 R | **300** スロット (`KAPI_FUNC_CAPACITY`) | `sdk/kapi.json` の `func_capacity` |
+| データ欄の先頭 | **0x4B8** = 8 + 4 × R (`KAPI_DATA_FIELDS_OFF`) | `sdk/gen_kapi.py` が生成 |
+| 予約スロット | 230〜299 (`kapi_reserved[70]`)。カーネルの表は `kapi_reserved_nosys` (= `OS32_ERR_NOSYS`)、CPL=3 のトランポリンは int 0x80 のスタブ (ディスパッチャが `slot >= KAPI_FUNC_COUNT` で kill)。**NULL にしない** | `exec/exec.c` |
+| R の上限 | トランポリン 1 ページ: `sizeof(KernelAPI)` + スタブ 8B × R + 写し場 256B ≤ 4096 → **R ≤ 318** (`STATIC_ASSERT`) | `exec/exec.c` |
+
+関数を足すときは `kapi_reserved[]` が 1 本減るだけで、データ欄は動かない。**関数数が R を
+超えたら `gen_kapi.py` が生成を拒否する** — そのときは次の R を決める票を起こす (目安は
+[ROADMAP.md](ROADMAP.md) §0)。
+
+**OS32X ヘッダ v3** (48 バイト、`OS32Header`): v2 の末尾に `kapi_data_off` (0x2C) を足した。
+値は包装時ではなく**コードが実際に使った配置**から取る — crt0 (`sdk/crt/crt0_c.c`) と
+Rust の os32api が ELF の**非ロード**のセクション `.os32_kapi_layout` に
+`KAPI_DATA_FIELDS_OFF` を 1 語置き (`OS32_KAPI_LAYOUT_STAMP()`)、`sdk/mkos32x.py` /
+`tools/mkshlib.py` (共通モジュール `sdk/os32x_hdr.py`) がそれをヘッダへ写す。
+刻印が無い・食い違う ELF は生成で断る。v3 の `min_api_ver` は 63 未満なら 63 に上げる
+(v3 の照合を持たない旧カーネルが受け入れないように)。
+
+照合する側 (`exec/os32x_hdr.c` の `os32x_layout_check`): 実読込長 ≥ 48・`version` ≥ 3・
+`header_size` ≥ 48・`kapi_data_off` == `KAPI_DATA_FIELDS_OFF`。
+
+| 誰が | 違ったら |
+|---|---|
+| exec (アプリ) | `Error: rebuild required (KAPI data layout)` で起動しない |
+| 常駐シェル (`/sys/shell.bin`) | FDD の shell を試し、それも違えば `FATAL: shell.bin: rebuild required (KAPI data layout)` と作り直しの案内を出して停止 (走らせても malloc が壊れる) |
+| gshell | CUI shell へ落ちる (`gshell: rebuild required (KAPI data layout) -> CUI shell`) |
+| `kernel/shlib.c` (`libos32gui.shlib`) | 載せない (GUI shlib 無効)。GUI を選んでいても CUI shell で起動する |
+| `libos32gui.shlib` 自身 | `os32gui_shlib_init` は `api->version < 63` (旧カーネル) なら `os32_init` の**前に** `OS32_ERR_VERSION` で返し、以後の全エクスポートは初期化成功フラグの門で失敗を返す |
+
+**作り直し忘れの検出**: crt の大域変数 `kapi` の実名は `os32_kapi_v63`
+(生成ヘッダの `#define kapi OS32_KAPI_CRT_SYMBOL`、`__KERNEL_BUILD__` では無効)。
+v62 以前にコンパイルしたオブジェクトは `kapi` を参照したままなので、新しい crt と
+リンクすると未定義参照で落ちる。名前は `sdk/kapi.json` の `crt_kapi_symbol` で、
+配置が変わるときにだけ変える。
+
 ### ヘッダ
 
 | Offset | フィールド | 説明 |
 |--------|-----------|------|
 | 0x00 | magic | 0x4B415049 ("KAPI") |
-| 0x04 | version | APIバージョン (現在: 41) |
+| 0x04 | version | APIバージョン (現在: 63) |
 
 ### API関数 (自動生成 — os32_kapi_generated.h 準拠)
 
@@ -1072,15 +1115,22 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 `launch_cancel` の `DONE` も壊れる。CTRL+STOP のように 1 本だけ止めたいときは、WM が
 `launch_child()` で末尾を解決してその ID を渡す (末尾は子孫を持たないので 1 本だけ畳まれる)。
 
-### データフィールド (構造体末尾)
+### 予約スロット (v63〜)
+
+0x3A0〜0x4B4 (slot 230〜299、70 本) は `kapi_reserved[]`。関数を足すと先頭から使う
+(§4-0)。カーネルの表は `kapi_reserved_nosys` (`OS32_ERR_NOSYS`)、トランポリンは
+int 0x80 のスタブで、CPL=3 からの呼び出しはアプリを kill する。
+
+### データフィールド (構造体末尾、v63 から 0x4B8 に固定)
 
 関数ポインタではなく値を持つフィールド。ジェネレータは `kapi-><field> = 0;` を
 出力するだけなので、**実際の値は `exec_init()` / `exec_run()` で代入する**。
+オフセットは関数表の容量 (R = 300) の後ろに**固定**で、関数を足しても動かない (§4-0)。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x3A0 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x3A4 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x4B8 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x4BC | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 
