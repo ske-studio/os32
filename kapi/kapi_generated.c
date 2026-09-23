@@ -2079,9 +2079,12 @@ int __cdecl wrap_pcm_write(const void *buf, u32 bytes)
 {
     KAPI_HIT(225);
     { u32 a = (u32)buf;
-      if (buf == 0 || bytes == 0) return 0;
+      int rc = pcm_write_check();
+      if (rc != 0) return rc;
+      if (buf == 0) return OS32_ERR_INVAL;
       if (a + bytes < a) return OS32_ERR_INVAL;
       if (!ring3_user_range_ok(a, bytes)) return OS32_ERR_INVAL;
+      if (bytes < PCM_FRAME_BYTES) return 0;
       return pcm_write(buf, bytes); }
 }
 

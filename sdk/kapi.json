@@ -1597,7 +1597,7 @@
       "name": "pcm_write",
       "ret": "int",
       "args": ["const void *buf", "u32 bytes"],
-      "body": "{ u32 a = (u32)buf;\n  if (buf == 0 || bytes == 0) return 0;\n  if (a + bytes < a) return OS32_ERR_INVAL;\n  if (!ring3_user_range_ok(a, bytes)) return OS32_ERR_INVAL;\n  return pcm_write(buf, bytes); }"
+      "body": "{ u32 a = (u32)buf;\n  int rc = pcm_write_check();\n  if (rc != 0) return rc;\n  if (buf == 0) return OS32_ERR_INVAL;\n  if (a + bytes < a) return OS32_ERR_INVAL;\n  if (!ring3_user_range_ok(a, bytes)) return OS32_ERR_INVAL;\n  if (bytes < PCM_FRAME_BYTES) return 0;\n  return pcm_write(buf, bytes); }"
     },
     {
       "name": "pcm_status",

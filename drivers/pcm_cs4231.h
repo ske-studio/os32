@@ -137,6 +137,51 @@
 /*  待ちの期限 (tick = 10ms)。全部 IF=1 の poll。 */
 #define PCM_WAIT_TICKS     5U   /* INIT / 再同期 / ACI (foreground) */
 #define PCM_STOP_TICKS     3U   /* DRS の落ちるのを tick で待つ */
+/*  close の 2 段目 (期限切れ → STOP_REQ) の待ちに足す余裕。入口の 3 tick に
+ *  「入口を書いた tick の端数」と「証拠を読む 1 tick」を足す。 */
+#define PCM_STOP_WAIT_SLACK 2U
+
+/*  時間の単位。tick は PIT 100Hz (1-0 の後はどちらのクロックでも 10ms)。
+ *  PCM_US_PER_TICK は sys_time_now が取れないときの µs 時計の代用。 */
+#define PCM_MS_PER_TICK    10U
+#define PCM_US_PER_TICK    10000U
+#define PCM_MS_PER_SEC     1000U
+#define PCM_US_PER_SEC     1000000U
+
+/*  起動時の表示に出す版の番号 (CS4231 = 100、CS4231A = 101)。 */
+#define PCM_VER_NAME_4231  100
+#define PCM_VER_NAME_4231A 101
+
+/* ------------------------------------------------------------------------ */
+/*  診断 (kernel.map から読む。E3 の切り分け) — 番号の意味                   */
+/* ------------------------------------------------------------------------ */
+/* pcm_diag_fault_site: どこで FAULTED になったか (最初の 1 回だけ残す)。 */
+#define PCM_DIAG_FAULT_TAIL      1   /* 停止の後続列が失敗 */
+#define PCM_DIAG_FAULT_TAIL_DL   2   /* STOP_REQ の DRS 待ちが期限切れ */
+#define PCM_DIAG_FAULT_EVID_DL   3   /* STOP_REQ の証拠が期限内に読めない */
+#define PCM_DIAG_FAULT_CLOSE2    5   /* close の 2 段目 (停止待ち) が期限切れ */
+#define PCM_DIAG_FAULT_RECLAIM   6   /* reclaim / close が証拠なしで解放 */
+/* pcm_diag_evidence のビット (最後の証拠読み)。 */
+#define PCM_DIAG_EV_INIT         0x01
+#define PCM_DIAG_EV_PEN          0x02
+#define PCM_DIAG_EV_PI           0x04
+/* pcm_diag_df_site のビット (drain_failed をどこで立てたか)。 */
+#define PCM_DIAG_DF_RS_STOP_DL   0x01   /* RS_STOP の期限切れ */
+#define PCM_DIAG_DF_RESTART      0x02   /* RS_RESTART の失敗 */
+#define PCM_DIAG_DF_CLOSE_DL     0x04   /* close の期限切れ */
+#define PCM_DIAG_DF_OBS          0x08   /* 観測 (番犬・喪失) が先に立てていた */
+
+/* ------------------------------------------------------------------------ */
+/*  ホスト試験の割り込み点 (tools/tests/pcm_cs4231_host.c)                   */
+/*                                                                          */
+/*  カーネルでは PCM_PREEMPT は空。ホスト試験はこれを定義して「ここで IF=1   */
+/*  なら tick が割り込める」を差し込む。**IF=0 の区間の中に置いた点は、試験  */
+/*  側が割り込ませない** — それ自体が「この判定と公開は 1 つの禁止区間」の   */
+/*  証明になる (Codex 実装レビューの blocker 2/3、2026-09-23)。             */
+/* ------------------------------------------------------------------------ */
+#define PCM_PP_CLOSE_ENTRY    1   /* close: 状態を読んだ後、DRAINING / close_pending を書く前 */
+#define PCM_PP_CLOSE_TIMEOUT  2   /* close: 期限切れで STOP_REQ を公開した後、停止の入口の前 */
+#define PCM_PP_WAIT           3   /* close: 停止待ちのループの 1 周 */
 
 /* ------------------------------------------------------------------------ */
 /*  エラーの写し (票 §2-2 の BUSY / NOMEM)                                  */
@@ -340,6 +385,10 @@ void pcm_reclaim(int owner);
 
 /* KAPI の実体 (kapi/ の __cdecl ラッパから呼ばれる — [C3])。 */
 int pcm_open(u32 rate);
+/* write の受付の検査だけ (owner と状態)。0 / OS32_ERR_INVAL。
+ * KAPI の wrapper が**入力の検査より先に**呼ぶ — 未 open・非 owner は
+ * bytes = 0 でも負を返す契約 (票 §2-2)。 */
+int pcm_write_check(void);
 int pcm_write(const void *buf, u32 bytes);
 int pcm_status(u32 *free_bytes, u32 *counters);
 int pcm_close(void);

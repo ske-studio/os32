@@ -12,6 +12,7 @@
 /*    (d) 初期化列 / 停止列 / RS の列の**順序**                              */
 /*    (e) 入口ガードで装置アクセスが **0 回**であること                      */
 /*    (f) close / reclaim が各状態から **1 度だけ**解放すること              */
+/*    (g) foreground と tick の割り込み順序 (race_*。割り込みの台本)         */
 /*                                                                          */
 /*  記録: tools/tests/pcm_cs4231_tdd.md                                     */
 /*  [C1] C89 / GNU89。                                                      */
@@ -242,14 +243,16 @@ int irq_unregister(unsigned int irq, irq_handler_fn fn, void *arg)
 
 /* ---- 時計と所有者 ------------------------------------------------------- */
 volatile u32 tick_count;
-static u32 sim_now_us;
+/* µs 時計は**64 ビット**で持つ (sys_time_now と同じく lo / hi の 2 本で返す)。
+ * 起動 35 分 48 秒 (2^31 µs) や 71 分 (2^32 µs) を跨ぐ試験に要る。 */
+static unsigned long long sim_now_us;
 static int sim_time_fail;
 
 int sys_time_now(u32 *lo, u32 *hi)
 {
     if (sim_time_fail) return OS32_ERR_AGAIN;
-    *lo = sim_now_us;
-    *hi = 0;
+    *lo = (u32)sim_now_us;
+    *hi = (u32)(sim_now_us >> 32);
     return 0;
 }
 
@@ -261,11 +264,107 @@ void *kmemcpy(void *dst, const void *src, u32 n) { return memcpy(dst, src, n); }
 void *kmemset(void *dst, int val, u32 n) { return memset(dst, val, n); }
 void kprintf(u8 attr, const char *fmt, ...) { (void)attr; (void)fmt; }
 
+/* ---- 割り込みの台本 (foreground と tick の交互の順序) ------------------- */
+/*                                                                          */
+/*  実機では IF=1 の命令の境目ならどこでも tick が入る。模型では「入り得る点」*/
+/*  を 2 種類だけ持つ:                                                      */
+/*   - IF=1 に戻った瞬間 (io.h の irq_restore が深さ 0 で pcm_shim_if_on)    */
+/*   - driver が置いた PCM_PREEMPT(site) (pcm_cs4231.h の PCM_PP_*)          */
+/*  台本は「site に来たら tick を 1 つ保留し、**IF=1 の最初の点で**配る」。  */
+/*  IF=0 の区間の中の PCM_PREEMPT に来ても配らない — 区間を出た最初の点で   */
+/*  配る。だから「判定と公開が 1 つの禁止区間」なら tick は公開の**後**に、  */
+/*  そうでなければ**間**に入る。                                            */
+/*                                                                          */
+/*  配った tick は ISR と同じく**深さ 1 (IF=0)** で走る。                    */
+/* ------------------------------------------------------------------------ */
+#define SITE_ANY    0
+#define SITE_IF_ON  100     /* PCM_PP_* と重ならない番号 */
+
+static int  isr_site;           /* この点に来たら保留する (SITE_ANY = すぐ保留) */
+static int  isr_armed;          /* 保留する回数 */
+static int  isr_pending;        /* 保留中 (IF=1 の最初の点で配る) */
+static int  isr_running;
+static u32  isr_fired;
+static void (*isr_fn)(void);    /* 配る中身 */
+static int  wait_advance;       /* PCM_PP_WAIT の 1 周で時計を 1 tick 進める */
+static int  wait_tick;          /* さらにその tick で pcm_tick も走らせる */
+static int  dev_play;           /* 1 = tick ごとに装置が 1 tick ぶん進む (PEN=1 かつ unmask のとき) */
+static u32  wait_iters;
+static void (*wait_probe)(void); /* PCM_PP_WAIT のたびに呼ぶ検査 (NULL = 無し) */
+
+/* ISR の文脈 (IF=0) で fn を走らせる。 */
+static void run_isr(void (*fn)(void))
+{
+    isr_running = 1;
+    pcm_shim_irq_depth++;
+    fn();
+    pcm_shim_irq_depth--;
+    isr_running = 0;
+}
+
+static void isr_deliver(void)
+{
+    if (!isr_pending || isr_running || pcm_shim_irq_depth != 0) return;
+    isr_pending = 0;
+    isr_fired++;
+    run_isr(isr_fn);
+}
+
+static void isr_reach(int site)
+{
+    if (isr_armed > 0 && (isr_site == SITE_ANY || isr_site == site)) {
+        isr_armed--;
+        isr_pending = 1;
+    }
+}
+
+void pcm_shim_if_on(void)
+{
+    if (isr_running) return;
+    isr_reach(SITE_IF_ON);
+    isr_deliver();
+}
+
+static void dev_tick(void);
+
+void pcm_shim_preempt(int site)
+{
+    if (isr_running) return;
+    isr_reach(site);
+    if (site == PCM_PP_WAIT && pcm_shim_irq_depth == 0) {
+        wait_iters++;
+        if (wait_probe) wait_probe();
+        if (wait_advance) {
+            dev_tick();
+            if (wait_tick) run_isr(pcm_tick);
+        }
+    }
+    isr_deliver();
+}
+
+#define PCM_PREEMPT(site) pcm_shim_preempt(site)
+
 /* ======================================================================== */
 /*  2. 実物をそのまま取り込む                                                */
 /* ======================================================================== */
 #include "../../drivers/pcm_cs4231_math.c"
 #include "../../drivers/pcm_cs4231.c"
+
+/* 装置の 1 tick: 時計を進め、再生中 (PEN=1 かつ unmask) なら位置も進める。 */
+static void dev_tick(void)
+{
+    u32 pos, step_frames;
+
+    tick_count++;
+    sim_now_us += PCM_US_PER_TICK;
+    if (!dev_play || sim_masked || (dev_reg[PCM_I_IFACE] & PCM_IFACE_PEN) == 0)
+        return;
+    step_frames = (g_pcm.rate ? g_pcm.rate : PCM_RATE_44100) / 100U;
+    pos = (PCM_RING_BYTES - sim_left % PCM_RING_BYTES) % PCM_RING_BYTES;
+    pos = (pos / PCM_FRAME_BYTES + step_frames) % PCM_RING_FRAMES;
+    sim_left = (PCM_RING_BYTES - pos * PCM_FRAME_BYTES) % PCM_RING_BYTES;
+    if (sim_left == 0) sim_left = PCM_RING_BYTES;
+}
 
 /* ======================================================================== */
 /*  3. 土台をきれいにする                                                    */
@@ -316,8 +415,22 @@ static void reset_all(void)
     s_mce_busy = 0;
     s_deadline = 0;
     s_seq_at = 0;
-    s_last_now = 0;
+    s_last_us = 0;
     s_fault_sticky = 0;
+    s_claimed = 0;
+    isr_site = SITE_ANY;
+    isr_armed = 0;
+    isr_pending = 0;
+    isr_running = 0;
+    isr_fired = 0;
+    isr_fn = pcm_tick;
+    wait_advance = 0;
+    wait_tick = 0;
+    dev_play = 0;
+    wait_iters = 0;
+    wait_probe = 0;
+    pcm_diag_fault_site = 0;
+    pcm_diag_df_site = 0;
     trace_reset();
 }
 
@@ -325,7 +438,7 @@ static void reset_all(void)
 static void sim_advance_time(u32 ticks)
 {
     tick_count += ticks;
-    sim_now_us += ticks * 10000U;
+    sim_now_us += (unsigned long long)ticks * PCM_US_PER_TICK;
 }
 
 /* ======================================================================== */
@@ -1004,7 +1117,7 @@ static void step(u32 pos_frames, u32 ticks)
 {
     sim_set_pos(pos_frames);
     sim_advance_time(ticks);
-    pcm_tick();
+    run_isr(pcm_tick);                   /* ISR と同じく IF=0 で */
 }
 
 static void case_close(void)
@@ -1230,6 +1343,299 @@ static void case_init(void)
 }
 
 /* ======================================================================== */
+/*  7b. foreground と tick の交互 (Codex 実装レビュー blocker 1〜5)          */
+/*                                                                          */
+/*  台本は「foreground が site まで進む → tick が 1 つ入る → foreground が   */
+/*  続ける」。site が IF=0 の区間の中なら、tick は区間を出た最初の点で入る。 */
+/*  **修正前の driver ではどれも RED** (pcm_cs4231_tdd.md の RED → GREEN)。  */
+/* ======================================================================== */
+
+/* 喪失 → RS_STOP → RS_RESTART まで実物の tick で進める (装置はマスク中)。 */
+static void to_rs_restart(void)
+{
+    CHECK(open_ok(PCM_RATE_44100) == 0);
+    fill_staging(PCM_STG_FRAMES);
+    CHECK(g_pcm.state == PCM_ST_RUNNING);
+    step(2000, 1);
+    step(3, 1);                              /* 同じ半分で戻った */
+    CHECK(g_pcm.state == PCM_ST_RS_STOP);
+    step(3, 1);
+    CHECK(g_pcm.state == PCM_ST_RS_RESTART);
+    CHECK(sim_masked == 1);
+}
+
+/* 配った tick が装置に触った回数 */
+static u32 isr_io;
+static void tick_counted(void)
+{
+    u32 before = IO_ACCESSES;
+    pcm_tick();
+    isr_io += IO_ACCESSES - before;
+}
+
+/* blocker 1: reclaim が abort・停止確認の後に IF を戻した瞬間の tick が
+ * RS_RESTART を実行 (unmask、PEN=1) し、その後で foreground がリングを
+ * free する。**claim した後の tick は装置に 1 度も触らない**。 */
+static void case_race_reclaim(void)
+{
+    u32 unmask0;
+    int i;
+    static const int states[] = {
+        PCM_ST_RUNNING, PCM_ST_DRAINING, PCM_ST_RS_STOP, PCM_ST_STOP_REQ
+    };
+
+    to_rs_restart();
+    unmask0 = sim_unmask_calls;
+    isr_site = SITE_IF_ON;                   /* reclaim が IF を戻した瞬間 */
+    isr_armed = 1;
+    isr_fn = tick_counted;
+    isr_io = 0;
+    pcm_reclaim(1);
+    CHECK(isr_fired == 1);                   /* 台本どおり tick が入った */
+    CHECK(isr_io == 0);
+    CHECK(sim_unmask_calls == unmask0);      /* 再始動していない */
+    CHECK(sim_masked == 1);
+    CHECK((dev_reg[PCM_I_IFACE] & PCM_IFACE_PEN) == 0);
+    CHECK(dev_reg[PCM_I_PINCTL] == 0);
+    CHECK(g_pcm.state == PCM_ST_CLOSED);
+    CHECK(pool_freed[0] == 1 && pool_leaked[0] == 0);
+    CHECK(pcm_shim_irq_depth == 0);
+
+    /* 他の状態からも同じ: IF を戻した瞬間の tick は装置に触らない */
+    for (i = 0; i < (int)(sizeof(states) / sizeof(states[0])); i++) {
+        CHECK(open_ok(PCM_RATE_44100) == 0);
+        fill_staging(PCM_STG_FRAMES);
+        g_pcm.state = (u8)states[i];
+        s_deadline = tick_count + PCM_STOP_TICKS;
+        isr_site = SITE_IF_ON;
+        isr_armed = 1;
+        isr_fired = 0;
+        isr_fn = tick_counted;
+        isr_io = 0;
+        pcm_reclaim(1);
+        CHECK(isr_fired == 1);
+        CHECK(isr_io == 0);
+        CHECK(g_pcm.state == PCM_ST_CLOSED);
+        CHECK(sim_masked == 1);
+    }
+}
+
+/* 停止待ちの 1 周ごとに見る不変条件: DRAINING なら装置は動いている。 */
+static u32 probe_bad;
+static void probe_draining_runs(void)
+{
+    if (g_pcm.state == PCM_ST_DRAINING &&
+        ((dev_reg[PCM_I_IFACE] & PCM_IFACE_PEN) == 0 || sim_masked)) {
+        probe_bad++;
+    }
+}
+
+/* blocker 2 の 1: close が RUNNING を読む → tick が喪失で RS_STOP (PEN=0)
+ * → close が DRAINING で上書き。止まった装置で drain を待つことになる。 */
+static void case_race_close_rs(void)
+{
+    int rc;
+
+    CHECK(open_ok(PCM_RATE_44100) == 0);
+    fill_staging(PCM_STG_FRAMES);
+    CHECK(g_pcm.state == PCM_ST_RUNNING);
+    step(2000, 1);
+    sim_set_pos(3);                          /* 次の tick は喪失を見る */
+    isr_site = PCM_PP_CLOSE_ENTRY;
+    isr_armed = 1;
+    wait_advance = 1;
+    wait_tick = 1;
+    dev_play = 1;
+    wait_probe = probe_draining_runs;
+    probe_bad = 0;
+    rc = pcm_close();
+    CHECK(isr_fired == 1);
+    CHECK(probe_bad == 0);                   /* 止まった装置の DRAINING は無い */
+    CHECK(rc == OS32_ERR_IO);                /* DRAINING での喪失 = drain 失敗 (票) */
+    CHECK(g_pcm.state == PCM_ST_CLOSED);
+    CHECK(pool_freed[0] == 1 && pool_leaked[0] == 0);
+    CHECK(pcm_diag_fault_site == 0);
+    CHECK(pcm_shim_irq_depth == 0);
+}
+
+/* blocker 2 の 2: close が RS_RESTART を読む → tick が restart を完了
+ * (close_pending = 0 なので RUNNING) → close は close_pending だけ立てる。
+ * RUNNING がそれを見ないと、再生し終えても close が期限切れで IO になる。 */
+static void case_race_close_restart(void)
+{
+    int rc;
+
+    to_rs_restart();
+    fill_staging(PCM_HALF_FRAMES);           /* RS_RESTART 中の write は受ける */
+    isr_site = PCM_PP_CLOSE_ENTRY;
+    isr_armed = 1;
+    wait_advance = 1;
+    wait_tick = 1;
+    dev_play = 1;
+    rc = pcm_close();
+    CHECK(isr_fired == 1);
+    CHECK(g_pcm.resyncs == 1);                /* restart は tick が済ませた */
+    CHECK(rc == 0);                          /* 最後まで再生して止まった */
+    CHECK(pcm_diag_df_site == 0);
+    CHECK(g_pcm.state == PCM_ST_CLOSED);
+    CHECK(pool_freed[0] == 1 && pool_leaked[0] == 0);
+    CHECK(pcm_diag_fault_site == 0);
+}
+
+/* blocker 3 の台本: 配る tick の後で DRS を落とし、以後の tick を通す。 */
+static void tick_then_resume(void)
+{
+    pcm_tick();
+    dev_reg[PCM_I_ERRSTAT] = 0;
+    wait_tick = 1;
+}
+
+/* blocker 3: close の期限切れで STOP_REQ を公開 → **停止の入口の前に** tick
+ * → 古い期限 (open の 0) と DRS=1 を見て FAULTED → リングを leaked にする。 */
+static void case_race_close_timeout(void)
+{
+    int rc;
+
+    CHECK(open_ok(PCM_RATE_44100) == 0);
+    fill_staging(PCM_STG_FRAMES);
+    CHECK(g_pcm.state == PCM_ST_RUNNING);
+    dev_reg[PCM_I_ERRSTAT] = PCM_ERR_DRS;    /* 発行済みの DMA 要求が残っている */
+    isr_site = PCM_PP_CLOSE_TIMEOUT;
+    isr_armed = 1;
+    isr_fn = tick_then_resume;
+    wait_advance = 1;                        /* 1 段目の待ちでは tick が pcm に届かない */
+    wait_tick = 0;
+    rc = pcm_close();
+    CHECK(isr_fired == 1);
+    CHECK(rc == OS32_ERR_IO);                /* 期限切れ = drain 失敗 */
+    CHECK(pcm_diag_fault_site == 0);         /* FAULTED を踏んでいない */
+    CHECK(pool_freed[0] == 1 && pool_leaked[0] == 0);
+    CHECK(g_pcm.state == PCM_ST_CLOSED);
+    CHECK(sim_masked == 1);
+    CHECK(pcm_open(PCM_RATE_44100) == 0);    /* sticky にしていない */
+}
+
+/* blocker 5 の台本: tick が FAULTED にした時点の書き込み回数を控える。 */
+static u32 io_at_fault;
+static void tick_note_fault(void)
+{
+    pcm_tick();
+    if (g_pcm.state == PCM_ST_FAULTED) io_at_fault = io_writes;
+}
+
+/* blocker 5: set_volume の FAULTED 判定の後 (I6 と I7 の間) に tick が
+ * FAULTED にし、その後で装置へ書く。**FAULTED の後の書きは 0 回**。 */
+static void case_race_volume(void)
+{
+    int rc;
+    u32 w0;
+
+    CHECK(open_ok(PCM_RATE_44100) == 0);
+    fill_staging(PCM_STG_FRAMES);
+    g_pcm.state = PCM_ST_STOP_REQ;           /* 停止の後続で期限切れ間近 */
+    s_seq_at = 0;
+    s_deadline = tick_count;
+    dev_reg[PCM_I_ERRSTAT] = PCM_ERR_DRS;
+    sim_advance_time(2);
+    isr_site = SITE_IF_ON;
+    isr_armed = 1;
+    isr_fn = tick_note_fault;
+    io_at_fault = 0xFFFFFFFFu;
+    trace_reset();
+    rc = pcm_set_volume(50);
+    CHECK(isr_fired == 1);
+    CHECK(g_pcm.state == PCM_ST_FAULTED);
+    CHECK(io_at_fault == io_writes);         /* FAULTED の後に 1 度も書いていない */
+    CHECK(rc == 0 || rc == OS32_ERR_AGAIN);
+
+    /* FAULTED なら判定で断り、Index 書きも 0 回 */
+    trace_reset();
+    w0 = io_writes;
+    CHECK(pcm_set_volume(50) == OS32_ERR_AGAIN);
+    CHECK(io_writes == w0 && IO_ACCESSES == 0);
+    CHECK(pcm_shim_irq_depth == 0);
+}
+
+/* 時計を us に置いてから open する (open_ok は時計も 0 に戻すので)。 */
+static int open_at(unsigned long long us)
+{
+    reset_all();
+    sim_now_us = us;
+    return pcm_open(PCM_RATE_44100);
+}
+
+/* blocker 4: µs 時計。起動 40 分後の初回再生でも番犬が効く (下位 32 ビットの
+ * 差を巻き戻りと読むと時計が 0 に張り付き、番犬が発火しなかった)。 */
+static void case_clock(void)
+{
+    int i;
+
+    /* (a) 起動 40 分後に初めて open → 位置が止まったら番犬 */
+    CHECK(open_at(2400000000ULL) == 0);
+    fill_staging(PCM_STG_FRAMES);
+    CHECK(g_pcm.state == PCM_ST_RUNNING);
+    for (i = 0; i < 15 && g_pcm.state == PCM_ST_RUNNING; i++) step(0, 1);
+    CHECK(g_pcm.state == PCM_ST_RS_STOP);
+    CHECK(g_pcm.now != 0);
+
+    /* (b) 長い空白の後の再 open (前回の基準が古い) でも同じ */
+    reset_all();
+    CHECK(open_ok(PCM_RATE_44100) == 0);
+    CHECK(pcm_close() == 0);
+    sim_now_us += 3000000000ULL;             /* 50 分 */
+    CHECK(pcm_open(PCM_RATE_44100) == 0);
+    fill_staging(PCM_STG_FRAMES);
+    for (i = 0; i < 15 && g_pcm.state == PCM_ST_RUNNING; i++) step(0, 1);
+    CHECK(g_pcm.state == PCM_ST_RS_STOP);
+
+    /* (c) 再生中に 2^32 µs (71 分) を跨いでも時計は進み、番犬も効く */
+    CHECK(open_at(0xFFFFFFFFULL - 30000ULL) == 0);
+    fill_staging(PCM_STG_FRAMES);
+    step(400, 1);
+    step(800, 1);
+    step(1200, 1);
+    step(1600, 1);                           /* ここで hi が 1 になる */
+    CHECK(g_pcm.state == PCM_ST_RUNNING);
+    CHECK(g_pcm.last_progress == (u32)sim_now_us);
+    for (i = 0; i < 15 && g_pcm.state == PCM_ST_RUNNING; i++) step(1600, 1);
+    CHECK(g_pcm.state == PCM_ST_RS_STOP);
+
+    /* (d) 時計が取れない回は tick の代用。戻った分は抑える (単調) */
+    CHECK(open_at(5000ULL) == 0);            /* tick 0 より 5ms 進んでいる */
+    fill_staging(PCM_STG_FRAMES);
+    sim_time_fail = 1;                       /* 代用は tick × 10ms = 0 */
+    step(100, 0);
+    CHECK(g_pcm.now == 5000U);               /* 戻らない */
+    sim_time_fail = 0;
+}
+
+/* 非 blocker: write の契約。**未 open・非 owner・NULL は bytes = 0 でも負**。 */
+static void case_write_contract(void)
+{
+    static u8 src[16];
+
+    CHECK(pcm_write_check() == OS32_ERR_INVAL);  /* 未 open */
+    CHECK(pcm_write(src, 0) == OS32_ERR_INVAL);
+    CHECK(pcm_write((const void *)0, 0) == OS32_ERR_INVAL);
+
+    CHECK(open_ok(PCM_RATE_44100) == 0);
+    CHECK(pcm_write_check() == 0);
+    CHECK(pcm_write((const void *)0, 4) == OS32_ERR_INVAL);
+    CHECK(pcm_write((const void *)0, 0) == OS32_ERR_INVAL);
+    CHECK(pcm_write(src, 0) == 0);
+    CHECK(g_pcm.stg.staged == 0);
+
+    sim_owner = 3;                           /* 非 owner */
+    CHECK(pcm_write_check() == OS32_ERR_INVAL);
+    CHECK(pcm_write(src, 0) == OS32_ERR_INVAL);
+    sim_owner = 1;
+
+    g_pcm.state = PCM_ST_DRAINING;           /* close の途中は受けない */
+    CHECK(pcm_write_check() == OS32_ERR_INVAL);
+    CHECK(pcm_write(src, 4) == OS32_ERR_INVAL);
+}
+
+/* ======================================================================== */
 /*  8. 入口                                                                  */
 /* ======================================================================== */
 struct case_ent { const char *name; void (*fn)(void); };
@@ -1255,7 +1661,14 @@ static const struct case_ent cases[] = {
     { "guard",       case_guard },
     { "reclaim",     case_reclaim },
     { "volume",      case_volume },
-    { "init",        case_init }
+    { "init",        case_init },
+    { "race_reclaim",       case_race_reclaim },
+    { "race_close_rs",      case_race_close_rs },
+    { "race_close_restart", case_race_close_restart },
+    { "race_close_timeout", case_race_close_timeout },
+    { "race_volume",        case_race_volume },
+    { "clock",              case_clock },
+    { "write_contract",     case_write_contract }
 };
 
 int main(int argc, char **argv)
