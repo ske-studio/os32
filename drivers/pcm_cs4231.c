@@ -55,8 +55,11 @@ static int  s_seq_at;              /* 停止列の再開位置 */
 static unsigned long long s_last_us;  /* µs 時計の単調性 (64 ビットで比べる) */
 static int  s_fault_sticky;        /* FAULTED を踏んだら再起動まで断る */
 /* 回収 / 解放が装置を引き取った印。立っている間、advance は装置に 1 度も
- * 触らず、RS_RESTART / RS_STOP / STOP_REQ の続きも走らせない。**IF=0 の中で
- * 立て**、次の open まで下ろさない (Codex 実装レビュー blocker 1)。 */
+ * 触らず、RS_RESTART / RS_STOP / STOP_REQ の続きも走らせない。reclaim は
+ * **IF=0 の中で**立てる (終端状態の公開まで一緒に)。release は IF=1 で立てるが、
+ * 呼び手は OPEN / OPENING / STOP_DONE / FAULTED か claim 済みの reclaim だけなので
+ * advance が補充や restart に入る隙は無い。次の open まで下ろさない
+ * (Codex 実装レビュー往復 1 の blocker 1、往復 2 の注記)。 */
 static volatile int s_claimed;
 
 /* ホスト試験の割り込み点 (pcm_cs4231.h の PCM_PP_*)。カーネルでは空。 */

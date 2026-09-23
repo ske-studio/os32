@@ -1,6 +1,6 @@
 # TASK_PCM_CS4231 — CS4231 (MATE-X PCM) の PCM 再生ドライバ (§5-5 の P1)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **実装済み・NP21/W で E0〜E3 合格 (2026-09-23、§3-1)。実装レビュー (Codex) 往復 1 = Request changes 5 件 (reclaim と restart の競合、close 入口の非原子性、close 期限の公開順、時計の巻き戻り判定、FAULTED 後の音量書き) → 修正済み (e301a61: 交互試験 7 ケース RED→GREEN、変異 30 本)。合流後に NP21/W で E3 を再確認 (5 秒 × 2 + 短いストリーム、close 0、fault site 0、kselftest 197/197)。実装レビュー往復 2 待ち。E4/E5 は残件、E6 は実機**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **実装済み・NP21/W で E0〜E3 合格 (2026-09-23、§3-1)。実装レビュー (Codex) 往復 1 = Request changes 5 件 (reclaim と restart の競合、close 入口の非原子性、close 期限の公開順、時計の巻き戻り判定、FAULTED 後の音量書き) → 修正済み (e301a61: 交互試験 7 ケース RED→GREEN、変異 30 本)。合流後に NP21/W で E3 を再確認 (5 秒 × 2 + 短いストリーム、close 0、fault site 0、kselftest 197/197)。**実装レビュー往復 2 = Approve** (P1〜P5 閉、新規 blocker 無し。非 blocker: claim のコメント、wrapper 経由の write 契約試験、交互試験の補強 3 件 — §3-1 の残件に)。E4/E5 は残件、E6 は実機**。
 > 正典の関係: [`PLAN.md`](PLAN.md) §5-5、土台は [`TASK_HAL_WIRING.md`](TASK_HAL_WIRING.md) (1-1 割り込み、1-2 8237、1-3 プール、1-5 時計)、
 > 出力保護は [`../memory/TASK_KAPI_OUTPUT_GUARD.md`](../memory/TASK_KAPI_OUTPUT_GUARD.md)。
 > 典拠: Crystal **CS4231A データシート DS139PP2** (`docs/hw/crystal/cs4231a.pdf`、gitignore のミラー、`pdftotext` 済み)、
@@ -273,6 +273,8 @@ close / reclaim が各状態から 1 度だけ解放すること)。
 | E4 | 未 (共有 IRQ の偽装置 hook は未実装) |
 | E5 | 未 (`/api/cmd` が返るまで `/api/key` を送れないので CTRL+STOP を注入できない。kselftest から `pcm_reclaim` を直接呼ぶ形に置き換える案) |
 | E6 | 未 (実機) |
+
+残件 (実装レビュー往復 2 の非 blocker): 生成 wrapper 経由の `pcm_write` 契約試験 (範囲・あふれ・端数の順序)、交互試験の補強 (2 段目の期限境界で STOP_DONE、release → 再 open の claim 引き継ぎ、親 owner に戻った状態の reclaim)。
 
 診断: `pcm_diag_fault_site` / `pcm_diag_evidence` / `pcm_diag_df_site` / `pcm_diag_stop_calls` などを kernel.map から読める (E3 の切り分けで使った。残す)。
 
