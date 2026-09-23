@@ -112,3 +112,4 @@ tools/emu_agent/logs/
 .claude/settings.local.json
 .claude/worktrees/
 .codex/
+/os32-ci/
