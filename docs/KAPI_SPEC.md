@@ -1,4 +1,4 @@
-# KernelAPI v60 仕様書
+# KernelAPI v61 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -104,6 +104,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v58 | **実装済み (2026-09-22、手元ビルドのみ)** | 実機の PCI 列挙 `pci_count` / `pci_get` / `pci_cfg_read32` の 3 本 (slot 219 = 0x374、220 = 0x378、221 = 0x37C、data_fields は 0x380 / 0x384 へ)。起動時に `pci_init()` が コンフィギュレーションメカニズム #1 (`0CF8h` DWORD / `0CFCh`) で bus 0 を走査し、vendor/device/class/BAR/Interrupt Line を静的表 (上限 32) に記録する。**読むだけ** — BAR のサイズ判定 (全 1 を書いて読み戻す) はしないので BIOS の割り当てを壊さない。シェルの `lspci` / `pcidump` がこの 3 本を使う。**NP21/W は PCI を実装していない**ので、エミュレータでは `[pci] mech#1 absent` と `lspci: no PCI` が正しい姿。実体は `drivers/pci.c` / `drivers/pci_decode.c` | [tasks/realhw/TASK_LAN_82557.md](tasks/realhw/TASK_LAN_82557.md) |
 | v59 | **実装済み (2026-09-23、手元ビルドのみ)** | µs 時計 `sys_time_now` 1 本 (slot 222 = 0x380、data_fields は 0x384 / 0x388 へ)。起動からの経過を µs で返す。**64 ビットは KAPI で返せない** (往復 1 の B14) ので、出力引数 2 本に**同じスナップショットの上下**を書く。時間源は `tick_count` (§1-0 の後はどちらのシステムクロックでもちょうど 10ms) と PIT ch0 のラッチ読みで、周期の境界はPIC1 の IRR bit0 をラッチの前後で挟んで判定する (最大 3 回やり直す)。戻り 0 = 成功 / `OS32_ERR_AGAIN` = 3 回とも判定できなかった / `OS32_ERR_NOSYS` = PIT 未初期化か mode 2 でない / `OS32_ERR_INVAL` = `lo` か `hi` が NULL・4 バイトが帯境界を跨ぐ・**2 本の範囲が交差する (差 0〜3)**。**負のときは 2 本とも書かない**。出力が読み取り専用の USER ページ (共有ライブラリの `.text`) なら `ring3_fault_kill` — OS32 は CR0.WP = 0 なのでハードウェアは止めない。実体は `kernel/ktime.c` / `kernel/time_math.c`、検証は `kapi/kapi_sys.c` の `kapi_sys_time_now` | [tasks/v3/TASK_HAL_WIRING.md](tasks/v3/TASK_HAL_WIRING.md) §1-5 |
 | v60 | **実装済み (2026-09-23、手元ビルドのみ)** | PCI 結線の診断の取得口 `pci_bind_info` 1 本 (slot 223 = 0x384、data_fields は 0x388 / 0x38C へ)。`idx` 番目 (**`pci_get` と同じ列挙順**) の結線結果を呼び手のバッファへ**8 バイトちょうど**写す。並びは `drivers/pci_bind.h` の `struct pci_bind_info`。`result` = NONE / BOUND / DECLINED / QUARANTINED、`reason` は上書き規則 1 つだけが正、`line_state` は**読む時点で合成**する (結線のときは正常だった線が後から隔離されても `result` は BOUND のまま `line_state` だけが QUARANTINED になる)。**既存 `pci_get` の 40 バイトは広げない** — 旧呼び手のバッファを踏むので別の口にした。戻り 0 = 成功 / `OS32_ERR_INVAL` = `out` が NULL・8 バイトが帯境界を跨ぐ・`idx` が範囲外 (**負のときは 1 バイトも書かない**)。出力が読み取り専用の USER ページなら `ring3_fault_kill` (v59 と同じ規則)。シェルの `lspci` が注記を出す。実体は `drivers/pci_bind.c`、検証は `kapi/kapi_sys.c` の `kapi_pci_bind_info` | [tasks/v3/TASK_HAL_WIRING.md](tasks/v3/TASK_HAL_WIRING.md) §1-4 |
+| v61 | **実装済み (2026-09-23、手元ビルドのみ)** | CS4231 (MATE-X PCM) の再生 `pcm_open` / `pcm_write` / `pcm_status` / `pcm_close` / `pcm_set_volume` の 5 本 (slot 224〜228 = 0x388〜0x398、data_fields は 0x39C / 0x3A0 へ)。16 ビット・ステレオ・44.1k / 22.05kHz の**再生だけ**で、単位は frame (左右 1 組 = 4 バイト)。カーネルが DMA リング 16KB (`dma_pool`) とステージング 16KB (`kmalloc`) を持ち、**アプリのバッファを IRQ から読むことはしない** — `pcm_write` はステージングへ写すだけで、リングを書くのは `pcm_advance` (IRQ / tick、IF=0) と停止中の `pcm_start` / RS_RESTART に限る。所有者は既存の資源 owner と同じアプリ ID で、異常終了は `exec_reclaim_owned` の `pcm_reclaim` が**待たずに**止めて返す。実体は `drivers/pcm_cs4231.c` / `drivers/pcm_cs4231_math.c` | [tasks/v3/TASK_PCM_CS4231.md](tasks/v3/TASK_PCM_CS4231.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -862,6 +863,52 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 - **NP21/W には PCI が無い**ので、エミュレータではこの口は常に 0 件
   (`lspci: no PCI`)。規則はホスト試験 `make check-pci-bind-host` が固める。
 
+### CS4231 (MATE-X PCM) の再生 (v61)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x388 | pcm_open | `int(u32 rate)` |
+| 0x38C | pcm_write | `int(const void *buf, u32 bytes)` |
+| 0x390 | pcm_status | `int(u32 *free_bytes, u32 *counters)` |
+| 0x394 | pcm_close | `int(void)` |
+| 0x398 | pcm_set_volume | `int(u32 percent)` |
+
+16 ビット・ステレオ・**44.1k と 22.05kHz だけ**の再生。単位は **frame**
+(左右 1 組 = 4 バイト)。録音・ミキサ (出力減衰以外)・PIO・V86 への提供は無い。
+設計の正典は [tasks/v3/TASK_PCM_CS4231.md](tasks/v3/TASK_PCM_CS4231.md)。
+
+- **`pcm_open(rate)`** — `44100` / `22050` 以外は `OS32_ERR_INVAL`。
+  戻り 0 / `OS32_ERR_NOSYS` (検出できない) / `OS32_ERR_FULL` (他の owner が
+  open 中、または IRQ10 に結べない) / `OS32_ERR_NOSPC` (DMA プールか KHEAP) /
+  `OS32_ERR_IO` (初期化の待ちが期限切れ。以後は再起動まで `OS32_ERR_IO`)。
+  失敗は**逆順に巻き戻す** (IRQ を解除し、取れたメモリを返す)。
+  経路レジスタ `0F40h` は `0x1A` (INT41 = IRQ10 + DMA #1) のまま残す —
+  detach 状態で装置レジスタを書かないため。
+- **`pcm_write(buf, bytes)`** — **frame の倍数だけ**受ける (端数は切り捨て)。
+  戻りは**受け取ったバイト数**で、`0` は「ステージングが満杯」。呼び手は
+  `sys_yield` して**もう一度**渡す (driver の中では待たない)。負は未 open・
+  非 owner・範囲外。書き込むのはカーネルのステージング (16KB) で、
+  **アプリのバッファを IRQ から読むことはしない**。
+- **`pcm_status(free_bytes, counters)`** — `free_bytes` はステージングの空き
+  (バイト)。`counters` = `(underruns << 24) | (repeats << 16) | resyncs`
+  (8 / 8 / 16 ビット、255 / 255 / 65535 で飽和)。**出力 2 本**で、
+  検証は v59 と同じ規則 (NULL は見ない / 書く前に present + RW + USER)。
+  drain の失敗はここには出ない — `pcm_close` の戻り値で受ける。
+- **`pcm_close()`** — **drain、期限つき**。残りを鳴らし切り、最後のデータの
+  半分と無音の半分を通してから止める。期限は
+  `(ceil(staged / 2048) + 3) × 半周期 + 3 tick` (44.1k・staged 0 で 17 tick)。
+  0 = 鳴らし切った / `OS32_ERR_IO` = 途中で止めた (番犬・連続性の喪失・期限)。
+  **「PI が来ない」は止まった証拠にしない** — 見るのは PEN=0 と I24 の PI=0。
+- **`pcm_set_volume(percent)`** — 1〜100 を I6/I7 の 6 ビット減衰へ線形に写す
+  (100 = 0dB)。**0 は D7 のミュート**。101 以上は `OS32_ERR_INVAL`。
+- **所有者**は既存の資源 owner と同じアプリ ID (`res_owner_get()`)。
+  `pcm_write` / `pcm_status` / `pcm_close` / `pcm_set_volume` は一致を要求し、
+  不一致は `OS32_ERR_INVAL`。異常終了 (fault / CTRL+STOP / kill) は
+  `exec_reclaim_owned` の `pcm_reclaim` が**待たずに** PEN=0 → DMA マスク →
+  解放まで進める (境界は問わない。捨てるストリームなので)。
+- **装置が無い機械では `pcm_open` が `OS32_ERR_NOSYS`**。起動行は `[pcm] none`
+  で、以後 tick は装置に 1 バイトも触らない。
+
 ### 排他的作成 (v53)
 
 **スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
@@ -1001,8 +1048,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x388 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x38C | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x39C | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x3A0 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

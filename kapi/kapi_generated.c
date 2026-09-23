@@ -38,6 +38,7 @@
 #include "launch.h"
 #include "kapi_host.h"
 #include "pci.h"
+#include "pcm_cs4231.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -51,7 +52,7 @@ extern int kapi_pci_bind_info(u32 idx, void *out);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[224];
+volatile u32 kapi_hits[229];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -281,6 +282,11 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     16,  /* pci_cfg_read32 */
     8,  /* sys_time_now */
     8,  /* pci_bind_info */
+    4,  /* pcm_open */
+    8,  /* pcm_write */
+    8,  /* pcm_status */
+    0,  /* pcm_close */
+    4,  /* pcm_set_volume */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -510,6 +516,11 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* pci_cfg_read32 */
     0x0003,  /* sys_time_now: lo,hi */
     0x0002,  /* pci_bind_info: out */
+    0x0000,  /* pcm_open */
+    0x0001,  /* pcm_write: buf */
+    0x0003,  /* pcm_status: free_bytes,counters */
+    0x0000,  /* pcm_close */
+    0x0000,  /* pcm_set_volume */
 };
 
 /* ---- 出力ポインタの書き込み可検査 (票 TASK_KAPI_OUTPUT_GUARD) --------
@@ -2056,5 +2067,44 @@ int __cdecl wrap_pci_bind_info(u32 idx, void *out)
 {
     KAPI_HIT(223);
     return kapi_pci_bind_info(idx, out);
+}
+
+int __cdecl wrap_pcm_open(u32 rate)
+{
+    KAPI_HIT(224);
+    return pcm_open(rate);
+}
+
+int __cdecl wrap_pcm_write(const void *buf, u32 bytes)
+{
+    KAPI_HIT(225);
+    { u32 a = (u32)buf;
+      if (buf == 0 || bytes == 0) return 0;
+      if (a + bytes < a) return OS32_ERR_INVAL;
+      if (!ring3_user_range_ok(a, bytes)) return OS32_ERR_INVAL;
+      return pcm_write(buf, bytes); }
+}
+
+int __cdecl wrap_pcm_status(u32 *free_bytes, u32 *counters)
+{
+    KAPI_HIT(226);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)free_bytes, KAPI_OUT_LEN(free_bytes, sizeof(u32)),
+                                    (u32)counters, KAPI_OUT_LEN(counters, sizeof(u32)))) {
+        ring3_fault_kill();   /* 戻らない */
+    }
+    return pcm_status(free_bytes, counters);
+}
+
+int __cdecl wrap_pcm_close(void)
+{
+    KAPI_HIT(227);
+    return pcm_close();
+}
+
+int __cdecl wrap_pcm_set_volume(u32 percent)
+{
+    KAPI_HIT(228);
+    return pcm_set_volume(percent);
 }
 

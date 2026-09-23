@@ -1,5 +1,5 @@
 {
-  "version": 60,
+  "version": 61,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -50,7 +50,7 @@
     "memory_boot.h",
     "launch.h",
     "kapi_host.h",
-    "pci.h"
+    "pci.h", "pcm_cs4231.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -1587,6 +1587,33 @@
       "ret": "int",
       "args": ["u32 idx", "void *out"],
       "target": "kapi_pci_bind_info"
+    },
+    {
+      "name": "pcm_open",
+      "ret": "int",
+      "args": ["u32 rate"]
+    },
+    {
+      "name": "pcm_write",
+      "ret": "int",
+      "args": ["const void *buf", "u32 bytes"],
+      "body": "{ u32 a = (u32)buf;\n  if (buf == 0 || bytes == 0) return 0;\n  if (a + bytes < a) return OS32_ERR_INVAL;\n  if (!ring3_user_range_ok(a, bytes)) return OS32_ERR_INVAL;\n  return pcm_write(buf, bytes); }"
+    },
+    {
+      "name": "pcm_status",
+      "out": [{"arg": "free_bytes", "size": "sizeof(u32)"}, {"arg": "counters", "size": "sizeof(u32)"}],
+      "ret": "int",
+      "args": ["u32 *free_bytes", "u32 *counters"]
+    },
+    {
+      "name": "pcm_close",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "pcm_set_volume",
+      "ret": "int",
+      "args": ["u32 percent"]
     }
   ]
 }

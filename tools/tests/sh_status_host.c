@@ -962,6 +962,16 @@ static int  __cdecl h_pci_bind_info(u32 idx, void *out)
 { (void)idx; (void)out; return -1; }
 static u32  __cdecl h_pci_cfg_read32(u32 bus, u32 dev, u32 fn, u32 reg)
 { (void)bus; (void)dev; (void)fn; (void)reg; return 0xFFFFFFFFUL; }
+/* KAPI v61: CS4231 の再生 (票 TASK_PCM_CS4231)。ホストに装置は無いので
+ * open は NOSYS。**NULL のままにしない** — 将来 sh から叩く日に静かに落ちる。 */
+static int  __cdecl h_pcm_open(u32 rate) { (void)rate; return OS32_ERR_NOSYS; }
+static int  __cdecl h_pcm_write(const void *buf, u32 bytes)
+{ (void)buf; (void)bytes; return OS32_ERR_INVAL; }
+static int  __cdecl h_pcm_status(u32 *freeb, u32 *cnt)
+{ (void)freeb; (void)cnt; return OS32_ERR_INVAL; }
+static int  __cdecl h_pcm_close(void) { return OS32_ERR_INVAL; }
+static int  __cdecl h_pcm_set_volume(u32 percent)
+{ (void)percent; return OS32_ERR_INVAL; }
 static int  __cdecl h_serial_init_vfast(u32 baud) { (void)baud; return -1; }
 static int  __cdecl h_serial_get_status(u32 *mode, u32 *baud, u32 *fifo)
 { if (mode) *mode = 0; if (baud) *baud = 9600; if (fifo) *fifo = 0; return 0; }
@@ -1031,6 +1041,11 @@ static void build_api(void)
     g_fake.pci_get = h_pci_get;
     g_fake.pci_bind_info = h_pci_bind_info;
     g_fake.pci_cfg_read32 = h_pci_cfg_read32;
+    g_fake.pcm_open = h_pcm_open;
+    g_fake.pcm_write = h_pcm_write;
+    g_fake.pcm_status = h_pcm_status;
+    g_fake.pcm_close = h_pcm_close;
+    g_fake.pcm_set_volume = h_pcm_set_volume;
     g_fake.serial_init_vfast = h_serial_init_vfast;
     g_fake.serial_get_status = h_serial_get_status;
     g_fake.rshell_set_active = h_rshell_set_active;

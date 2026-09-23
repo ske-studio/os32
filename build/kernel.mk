@@ -33,6 +33,7 @@ C_KERNEL = \
     drivers/fdc.c drivers/fdc_decide.c drivers/disk.c drivers/dma8237.c drivers/dma8237_math.c drivers/pci.c drivers/pci_decode.c drivers/pci_bind.c drivers/pci_bind_match.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c drivers/loop_dev.c \
     drivers/mouse.c drivers/mouse_bus.c drivers/mouse_seamless.c \
     drivers/lgy98.c drivers/ne2000.c drivers/ne2000_ring.c \
+    drivers/pcm_cs4231.c drivers/pcm_cs4231_math.c \
     drivers/wab_glue_xe10.c drivers/wab_cirrus.c \
     net/link.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c gfx/backend_pc98.c gfx/backend_pegc.c gfx/backend_cirrus.c \
@@ -72,6 +73,24 @@ drivers/ne2000.o: drivers/ne2000.c
 
 drivers/lgy98.o: drivers/lgy98.c .FORCE
 	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+# PCM: pcm_cs4231.c は irq.h / dma_pool.h / idt.h (kernel/) を参照するため
+# INC_KERNEL。純粋部 (pcm_cs4231_math.c) は I/O もカーネル頭も見ないので
+# 既定の INC_DRIVERS で通る (票 TASK_PCM_CS4231 §2-1)。
+#
+# **-Os で積む**。実装時点の基点 (17e3f46) ではカーネル本体の残りが 6.2KB
+# しかなく (docs/02_memory.md §2-1「カーネル本体の予算」)、この 2 本を -O2 で
+# 積むと `build/os32.ld` の ASSERT にちょうど触れて 1 バイトも余らない。
+# PCM の経路は 10ms の tick と 46ms の半周期で動くので、-O2 と -Os の差は
+# 音に出ない (時間の余裕は REFILL_MARGIN = 11.6ms で持っている)。
+# **他所のコードは 1 行も削っていない。**
+# KHEAP 縮小で MEM_KERNEL_IMAGE_MAX が 596KB になった枝へ着地したら、
+# この 2 行は消して既定の drivers/%.o (-O2) に戻してよい。
+drivers/pcm_cs4231.o: drivers/pcm_cs4231.c
+	$(CC) $(CFLAGS_BASE) -Os $(INC_KERNEL) -c $< -o $@
+
+drivers/pcm_cs4231_math.o: drivers/pcm_cs4231_math.c
+	$(CC) $(CFLAGS_BASE) -Os $(INC_DRIVERS) -c $< -o $@
 
 # net/ (リンク層。ne2000.h / idt.h / kstring.h を参照するため INC_KERNEL)
 net/%.o: net/%.c

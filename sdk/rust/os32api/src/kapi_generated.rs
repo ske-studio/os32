@@ -233,13 +233,18 @@ pub struct KernelAPI {
     /* idx 223 */ pub pci_cfg_read32: unsafe extern "C" fn(bus: u32, dev: u32, r#fn: u32, reg: u32) -> u32,
     /* idx 224 */ pub sys_time_now: unsafe extern "C" fn(lo: *mut u32, hi: *mut u32) -> i32,
     /* idx 225 */ pub pci_bind_info: unsafe extern "C" fn(idx: u32, out: *mut u8) -> i32,
+    /* idx 226 */ pub pcm_open: unsafe extern "C" fn(rate: u32) -> i32,
+    /* idx 227 */ pub pcm_write: unsafe extern "C" fn(buf: *const u8, bytes: u32) -> i32,
+    /* idx 228 */ pub pcm_status: unsafe extern "C" fn(free_bytes: *mut u32, counters: *mut u32) -> i32,
+    /* idx 229 */ pub pcm_close: unsafe extern "C" fn() -> i32,
+    /* idx 230 */ pub pcm_set_volume: unsafe extern "C" fn(percent: u32) -> i32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 60;
+pub const KAPI_VERSION: u32 = 61;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

@@ -171,6 +171,61 @@ CLOSED → 何もしない。正常終了・fault・CTRL+STOP・park 中の kill
 **レート**: 44100 / 22050 だけ。**音量**: I6/I7 の LDA/RDA (6 ビット、1.5dB 刻み、減衰値に線形) を `percent` (1〜100、100 = 0dB)
 から写し、**0 は D7 の LDM/RDM (ミュート) を立てる** (1〜100 で落とす)。101 以上は `OS32_ERR_INVAL`。
 
+#### 進捗 (2026-09-23、worktree `wt/pcm`、基点 17e3f46)
+
+**実装済み (手元ビルドのみ。NP21/W と実機は未実施)**:
+
+- `drivers/pcm_cs4231.h` — ポート・間接レジスタ・ビット・寸法・状態・op を
+  1 か所に ([C4])。典拠は DS139PP2 の頁番号と `io_sound.md` の節で注記。
+- `drivers/pcm_cs4231_math.c` — 純粋部。連続性 (位置だけ)・補充の余裕・
+  drain の 3 段階・ステージング・`pcm_start` の配り方・レート → I8・
+  close の期限式・percent → 減衰、そして**列を `const` の表**で持つ。
+- `drivers/pcm_cs4231.c` — レジスタアクセス (Index と Data は 1 つの
+  `irq_save`)、列の実行器、状態機械、KAPI の実体、`pcm_init` / `pcm_tick` /
+  `pcm_reclaim`。
+- KAPI v61 の 5 本 (slot 224〜228)。`pcm_status` は生成される出力保護つき、
+  `pcm_write` は wrapper の body で `ring3_user_range_ok`。
+- 結線: `kernel/kernel.c` (`pci_bind_all` の後に `pcm_init`)、
+  `kernel/isr_handlers.c` (`snd_tick` の隣に `pcm_tick`)、
+  `exec/exec.c` (`snd_owner_exit` の隣に `pcm_reclaim`)、
+  `kernel/kselftest.c` (起動後に CLOSED と「知らないレートを装置に触らず断る」)。
+- ホスト試験 `make check-pcm-cs4231-host` — 21 ケース + 変異 24 本が全部 RED。
+  記録は `tools/tests/pcm_cs4231_tdd.md`。
+- CPL=3 の `userland/tests/pcm_test.c` (5 秒 / `short` / `nodev`)、
+  `build/app.conf` と `userland/deploy.yaml` に登録 ([V2])。
+
+**票からの逸脱 (PM の判断が要る)**:
+
+1. **ステージングは `kmalloc` (KHEAP) から取る** — プールは 64KB しかなく
+   82557 の 16KB と分け合うため (PM 指示 2026-09-23)。§2-1「メモリ」の
+   「暫定でプールを使う」は解消。リングだけが `dma_pool_alloc(16384, 4096)`。
+   解放はリングの leaked と独立で、ステージングは**必ず `kfree`** してよい
+   (装置が触らないメモリなので)。
+2. `OS32_ERR_*` に **BUSY と NOMEM が無い**ので、BUSY → `OS32_ERR_FULL` (-13)、
+   NOMEM → `OS32_ERR_NOSPC` (-4) に写した (`PCM_ERR_BUSY` / `PCM_ERR_NOMEM`)。
+   新しい番号は足していない。
+3. `drivers/pcm_cs4231{,_math}.c` だけ **`-Os`** で積んでいる。基点 17e3f46 の
+   予算 (残り 6.2KB) では `-O2` だと ASSERT にちょうど触れて 1 バイトも余らない。
+   `MEM_KERNEL_IMAGE_MAX` が 596KB になった枝へ着地したら `build/kernel.mk` の
+   2 行を消して既定 (`-O2`) に戻してよい。**他所のコードは 1 行も削っていない。**
+4. 完了条件の `staged == 0` は `frames > 0` の段階戻しと重なっていて
+   `pcm_obs` の中からは到達できない (残りがあれば必ず補充されて段階が戻る)。
+   **票どおり両方残した**が、変異試験にはできないので `pcm_cs4231_tdd.md` に
+   その旨を書いた。
+5. `advance` の中で `dma_chan_ack_tc` を呼ぶのは **`tc` が立っていたときだけ**に
+   した (判定には一切使わない。診断の通知を落とすためだけ)。
+
+**PM が NP21/W で見るもの (E0 / E2 が整ってから)**:
+
+- E2: 起動行 `[pcm] CS4231 v=100 irq 10 dma 1 fmt 0x5B`
+  (装置が無いいまの trial ini では `[pcm] none` が正しい姿)。
+- E3: `pcm_test` の 5 秒。`/api/sound?pcm=1` の生 frame で
+  右チャネル = frame 番号が連続していること、左が 1kHz (44.1 frame 周期)、
+  `pcm_status` の free が書き込みで減り**半分の補充で 8KB 戻る**こと、
+  200ms 止めて underrun が増え、再開後に右の番号が飛ばないこと。
+- E4: 共有 IRQ の実証。E5: `pcm_test` を CTRL+STOP で殺して `pcm_reclaim`。
+- E6: 実機 (XTAL2 の有無、INIT 中の書き無視、auto-init ビット、耳)。
+
 ### 2-2. KAPI (v61、末尾追記。出力引数は出力保護つき、入力は `ring3_user_range_ok`)
 
 ```c
