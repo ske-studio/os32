@@ -71,3 +71,7 @@ ext2 直呼び (試験・将来の呼び手) では `"/a/"` の末尾も空の�
 `/lost+found/#23` へ接続 (`lost+found` は e2fsck が新しく作る。OS32 のフォーマッタは作らない)、UUID が生成され、
 状態は clean。**`db` (inode 43、`fep.db` 5.8MB) を含む他の項目は残る**。直した後の OS32 は `#23` を普通の空
 ディレクトリとして扱う (rmdir で消せる)。なお写しの s_state は元から「not clean with errors」だった (原因未確認)。
+
+## 実装レビュー (2026-09-24)
+
+fc5ce67 は Codex / Opus のラリー 1 で**両者 Approve** (blocker なし)。修正前からの欠陥 (FD のパス再解決でディレクトリを上書き、長いパスの切り詰め) は別票 [`TASK_VFS_FD_PATH.md`](TASK_VFS_FD_PATH.md)。既存 NHD の名前の無い項目は修正後のカーネルでも見えず消せない → ホストの `e2fsck -fy` で直す (NHD の書き換えは [D2])。`check-ext2-empty-name-host` は e2fsck が無いと SKIP で通るので、受入ではログの `E2FSCK` 行を見る。
