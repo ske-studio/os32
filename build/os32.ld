@@ -20,7 +20,7 @@ ENTRY(kentry)
 /* ======================================================================== */
 KERNEL_LOAD_ADDR     = 0x100000;
 MEM_KSTACK_TOP       = 0x2FFFFC;
-MEM_KERNEL_IMAGE_MAX = 0x75000;
+MEM_KERNEL_IMAGE_MAX = 0x95000;
 
 /*  名前が長いので列は揃えない。**上の 3 行の綴りは変えないこと** —
  *  tools/tests/test_memmap_gen.py が「写しがずれたら気づくか」を

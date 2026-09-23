@@ -379,7 +379,13 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* ヒープ初期化 (VFSマウントでkmalloc使用のため、マウント前に必要) */
     tvram_print(24, 2, "HEAP...", TATTR_GREEN);
     kmalloc_init((void *)KHEAP_BASE, KHEAP_SIZE);
-    tvram_print(31, 2, "320K", TATTR_WHITE);
+    {
+        /* KHEAP_SIZE から出す (決め打ちの "320K" が 2026-09-23 の切り直しで嘘になった) */
+        char hb[8];
+        kutoa_dec((u32)(KHEAP_SIZE / 1024UL), hb, (int)sizeof(hb));
+        kstrncat(hb, "K", sizeof(hb));
+        tvram_print(31, 2, hb, TATTR_WHITE);
+    }
 
     /* 自動マウント処理 */
     tvram_print(14, 3, "MOUNT...", TATTR_GREEN);

@@ -11,7 +11,7 @@
 「直った地図」の両方を作れる。試験が実物のツリーの状態に依存しないので、
 票 §4 の 4 で番地を直しても腐らない。
 
-  BROKEN (__bss_end=0x180000)  予算超過。SHM 帯がカーネル帯域を突き抜けて
+  BROKEN (__bss_end=0x1A0000)  予算超過。SHM 帯がカーネル帯域を突き抜けて
                                SQLite 帯と重なり、後方予約が逆転する
   CLEAN  (__bss_end=0x140000)  予算内。矛盾 0
 
@@ -34,8 +34,8 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "tools/gen_memmap.py"
 
-# 予算 MEM_KERNEL_IMAGE_MAX = 0x75000 → 上限は __bss_end = 0x175000。
-BROKEN = 0x180000        # 予算超過。SHM がカーネル帯域を突き抜ける
+# 予算 MEM_KERNEL_IMAGE_MAX = 0x95000 (KHEAP 192KB、2026-09-23) → 上限は __bss_end = 0x195000。
+BROKEN = 0x1A0000        # 予算超過。SHM がカーネル帯域を突き抜ける
 CLEAN = 0x140000         # 予算内。重なりも逆転も無い
 
 MAP_TEMPLATE = (
