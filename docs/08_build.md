@@ -487,7 +487,8 @@ OS32の `Makefile` は、ここで指定された `$CROSS_DIR/i386-elf/include` 
 |---|---|
 | 起動 | `main` / `feat/**` への push、tag `v*` の push、手動 (workflow_dispatch)。同じ ref の古い run は打ち切る |
 | ビルド | `make -j$(nproc) all [external] fd144` → `make deploy HOSTDRV_DIR=$RUNNER_TEMP/hostdrv NO_PRUNE=1`。`NP21W_DIR` は存在しない場所で、コピー失敗は Warning で続行する |
-| submodule | **`apps/` と `game/` は private repo** なので既定の `GITHUB_TOKEN` では clone できない (初回 run はここで落ちた、2026-09-23)。リポジトリの secret **`SUBMODULE_TOKEN`** (os32-apps / os32-game の Contents: read を持つ fine-grained PAT) があれば取って `make external` まで回し、**無ければ warning を出して core だけ作る** (FD・ISO・packages・配備ツリーの本体側は揃う。apps/game の .bin だけ配備ツリーに入らない)。2 つの repo を public にすれば secret は要らない |
+| submodule | **`apps/` と `game/` は private repo** なので既定の `GITHUB_TOKEN` では clone できない (初回 run はここで落ちた、2026-09-23)。リポジトリの secret **`SUBMODULE_TOKEN`** (os32-apps / os32-game の Contents: read を持つ fine-grained PAT) があれば取って `make external` まで回し、**無ければ warning を出して core だけ作る** (FD・ISO・packages・配備ツリーの本体側は揃う。apps/game の .bin だけ配備ツリーに入らない)。2 つの repo を public にすれば secret は要らない。**ユーザー決定 (2026-09-23): apps/game は含めない (core だけ)** |
+| 文書だけの push | `docs/**`・`*.md`・`.claude/**` だけの push では回さない (`paths-ignore`)。同じ ref の run は 1 つ (`cancel-in-progress`) なので、**run の途中でその ref へ push すると打ち切られる** |
 | ツールチェーン | `tools/ci/build_cross.sh` (§8-5) で `~/opt/cross` に作り、`actions/cache` で保存。キーは `cross-i386-elf-<OS>-<build_cross.sh のハッシュ>` なので、**スクリプトを変えたときだけ作り直す**。初回 (とキャッシュが消えたとき) は約 +30 分 |
 | Rust | `rust-toolchain.toml` を `rustup toolchain install` (引数なし) で解決。`Swatinem/rust-cache` で `target/` を保存 |
 | 上限 | `timeout-minutes: 150` |

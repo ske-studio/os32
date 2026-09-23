@@ -15,6 +15,11 @@ on:
   push:
     branches: [main, "feat/**"]
     tags: ["v*"]
+    # 文書だけの push では回さない (同じ ref の進行中の run を打ち切ってしまうので)
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - ".claude/**"
   workflow_dispatch:
 
 concurrency:
@@ -36,7 +41,7 @@ jobs:
       # apps/ と game/ (submodule) は private repo なので既定の GITHUB_TOKEN では clone できない。
       # secret SUBMODULE_TOKEN (それら 2 つの Contents: read を持つ fine-grained PAT) があれば取って
       # `make external` まで回し、無ければ core (FD・ISO・packages・配備ツリーの本体側) だけ作る。
-      - name: Submodules (apps/game are private — need SUBMODULE_TOKEN)
+      - name: Submodules (apps/game are private — skipped unless SUBMODULE_TOKEN; user decision 2026-09-23 = core only)
         env:
           TOKEN: ${{ secrets.SUBMODULE_TOKEN }}
         run: |
