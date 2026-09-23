@@ -75,3 +75,12 @@ ext2 直呼び (試験・将来の呼び手) では `"/a/"` の末尾も空の�
 ## 実装レビュー (2026-09-24)
 
 fc5ce67 は Codex / Opus のラリー 1 で**両者 Approve** (blocker なし)。修正前からの欠陥 (FD のパス再解決でディレクトリを上書き、長いパスの切り詰め) は別票 [`TASK_VFS_FD_PATH.md`](TASK_VFS_FD_PATH.md)。既存 NHD の名前の無い項目は修正後のカーネルでも見えず消せない → ホストの `e2fsck -fy` で直す (NHD の書き換えは [D2])。`check-ext2-empty-name-host` は e2fsck が無いと SKIP で通るので、受入ではログの `E2FSCK` 行を見る。
+
+## NP21/W での受入 (2026-09-24、ユーザー指示「新規インストールによる修復をテスト」)
+
+- 手順: NHD を空に (`tools/mk_blank_nhd.py`、ユーザー承認、バックアップ不要) → FD (最新) で起動 → CD の `cdinst` (Normal、Debug/Append なし) → 停止 → ホストで `e2fsck -fn` → HDD 起動。
+- **結果**: `e2fsck -fn` **clean** (112 files)、ルートに名前の無い項目なし。入った `/boot/vmkernel.lz4` と `/sys/shell.bin` は今のビルドとバイト一致。HDD 起動で `ver` = API v62、**kselftest 206/206 (fail 0)**、`kbdstat` `cmd=16`。
+- **NP21/W の観察 (記録)**:
+  1. CD ドライブは ini の `HDD3FILE` ではなく**別の設定から** `os32_install.iso` を掴んでいた (1 回目のインストールは古い ISO = v61 の中身が入った)。`HDD3FILE` に別の ISO を入れた試験用 ini (`np21w-trial-cdinst.ini`) では、**インストール後の HDD から BIOS が起動しなかった** (「システムディスクをセットしてください」)。元の試験用 ini では起動する。
+  2. 空の NHD で最初の冷起動では `hd0` が検出されないことがあった (リセットで検出)。実機で同じ現象が出るかは未確認。
+  3. インストール直後に WSL から Windows 側の NHD を直接読んだ (`tail`) ため、NP21/W が NHD を開けなかった (ユーザーの指摘)。**Windows 側の NHD は直接読まず、`make nhd-pull` の写しを使う**。
