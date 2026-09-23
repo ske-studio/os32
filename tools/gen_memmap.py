@@ -188,6 +188,11 @@ def bands(m, sym):
         "ブート後は R/O (BDA 参照のため。paging.c の [DEBUG] 注記)")
     add(CONV, "フォントキャッシュ", v("MEM_FONT_CACHE_BASE"),
         (v("MEM_UNICODE_TABLE_BASE") or 0) - 1, "RW", "kcg.c がブート後に配置")
+    add(CONV, "ブート情報域 (ローダ → kernel_main)", v("MEM_BOOTINFO_BASE"),
+        v("MEM_BOOTINFO_END"), "RW",
+        "INT 1Bh AH=84h の結果 (include/bootinfo.h)。kernel_main の最初で写した"
+        "後はフォントキャッシュが上書きしてよい",
+        parent="フォントキャッシュ")
     add(CONV, "Unicode-JIS 変換表", v("MEM_UNICODE_TABLE_BASE"),
         plus("MEM_UNICODE_TABLE_BASE", "MEM_UNICODE_TABLE_SIZE", -1), "RW",
         "utf8.c")
@@ -364,6 +369,10 @@ MIRRORS = (
     # (u32)&__bss_end を含んでホストで使えないので写しを持つしかないが、
     # **2026-09-17 に実際にずれた** — D1 で 16 → 14 ブロックにしたとき、
     # ここだけ 16 のままで shm.c の表明が落ちた (make check が捕まえた)。
+    # ローダ (NASM) はヘッダを読めないので番地を写して持つ
+    # (票 TASK_HDD_INSTALL 段 0。オフセットの一致は tools/tests/test_bootinfo.py)。
+    ("boot/bootinfo.inc", r"^MEM_BOOTINFO_BASE\s+EQU\s+(0x[0-9A-Fa-f]+)\s*$",
+     "MEM_BOOTINFO_BASE"),
     ("tools/tests/test_owner_reclaim.py",
      r'"#define MEM_SHM_SIZE\s+(0x[0-9A-Fa-f]+)U',
      "MEM_SHM_SIZE"),

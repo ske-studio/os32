@@ -198,6 +198,10 @@ u32 ext2m_lookup(const char *path)
 /* ================================================================ */
 /*  ext2m_read_file — ファイル全体読み込み                           */
 /*  戻り値: 読み込みバイト数 (負=エラー)                             */
+/*    EXT2M_ERR_TOO_BIG  i_size が max_size を超える (**切り詰めない**) */
+/*    EXT2M_ERR_SHORT    ブロックの穴で最後まで読めなかった           */
+/*  以前は max_size で黙って切り詰め、途中までのイメージを展開して     */
+/*  いた (票 TASK_HDD_INSTALL N8)。                                    */
 /* ================================================================ */
 int ext2m_read_file(u32 ino, u8 *buf, u32 max_size)
 {
@@ -213,7 +217,7 @@ int ext2m_read_file(u32 ino, u8 *buf, u32 max_size)
     file_size = *(u32 *)&inode_raw[4]; /* i_size */
     blocks    = (u32 *)&inode_raw[40]; /* i_block */
 
-    if (file_size > max_size) file_size = max_size;
+    if (file_size > max_size) return EXT2M_ERR_TOO_BIG;
     remain = file_size;
 
     for (fblk = 0; remain > 0; fblk++) {
@@ -230,5 +234,6 @@ int ext2m_read_file(u32 ino, u8 *buf, u32 max_size)
         remain -= copy_len;
     }
 
-    return (int)(file_size - remain);
+    if (remain != 0) return EXT2M_ERR_SHORT;
+    return (int)file_size;
 }

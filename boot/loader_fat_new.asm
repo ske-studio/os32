@@ -57,6 +57,9 @@ LOAD_SEG1   EQU     1000h       ;; Phase 2: セグメント0x1000 (物理0x10000
 ;; LZ4デコーダ定数
 LZ4_MINMATCH EQU    4
 
+;; ブート情報域 (0x7E00) の番地とオフセット。正典は include/bootinfo.h。
+%include "boot/bootinfo.inc"
+
 section .text
 
 
@@ -77,6 +80,28 @@ loader_start:
         call    print16
 
         ;; ES = 0 に戻す
+        xor     ax, ax
+        mov     es, ax
+
+        ;; ============================================================
+        ;; ブート情報域 (0x7E00〜0x7E2F) — HDD の BIOS 幾何を測る
+        ;; (票 TASK_HDD_INSTALL 段 0)。**起動のたびにまず無効にしてから**
+        ;; DA=80h / 81h に INT 1Bh AH=84h (新センス)。失敗 (CF=1) も
+        ;; cf / ah として残す。最後に magic と反転チェック語を書く。
+        ;; 0x7E00 はスタック (0x7C00 から下)、FAT/ルートDir の
+        ;; バッファ (0x6000〜0x77FF)、ローダ本体 (0x8000〜) のどれとも
+        ;; 重ならない。
+        ;; ============================================================
+        sti
+        mov     al, BOOTINFO_SRC_FD
+        call    bi_clear
+        mov     al, 80h
+        mov     si, MEM_BOOTINFO_BASE + BI_OFF_DRIVE0
+        call    bi_sense
+        mov     al, 81h
+        mov     si, MEM_BOOTINFO_BASE + BI_OFF_DRIVE0 + BI_DRIVE_SIZE
+        call    bi_sense
+        call    bi_seal
         xor     ax, ax
         mov     es, ax
 
@@ -584,6 +609,12 @@ print16:
         jmp     print16
 .done:
         ret
+
+;; ============================================================
+;; ブート情報域を書く手続き (bi_clear / bi_sense / bi_seal)。
+;; HDD ローダと同じ 1 つのファイル。
+;; ============================================================
+%include "boot/bootinfo_rm.inc"
 
 ;; ============================================================
 ;; GDT

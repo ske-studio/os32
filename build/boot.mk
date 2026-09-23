@@ -6,6 +6,11 @@
 ASM_STANDALONE = boot/boot_fat.asm boot/loader_fat.asm boot/loader_fat_new.asm boot/boot_hdd.asm boot/loader_hdd.asm
 BIN_STANDALONE = $(ASM_STANDALONE:.asm=.bin)
 
+# ブート情報域 (0x7E00) の NASM 側。2 本のローダが %include するので、
+# 変えたら両方を組み直す (票 TASK_HDD_INSTALL 段 0)。
+BOOTINFO_INC = boot/bootinfo.inc boot/bootinfo_rm.inc
+boot/loader_fat_new.bin boot/loader_fat144.bin boot/loader_hdd.o: $(BOOTINFO_INC)
+
 # === 新HDDローダー (ASM + C リンク) ===
 CFLAGS_BOOT = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie \
               -fno-stack-protector -nostdlib -mno-red-zone -Os -Wall -fcommon \

@@ -9,7 +9,9 @@
 ;;   AL = DA/UA, AH = ヘッド数, BL = セクタ/トラック
 ;;
 ;; メモリマップ:
-;;   0x7F00-0x7F0F  パラメータ受け渡し (16bit→32bit)
+;;   0x7C00 から下  実モードのスタック
+;;   0x7E00-0x7E2F  ブート情報域 (include/bootinfo.h、kernel_main が写す)
+;;   0x7F00-0x7F11  パラメータ受け渡し (16bit→32bit、+16/+17 は読みの CF/AH)
 ;;   0x8000-0x9FFF  ローダー自身 (8KB)
 ;;   0x10000-       vmkernel.lz4 一時読み込み先
 ;;   0x100000       カーネル展開先
@@ -31,6 +33,11 @@ PARAM_SEC_OFF   EQU     7       ;; 7F07h
 PARAM_BUF_SEG   EQU     8       ;; 7F08h
 PARAM_BUF_OFF_16 EQU    10      ;; 7F0Ah
 PARAM_RET_EIP   EQU     12      ;; 7F0Ch
+PARAM_ST_CF     EQU     16      ;; 7F10h  直前の INT 1Bh 読みの CF (0/1)
+PARAM_ST_AH     EQU     17      ;; 7F11h  同 AH (状態)
+
+;; ブート情報域 (0x7E00) の番地とオフセット。正典は include/bootinfo.h。
+%include "boot/bootinfo.inc"
 
 section .text
 
@@ -53,6 +60,81 @@ loader_entry:
         mov     ds, ax
         mov     ss, ax
         mov     sp, 7C00h
+
+        ;; ============================================================
+        ;; ブート情報域 (票 TASK_HDD_INSTALL 段 0 / N2)。
+        ;; **まず無効 (magic 0) にしてから** IPL から受けた DA に
+        ;; INT 1Bh AH=84h。記録は DA の下位 1 ビットの位置
+        ;; (80h → drive[0]、81h → drive[1])。問い合わせない方は queried 0。
+        ;; ============================================================
+        sti
+        mov     al, BOOTINFO_SRC_HDD
+        call    bi_clear
+        mov     al, [PARAM_AREA + PARAM_DA_OFF]
+        mov     si, MEM_BOOTINFO_BASE + BI_OFF_DRIVE0
+        test    al, 1
+        jz      .bi_slot
+        add     si, BI_DRIVE_SIZE
+.bi_slot:
+        push    si
+        call    bi_sense
+        pop     si
+        call    bi_seal
+
+        ;; IPL に焼いた幾何 (heads/SPT) と BIOS の答えが違えば止まる
+        ;; (IPL の値の陳腐化。違う幾何で読み進めると別のセクタを読む)。
+        ;; AH=84h が使えない答えなら比べられないので、警告だけ出して進む。
+        cmp     byte [si + BI_DRV_VALID], 1
+        jne     .geo_unknown
+        mov     al, [si + BI_DRV_DH]
+        cmp     al, [PARAM_AREA + PARAM_HEADS_OFF]
+        jne     .geo_mismatch
+        mov     al, [si + BI_DRV_DL]
+        cmp     al, [PARAM_AREA + PARAM_SPT_OFF]
+        jne     .geo_mismatch
+        jmp     .geo_ok
+
+.geo_unknown:
+        mov     ax, 0A000h
+        mov     es, ax
+        mov     di, 1120                ;; 7 行目 (PM の表示は 5 行目まで)
+        mov     si, msg_geo_unknown
+        call    rm_print
+        xor     ax, ax
+        mov     es, ax
+        jmp     .geo_ok
+
+.geo_mismatch:
+        ;; "HDD geom mismatch: IPL H/S=hh/ss BIOS H/S=hh/ss" を出して止まる
+        push    si
+        mov     ax, 0A000h
+        mov     es, ax
+        mov     di, 960                 ;; 6 行目
+        mov     si, msg_geo_mis1
+        call    rm_print
+        mov     al, [PARAM_AREA + PARAM_HEADS_OFF]
+        call    rm_hex8
+        mov     si, msg_slash
+        call    rm_print
+        mov     al, [PARAM_AREA + PARAM_SPT_OFF]
+        call    rm_hex8
+        mov     si, msg_geo_mis2
+        call    rm_print
+        pop     si
+        push    si
+        mov     al, [si + BI_DRV_DH]
+        call    rm_hex8
+        mov     si, msg_slash
+        call    rm_print
+        pop     si
+        mov     al, [si + BI_DRV_DL]
+        call    rm_hex8
+        cli
+.geo_halt:
+        hlt
+        jmp     .geo_halt
+
+.geo_ok:
 
         ;; A20 ゲート有効化 (PC-98: ポート 0xF2)
         mov     al, 3
@@ -157,6 +239,11 @@ rm_trampoline:
         
         mov     ah, 06h
         int     1Bh
+        ;; CF と AH を残す (PM 側の pm_read_sector が見て、失敗なら止まる。
+        ;; F14 / Codex B9 — 以前は CF を見ずに読めたことにしていた)。
+        ;; DS は BIOS が保存する。setc / mov はフラグを変えない順で。
+        setc    byte [PARAM_AREA + PARAM_ST_CF]
+        mov     [PARAM_AREA + PARAM_ST_AH], ah
         
         cli
         
@@ -170,6 +257,52 @@ rm_trampoline:
         db      0EAh
         dd      pm32_return_trampoline
         dw      0008h
+
+;; ============================================================
+;; 実モードの表示 (ES = A000h、DI = TVRAM オフセット、SI = 文字列)
+;; ============================================================
+rm_print:
+        push    ax
+.loop:
+        lodsb
+        or      al, al
+        jz      .done
+        mov     ah, 0
+        mov     es:[di], ax
+        mov     byte es:[di + 2000h], 0E1h
+        add     di, 2
+        jmp     .loop
+.done:
+        pop     ax
+        ret
+
+;; AL を 16 進 2 桁で出す (ES:DI、DI を進める)
+rm_hex8:
+        push    ax
+        push    ax
+        shr     al, 4
+        call    .nib
+        pop     ax
+        and     al, 0Fh
+        call    .nib
+        pop     ax
+        ret
+.nib:
+        and     al, 0Fh
+        add     al, '0'
+        cmp     al, '9'
+        jbe     .put
+        add     al, 7
+.put:
+        mov     ah, 0
+        mov     es:[di], ax
+        mov     byte es:[di + 2000h], 0E1h
+        add     di, 2
+        ret
+
+;; ブート情報域を書く手続き (bi_clear / bi_sense / bi_seal)。
+;; FD ローダと同じ 1 つのファイル。
+%include "boot/bootinfo_rm.inc"
 
 
 ;; ============================================================
@@ -388,9 +521,32 @@ pm_read_sector:
         jmp     0018h:pm16_trampoline
         
 .return_here:
+        ;; 読みの CF を見る (F14)。失敗なら LBA と AH を出して止まる —
+        ;; 読めなかったバッファを ext2 として解釈して進むより、ここで止まる方が
+        ;; 原因に近い。
+        cmp     byte [PARAM_AREA + PARAM_ST_CF], 0
+        jne     .read_fail
         popad
         add     edi, 512
         ret
+
+.read_fail:
+        popad
+        push    eax                     ;; LBA (pushad の前の EAX)
+        mov     edi, 0A0000h + 960      ;; 6 行目
+        mov     esi, msg_read_err
+        call    pm_print
+        mov     esi, msg_ah
+        call    pm_print
+        movzx   eax, byte [PARAM_AREA + PARAM_ST_AH]
+        mov     ecx, 2
+        call    pm_hex
+        mov     esi, msg_lba
+        call    pm_print
+        pop     eax
+        mov     ecx, 8
+        call    pm_hex
+        jmp     pm_halt
 
 
 ;; ============================================================
@@ -416,6 +572,38 @@ ppr_done:
         pop     eax
         ret
 
+
+;; ============================================================
+;; pm_hex — EAX の下位 ECX 桁を 16 進で表示 (EDI を進める)
+;; ============================================================
+
+pm_hex:
+        push    ebx
+        push    edx
+        mov     ebx, ecx
+        shl     ebx, 2                  ;; 桁数 × 4 ビット
+.next:
+        sub     ebx, 4
+        mov     edx, eax
+        push    ecx
+        mov     ecx, ebx
+        shr     edx, cl
+        pop     ecx
+        and     edx, 0Fh
+        add     dl, '0'
+        cmp     dl, '9'
+        jbe     .put
+        add     dl, 7
+.put:
+        mov     dh, 0
+        mov     [edi], dx
+        mov     byte [edi + 2000h], 0E1h
+        add     edi, 2
+        dec     ecx
+        jnz     .next
+        pop     edx
+        pop     ebx
+        ret
 
 ;; ============================================================
 ;; pm_halt — 停止
@@ -446,7 +634,13 @@ param_spt:      db      0
 
 msg_title:      db      'OS32 HDD Loader v3 (ext2+LZ4)', 0
 msg_ide_err:    db      'IDE Timeout!', 0
-msg_read_err:   db      'Read Error!', 0
+msg_read_err:   db      'HDD read error (INT 1Bh CF=1)', 0
+msg_ah:         db      ' AH=', 0
+msg_lba:        db      ' LBA=', 0
+msg_geo_mis1:   db      'HDD geom mismatch: IPL H/S=', 0
+msg_geo_mis2:   db      ' BIOS(84h) H/S=', 0
+msg_slash:      db      '/', 0
+msg_geo_unknown: db     'BIOS sense (84h) unusable: geometry not checked', 0
 msg_booting:    db      'Booting kernel...', 0
 msg_dbg0:       db      '[0]IDE OK', 0
 msg_dbg05:      db      '[0.5]BSS CLR', 0

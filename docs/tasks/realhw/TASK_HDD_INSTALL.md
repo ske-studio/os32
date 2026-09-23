@@ -34,6 +34,47 @@
 2. カーネルは IDENTIFY の word 1/3/6 (既定)、word 53 と 54-58 (現在)、word 49 bit9 (LBA)、word 60-61 (総数) を表示。
 3. 出力 `[hdd] bios da=80 cf=0 len=512 C/H/S=… / ata def=… cur=… lba=1 total=…` を実機で記録 (受入 H3)。**段 1 の設計値はこの結果で確定する** (8/17 か 16/63 か、既定 = 現在か)。
 
+#### 段 0 の実装メモ (2026-09-23、wt/hdd-stage0)
+
+- **番地**: `MEM_BOOTINFO_BASE` = 0x7E00、予約 256B (0x7E00〜0x7EFF、`include/memmap.h`)。使うのは先頭 0x30B。
+  地図 (`docs/02_memory.md` §2-1) ではフォントキャッシュの内側の帯として載る。NASM 側の写しは `boot/bootinfo.inc`
+  (番地は `gen_memmap.py --check`、オフセットは `make check-bootinfo-host` が照合)。
+- **形式** (`include/bootinfo.h`、リトルエンディアン):
+
+  | オフセット | 大きさ | 中身 |
+  |---|---|---|
+  | +0x00 | u32 | magic `0x49544F42` ('BOTI') |
+  | +0x04 | u16 | version = 1 |
+  | +0x06 | u8 | 取得元 1 = FD ローダ / 2 = HDD ローダ |
+  | +0x07 | u8 | ドライブ数 = 2 |
+  | +0x08 / +0x18 | 16B × 2 | ドライブ記録 (DA 80h → [0]、81h → [1]): +0 DA, +1 valid, +2 CF, +3 AH, +4 BX (u16), +6 CX (u16), +8 DH, +9 DL, +10 queried, +11〜15 0 |
+  | +0x28 | u16 | ドライブ記録 (+0x08〜+0x27) のバイト和 |
+  | +0x2A | u16 | 0 |
+  | +0x2C | u32 | 反転チェック語 = ~(magic ^ version) = `0xB6ABB0BC`。**最後に書く** |
+
+  valid の規則 (ローダ・カーネル共通): CF=0、BX=512、CX≠0、DH≠0、DL≠0。カーネルはさらに queried=1、DA ∈ {80h, 81h}、
+  ローダの valid=1 を要求する。
+- **ローダ**: 手続きは `boot/bootinfo_rm.inc` の 1 つ (`bi_clear` → `bi_sense` → `bi_seal`) を両方が `%include`。
+  FD ローダは 80h と 81h、HDD ローダは IPL から受けた DA だけを問い合わせる。HDD ローダは AH=84h の DH/DL が
+  IPL の heads/SPT と違えば `HDD geom mismatch: IPL H/S=hh/ss BIOS(84h) H/S=hh/ss` (6 行目) を出して止まる。
+  AH=84h が使えない答えなら比べられないので `BIOS sense (84h) unusable: geometry not checked` (7 行目) を出して進む。
+  読みの INT 1Bh は CF を 0x7F10 (CF)・0x7F11 (AH) に残し、CF=1 なら `HDD read error (INT 1Bh CF=1) AH=xx LBA=xxxxxxxx`
+  で止まる (F14)。`ext2_mini` は `MAX_IMAGE_SIZE` 超を切り詰めずにエラーにし、ローダは
+  `vmkernel.lz4 too large (> 508KiB)` で止まる (N8)。
+- **カーネル**: `kernel_main` の最初の文で `bootinfo_capture()` (写して検証し、低位の magic を 0 に戻す)。
+  `bootinfo_hdd_geom(da, &cyl, &heads, &spt, &seclen)` が保存値を返す。IDE の初期化の直後に `bootinfo_report()`:
+
+  ```
+  [hdd] bios da=80 cf=0 ah=00 len=512 C/H/S=16382/16/63 src=fd
+  [hdd] bios da=81 cf=1 ah=60 len=0 C/H/S=0/0/0 src=fd (unusable)
+  [hdd] ata0 def=16382/16/63 cur=16382/16/63(valid) lba=1 total=16514063
+  ```
+
+  情報域が無効なら `[hdd] bios geom: none (magic xxxxxxxx err=-N)`。HDD ローダが問い合わせなかった方は出さない。
+  ATA の行は `ataN` (N = IDE ドライブ番号 0/1)。IDENTIFY の word 1/3/6・49・53・54-56・60-61 は `ide_get_geom()`
+  (`IdeGeom`) に持つ。KAPI の `IdeInfo` (96B) は変えていない。I/O の CHS 変換も変えていない (LBA28 は段 1)。
+  (上の数値は例。実機の値は受入 H3 で記録する)
+
 ### 段 1 — 一時置き場 (FD 起動のまま)
 
 4. **区画表の読み書きを 1 つの共有部に集約**し、標準配置で読み書きする: `ext2_find_partition`、`boot/boot_main.c`、cdinst、install、`tools/nhd_deploy.py`、fatfs の読み手と同じ struct を使う。**同じコミット**で揃える。既存 NHD は `make deploy-kernel` の区画表書き直しで移行する (H2 で確認)。旧配置を読む互換はしない (実機に OS32 の旧配置の区画は存在しない)。

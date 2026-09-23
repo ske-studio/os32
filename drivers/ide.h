@@ -89,6 +89,26 @@ typedef struct {
     u16  phys_sector_size; /* 物理セクタサイズ (SASI=256, IDE=512) */
 } IdeInfo;
 
+/* IDENTIFY の幾何まわりの生の値 (票 TASK_HDD_INSTALL 段 0)。
+ * **IdeInfo は KAPI の out 構造体 (96 B、インストーラが並びに依存) なので
+ * 触らない** — 足りない語はこちらに別に持つ。カーネル内だけで使う。 */
+typedef struct {
+    u16 def_cyl;        /* word 1  既定シリンダ数 */
+    u16 def_heads;      /* word 3  既定ヘッド数 */
+    u16 def_spt;        /* word 6  既定セクタ数/トラック */
+    u16 w49;            /* word 49 能力 (bit9 = LBA) */
+    u16 w53;            /* word 53 (bit0 = word 54-58 が有効) */
+    u16 cur_cyl;        /* word 54 現在のシリンダ数 */
+    u16 cur_heads;      /* word 55 現在のヘッド数 */
+    u16 cur_spt;        /* word 56 現在のセクタ数/トラック */
+    u32 total;          /* word 60-61 LBA 総セクタ数 */
+    u8  valid;          /* 1 = IDENTIFY が成功して値を持っている */
+} IdeGeom;
+
+/* 最後に成功した IDENTIFY の幾何 (ide_init が drive 0-3 を埋める)。
+ * 0 = 値あり、負 = そのドライブは IDENTIFY に答えていない。 */
+int ide_get_geom(int drive, IdeGeom *out);
+
 /* IDE初期化 (ドライブ検出) */
 int ide_init(void);
 
