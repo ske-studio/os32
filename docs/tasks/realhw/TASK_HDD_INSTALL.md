@@ -134,7 +134,7 @@
 | H2 | NP21/W: `deploy-kernel` 後の既存 NHD が新配置で起動・マウント、kselftest。FD 起動 (HDD 無し) で `[hdd] bios da=80 cf=0 ah=0f len=0 C/H/S=0/0/0 (unusable)` → 幾何なし → 従来どおり (**NP21/W は未接続でも CF=0 で 0 を返す**、`np21w-src/src/bios/sxsibios.c` の `sasibios_sense`。実機は未確認) | NP21/W |
 | H3 | 実機: 段 0 の `[hdd]` 行を記録 | 実機 |
 | H4 | 実機: 承認後 `hdprep` → 再起動 → `/hd0` マウント → 書き → 再起動後 md5 一致 (区画の前半と末尾の両方のファイル) | 実機 |
-| H5 | 実機: CD インストール → HDD 起動 → kselftest | 実機 |
+| H5 | 実機: CD インストール → HDD 起動 → kselftest。**インストール後の HDD をホストで `e2fsck -fn` して clean** (TASK_EXT2_EMPTY_NAME の教訓: OS32 で読めることは正しい ext2 の証拠にならない) | 実機 |
 
 ## 4. しないこと
 
