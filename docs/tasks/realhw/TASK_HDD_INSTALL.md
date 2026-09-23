@@ -1,6 +1,6 @@
 # TASK_HDD_INSTALL — 実機 Ra266 の 8GB IDE へ置き場を作り、CD からインストールして HDD 起動する
 
-> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-23) / 状態: **v2 — ラリー 1 (Fable / Codex とも Request changes) を反映、ラリー 2 待ち**。実装はキーボード修正 (wt/kbd-rty) の着地後。
+> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-23) / 状態: **v3 — ラリー 2 (Codex、Request changes、N1〜N8) を反映、ラリー 3 (最後) 待ち**。ラリー 2 は Fable が月間上限で不参加 (Fable のラリー 1 所見は Codex が同意/不同意を判定済み)。実装はキーボード修正 (wt/kbd-rty) の着地後。
 > ユーザー指示 (2026-09-23): 「キーボードが直ってから HDD インストールへの移行を早める。FDD のみで一時的に置ける場所が無いのは不便。CD イメージからインストールする」。
 > 正典の親: [PLAN.md](PLAN.md) §2 (8GB は未知の領域、先頭に小さく切る) / §3 (FD 起動 + CD から入れる)。
 
@@ -15,7 +15,7 @@
 | F5 | IPL (`boot/boot_hdd.asm`) は IPL 内の `geo_heads/geo_spt` (インストーラが 8/17 を書く) で LBA→CHS を計算し **BIOS INT 1Bh** に渡す。**BIOS が 8GB ディスクをどの幾何で見せるかは未測定** (資料の壁: 8/17 = 4.25GB、16/63 = 31.4GB。Bible 2-9-1)。幾何は **INT 1Bh AH=84h (新センス)** で BX=セクタ長 / CX=シリンダ / DH=ヘッド / DL=セクタ として得られる (Bible 2-9 §3 SENSE [HDD]) | boot_hdd.asm:36, 70〜100 |
 | F6 | `loader_hdd.asm` は IPL から DA / heads / SPT を `7F00h` のパラメータ域で受け取る。FD のローダ (`loader_fat_new.asm`) は HDD の幾何を問い合わせていない | loader_hdd.asm:24〜49、loader_fat_new.asm |
 | F7 | ext2 の一括フォーマットの実績は 200MB の NHD まで (1KB ブロック、1 グループ 8192 ブロック)。シェルの `format [0-3] [sects]` は `ext2_format()` を呼ぶだけで区画表を書かない | fs/ext2_fmt.c、userland/shell/cmd_sys.c:112〜127 |
-| F8 | カーネルの ATA I/O は IDENTIFY の幾何で LBA→CHS (`ide.c:356〜367`)。これは**ドライブ直叩き**なので IDENTIFY の幾何で正しい (BIOS の変換とは無関係) | drivers/ide.c |
+| F8 | カーネルの ATA I/O は IDENTIFY の**既定**幾何で LBA→CHS (`ide.c:356〜367`、`drivers/dev.c:254-265` にも同じ変換)。**正しいのはドライブの現在の変換と一致するときだけ** (F13) | drivers/ide.c、dev.c |
 | F10 | **区画表のバイト配置が PC-98 標準と 2 バイトずれている** (ラリー 1 で両者が指摘)。標準 (FreeBSD `diskpc98.h`、OS32 の `fs/fatfs_vfs.c:380` `PC98PartEntry`) は +4/5/6-7 IPL CHS、**+8 開始セクタ / +9 開始ヘッド / +10-11 開始シリンダ**、+12/13/14-15 終了。OS32 の書き手 (cdinst / install / `tools/nhd_deploy.py:689-723`) と読み手 (`ext2_find_partition`、`boot/boot_main.c:16-43`) は +6/+7/+8-9 を開始、+10〜13 を終了に使う独自配置で、**互いに揃っているので NP21/W では出なかった** | Codex B1 / Fable B2 |
 | F11 | **ext2 は最大 32 グループ = 256MiB** (`fs/ext2_ctx.h:18` `EXT2_MAX_GROUPS 32`、format は `NOSPC`、mount は `IO`)。「200MB の実績」は設計上限の内側だっただけ | 両者 |
 | F12 | formatter は**最終グループがメタデータより小さくても断らず区画外へ書く** (例: 200MiB を 8/17 のシリンダに切り上げると最終グループ 15 ブロック < 必要 249)。`ext2_find_partition` は読めない・見つからないとき **LBA 1088 を返し**、format はその位置から書き始める。`dev_blk_write_lba` は範囲検査をしない | Codex B3/B5、Fable 非 blocker 9 |
@@ -52,6 +52,20 @@
 
 12. HDD ローダは INT 1Bh ごとに CF を検査し、失敗を画面に出して止まる (F14)。
 13. hd0 (DA 80h) 起動のみ。hd1 は断る。
+
+## 1-v3. ラリー 2 (N1〜N8) による改訂 — §1 の該当項をこの節で置き換える
+
+- **N1 ブート情報域の置き場** (段 0-1 を置換): **0x7E00〜0x7EFF (256B)**。根拠: 実モードのスタックは 0x7C00 から下へ、ローダは 0x8000〜、`loader_hdd` の受け渡しは 0x7F00〜0x7F0F、圧縮イメージは 0x10000〜0x8EFFF (`boot_defs.h:45-49`)、PM の ESP は 0x9FFFC、カーネル本体は 0x100000。フォントキャッシュ (0x1000〜) は `kernel_main` のフォント初期化で上書きするので、**`kernel_main` の最初 (フォント・ヒープより前) で写す**。実装者はローダ 2 本のバッファ・スタックとの非重複を `.map` / ソースで確かめて報告する。`include/memmap.h` に定義し `tools/gen_memmap.py` の表へ。
+- **N2 HDD 起動の生成経路** (段 0-1 に追加): **FD ローダと HDD ローダ (`loader_hdd.asm` の実モード部) の両方**が、起動のたびに情報域を**まず無効 (magic=0) で初期化**してから AH=84h を呼び、成功時だけ valid を立てる。残留した前回の値を受け入れる経路は無い。HDD ローダは、IPL から受けた heads/SPT と AH=84h の値が食い違えば画面に出して**止まる** (IPL に焼いた値の陳腐化の検出)。
+- **N3 NHD の移行** (段 1-4 を置換): `tools/nhd_deploy.py` に**移行の 1 操作** (`migrate-pt`) を足す — NP21/W 停止中 ([D1]) に、旧配置の区画表を読み、**同じ開始 LBA・長さ**を標準配置で書き直し、第二段ローダ (LBA 2〜) とカーネルを**同時に**配備する。`make deploy-kernel` だけでは移行しない旨を 08_build.md に書く。H2 は `migrate-pt` → 起動 → マウント → 既存ファイルの md5。
+- **N4 モードの分離** (段 1-7 / 段 2-10 を置換): `hdprep` = **空のディスク専用** (区画項目が 1 つでもあれば断る)。インストーラ = **再作成モード**: 区画表の項目が**ちょうど 1 つ**で、それが OS32 が作ったもの (sys_id = ext2 用の値かつ名前 `OS32`、開始 = 期待値) のときだけ、承認後に作り直す。それ以外 (未知の区画、2 つ以上) は断る。
+- **N5 format の新しい入口**: KAPI を**追記** `ext2_format_at(drive, start_lba, length)` (既存 `ext2_format` は変えない、[ABI2])。区画表を読まずに与えられた範囲だけに書き、範囲がディスク総数を超えれば断る。hdprep / インストーラは「全検査 → `ext2_format_at` → マウント確認 → **区画表を最後に**書く → 読み戻し比較」。KAPI 版はキーボード修正の v62 の次 (v63)。
+- **N6 使用中の検査**: KAPI を**追記** `dev_mount_count(drive)` (その物理デバイスがどの prefix でマウントされているか・root かを数える) と `sys_umount_checked(prefix)` (sync の失敗を含めて int を返す。既存 `sys_umount` の void は変えない)。hdprep / インストーラは hd0 のマウントが 1 つでもあれば umount_checked し、失敗・root なら断る。
+- **N7 最終グループ** (段 1-6 を置換): 最終グループの必要量 = **sparse の SB・GDT (予約 GDT 含む) + bitmap 2 + inode 表** (group 0 はさらに root / lost+found の初期ブロック)。切り下げ後にグループ数・inode 数を**再計算して再判定**し、成立する長さになるまで繰り返す (固定点)。判定関数はホスト試験 (H1) の対象。
+- **N8 圧縮イメージの上限**: インストーラの事前検査に `vmkernel.lz4 ≤ MAX_IMAGE_SIZE (508KiB)`。`boot/ext2_mini.c` は上限を超えるファイルを**切り詰めずにエラー**にし、ローダはそれを画面に出して止まる。
+- **ATA 側の変換** (Codex の非 blocker「word 53 bit0 が無効な場合」と F13): **ATA I/O は word 49 bit9 (LBA 対応) なら LBA28 で行う** (`ide.c` と `dev.c` の両方の CHS 変換を LBA28 に切り替え)。LBA 非対応なら word 53 bit0 = 1 のときの現在の幾何、どちらも無ければ hdprep / インストーラは書き込みを断る。NP21/W も LBA に対応している (`np21w-src/src/cbus/ideio.c`)。これで「既定≠現在」の問題はドライブ側から消え、残るのは BIOS 幾何 (区画表・IPL) だけになる。
+- **F1 の「FAT が無い」**: 断定しない。空判定は段 1 の hdprep が LBA 0/1 の生バイトで行う。
+- **受入の追加** (H1/H2/H4): PT 読み取り失敗、情報域の無効 (magic 無し・前回の残留)、別 prefix でのマウント中、再作成モードで未知の区画を断る、format / sync / 追加パッケージの失敗を完了扱いにしない、H4 の「末尾」は実際の割り当て LBA を `dd` で確認。容量表示の 32 ビット溢れ (`ide.c:219`) は総セクタ数から計算し直す。
 
 ## 2. ラリー 1 の論点の処理
 
