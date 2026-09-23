@@ -82,7 +82,7 @@ make check-tests-inventory                      # 表が古くないか検査す
 | # | ターゲット | コマンド | 対象ソース | 記録 (RED→GREEN) | 票 | CI |
 |---|---|---|---|---|---|---|
 
-## 3. `check` の列に**入っていない** `check-*` ターゲット (91)
+## 3. `check` の列に**入っていない** `check-*` ターゲット (92)
 
 門ではなく計測器・実機試験。`make check` からは呼ばれない。
 
@@ -179,6 +179,7 @@ make check-tests-inventory                      # 表が古くないか検査す
 | 89 | `check-vfs-fd-sqlite-host` | `python3 tools/tests/test_vfs_fd_sqlite.py` | `fs/vfs_fd.c` | [`tools/tests/vfs_fd_sqlite_tdd.md`](../tools/tests/vfs_fd_sqlite_tdd.md) | — | × |
 | 90 | `check-vfs-kind-host` | `python3 -B tools/tests/test_vfs_kind.py --target` | `fs/vfs.c`<br>`fs/vfs_fd.c` | [`tools/tests/h1_tdd.md`](../tools/tests/h1_tdd.md)<br>[`tools/tests/vfs_kind_tdd.md`](../tools/tests/vfs_kind_tdd.md) | [`docs/tasks/shell/HSYNC_IMPROVEMENT_PLAN.md`](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) | × |
 | 91 | `check-vfs-mount-dev-host` | `python3 -B tools/tests/test_vfs_mount_dev.py`<br>`python3 -B tools/tests/test_ext2_read_bound.py`<br>`python3 -B tools/tests/test_ext2_write_io.py`<br>`python3 -B tools/tests/test_fatfs_stat.py` | `fs/vfs.c`<br>`fs/ext2_vfs.c`<br>`fs/ext2_file.c`<br>`fs/ext2_super.c`<br>`fs/ext2_inode.c`<br>`fs/ext2_dir.c`<br>`fs/ext2_fmt.c`<br>`lib/microtar/microtar.c`<br>`fs/fatfs_vfs.c` | [`tools/tests/k5b_kernel_tdd.md`](../tools/tests/k5b_kernel_tdd.md)<br>[`tools/tests/s6p_tdd.md`](../tools/tests/s6p_tdd.md)<br>[`tools/tests/vfs_mount_dev_tdd.md`](../tools/tests/vfs_mount_dev_tdd.md) | [`docs/tasks/gui/v13/TASK_K5B_kernel.md`](tasks/gui/v13/TASK_K5B_kernel.md)<br>[`docs/tasks/settings/TASK_S6.md`](tasks/settings/TASK_S6.md) | × |
+| 92 | `check-vmkernel-lz4-host` | `python3 -B tools/tests/test_vmkernel_lz4.py --real --target --mutate` | `tools/mkvmkernel.py`<br>`boot/lz4_mini.c`<br>`lib/lz4.c`<br>`boot/loader_fat_new.asm` | [`tools/tests/vmkernel_lz4_tdd.md`](../tools/tests/vmkernel_lz4_tdd.md) | [`docs/tasks/realhw/TASK_SERIAL_HOSTFS.md`](tasks/realhw/TASK_SERIAL_HOSTFS.md) | × |
 
 ## 4. `make check` の外にある試験
 

@@ -27,6 +27,10 @@ kernel.elf      →  objcopy (-O binary)       → build/out/kernel.bin (カー�
                 →  objcopy (--only-section)  → build/out/sqlite.bin (SQLite拡張域)
                                                ↓
 kernel.bin + sqlite.bin → mkvmkernel.py      → build/out/vmkernel.lz4 (LZ4圧縮カーネルイメージ)
+                                               LZ4 高圧縮 (HC level 12、展開側は同じ形式で無変更)。
+                                               合計が MAX_IMAGE_SIZE (boot/boot_defs.h、508KiB) を
+                                               超えたら出力を消して失敗 (HDD ローダが読めない)。
+                                               試験: make check-vmkernel-lz4-host
 
 ※ カーネル関連のビルド成果物はすべて `build/out/` に集約される (`BUILD_OUT`、gitignore対象)。
   `tools/gen_unicode` の出力 `unicode.bin` も同ディレクトリへ移動される。

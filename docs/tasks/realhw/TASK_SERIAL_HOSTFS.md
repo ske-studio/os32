@@ -39,6 +39,7 @@
 
 **部品 A (1 ファイル + 高圧縮 + 壊れの検出)**
 - A-1 はそのまま (mkvmkernel を高圧縮、level は 9 と 12 を実測)。**A-2 (SQLite の分離) は取り下げ**。見込み 約 430KB、上限 508KiB まで約 90KB。
+  - **A-1 は先行して着地 (2026-09-24、wt/lz4-hc)**: HC level 12 を採用。`vmkernel.lz4` 516,731B → **437,169B** (level 9 は 438,072B)、上限 520,192B まで残り 83,023B。mkvmkernel は合計が `MAX_IMAGE_SIZE` (boot/boot_defs.h から読む) を超えると出力を消して失敗する (N8 の生成側)。展開側 3 実装 (lz4_mini.c・lib/lz4.c・FD ローダの ASM) の一致はホスト試験 `make check-vmkernel-lz4-host` ([記録](../../../tools/tests/vmkernel_lz4_tdd.md))。NP21/W・実機の起動確認は残件。A-4 (CRC32 表) は未着手。
 - **A-4 壊れの検出** (両者): VK32 に **CRC32 表を追加**する。既存のエントリ (16B × n) の後ろに `entry_count` 個の CRC32 (展開後のデータに対して) と、ファイル全体の CRC32 を置き、`header_size` を増やす。**旧ローダとの互換**: 旧ローダがエントリを `16 + i*16` の固定位置で読み、`data_offset` を明示で使うなら、表の追加は旧ローダに見えない (実装者がコードで確認して報告。互換にならないなら止めて報告)。新ローダ (HDD `boot_main.c` + `lz4_mini.c`、FD `loader_fat_new.asm` の ASM デコーダ) は: 完全長 (ext2 の切り詰めは段 0 で止まる形に済)、`entry_count ≥ 1`、各エントリの `data_offset + comp_size ≤ ファイル長`、展開先が許可範囲 (0x100000〜の帯) に収まる、**`decoded == raw_size`**、CRC32 一致、を検査し、外れたら画面に出して止まる。FD の ASM デコーダが CRC32 を持つのが重ければ、FD は長さと範囲の検査だけにし CRC は HDD ローダだけ (FD は媒体ごと書き直す運用なので) — 実装者の判断を報告。
 
 **部品 B (SerialFS)**
