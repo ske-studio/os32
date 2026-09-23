@@ -1,6 +1,6 @@
 # TASK_KAPI_DATA_FIELDS — KAPI のデータ欄 (sbrk_heap_limit / shm_base) が関数追加のたびにずれ、旧バイナリが黙って壊れる
 
-> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-23) / 状態: **v2 — ラリー 1 (Codex / Opus とも Request changes) を反映、ラリー 2 待ち** — ユーザー指示「別票を着手」(2026-09-24)。カーネル層 (KAPI / exec) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
+> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-23) / 状態: **v3 — ラリー 2 (Codex / Opus とも Request changes、残り各 1 件) を反映、ラリー 3 (最後) 待ち** — ユーザー指示「別票を着手」(2026-09-24)。カーネル層 (KAPI / exec) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
 > 出所: キーボード修正 (bda95fa / f924275、KAPI v62) の実装レビュー。ラリー 1 で Codex が blocker、Opus が非 blocker と判定が分かれ、ラリー 2 で**両者とも「この commit 固有ではない構造問題、別票 (b)」で一致**。
 
 ## 事実
@@ -43,3 +43,11 @@ KAPI を上げたら `make clean` → `make all` → `make external` → **カ�
 5. **hsync**: 名札 (`.deploy/manifest.txt`) に `kapi=` を足し (format を上げる)、カーネルと違えば**既定で断る** (`--force` で越える)。最初の移行 (旧 hsync) は運用で補う。
 6. **移行手順** (08_build / ROADMAP に明記): `make clean && make clean-external` → `make all external fd144` → **NHD はエミュレータ停止中に一式** (カーネル・/sys・shlib・userland) → HostDrv だけ・`/sys` を外した hsync は移行完了ではない。配備順は「ユーザーランドを先、カーネルを後」。実機は FD / CD の入れ直し。CI の成果物は全媒体が v63。
 7. 受入: gen_kapi の容量拒否、ヘッダ v3 (C / Rust / shlib / 外部 repo) の値がセクションと一致、exec / shlib / 常駐シェルの判定関数 (v2 → 断る、v3 値違い → 断る、一致 → 通す)、NP21/W で v62 のバイナリが `rebuild required` で断られ作り直したものは動く、kselftest。
+
+## 方針 v3 (ラリー 2 を反映、v2 に追記)
+
+- **刻印は翻訳単位ごと** (Opus B2-1): 生成ヘッダ (C) が各翻訳単位で `static const u32 … __attribute__((section(".os32_kapi_layout"), used)) = KAPI_DATA_FIELDS_OFF;` を出す。静的ライブラリ (libos32db / cfg_backend / 外部 repo の .a) も同じヘッダを通るので刻印を持つ。生成器は**全部の値が一致し、1 個以上ある**ことを検査し、1 つでも違えばビルドを失敗させる。Rust は os32api の `#[used] #[link_section]`。`app.ld` / shlib のリンカ台本は KEEP し、**非ロード** (平らなバイナリに入れない)。CRT を使わない asm の試験バイナリは刻印を明示するか対象外を明記。旧 `.raw` と新 ELF の取り違えは生成工程で防ぐ (ELF からしかヘッダを作らない)。
+- **旧カーネル + 新 shlib** (Codex B-R2-1): 旧 shlib ローダは `min_api_ver` を見ないので、**shlib 自身の入口 (`shlib_init`) で `api->version < 63` なら初期化を断る** (以後の呼び出しは失敗を返し、GUI アプリはエラーで終わる)。新カーネル側の `kernel/shlib.c` の v3 照合は v2 のとおり。
+- **hsync の名札** (Opus 実装 7): 比べるのは版ではなく**配置 (`kapi_data_off`) の不一致**と「host の KAPI 版 > カーネルの版」。v63 以降は配置が固定なので、関数を 1 つ足すたびに `--force` が要ることにはならない。`kapi=` の欠落・不正・未知の format は一致と扱わない。
+- 予約スロット 230〜299 は `tbl[2+i]` にトランポリンを置かず (int 0x80 は `slot >= KAPI_FUNC_COUNT` で kill 済み)、カーネル側の構造体は NULL。`kapi_rust_gen.py` の構造体にも R 個分の詰め物。R の残りが少なくなったら次の R を決める票を起こす目安を ROADMAP に。
+- 移行手順の書き分け: NHD は停止中に一式 (順序は問わない)。HostDrv + hsync だけで移る場合は「ユーザーランド (`hsync sys` を含む) を先、カーネルを後」だが、旧 hsync は名札を見ないので**初回の移行は NHD 一式か FD / CD の入れ直しで行う**。

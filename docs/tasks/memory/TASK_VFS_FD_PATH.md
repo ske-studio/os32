@@ -1,6 +1,6 @@
 # TASK_VFS_FD_PATH — FD がパスを覚えて書き込みごとに引き直す / 長いパスを黙って切り詰める (VFS の既存欠陥)
 
-> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-24) / 状態: **v2 — ラリー 1 (Codex / Opus とも Request changes) を反映、ラリー 2 待ち** — ユーザー指示「別票を着手」(2026-09-24)。カーネル層 (VFS/FS) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
+> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-24) / 状態: **v3 — ラリー 2 (Codex / Opus とも Request changes) を反映、ラリー 3 (最後) 待ち** — ユーザー指示「別票を着手」(2026-09-24)。カーネル層 (VFS/FS) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
 > 出所: TASK_EXT2_EMPTY_NAME の修正 (fc5ce67) の実装レビュー (Codex / Opus とも Approve、どちらも「修正前からある別の欠陥」として挙げた)。
 
 ## 欠陥 1 (Codex、優先): 開いた FD の書き込みが、同じパスに作り直したディレクトリを上書きする
@@ -47,3 +47,19 @@
 10. **末尾の `.` / `..`**: 末尾の `/` を落とした後の最終要素が `.` / `..` なら、rmdir / rename (両引数) / unlink / mkdir を正規化前に INVAL。
 11. **マウント点の O_EXCL**: NOSYS の判定の後に EXIST。
 12. 受入 (追加): 通常ファイルへの inode 再利用 (open → unlink → 同名 create → 旧 FD write が STALE、新ファイル不変)、ディレクトリへの作り直し、set_mtime / O_TRUNC 後も同じ FD は STALE にならない、umount 後の旧 FD、read / fstat、相対パス + cwd、255/256 と 32/33 の境界、mkpkg 123/124 と 128/129 項目、newlib の write が -1 + errno、IME 辞書の置き換え後に FEP が動く (NP21/W)。
+
+## 方針 v3 (ラリー 2 を反映、v2 の 1〜7 を置き換える。8〜12 は下の追記つきで残す)
+
+**ext2 の FD は記録した inode で読み書きする** (Opus 案 (i)、Codex A-R2-1 親ディレクトリの rename を塞ぐ):
+1. ext2 に `open_ino(ctx, path, &ino)` / `read_ino` / `write_ino` / `stat_ino` / `truncate_ino` を追記 (内部はすでに inode で動く: `ext2_read_stream(ctx, ino, …)`)。`vfs_open` は ext2 なら inode を取って FD に記録し、以後の read / write / fstat / 切り詰めは**パスを引き直さず inode で行う** (rename・親の rename の後も FD は同じ実体を指す = POSIX と同じ)。**inode が取れなければ open を失敗させる** (Codex A-R2-3 / Opus A2-2)。ext2 以外 (FAT / HostDrv) は従来どおりパスで (今回の保証は ext2 だけ、と明記)。
+2. **失効の印は inode が解放されうる操作だけ**: `vfs_rm` (unlink) と `vfs_rename` の**置き換えられる宛先**、`vfs_rmdir` (ディレクトリは開けないので実質なし)。対象の inode は操作の前に取り、**取得が NOTFOUND 以外で失敗したら操作をしない** (rename の宛先の NOTFOUND は正常)。**印は操作の成否を問わず付ける** (Codex A-R2-2: 公開後の失敗でも旧実体は解放されうる。余分に STALE にするほうへ倒す)。`vfs_umount` はそのマウントの全 FD (FAT / HostDrv 含む) に印を付け、fs_ctx の解放**より前**に済ませる。
+3. 読み書きは最初に印を見て、立っていれば `OS32_ERR_STALE` (既存 -11)。close は印付きでも解放できる (`vfs_close_sqlite` も)。
+4. `ext2_write_stream` / `read_stream` / 切り詰めは通常ファイル以外を `ISDIR` で断る (最後の砦)。
+5. ハードリンク (ホストで作った媒体) では、1 つの名前の unlink で同じ inode の他の FD まで STALE になる (余分に断る側、許容)。
+6. **常駐 FD**: IME 辞書は STALE / IO で**SQLite 接続ごと**開き直す (ステートメント 3 本の finalize → `sqlite3_close` → open → prepare → `dict_fd_protect`、1 回だけ、hot journal が残っていないことを確かめる、失敗なら辞書無し)。cfg の常駐接続も同じ。loop_dev は**使用中のイメージの置き換え・削除を断る** (幾何や D88 索引を持つので開き直しでは続けられない)。inode 方式では rename だけなら常駐 FD は生きたまま。
+7. **newlib**: `_write` / `_read` / `_open` / `_lseek` / `_fstat` / **`_unlink` / `_stat`** を -1 + errno に (Codex A-R2-6 / Opus)。`_close` は void のまま (ABI を変えない)。既存の NOTFOUND / EXIST / NOSPC 等も errno に対応させる。
+
+**長いパス (v2 の 8 に追記)** — Codex A-R2-4: resolver の前でコピーする入口も直す: exec のコマンド名抽出 (`exec/exec.c:1370`)、`kapi_db_open` の固定長コピー (`kapi/kapi_db.c:507`)、`vfs_mount` の prefix 登録 (`fs/vfs.c:299`)。相対パスは cwd + "/" + 入力の合計で判定。32 要素は受理し 33 個目で断る。
+**パッケージ (v2 の 9 に追記)** — Codex A-R2-5: **cdinst は前置 (`/hd0`) 後に溢れる項目があれば展開を始める前に断る** (外部で作られた PKG への消費側の保護)。`pkg_parse` の項目数超過は 128 項目の後の終端を見て検出。
+**範囲外 (明記)**: マウント中の装置への `ext2_format`、FAT / HostDrv の FD 同一性、unlink した実体を最後の close まで保持する完全な POSIX 意味論。
+**受入 (v2 の 12 に追加)**: 親ディレクトリの rename 後も旧 FD が同じ実体を読み書きする (新しい同名ファイルは不変)、置き換え rename の公開後失敗 (注入) で旧宛先 FD が STALE、inode 取得の失敗注入で open / unlink が断る、ハードリンク、IME 辞書の置き換え後に FEP が動く、長い DB 名・長い mount prefix・長いコマンド名が断られる、cdinst が 124〜127 バイトの格納パスを断る。
