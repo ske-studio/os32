@@ -227,9 +227,10 @@ extern int __cdecl wrap_pcm_write(const void *buf, u32 bytes);
 extern int __cdecl wrap_pcm_status(u32 *free_bytes, u32 *counters);
 extern int __cdecl wrap_pcm_close(void);
 extern int __cdecl wrap_pcm_set_volume(u32 percent);
+extern int __cdecl wrap_kbd_diag(KbdDiag *out);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 61;
+kapi->version = 62;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -460,5 +461,6 @@ kapi->version = 61;
     kapi->pcm_status = wrap_pcm_status;
     kapi->pcm_close = wrap_pcm_close;
     kapi->pcm_set_volume = wrap_pcm_set_volume;
+    kapi->kbd_diag = wrap_kbd_diag;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

@@ -1095,6 +1095,33 @@ read-modify-write で保つ。
   切り分けは「どこで失敗したか」を記録する診断 (fault site / 最後の証拠 / 呼び出し回数) を kernel.map から読むのが速かった —
   `/api/mem` は `/api/cmd` の実行中は返らない (HTTP サーバは 1 本) ので、実行中の状態遷移は取れない。
 
+### 4-57. NP21/W はキーボード 8251 の DTR (RTY#)・RTS (RDY#)・RxE を見ない — 実機の定常値は BIOS と同じ 0x16 (2026-09-23)
+
+- **症状**: 実機 PC-9821Ra266 で本体キーボードの打鍵が**一切**効かない。シリアル (rshell) は動く。NP21/W では効く。
+- **原因 (本命)**: `kbd_init()` が 0043h にコマンド語 **0x14** (ER + RxE) を書いていた。bit1 (DTR) = 0 は
+  **RTY# を LOW にする = キーボードへの再送要求** (`docs/hw/undocumented/io_kb.md` の 0043h [WRITE]:
+  「1= RTY#信号をHIGHレベルにする / 0= LOWレベル」「通常はHIGH。LOWのとき、キーボードにデータの再送を要求する」)。
+  BIOS の定常値は **0x16** (NP21/W の BIOS `src/bios/bios09.c` も 0x3A → 0x32 → 0x16)。コメントは「FreeBSD は空関数
+  → BIOS 初期化済みを前提」と書きながら、その前提を自分で壊していた。Bible の「D1: リトライ 1:有効」という書き方は
+  極性の根拠にしない (信号レベルで書いてある io_kb.md を採る、§4-50)。
+- **エミュレータで出ない理由**: NP21/W の `keyboard_o43` (`src/io/serial.c`) は bit3 の立ち下がり (リセット) と
+  bit4 (ER) しか見ず、`keybrd.cmd` に保存するだけ。bit1 (DTR) も bit5 (RTS) も bit2 (RxE) も効かない。
+  `keyboard_i43` は `status | 0x85` を返し、IRQ1 の前に必ず RxRDY を立てる — §4-49・§4-51・§4-53 と同じ型。
+- **対策**: コマンド語を `KBD_CMD_ERRRST_RXE_RTYHIGH` = 0x16 に (kselftest `kbd cmd word is 0x16` /
+  `kbd cmd keeps DTR=1` が見張る)。モード語 (0x5E) からのやり直しは**第 2 段**としてコメントに残すだけ。
+  同じ変更で IRQ1 ハンドラが **0041h の前に 0043h を読む**: RxRDY = 0 は空 IRQ (0041h を読まない)、
+  PE/OE/FE は読み捨て + 0x16 を書き直して解除 (ホスト試験 `make check-kbd-status-host`)。
+- **「RTY# LOW で沈黙する」機構そのものは資料では証明できない**。0x16 で直らなかったときのために観測を入れた:
+  起動行 `[kbd] st=XX -> YY cmd=16 flushed=N` と、シェルの **`kbdstat`** (KAPI v62 `kbd_diag`、rshell から読める)。
+  `kbd irq=… empty=… err=… flushed=… init=XX->YY cmd=16 st=… code=… now=…` の読み方:
+  - `irq=0` かつ `now` の RxRDY (bit1、0x02) = 1 → 8251 は受けている。**PIC / IRQ1 の経路**を疑う (IMR、ICW)。
+  - `irq=0` かつ RxRDY = 0 → **キーボードが送っていない** (RTY# / RST# / 電源・コネクタ、次は第 2 段のモード語)。
+  - `irq>0` なのに文字が出ない → 8251 までは来ている。`empty` / `err` の割合と `code` を見て、**配送側**
+    (cooked リング / GUI モード / rshell の読み口) を疑う。
+  - 同じ `code` のまま `irq` が打鍵の数より桁違いに増える → **再送ストーム** (RTY# が LOW のまま等)。
+- **教訓**: 「BIOS 初期化済みを前提」にするなら、書くのは BIOS の定常値だけにする。ハンドシェイク線 (DTR/RTS) の
+  極性は NP21/W では検証できない — 実機でしか分からない値は、観測の口を同時に入れる。
+
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 
 - **症状**: NHD 配備 (`os32-cycle deploy`) 直後に、試験用ファイルを 1 本足す目的でゲストの `hsync` を実行したら、

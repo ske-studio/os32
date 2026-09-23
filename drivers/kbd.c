@@ -11,10 +11,15 @@
 /*    - KBD_STATUS_PORT = base + 2 = 0x43 (PC-98はI/O 2バイト間隔)         */
 /*    - KBDS_BUFFER_FULL = 0x0002 (8251 RxRDY)                              */
 /*    - FreeBSD init_keyboard() は空 → BIOS初期化済みを前提                */
+/*      この前提を守る = **BIOS の定常値 (0x16) 以外を書かない**。以前は     */
+/*      0x14 (DTR = 0 = RTY# LOW = 再送要求) を書いて自分で壊していた       */
+/*      (実機 PC-9821Ra266 で打鍵が届かない、2026-09-23、POLICY_DEBUG §4-57)*/
 /* ======================================================================== */
 
 #include "kbd.h"
 #include "io.h"
+#include "kprintf.h"
+#include "pc98.h"        /* TATTR_WHITE */
 #include "serial.h"
 #include "kbd_inject.h"   /* K7: GUI 中の打鍵は注入リングから来る */
 
@@ -67,6 +72,22 @@ extern void appslot_poll_yield_reset(void);
  * ロック無しで安全。カーネル側は読むだけ (ime.c 等)。
  * この所有権を破って通常コンテキストから書くなら irq_save が要る。 */
 volatile u8 kbd_shift_state = 0;
+
+/* ======== 診断カウンタ (KAPI v62 kbd_diag、シェルの `kbdstat`) ========
+ * 実機で打鍵が届かないとき、どこで止まっているかを切り分けるための値
+ * (読み方は docs/POLICY_DEBUG.md §4-57)。ISR だけが書く値は volatile。
+ * init_* と cmd と flushed は kbd_init が 1 回だけ書く。 */
+static volatile u32 kbd_diag_irq;
+static volatile u32 kbd_diag_empty;
+static volatile u32 kbd_diag_err;
+static volatile u8  kbd_diag_last_st;
+static volatile u8  kbd_diag_last_code;
+static u32 kbd_diag_flushed;
+static u8  kbd_diag_init_before;
+static u8  kbd_diag_init_after;
+static u8  kbd_diag_cmd;
+
+STATIC_ASSERT(sizeof(KbdDiag) == 24, kbd_diag_is_24);
 
 /* ======== キー押下状態ビットマップ (128キー分) ======== */
 /* ビット1 = 押下中, ビット0 = 離されている */
@@ -178,8 +199,37 @@ void kbd_irq_handler(void)
     int is_break;
     int is_mod;
 
+    u8 st;
+    int kind;
+
+    /* 0041h を読む前に 0043h を見る (票: 実機の打鍵不達、POLICY_DEBUG §4-57)。
+     *   RxRDY = 0      → 空 IRQ。0041h は読まない (読んでも打鍵ではない)。
+     *   PE / OE / FE   → 0041h を読み捨て (化けたバイトは使わない)、
+     *                    コマンド語 (ER 込み) を書き直してエラーを解除する。
+     * NP21/W の keyboard_i43 は `status | 0x85` を返し、IRQ1 の前に RxRDY
+     * (status bit1) を立てる。エラービットは向こうのバッファが溢れたときの
+     * OE だけなので、通常の打鍵では従来どおり KBD_ST_DATA に落ちる。
+     * **V86 分岐より前に置く** — V86 中も化けたバイトはゲストへ渡さない
+     * (ゲストの 0041h/0043h は kernel/v86_kbd.c の FIFO が答えるので、
+     * 実チップを読むのはここだけ)。 */
+    st = (u8)inp(KBD_CMD);
+    kbd_diag_irq++;
+    kbd_diag_last_st = st;
+    kind = kbd_status_classify(st);
+    if (kind == KBD_ST_EMPTY) {
+        kbd_diag_empty++;
+        return;
+    }
+    if (kind == KBD_ST_ERROR) {
+        (void)inp(KBD_DATA);
+        outp(KBD_CMD, KBD_CMD_ERRRST_RXE_RTYHIGH);
+        kbd_diag_err++;
+        return;
+    }
+
     /* μPD8251Aからスキャンコード読み取り */
     scancode = (u8)inp(KBD_DATA);
+    kbd_diag_last_code = scancode;
 
     /* V86 セッション中はキーをまるごとゲストへ回す。
      * 8251A のデータレジスタは読んだら消えるので、ここで OS32 側の
@@ -304,6 +354,7 @@ void kbd_irq_handler(void)
 void kbd_init(void)
 {
     u8 dummy;
+    u32 flushed = 0;
 
     /*
      * μPD8251A 初期化
@@ -312,18 +363,32 @@ void kbd_init(void)
      * BIOSが既に8251Aを初期化済みであることを前提としている。
      *
      * 我々のベアメタルOSでも、ブートローダ経由でBIOSが起動時に
-     * 8251Aを初期化しているため、基本的にはそのまま使える。
-     * ただし安全のため、エラーリセットと受信イネーブルのみ行う。
+     * 8251Aを初期化しているため、そのまま使える。前提を守るとは
+     * **BIOS の定常値以外を書かない**こと — 書くのはエラーリセットを
+     * 兼ねた定常値 0x16 (ER / RxE / DTR = RTY# HIGH) だけ。以前は 0x14
+     * (DTR = 0 = RTY# LOW = 再送要求) を書いて自分で壊していた
+     * (実機 PC-9821Ra266、2026-09-23)。モード語からのやり直しはしない
+     * (第 2 段の候補として kbd.h の KBD_MODE_1S_ODD_8B_X16 に残すだけ)。
      */
+    kbd_diag_init_before = (u8)inp(KBD_CMD);
 
     /* 既存のデータを読み捨て (バッファフラッシュ) */
     while (inp(KBD_CMD) & KBD_STAT_RXRDY) {
         dummy = (u8)inp(KBD_DATA);
+        flushed++;
     }
     (void)dummy;
 
-    /* コマンド: エラーリセット(D4=1) + 受信イネーブル(D2=1) */
-    outp(KBD_CMD, KBD_CMD_ERRRST_RXE);
+    /* コマンド: エラーリセット(D4) + 受信イネーブル(D2) + DTR=1 (RTY# HIGH) */
+    kbd_diag_cmd = KBD_CMD_ERRRST_RXE_RTYHIGH;
+    outp(KBD_CMD, kbd_diag_cmd);
+    kbd_diag_init_after = (u8)inp(KBD_CMD);
+    kbd_diag_flushed = flushed;
+    kbd_diag_irq = 0;
+    kbd_diag_empty = 0;
+    kbd_diag_err = 0;
+    kbd_diag_last_st = 0;
+    kbd_diag_last_code = 0;
 
     /* バッファクリア */
     kbd_head = 0;
@@ -342,6 +407,49 @@ void kbd_init(void)
 
     /* キーボードIRQを有効化 */
     irq_enable(KBD_IRQ);
+
+    kprintf(TATTR_WHITE, "[kbd] st=%02x -> %02x cmd=%02x flushed=%u\n",
+            (u32)kbd_diag_init_before, (u32)kbd_diag_init_after,
+            (u32)kbd_diag_cmd, kbd_diag_flushed);
+}
+
+/* ======================================================================== */
+/*  kbd_diag — 診断カウンタを写す (KAPI v62、シェルの `kbdstat`)            */
+/*  ISR が書く u32 は割り込み禁止の間に一括で写す (同じ瞬間の組にする)。   */
+/* ======================================================================== */
+int kbd_diag(KbdDiag *out)
+{
+    unsigned int flags;
+    u32 irq, empty, err;
+    u8 last_st, last_code;
+
+    if (out == NULL) {
+        return OS32_ERR_INVAL;
+    }
+    /* 禁止区間ではローカルへ写すだけ (呼び手のページには IF=1 で書く) */
+    flags = irq_save();
+    irq       = kbd_diag_irq;
+    empty     = kbd_diag_empty;
+    err       = kbd_diag_err;
+    last_st   = kbd_diag_last_st;
+    last_code = kbd_diag_last_code;
+    irq_restore(flags);
+    out->irq_count      = irq;
+    out->empty_count    = empty;
+    out->err_count      = err;
+    out->last_st        = last_st;
+    out->last_code      = last_code;
+    out->flushed        = kbd_diag_flushed;
+    out->init_st_before = kbd_diag_init_before;
+    out->init_st_after  = kbd_diag_init_after;
+    out->cmd            = kbd_diag_cmd;
+    /* いまの 0043h。IRQ が 1 回も来ていない (irq_count = 0) とき、RxRDY が
+     * 立ったままなら 8251 は受けている = PIC 側、落ちていれば キーボードが
+     * 送っていない、と分けるのに使う (last_st は IRQ の中でしか更新されない)。
+     * ステータスの読みは 8251A の状態を変えない。 */
+    out->now_st         = (u8)inp(KBD_CMD);
+    out->reserved[0] = out->reserved[1] = 0;
+    return 0;
 }
 
 /* ======================================================================== */

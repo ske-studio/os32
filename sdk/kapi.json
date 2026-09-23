@@ -1,5 +1,5 @@
 {
-  "version": 61,
+  "version": 62,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1614,6 +1614,12 @@
       "name": "pcm_set_volume",
       "ret": "int",
       "args": ["u32 percent"]
+    },
+    {
+      "name": "kbd_diag",
+      "out": [{"arg": "out", "size": "sizeof(KbdDiag)"}],
+      "ret": "int",
+      "args": ["KbdDiag *out"]
     }
   ]
 }

@@ -1,4 +1,4 @@
-# KernelAPI v61 仕様書
+# KernelAPI v62 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -105,6 +105,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v59 | **実装済み (2026-09-23、手元ビルドのみ)** | µs 時計 `sys_time_now` 1 本 (slot 222 = 0x380、data_fields は 0x384 / 0x388 へ)。起動からの経過を µs で返す。**64 ビットは KAPI で返せない** (往復 1 の B14) ので、出力引数 2 本に**同じスナップショットの上下**を書く。時間源は `tick_count` (§1-0 の後はどちらのシステムクロックでもちょうど 10ms) と PIT ch0 のラッチ読みで、周期の境界はPIC1 の IRR bit0 をラッチの前後で挟んで判定する (最大 3 回やり直す)。戻り 0 = 成功 / `OS32_ERR_AGAIN` = 3 回とも判定できなかった / `OS32_ERR_NOSYS` = PIT 未初期化か mode 2 でない / `OS32_ERR_INVAL` = `lo` か `hi` が NULL・4 バイトが帯境界を跨ぐ・**2 本の範囲が交差する (差 0〜3)**。**負のときは 2 本とも書かない**。出力が読み取り専用の USER ページ (共有ライブラリの `.text`) なら `ring3_fault_kill` — OS32 は CR0.WP = 0 なのでハードウェアは止めない。実体は `kernel/ktime.c` / `kernel/time_math.c`、検証は `kapi/kapi_sys.c` の `kapi_sys_time_now` | [tasks/v3/TASK_HAL_WIRING.md](tasks/v3/TASK_HAL_WIRING.md) §1-5 |
 | v60 | **実装済み (2026-09-23、手元ビルドのみ)** | PCI 結線の診断の取得口 `pci_bind_info` 1 本 (slot 223 = 0x384、data_fields は 0x388 / 0x38C へ)。`idx` 番目 (**`pci_get` と同じ列挙順**) の結線結果を呼び手のバッファへ**8 バイトちょうど**写す。並びは `drivers/pci_bind.h` の `struct pci_bind_info`。`result` = NONE / BOUND / DECLINED / QUARANTINED、`reason` は上書き規則 1 つだけが正、`line_state` は**読む時点で合成**する (結線のときは正常だった線が後から隔離されても `result` は BOUND のまま `line_state` だけが QUARANTINED になる)。**既存 `pci_get` の 40 バイトは広げない** — 旧呼び手のバッファを踏むので別の口にした。戻り 0 = 成功 / `OS32_ERR_INVAL` = `out` が NULL・8 バイトが帯境界を跨ぐ・`idx` が範囲外 (**負のときは 1 バイトも書かない**)。出力が読み取り専用の USER ページなら `ring3_fault_kill` (v59 と同じ規則)。シェルの `lspci` が注記を出す。実体は `drivers/pci_bind.c`、検証は `kapi/kapi_sys.c` の `kapi_pci_bind_info` | [tasks/v3/TASK_HAL_WIRING.md](tasks/v3/TASK_HAL_WIRING.md) §1-4 |
 | v61 | **実装済み (2026-09-23、手元ビルドのみ)** | CS4231 (MATE-X PCM) の再生 `pcm_open` / `pcm_write` / `pcm_status` / `pcm_close` / `pcm_set_volume` の 5 本 (slot 224〜228 = 0x388〜0x398、data_fields は 0x39C / 0x3A0 へ)。16 ビット・ステレオ・44.1k / 22.05kHz の**再生だけ**で、単位は frame (左右 1 組 = 4 バイト)。カーネルが DMA リング 16KB (`dma_pool`) とステージング 16KB (`kmalloc`) を持ち、**アプリのバッファを IRQ から読むことはしない** — `pcm_write` はステージングへ写すだけで、リングを書くのは `pcm_advance` (IRQ / tick、IF=0) と停止中の `pcm_start` / RS_RESTART に限る。所有者は既存の資源 owner と同じアプリ ID で、異常終了は `exec_reclaim_owned` の `pcm_reclaim` が**待たずに**止めて返す。実体は `drivers/pcm_cs4231.c` / `drivers/pcm_cs4231_math.c` | [tasks/v3/TASK_PCM_CS4231.md](tasks/v3/TASK_PCM_CS4231.md) |
+| v62 | **実装済み (2026-09-23、手元ビルドのみ)** | キーボード 8251 の診断 `kbd_diag` 1 本 (slot 229 = 0x39C、data_fields は 0x3A0 / 0x3A4 へ)。`KbdDiag` (24 バイト、`os32_kapi_shared.h`) を呼び手のバッファへ写す — IRQ1 回数・空 IRQ (RxRDY = 0)・エラー (PE/OE/FE)・起動時に読み捨てたバイト数・`kbd_init` の前後の 0043h・直近の 0043h とスキャンコード・書いたコマンド語・呼んだ時点の 0043h。戻り 0 / `OS32_ERR_INVAL` (`out` が NULL)。出力は生成ラッパの `out` 検査 (読み取り専用の USER ページなら `ring3_fault_kill`)。シェルの `kbdstat` が 1 行で出す。同じ変更でカーネルが 0043h に書くコマンド語を **0x14 → 0x16** (DTR = 1 = RTY# HIGH、BIOS の定常値) に直した — 実機 PC-9821Ra266 で打鍵が一切届かなかった件。実体は `drivers/kbd.c` / `drivers/kbd_status.c` | [POLICY_DEBUG.md](POLICY_DEBUG.md) §4-57 |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -909,6 +910,36 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 - **装置が無い機械では `pcm_open` が `OS32_ERR_NOSYS`**。起動行は `[pcm] none`
   で、以後 tick は装置に 1 バイトも触らない。
 
+### キーボード 8251 の診断 (v62)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x39C | kbd_diag | `int(KbdDiag *out)` |
+
+実機で本体キーボードの打鍵が届かないときの切り分け用 (経緯と読み方は
+[POLICY_DEBUG.md](POLICY_DEBUG.md) §4-57)。`KbdDiag` は
+`sdk/include/os32/os32_kapi_shared.h` にあり、カーネルと外部プログラムで
+同じ定義を使う (24 バイト、`drivers/kbd.c` の `STATIC_ASSERT` が見張る)。
+
+| Offset | 型 | フィールド | 意味 |
+|---|---|---|---|
+| 0 | `u32` | `irq_count` | IRQ1 ハンドラに入った回数 (空・エラーも含む) |
+| 4 | `u32` | `empty_count` | 0043h の RxRDY = 0 だった IRQ (0041h を読まずに返した) |
+| 8 | `u32` | `err_count` | PE / OE / FE のどれかが立っていた IRQ (0041h を読み捨て、ER 込みのコマンド語で解除) |
+| 12 | `u32` | `flushed` | `kbd_init` が起動時に読み捨てたバイト数 |
+| 16 | `u8` | `init_st_before` | `kbd_init` がコマンド語を書く前の 0043h |
+| 17 | `u8` | `init_st_after` | 書いた後の 0043h |
+| 18 | `u8` | `last_st` | 直近の IRQ で読んだ 0043h |
+| 19 | `u8` | `last_code` | 直近に受け取ったスキャンコード |
+| 20 | `u8` | `cmd` | `kbd_init` が書いたコマンド語 (0x16) |
+| 21 | `u8` | `now_st` | `kbd_diag` を呼んだ時点の 0043h |
+| 22 | `u8[2]` | `reserved` | 0 |
+
+- 戻り 0 = 成功 / `OS32_ERR_INVAL` = `out` が NULL。
+- IRQ1 ハンドラが書く値 (u32 3 本・`last_st`・`last_code`) は割り込み禁止の
+  間に一括で写すので、同じ瞬間の組になる。
+- カウンタは飽和しない (u32 で折り返す)。
+
 ### 排他的作成 (v53)
 
 **スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
@@ -1048,8 +1079,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x39C | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x3A0 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x3A0 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x3A4 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 
