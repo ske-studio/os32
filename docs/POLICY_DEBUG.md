@@ -1097,6 +1097,8 @@ read-modify-write で保つ。
 
 ### 4-57. NP21/W はキーボード 8251 の DTR (RTY#)・RTS (RDY#)・RxE を見ない — 実機の定常値は BIOS と同じ 0x16 (2026-09-23)
 
+> **実装レビュー (2026-09-23)**: bda95fa + f924275 は Codex / Opus のラリー 2 で両者 Approve。レビューで出た KAPI データ欄のずれ (旧バイナリの malloc が ENOMEM) は既存の構造問題として別票 [`tasks/memory/TASK_KAPI_DATA_FIELDS.md`](tasks/memory/TASK_KAPI_DATA_FIELDS.md)。実機での打鍵は未確認。
+
 - **症状**: 実機 PC-9821Ra266 で本体キーボードの打鍵が**一切**効かない。シリアル (rshell) は動く。NP21/W では効く。
 - **原因 (本命)**: `kbd_init()` が 0043h にコマンド語 **0x14** (ER + RxE) を書いていた。bit1 (DTR) = 0 は
   **RTY# を LOW にする = キーボードへの再送要求** (`docs/hw/undocumented/io_kb.md` の 0043h [WRITE]:
