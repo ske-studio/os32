@@ -314,6 +314,35 @@ static int cmd_gfxmode(int argc, char **argv)
     return 0;
 }
 
+/* ------------------------------------------------------------------------ */
+/*  kbdstat — キーボード 8251 の診断カウンタ (KAPI v62 kbd_diag)              */
+/*                                                                          */
+/*  実機で本体キーボードの打鍵が届かないときの切り分け用。rshell (シリアル) */
+/*  から打って読む前提なので 1 行で出す。読み方は docs/POLICY_DEBUG.md §4-57:*/
+/*    irq=0 かつ now の RxRDY (bit1) = 1 → 8251 は受けている = PIC / IRQ1 側  */
+/*    irq=0 かつ RxRDY = 0              → キーボードが送っていない           */
+/*    irq>0 なのに文字が出ない          → 配送側 (リング / GUI / rshell)      */
+/*    同じ code で irq が暴走            → 再送ストーム                       */
+/* ------------------------------------------------------------------------ */
+static int cmd_kbdstat(int argc, char **argv)
+{
+    KbdDiag d;
+    int rc;
+    (void)argc; (void)argv;
+    rc = g_api->kbd_diag(&d);
+    if (rc < 0) {
+        g_api->kprintf(ATTR_RED, "kbdstat: kbd_diag failed (rc=%d)\n", rc);
+        return SH_STATUS_ERROR;
+    }
+    g_api->kprintf(ATTR_WHITE,
+                   "kbd irq=%u empty=%u err=%u flushed=%u init=%02x->%02x "
+                   "cmd=%02x st=%02x code=%02x now=%02x\n",
+                   d.irq_count, d.empty_count, d.err_count, d.flushed,
+                   (u32)d.init_st_before, (u32)d.init_st_after, (u32)d.cmd,
+                   (u32)d.last_st, (u32)d.last_code, (u32)d.now_st);
+    return 0;
+}
+
 /* 登録用テーブル */
 static const ShellCmd sys_cmds[] = {
     { "mem",    cmd_mem,    "",              "Show memory statistics" },
@@ -326,6 +355,7 @@ static const ShellCmd sys_cmds[] = {
     { "play",   cmd_play,   "MML",           "Play MML via FM synth" },
     { "os32gui",cmd_os32gui,"[on|off]",      "Switch to GUI shell now, or set GUI at boot" },
     { "gfxmode",cmd_gfxmode,"pc98|pegc|cirrus|auto","Force the graphics backend at next boot" },
+    { "kbdstat",cmd_kbdstat,"",              "Show keyboard 8251 diagnostic counters" },
     { (const char *)0, 0, 0, 0 }
 };
 
