@@ -6,9 +6,9 @@ AI コーディングアシスタント共通の入口。**置くのは指示と
 
 ## 体制
 
-PM = Claude Code (`claude-fable-5-1`)、コーダー = サブエージェント (`claude-opus-5`, worktree 隔離)、
+PM = Claude Code (`claude-fable-5-1`)、コーダー = サブエージェント (**Opus 5.5**、2026-09-23〜、worktree 隔離)、
 レビュアー = **Codex** (`codex exec -s read-only`。2026-09-14 に Fable 枯渇で復帰、範囲を絞って依頼)、テスター = ローカル AI (`tools/emu_agent/`、スキル `os32-local-ai`)。
-実装は基盤・アプリ層とも Claude Code (PM) が Opus 5 サブエージェントで行う (2026-09-14 更新、別エージェント案は撤回。ROLES §0)。
+実装は基盤・アプリ層とも Claude Code (PM) が Opus 5.5 サブエージェントで行う (2026-09-14 更新、別エージェント案は撤回。ROLES §0)。
 役割の境界・起動コマンド・規約の正典は [`docs/tasks/agents/ROLES.md`](docs/tasks/agents/ROLES.md)。
 **カーネル層 (カーネル本体・VFS/FS・exec/ページング・KAPI・shlib 読み込み) に分かっている不具合が
 あるあいだは、新機能より先に直す** — 理由と適用の仕方は
