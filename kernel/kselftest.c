@@ -460,7 +460,9 @@ static void test_kbd_cmd(void)
     check(kbd_diag((KbdDiag *)0) == OS32_ERR_INVAL, "kbd_diag refuses NULL");
     kmemset(&d, 0, sizeof(d));
     check(kbd_diag(&d) == 0, "kbd_diag returns 0");
-    check(d.cmd == KBD_CMD_ERRRST_RXE_RTYHIGH, "kbd cmd word is 0x16 (BIOS)");
+    /* マクロではなくリテラルと比べる — kbd_init もマクロを書くので、マクロ
+     * どうしの比較は恒真で、定数を誤って変えても落ちない。 */
+    check(d.cmd == 0x16, "kbd cmd word is 0x16 (BIOS)");
     check((d.cmd & KBD_CMD_DTR) != 0, "kbd cmd keeps DTR=1 (RTY# HIGH)");
 }
 

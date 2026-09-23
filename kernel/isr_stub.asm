@@ -497,13 +497,22 @@ irq_stub_1:
 
         ;; Cハンドラを呼び出し。V86 セッション中はここでスキャンコードが
         ;; ゲスト用 FIFO に積まれ、OS32 のリングバッファには入らない。
+        ;; 戻り値 (eax) = 反射してよいか。0041h から実データを読んだときだけ
+        ;; 非 0 — 空 IRQ (RxRDY=0) やエラー (PE/FE) で反射すると、ゲストが
+        ;; 空の仮想 FIFO から偽の打鍵を読む (POLICY_DEBUG §4-57)。
+        ;; ebx に移すのは EOI の `out` が al を使うから。ebx は pushad が
+        ;; 退避済みで、V86_REFLECT が呼ぶ C (v86_reflect_irq) も保存する。
         call    kbd_irq_handler
+        mov     ebx, eax
 
         ;; マスタPICにEOI送出 (PC-98: ポート 0x00)
         mov     al, OCW2_EOI
         out     PIC1_CMD, al
 
+        test    ebx, ebx
+        jz      .no_reflect
         V86_REFLECT 1           ;; IRQ1 (キーボード)。既定では INT 09h に落ちる
+.no_reflect:
 
         ;; 脱出ホットキー (CTRL+GRPH+DEL) が押されていたら畳む。
         ;; EOI と反射を済ませてから判定するのはタイマ側と同じ理由。

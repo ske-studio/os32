@@ -291,7 +291,7 @@ typedef struct {
 typedef struct {
     u32 irq_count;       /* IRQ1 ハンドラに入った回数 (空・エラーも含む) */
     u32 empty_count;     /* 0043h の RxRDY = 0 だった IRQ (0041h を読まずに返した) */
-    u32 err_count;       /* PE/OE/FE のどれかが立っていた IRQ (読み捨て + ER で解除) */
+    u32 err_count;       /* PE/FE のどれかが立っていた IRQ (読み捨て + ER で解除) */
     u32 flushed;         /* kbd_init が起動時に読み捨てたバイト数 */
     u8  init_st_before;  /* kbd_init がコマンド語を書く前の 0043h */
     u8  init_st_after;   /* 書いた後の 0043h */
@@ -299,7 +299,8 @@ typedef struct {
     u8  last_code;       /* 直近に受け取ったスキャンコード (0041h) */
     u8  cmd;             /* kbd_init が書いたコマンド語 (0x16) */
     u8  now_st;          /* kbd_diag を呼んだ時点の 0043h (IRQ が 1 回も来ないときの RxRDY 判定用) */
-    u8  reserved[2];     /* 0 */
+    u16 overrun_count;   /* OE だけが立っていた IRQ (バイトは使い、ER で解除)。0xFFFF で飽和。
+                          * bda95fa では reserved[2] (= 0) だった場所。大きさ・並びは同じ */
 } KbdDiag;
 
 /* パレットエントリ (各0-15) */
