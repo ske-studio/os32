@@ -147,20 +147,27 @@ LIBC="$PREFIX/$TARGET/lib/libc.a"
 #     _printf_i も無い。(_printf_float はどちらでも定義として出ないので判定に使えない。)
 #   nano-malloc: nano 版の mallocr.o は __malloc_free_list を定義し、__malloc_av_ を持たない。
 #     通常構成 (dlmalloc) はその逆。
+# ⚠ `echo "$SYMS" | grep -q` は使わない: grep -q が最初の一致で抜けると echo が
+#   SIGPIPE を受け、`set -o pipefail` でパイプライン全体が失敗になる (GitHub Actions の
+#   初回 run 35819997848 が「_printf_i を定義していない」で落ちた。手元では運良く通っていた)。
+#   ファイルに落として grep する。
 NM="$PREFIX/bin/$TARGET-nm"
 AR="$PREFIX/bin/$TARGET-ar"
-"$AR" t "$LIBC" | grep -qx 'libc_a-nano-vfprintf.o' \
+MEMBERS="$WORK/libc.members"
+SYMS="$WORK/libc.syms"
+"$AR" t "$LIBC" > "$MEMBERS"
+"$NM" "$LIBC" > "$SYMS" 2>/dev/null
+grep -qx 'libc_a-nano-vfprintf.o' "$MEMBERS" \
     || fail "libc.a に libc_a-nano-vfprintf.o が無い (nano-formatted-io でない)"
-SYMS="$("$NM" "$LIBC" 2>/dev/null)"
-echo "$SYMS" | grep -qE ' T _printf_i$' \
+grep -qE ' T _printf_i$' "$SYMS" \
     || fail "libc.a が _printf_i を定義していない (nano-formatted-io でない)"
-echo "$SYMS" | grep -qE ' [BDC] __malloc_free_list$' \
+grep -qE ' [BDC] __malloc_free_list$' "$SYMS" \
     || fail "libc.a に __malloc_free_list が無い (nano-malloc でない)"
-if echo "$SYMS" | grep -qE ' [BDC] __malloc_av_$'; then
+if grep -qE ' [BDC] __malloc_av_$' "$SYMS"; then
     fail "libc.a に __malloc_av_ がある (通常構成の dlmalloc)"
 fi
 
-"$PREFIX/bin/$TARGET-gcc" --version | head -1
+"$PREFIX/bin/$TARGET-gcc" --version | sed -n 1p
 echo "prefix: $PREFIX ($(du -sh "$PREFIX" | cut -f1))"
 echo "newlib: nano-formatted-io + nano-malloc を確認"
 
