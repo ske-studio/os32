@@ -150,8 +150,10 @@ STATIC_ASSERT((PAGING_BOOT_MAP_SIZE % (PTE_COUNT * PAGE_SIZE)) == 0,
  * 4095 バイトのパディングを持たせていたが (u8[N][4096+4095])、H3b で枚数が
  * 4 → 8 になると捨てるぶんも倍 (32KB) になる。先頭だけ 4096 境界に上げれば
  * 以降の 4KB 刻みは自動的に境界に乗るので、増分は表そのものの +16KB で済む。 */
-static u8 pd_raw[4096 + 4095];      /* ページディレクトリ用生バッファ */
-static u8 pt_raw[PAGING_BOOT_PT_COUNT * 4096 + 4095];  /* ページテーブル用生バッファ */
+/* 4KB 整列を属性で保証し、+4095 の捨て (合計 8KB) を無くす (2026-09-23、TASK_MEMMAP_V3 2-3)。
+ * align4096() はそのまま (整列済みなので恒等)。 */
+static u8 pd_raw[4096] __attribute__((aligned(4096)));      /* ページディレクトリ用生バッファ */
+static u8 pt_raw[PAGING_BOOT_PT_COUNT * 4096] __attribute__((aligned(4096)));  /* ページテーブル用生バッファ */
 
 static u32 *page_directory;          /* アライン済みポインタ */
 static u32 *page_tables[PAGING_PT_COUNT];

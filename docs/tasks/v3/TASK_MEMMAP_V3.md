@@ -1,63 +1,73 @@
 # TASK_MEMMAP_V3 — カーネル帯の切り直し (v3 のメモリマップ見直し)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v1 (レビュー前)**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v2 (Codex 往復 1 の 9 件を反映。2-2 は保留、2-3 は着地)**。
 > 出所: ユーザー指示 2026-09-23「カーネル予算はシュリンクではなく考え直す。順に実行」。1 (KHEAP 320 → 192KB) は着地済み (aa536e9)、
 > ここは 2 (ページ表を画像の外へ) と 4 (帯の切り直し) をまとめた票。3 (動的読み込み) は [`PLAN.md`](PLAN.md) §3。
 > 正典の関係: 番地の正典は `include/memmap.h`、地図は `docs/02_memory.md` §2-1 (生成)、経緯は [`../memory/TASK_KSTACK_USER.md`](../memory/TASK_KSTACK_USER.md)。
 
-## 0. いまの数字 (2026-09-23)
+> **v2 (Codex 往復 1 の 9 件を反映)**: 2-2 (カーネル帯 2MB) は「シェルを PDE 1 に置くと CPL=3 起動でシェルの写像が消える」
+> 「pgalloc の配布域にシェルが入る」「予算式・予約域・スタックの境界」「番地を焼く 5 つのビルド経路」「NHD の移行単位」「アプリ帯の
+> PDE と 9/16MB」「ローダの 508KiB 上限」を先に決めないと着手できない**大きい票**。**PM の判断: 134KB の余裕で PCM と 82557 は入るので、
+> 2-2 は v3 §1 (C11) の前の独立した段階に回し、この票はいま「決めるべきこと」の一覧として保つ**。2-3 の小さい整理は着地 (下)。
+
+## 0. いまの数字 (2026-09-23、往復 1 で訂正)
 
 | 帯 | 範囲 | 中身 | 余り |
 |---|---|---|---|
-| カーネル帯 | 0x100000〜0x1FFFFF (1MB) | 本体 461.8KB (予算 596KB) → KHEAP 192KB → KAPI 4KB → SHM 224KB (末尾 64KB は GUI 予約) → 予約 | **134KB** (本体の伸び代) |
-| SQLite 帯 | 0x200000〜0x2FFFFF (1MB) | SQLite 752KB → 代替スタック 128KB → 予約 (0x2DD000〜) → DMA プール 64KB (0x2E8000) → 予約 12KB → ガード → カーネルスタック 16KB (0x2FC000) | SQLite の伸び代 44KB |
-| シェル帯 / shlib 帯 | 0x300000〜 / 0x400000〜 | 常駐シェル (2 ヒープ) / 共有ライブラリ | — |
+| カーネル帯 | 0x100000〜0x1FFFFF (1MB) | 本体 (予算 596KB) → KHEAP 192KB → KAPI 4KB → SHM 224KB (末尾 64KB は GUI 予約) → 予約 | **134.2KiB** (本体の伸び代。ページ整列後の SHM 後方予約は 132KiB) |
+| SQLite 帯 | 0x200000〜0x2FFFFF (1MB) | SQLite 752KB → 代替スタック 128KB → 予約 (0x2DD000〜、伸び代 44,960B) → DMA プール 64KB (0x2E8000) → 予約 12KB → ガード → カーネルスタック 16KB (0x2FC000) | |
+| シェル帯 / shlib 帯 | 0x300000〜 / 0x400000〜 | 常駐シェル (2 ヒープ) / 共有ライブラリ (PDE 1 の私有 PT、`.text` は共有) | |
 
-本体 461.8KB の内訳 (オブジェクト合計): kernel/ 193KB (うち **`paging.o` の静的ページ表 48KB** = pd_raw 8KB + pt_raw 36KB + page_tables 4KB、
-alignment の捨て 8KB を含む)、fs/ 94KB (FAT12 が `fat12.o` 18KB + `fatfs/ff.o` 13KB の 2 系統)、drivers/ 60KB、exec/ 35KB、net/ 31KB、kapi/ 28KB、gfx/ 13KB。
+本体の内訳 (**リンクされる .o だけ**、`build/kernel.mk` の C_KERNEL): kernel/ 189KB (うち `paging.o` の静的ページ表 = pd_raw 4KB + pt_raw 32KB +
+page_tables 4KB。整列の捨て 8KB は 2-3 で除去済み)、fs/ 76KB (**FAT は FatFs の 1 系統だけ**。`fat12.o` は 8 月の残骸で未リンク)、drivers/ 60KB、
+exec/ 35KB、net/ 31KB、kapi/ 28KB、gfx/ 13KB。ホットデプロイの窓は 2026-09-09 に撤去済み (この票の対象ではない)。
 
 ## 1. 目的
 
-- 本体の伸び代を「削って作る」のではなく「配置で作る」。v3 で載る予定のもの: PCM ドライバ (TASK_PCM_CS4231、数 KB + プール 32KB)、
+- 本体の伸び代を「削って作る」のではなく「配置で作る」。v3 で載る予定のもの: PCM ドライバ (TASK_PCM_CS4231、数 KB + プール 16KB)、
   82557 (L-B、数 KB + プール 16KB)、§5-5 P2 の合成器 (**動的読み込みの前提**、本体には入れない)。
 - 浮動番地 (`__bss_end` 由来の KHEAP_BASE 以降の連鎖) を減らし、固定番地で STATIC_ASSERT できる範囲を広げる。
-- DMA に使うメモリ (ページ表・DMA プール・PCM のリング) は**固定番地・全 PD 共有** (PDE 0〜) に置く。
+- CPU のページ表 (ページウォーク用) と DMA に使うメモリ (プール・PCM のリング) は**固定番地・全 PD 共有** (PDE 0) に置く。
 
-## 2. 案 (レビューで決める)
+## 2. 決めるべきこと (往復 1 の B1〜B9。2-2 に着手する前に全部)
 
-### 2-1. ページ表を画像の外の固定番地へ (+48KB)
+| # | 論点 | 反例 (往復 1) | 決め方 |
+|---|---|---|---|
+| B1 | **シェルの写像**: シェル 0x400000 / shlib 0x500000 / アプリ 0x600000 は**全部 PDE 1** (0x400000〜0x7FFFFF)。CPL=3 起動で `paging_addrspace_clear_app_band()` が PDE 1 を消し、シェルのスタック上で CR3 を切り替えて #PF | シェルを PDE 1 の私有 PT に同一物理・supervisor で保持する規則 (消去・解放・全 AS への反映) を書くか、アプリ固有帯を PDE 2 (0x800000〜) へ (B7 の制約が増える) |
+| B2 | **pgalloc の配布域**: `MEM_APP_BAND_BASE = 0x400000` から RAM を登録しており、新配置ではシェルが配布対象に入る (アプリの PD/PT や V86 backing がシェルを上書き) | PDE の開始番地と物理の配布開始番地を分離し、シェル全域を初回確保より前に除外 (legacy / model の両経路) |
+| B3 | **固定 PD/PT は PG=0 で作れるが、予約域の NP 化の後に present/RW/supervisor で張り直さないと PG=1 後にソフトから触れない** (`paging_reclaim_conventional` が #PF) | 順序: PG=0 で PD 1 + PT 8 を初期化 → 恒等写像と予約 → **NP 化の後**に固定 36KB を張る → CR3 → PG。pgalloc に依存しない |
+| B4 | **予算式**: `MEM_KERNEL_BAND_END` だけ上げると固定 PT・DMA・kstack を差し引かない。SHM 後方予約の NP 化が現用 kstack を消す。SQLite の ASSERT が「3MB 台の終端 ≤ 2MB 台の DMA」で必ず落ちる | 浮動部分の上限を最初の固定領域の手前に置く (例: PT を 0x2DF000 に固定なら本体予算 = 0x174000 = 1488KiB)。地図生成器の kstack の終端 (`MEM_SHELL_LOAD_ADDR-1`) も構造変更 |
+| B5 | **番地を焼く経路**: `sdk/link/app_sys.ld` (常駐 shell / gshell)、`sdk/link/shlib.ld` (配置と `text_pages` の基点)、`tools/mkshlib.py` (基点の一致検査)、`sdk/rust/os32api/src/gui/stub.rs` (0x400000 のジャンプ表)、`build/kernel.mk` の `--sqlite-addr 0x200000` (VK32 の展開先) | 影響一覧に全部載せ、VK32 の展開先とリンク先の照合を足す。`crt0.asm` は直書き無し (再リンクのみ) |
+| B6 | **NHD の移行単位**: 旧 `/usr/bin` の v2 バイナリ (`load_addr = 0x500000`) は拒否される (起動不能)。**旧 `/sys/shell.bin` は `is_shell` で番地検査を通らず、旧 3MB リンクのコードを 4MB で実行して SQLite 帯へ絶対参照**。`load_addr = 0` の旧アプリは警告だけで通る。shlib の旧版は `data_vaddr` 検査で拒否され GUI が壊れる | カーネル・常駐 shell/gshell・shlib・in-tree・apps/game を**一組**として配備する手順 (`hsync sys` を含む)。旧シェルと番地不明バイナリの拒否方針 |
+| B7 | **アプリ帯**: 提案番地のまま PDE 1 開始だと既定の上端 8MB で仮想帯が 1MB 減る (`heap_size = 0` は常に 1 PDE、9MB では 2 PDE に拡張できず NOMEM)。PDE 2 開始で最大 2 PDE なら上端 16MB = 15MB のデバイス窓の下限を越え、master の動的 PT 用 workspace の配置条件を満たせない。V86 は 159 ページ = 636KiB の連続物理を要求 | アプリ帯の開始・既定上端・最大枚数・物理配布域を一組で決裁 (9MB / 16MB、画面バッファ予約あり / なし で起動可能サイズと NOMEM の仕様) |
+| B8 | **ローダの上限**: HDD ローダは `vmkernel.lz4` を最大 **508KiB** しか読まない (`boot/boot_defs.h`、超過は切り詰めて未読データを展開) | 常駐予算と圧縮配布サイズを別の制約として定義し、超えるイメージは生成時に拒否。FD の低位ステージングの限界も別途 |
+| B9 | **受入**: 起動 + 現行 MM 検査 (PDE 0 だけ) では B1/B2 を取り逃す | 新シェルからの CPL=3 起動・終了・fault 復帰・GUI の複数 AS 切替、シェル / 固定 PD/PT / DMA の全 AS での写像と supervisor、9MB / 16MB の pgalloc と V86、旧バイナリ混在時の拒否、固定境界を越える変異をリンクと地図検査が止めること |
 
-`paging_init` が使う PD 1 枚 + ブート PT 8 枚 (= 36KB) を `.bss` から出し、**固定番地の帯** `MEM_PT_BASE` (4KB 整列) に置く。
-候補: (a) SQLite 帯の予約域 0x2DF000〜0x2E7FFF (36KB。SQLite の伸び代が 8KB になる) / (b) 2-2 でカーネル帯を広げた後の末尾。
-**(a) は 2-2 と一緒でなければ採らない** (SQLite の伸び代 8KB は薄すぎる)。`page_tables[]` の 4KB は sparse なポインタ配列なので画像に残す。
-ページングを張る前 (PG=0) に物理番地でゼロ埋めして使う。`tools/gen_memmap.py` の MIRRORS と `os32.ld` の ASSERT を足す。
+## 2-1. ページ表を画像の外へ (2-2 と一緒に)
 
-### 2-2. カーネル帯を 2MB に (SQLite を上へ)
+固定化するのは **master PD 1 枚 + ブート PT 8 枚 (36KB)** だけ (後から増える PT は従来どおり pgalloc / 適格ページから。`page_tables[]` の 4KB は
+sparse な索引なので画像に残す)。置き場は **2-2 で広げたカーネル帯の末尾** (DMA プール 0x2E8000 と kstack は維持できる)。SQLite 帯の予約
+(0x2DF000〜、伸び代 8,096B) に置く案は採らない (PM 判断、往復 1 も同意)。本体予算に対する効果は **+44KiB** (pd 4KB + pt 32KB + 整列の捨て
+8KB だった分は 2-3 で既に回収)。総占有の削減は約 8KiB で、主効果は「本体予算の外へ出す」こと。
 
-| 帯 | 新しい範囲 | 中身 |
-|---|---|---|
-| カーネル帯 | 0x100000〜0x2FFFFF (2MB) | 本体 (予算 ≒ 1.5MB) → KHEAP 192KB → KAPI → SHM 224KB → 予約 → **ページ表 36KB (固定)** → **DMA プール 64KB (固定)** → ガード → カーネルスタック 16KB (固定、末尾) |
-| SQLite 帯 | 0x300000〜0x3FFFFF | SQLite 752KB → 代替スタック 128KB → 予約 |
-| シェル帯 | 0x400000〜0x4FFFFF | 常駐シェル |
-| shlib 帯 | 0x500000〜0x5FFFFF | 共有ライブラリ |
-| プログラム空間 | 0x600000〜 | 外部プログラム (`sdk/link/app.ld`、`crt0`、`RING3_*` の定数が動く) |
+## 2-2. カーネル帯を 2MB に — B1〜B9 を決めてから、独立した段階として
 
-**影響**: `include/memmap.h` の全帯、`build/os32.ld` / `sdk/link/app.ld` / `sdk/link/shell.ld` の番地、`sdk/crt/crt0.asm`、`kernel/paging.h` の PDE
-割り当て (アプリ帯の PDE、共有 PDE の表)、`exec/exec.c` の `RING3_*`、`docs/02_memory.md` の生成器、`tools/tests/test_memmap_*`、
-**SDK の定数 (`GUI_SHM_OFFSET` は不変、`MEM_SHLIB_BASE` 相当は変わる) → `make external` で全アプリの再ビルド**、ホットデプロイの窓、
-V86 の `v86_mem.c` (低位だけなので影響小)、ブートローダの kernel 配置 (0x100000 のまま)。**大きい**ので、2-1 と分けて段階を切る。
+案の骨子は v1 のまま (カーネル帯 0x100000〜0x2FFFFF、SQLite 0x300000〜、シェル 0x400000〜、shlib 0x500000〜、プログラム 0x600000〜) だが、
+B1/B7 の結果で番地は変わり得る (アプリ固有帯を PDE 2 にする案を含む)。**着手条件**: B1〜B9 の決裁が票に書かれ、Codex の設計レビューで Approve。
 
-### 2-3. 小さい整理 (どちらの案でも)
+## 2-3. 小さい整理 (着地済み、2026-09-23)
 
-- `mem` / `heap` コマンドの地図の文言 (kstack 0x1FC000 表記、DMA プール無し) を `memmap.h` の定数から出す。
-- FAT12 の 2 系統 (`fs/fat12.c` と `fs/fatfs/`) のどちらかを外す (31KB のうち 13〜18KB)。**別票** (ブート FS の互換確認が要る)。
-- PCM のステージング 16KB を DMA プールから KHEAP へ (KHEAP の実測 peak 64KB に対して 192KB あるので余裕)。TASK_PCM_CS4231 §2-1 の暫定を解く。
+- `mem` / `heap` コマンドの地図の文言を現状 (kstack 0x2FC000、DMA プール) に合わせた。外部シェルは `__bss_end` 依存のマクロを評価しないので固定の写し。
+- `paging.c` の pd_raw / pt_raw を `aligned(4096)` にして整列の捨て 8KB を除いた。
+- PCM のステージング 16KB は KHEAP (`kmalloc`、IRQ 外で確保、失敗は NOMEM で巻き戻し) に (TASK_PCM_CS4231 の暫定を解く)。
 
 ## 3. 段取り
 
-1. **この票のレビュー** (Codex、案の選択: 2-1 だけ先に (a) で行くか、2-2 と一緒か)。
-2. 2-1 (+48KB) を先に、2-2 は v3 の §1 (C11 移行) の前に。どちらも `make check` の地図 + NP21/W の起動 + kselftest の MM 検査 + 実機の FD 起動が受入。
+1. **いまは 2-2 に着手しない** (PM 判断: 134KB で PCM と 82557 は入る)。B1〜B9 の決裁を v3 §1 の前に行い、Codex の設計レビューを通してから実装。
+2. 2-1 は 2-2 と同時。
+3. 受入は B9 の一覧。
 
 ## 4. しないこと
 
-本体のコードを削ること (診断文字列・kselftest の圧縮は今回の対象外)、SHM の GUI 予約の移動 (SDK 定数)、物理メモリ 16MB 超の扱い。
+本体のコードを削ること (診断文字列・kselftest の圧縮は対象外)、SHM の GUI 予約の移動 (SDK 定数 `GUI_SHM_OFFSET` は不変)、物理メモリ 16MB 超の扱い、
+FAT の 2 系統統合 (存在しなかった)。

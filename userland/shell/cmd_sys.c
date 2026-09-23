@@ -48,10 +48,12 @@ static int cmd_mem(int argc, char **argv)
     g_api->kprintf(ATTR_WHITE, "%s", "  0x00000 - 0x00FFF  NP (NULL guard)\n");
     g_api->kprintf(ATTR_WHITE, "%s", "  0x01000 - 0x9FFFF  Font/Unicode/GFX (V86 guest window)\n");
     g_api->kprintf(ATTR_WHITE, "%s", "  0xA0000 - 0xEFFFF  VRAM\n");
-    g_api->kprintf(ATTR_WHITE, "%s", "  0x100000-0x1FAFFF  Kernel Band (code+heap+SHM)\n");
-    g_api->kprintf(ATTR_WHITE, "%s", "  0x1FB000-0x1FBFFF  NP (kernel stack guard)\n");
-    g_api->kprintf(ATTR_WHITE, "%s", "  0x1FC000-0x1FFFFF  Kernel Stack (16KB)\n");
-    g_api->kprintf(ATTR_WHITE, "%s", "  0x200000-0x2FFFFF  SQLite Band (1MB)\n");
+    /* 番地の正典は include/memmap.h (docs/02_memory.md §2-1 が生成)。ここは
+     * 2026-09-17 の kstack 移設と 2026-09-23 の DMA プールを反映した写し。 */
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x100000-0x1FFFFF  Kernel Band (code+heap+KAPI+SHM)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x200000-0x2FFFFF  SQLite Band (code+alt stack, DMA pool 0x2E8000-0x2F7FFF)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x2FB000-0x2FBFFF  NP (kernel stack guard)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x2FC000-0x2FFFFF  Kernel Stack (16KB)\n");
     g_api->kprintf(ATTR_WHITE, "%s", "  0x300000-0x3FFFFF  Shell Band (1MB)\n");
     g_api->kprintf(ATTR_WHITE, "%s", "  0x400000-0x4FFFFF  Shared Library Band (1MB)\n");
     g_api->kprintf(ATTR_WHITE, "%s", "  0x500000-          Program Space\n");
