@@ -128,6 +128,18 @@ extern u32 __bss_end;
 /* フォントキャッシュ (コンベンショナル, ~292KB) */
 #define MEM_FONT_CACHE_BASE     0x01000UL
 
+/* ブート情報域 (ローダ → kernel_main、256B)。形式は include/bootinfo.h。
+ * FD / HDD のローダが実モードで INT 1Bh AH=84h の結果をここへ書き、
+ * kernel_main が**最初に** (フォント・ヒープより前に) 写す。
+ * フォントキャッシュの内側なので、写した後は上書きされてよい。
+ * 置き場の根拠 (票 TASK_HDD_INSTALL §1-v3 N1): ローダの実モードスタックは
+ * 0x7C00 から下へ、ローダ本体は 0x8000〜、loader_hdd の受け渡しは
+ * 0x7F00〜0x7F11、FAT のバッファは 0x6000〜0x77FF、圧縮イメージは 0x10000〜。
+ * **NASM 側の写しは boot/bootinfo.inc** (一致は gen_memmap.py --check)。 */
+#define MEM_BOOTINFO_BASE       0x07E00UL
+#define MEM_BOOTINFO_SIZE       0x00100UL
+#define MEM_BOOTINFO_END        0x07EFFUL
+
 /* Unicode-JIS変換テーブル (コンベンショナル, 128KB) */
 #define MEM_UNICODE_TABLE_BASE  0x4A000UL
 #define MEM_UNICODE_TABLE_SIZE  0x20000UL  /* 128KB */

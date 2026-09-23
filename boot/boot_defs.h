@@ -63,6 +63,8 @@ extern u8 param_spt;
 int  ext2m_init(u32 part_lba);
 u32  ext2m_lookup(const char *path);
 int  ext2m_read_file(u32 ino, u8 *buf, u32 max_size);
+#define EXT2M_ERR_TOO_BIG  (-2)   /* i_size > max_size (切り詰めない、N8) */
+#define EXT2M_ERR_SHORT    (-3)   /* 穴で最後まで読めない */
 
 /* LZ4 デコーダ */
 int  boot_lz4_decode(const u8 *src, int compressed_size,

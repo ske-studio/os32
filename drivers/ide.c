@@ -24,6 +24,9 @@ extern void irq_disable(unsigned int irq);
 #define IDE_MAX_DRIVES 4
 static int drive_present[IDE_MAX_DRIVES] = { 0, 0, 0, 0 };
 static IdeInfo drive_info[IDE_MAX_DRIVES];
+/* IdeInfo に無い IDENTIFY の語 (word 53-56 ほか)。IdeInfo は KAPI の並びなので
+ * 足さずに別に持つ (票 TASK_HDD_INSTALL 段 0)。 */
+static IdeGeom drive_geom[IDE_MAX_DRIVES];
 
 /* ---- 内部ヘルパー ---- */
 
@@ -170,6 +173,7 @@ int ide_identify(int drive, IdeInfo *info)
     u16 buf[256];
     int i, ret;
 
+    drive_geom[drive & 3].valid = 0;   /* 答えなければ古い値を残さない */
     ide_select_drive(drive & 3);
     ret = ide_wait_bsy();
     if (ret != IDE_OK) return ret;
@@ -193,6 +197,22 @@ int ide_identify(int drive, IdeInfo *info)
     { u8 st = (u8)inp(IDE_STATUS); (void)st; }
     ide_wait_bsy();
 
+    /* 幾何の生の語 (段 0 の計測。CHS 変換はまだ既定の word 1/3/6 を使う —
+     * LBA28 / 現在の変換への切り替えは段 1 の範囲)。 */
+    {
+        IdeGeom *g = &drive_geom[drive & 3];
+        g->def_cyl   = buf[1];
+        g->def_heads = buf[3];
+        g->def_spt   = buf[6];
+        g->w49       = buf[49];
+        g->w53       = buf[53];
+        g->cur_cyl   = buf[54];
+        g->cur_heads = buf[55];
+        g->cur_spt   = buf[56];
+        g->total     = (u32)buf[60] | ((u32)buf[61] << 16);
+        g->valid     = 1;
+    }
+
     /* 情報抽出 */
     info->cylinders = buf[1];
     info->heads = buf[3];
@@ -215,9 +235,11 @@ int ide_identify(int drive, IdeInfo *info)
         info->phys_sector_size = 512;
     }
 
-    /* サイズ(MB) = 総セクタ数 * 物理セクタサイズ / 1048576 */
-    info->size_mb = (info->total_sectors * info->phys_sector_size)
-                    / (1024 * 1024);
+    /* サイズ(MB) = 総セクタ数 / (1MB あたりのセクタ数)。
+     * 総セクタ数 × セクタ長を先に掛けると 4GB 超 (実機の 8GB = 16,514,063
+     * セクタ) で 32bit が溢れる。1MB はどちらのセクタ長でも割り切れる。 */
+    info->size_mb = info->total_sectors
+                    / ((1024UL * 1024UL) / (u32)info->phys_sector_size);
 
     /* モデル名 (word 27-46): ATA文字列はバイトスワップ */
     for (i = 0; i < 20; i++) {
@@ -329,6 +351,17 @@ int ide_write_sector_chs(int drive, u16 cyl, u8 head, u8 sect,
 int ide_drive_present(int drive)
 {
     return drive_present[drive & 3];
+}
+
+int ide_get_geom(int drive, IdeGeom *out)
+{
+    const IdeGeom *g;
+
+    if (drive < 0 || drive >= IDE_MAX_DRIVES) return IDE_ERR_NO_DRIVE;
+    g = &drive_geom[drive];
+    if (!g->valid) return IDE_ERR_NO_DRIVE;
+    if (out) *out = *g;
+    return IDE_OK;
 }
 
 int ide_get_info(int drive, IdeInfo *info)

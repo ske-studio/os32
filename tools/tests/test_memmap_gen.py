@@ -68,7 +68,9 @@ MIRROR_FILES = ("build/os32.ld", "kernel/kentry.asm",
                 "sdk/rust/os32api/src/gui/proto.rs",
                 # ホスト試験が kernel/shm.c を組むための偽 memmap.h を持つ。
                 # 2026-09-17 に実際にずれたので写しの照合対象に入っている。
-                "tools/tests/test_owner_reclaim.py")
+                "tools/tests/test_owner_reclaim.py",
+                # ローダ (NASM) のブート情報域の番地 (票 TASK_HDD_INSTALL 段 0)
+                "boot/bootinfo.inc")
 
 
 def make_tree(tmp, bss_end):

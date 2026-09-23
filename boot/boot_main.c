@@ -76,6 +76,12 @@ int boot_main(void)
     /* 4. ファイルを LOAD_BUF (0x10000) に読み込み */
     file_base = (u8 *)LOAD_BUF;
     file_size = ext2m_read_file(ino, file_base, MAX_IMAGE_SIZE);
+    if (file_size == EXT2M_ERR_TOO_BIG) {
+        /* 上限 (0x10000〜0x8EFFF、ブート時スタックの手前) を超えるイメージは
+         * 切り詰めて展開せずに止まる (N8)。 */
+        boot_print_asm(0xA0000 + 480, "vmkernel.lz4 too large (> 508KiB)");
+        return -6;
+    }
     if (file_size <= 0) {
         boot_print_asm(0xA0000 + 480, "File read FAIL!");
         return -3;

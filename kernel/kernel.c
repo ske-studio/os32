@@ -38,6 +38,7 @@
 #include "dma8237.h"    /* 8237 の共通部 + 0439h (同 §1-2) */
 #include "dma_pool.h"   /* DMA プール (同 §1-3) */
 #include "ide.h"
+#include "bootinfo.h"   /* ブート情報域 0x7E00 (票 TASK_HDD_INSTALL 段 0) */
 #include "atapi.h"
 #include "vfs.h"
 #include "ext2.h"
@@ -170,6 +171,14 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 {
     char tmp[16];
     int mb;
+
+    /* **最初に** ブート情報域 (0x7E00、ローダが INT 1Bh AH=84h の結果を
+     * 書いた) を写す。0x7E00 はフォントキャッシュの内側で、フォント・
+     * ヒープ・その他の低位の再利用より前でなければ上書きされる。
+     * memory_boot_detect も低位 (0594h) を読むだけだが、順序を固定する
+     * ためここに置く。以後は写しだけを使う (bootinfo_get / _hdd_geom)。 */
+    bootinfo_capture();
+
     /* ローダの 512KB プローブは 16MB 手前までしか見ない (その先は PC-98 の
      * 16MB システム空間で、書き込みプローブが VRAM を壊す)。16MB 超は BIOS
      * ワークエリア 0594h を正典に、1MB ごとの再確認を通して足す (K6-RAM)。
@@ -367,6 +376,10 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
             tvram_print(5, 3, "no drive", TATTR_CYAN);
         }
     }
+
+    /* HDD の幾何: BIOS (ローダの AH=84h) と IDENTIFY を 1 行ずつ。
+     * 段 1 の設計値はこの 2 つで決める (票 TASK_HDD_INSTALL 段 0)。 */
+    bootinfo_report();
 
     /* ATAPI CD-ROM 検出 */
     {
