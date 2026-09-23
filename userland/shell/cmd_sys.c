@@ -335,9 +335,10 @@ static int cmd_kbdstat(int argc, char **argv)
         return SH_STATUS_ERROR;
     }
     g_api->kprintf(ATTR_WHITE,
-                   "kbd irq=%u empty=%u err=%u flushed=%u init=%02x->%02x "
+                   "kbd irq=%u empty=%u err=%u ovr=%u flushed=%u init=%02x->%02x "
                    "cmd=%02x st=%02x code=%02x now=%02x\n",
-                   d.irq_count, d.empty_count, d.err_count, d.flushed,
+                   d.irq_count, d.empty_count, d.err_count,
+                   (u32)d.overrun_count, d.flushed,
                    (u32)d.init_st_before, (u32)d.init_st_after, (u32)d.cmd,
                    (u32)d.last_st, (u32)d.last_code, (u32)d.now_st);
     return 0;

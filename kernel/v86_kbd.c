@@ -20,6 +20,17 @@ static u8  fifo[V86_KBD_FIFO_SZ];
 static u32 fifo_r;
 static u32 fifo_w;
 
+/* ゲストが 0x41 から最後に読んだバイト。空の FIFO を読まれたらこれを返す
+ * (実チップの 8251A もデータレジスタに前回のバイトが残る)。以前は 0x00 を
+ * 返していて、それは **ESC のメイク**だった — IRQ1 の偽反射 (空 IRQ・
+ * エラー) と組んで、ゲストに押していない ESC が届いた (POLICY_DEBUG §4-57)。
+ * 反射は実データのときだけに絞ったので、これは二重の防御。
+ * セッション開始時の初期値は V86_KBD_IDLE (未割当キー 0x7F のブレイク) —
+ * 前回のバイトが無い状態で何か返すなら、押されていないキーの「離した」が
+ * いちばん害が無い。 */
+#define V86_KBD_IDLE  0xFF
+static u8  last_data = V86_KBD_IDLE;
+
 /* 診断用カウンタ。ホストから emu_read_mem addr=v86_kbd_n_push len=12 で
  * 3 本まとめて読めるように並べて置く (ディスク側のカウンタと同じ作法)。
  * static にすると最適化で消えるので必ず外部リンケージにする (04 §4-11)。 */
@@ -36,6 +47,7 @@ void v86_kbd_reset(void)
 {
     fifo_r = 0;
     fifo_w = 0;
+    last_data = V86_KBD_IDLE;
     v86_kbd_n_push = 0;
     v86_kbd_n_read = 0;
     v86_kbd_n_drop = 0;
@@ -109,10 +121,11 @@ u32 v86_kbd_in(u16 port)
 
     if (port == V86_KBD_DATA) {
         if (fifo_r == fifo_w) {
-            return 0x00;        /* 空読み。実機も不定値が返るだけ */
+            return last_data;   /* 空読み。実機と同じく前回のバイト */
         }
         v = fifo[fifo_r];
         fifo_r = (fifo_r + 1) % V86_KBD_FIFO_SZ;
+        last_data = v;
         v86_kbd_n_read++;
         return v;
     }

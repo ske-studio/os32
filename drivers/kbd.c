@@ -67,7 +67,7 @@ extern volatile u32 tick_count;
 extern void appslot_poll_yield_reset(void);
 
 /* ======== シフトキー状態 ========
- * **書き込むのは kbd_irq_handler (IRQ1 ISR) だけ**。ISR は割り込みゲート
+ * **書き込むのは kbd_irq_handler (IRQ1 ISR、配りの kbd_deliver を含む) だけ**。ISR は割り込みゲート
  * 経由で IF=0 のまま走り自身に再入しないので、ここでの |= / &= / ^= は
  * ロック無しで安全。カーネル側は読むだけ (ime.c 等)。
  * この所有権を破って通常コンテキストから書くなら irq_save が要る。 */
@@ -80,6 +80,7 @@ volatile u8 kbd_shift_state = 0;
 static volatile u32 kbd_diag_irq;
 static volatile u32 kbd_diag_empty;
 static volatile u32 kbd_diag_err;
+static volatile u32 kbd_diag_overrun;
 static volatile u8  kbd_diag_last_st;
 static volatile u8  kbd_diag_last_code;
 static u32 kbd_diag_flushed;
@@ -189,23 +190,27 @@ static const u8 scancode_to_ascii_shift[128] = {
 
 /* ======================================================================== */
 /*  kbd_irq_handler — IRQ1 割り込みハンドラ (Cレベル)                      */
-/*  ASMスタブから呼ばれる                                                    */
+/*  ASMスタブ (kernel/isr_stub.asm の irq_stub_1、呼び手はここだけ) から    */
+/*  呼ばれる。戻り値は「IRQ1 を V86 ゲストへ反射してよいか」:               */
+/*  0041h から実データを読んだとき (DATA / OVERRUN) だけ 1。空 IRQ・エラー */
+/*  で反射すると、ゲストは空の仮想 FIFO を読んで偽の打鍵を得る              */
+/*  (以前は 0x00 = ESC のメイク、POLICY_DEBUG §4-57)。                      */
+/*  スタブは V86 中でなければ戻り値に関係なく反射しない (EFLAGS.VM を見る)。*/
 /* ======================================================================== */
-void kbd_irq_handler(void)
+static void kbd_deliver(u8 scancode);
+
+int kbd_irq_handler(void)
 {
     u8 scancode;
-    u8 keycode;
-    u8 ascii;
-    int is_break;
-    int is_mod;
-
     u8 st;
     int kind;
 
     /* 0041h を読む前に 0043h を見る (票: 実機の打鍵不達、POLICY_DEBUG §4-57)。
      *   RxRDY = 0      → 空 IRQ。0041h は読まない (読んでも打鍵ではない)。
-     *   PE / OE / FE   → 0041h を読み捨て (化けたバイトは使わない)、
+     *   PE / FE        → 0041h を読み捨て (化けたバイトは使わない)、
      *                    コマンド語 (ER 込み) を書き直してエラーを解除する。
+     *   OE だけ        → 前のバイトを取りこぼしただけで 0041h のバイトは
+     *                    正しい。使って、ER で OE を解除する (数える)。
      * NP21/W の keyboard_i43 は `status | 0x85` を返し、IRQ1 の前に RxRDY
      * (status bit1) を立てる。エラービットは向こうのバッファが溢れたときの
      * OE だけなので、通常の打鍵では従来どおり KBD_ST_DATA に落ちる。
@@ -218,24 +223,46 @@ void kbd_irq_handler(void)
     kind = kbd_status_classify(st);
     if (kind == KBD_ST_EMPTY) {
         kbd_diag_empty++;
-        return;
+        return kbd_status_reflects(kind);
     }
     if (kind == KBD_ST_ERROR) {
         (void)inp(KBD_DATA);
         outp(KBD_CMD, KBD_CMD_ERRRST_RXE_RTYHIGH);
         kbd_diag_err++;
-        return;
+        return kbd_status_reflects(kind);
     }
 
     /* μPD8251Aからスキャンコード読み取り */
     scancode = (u8)inp(KBD_DATA);
     kbd_diag_last_code = scancode;
+    if (kind == KBD_ST_OVERRUN) {
+        /* バイトを読んだ後で OE を解除する (ER はフラグを落とすだけで、
+         * 受信データには触らない)。 */
+        outp(KBD_CMD, KBD_CMD_ERRRST_RXE_RTYHIGH);
+        kbd_diag_overrun++;
+    }
+
+    kbd_deliver(scancode);
+    return kbd_status_reflects(kind);
+}
+
+/* 読んだ 1 バイトを配る (V86 の FIFO か、OS32 のリング)。途中の return は
+ * 配らない場合で、反射の判定 (上の戻り値) には効かない。 */
+static void kbd_deliver(u8 scancode)
+{
+    u8 keycode;
+    u8 ascii;
+    int is_break;
+    int is_mod;
 
     /* V86 セッション中はキーをまるごとゲストへ回す。
      * 8251A のデータレジスタは読んだら消えるので、ここで OS32 側の
      * リングバッファにも入れると「シェルに打った覚えのない文字が
      * 溜まる」ことになる。所有権はどちらか一方しか持てない。
-     * 戻り値が非 0 なら脱出ホットキー (CTRL+GRPH+DEL)。 */
+     * 戻り値が非 0 なら脱出ホットキー (CTRL+GRPH+DEL)。
+     * ホットキーのときも呼び手は反射する (従来どおり): irq_stub_1 は反射の
+     * 後で v86_check_exit_request を見てセッションを畳むので、反射された
+     * INT 09h をゲストが走らせることはない。 */
     if (v86_is_active()) {
         if (v86_kbd_push(scancode)) {
             v86_request_exit();
@@ -387,6 +414,7 @@ void kbd_init(void)
     kbd_diag_irq = 0;
     kbd_diag_empty = 0;
     kbd_diag_err = 0;
+    kbd_diag_overrun = 0;
     kbd_diag_last_st = 0;
     kbd_diag_last_code = 0;
 
@@ -420,7 +448,7 @@ void kbd_init(void)
 int kbd_diag(KbdDiag *out)
 {
     unsigned int flags;
-    u32 irq, empty, err;
+    u32 irq, empty, err, overrun;
     u8 last_st, last_code;
 
     if (out == NULL) {
@@ -431,6 +459,7 @@ int kbd_diag(KbdDiag *out)
     irq       = kbd_diag_irq;
     empty     = kbd_diag_empty;
     err       = kbd_diag_err;
+    overrun   = kbd_diag_overrun;
     last_st   = kbd_diag_last_st;
     last_code = kbd_diag_last_code;
     irq_restore(flags);
@@ -448,7 +477,8 @@ int kbd_diag(KbdDiag *out)
      * 送っていない、と分けるのに使う (last_st は IRQ の中でしか更新されない)。
      * ステータスの読みは 8251A の状態を変えない。 */
     out->now_st         = (u8)inp(KBD_CMD);
-    out->reserved[0] = out->reserved[1] = 0;
+    /* u16 に収まらなければ 0xFFFF で止める (折り返すと 0 に見える) */
+    out->overrun_count  = (u16)(overrun > 0xFFFFu ? 0xFFFFu : overrun);
     return 0;
 }
 
