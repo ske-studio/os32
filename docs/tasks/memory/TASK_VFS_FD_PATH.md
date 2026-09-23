@@ -1,6 +1,6 @@
 # TASK_VFS_FD_PATH — FD がパスを覚えて書き込みごとに引き直す / 長いパスを黙って切り詰める (VFS の既存欠陥)
 
-> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-24) / 状態: **v3 — ラリー 2 (Codex / Opus とも Request changes) を反映、ラリー 3 (最後) 待ち** — ユーザー指示「別票を着手」(2026-09-24)。カーネル層 (VFS/FS) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
+> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-24) / 状態: **方針確定 (2026-09-24)** — ラリー 3: Opus 条件付き Approve、Codex は A-R3-1 のみ → ユーザー決裁 ①。実装中 — ユーザー指示「別票を着手」(2026-09-24)。カーネル層 (VFS/FS) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
 > 出所: TASK_EXT2_EMPTY_NAME の修正 (fc5ce67) の実装レビュー (Codex / Opus とも Approve、どちらも「修正前からある別の欠陥」として挙げた)。
 
 ## 欠陥 1 (Codex、優先): 開いた FD の書き込みが、同じパスに作り直したディレクトリを上書きする
@@ -63,3 +63,8 @@
 **パッケージ (v2 の 9 に追記)** — Codex A-R2-5: **cdinst は前置 (`/hd0`) 後に溢れる項目があれば展開を始める前に断る** (外部で作られた PKG への消費側の保護)。`pkg_parse` の項目数超過は 128 項目の後の終端を見て検出。
 **範囲外 (明記)**: マウント中の装置への `ext2_format`、FAT / HostDrv の FD 同一性、unlink した実体を最後の close まで保持する完全な POSIX 意味論。
 **受入 (v2 の 12 に追加)**: 親ディレクトリの rename 後も旧 FD が同じ実体を読み書きする (新しい同名ファイルは不変)、置き換え rename の公開後失敗 (注入) で旧宛先 FD が STALE、inode 取得の失敗注入で open / unlink が断る、ハードリンク、IME 辞書の置き換え後に FEP が動く、長い DB 名・長い mount prefix・長いコマンド名が断られる、cdinst が 124〜127 バイトの格納パスを断る。
+
+## ラリー 3 とユーザー決裁 (2026-09-24)
+
+- **A-R3-1 (Codex、SQLite のジャーナルは開いた時の名前を覚える) → 決裁 ①**: **開いている SQLite DB (`vfs_open_sqlite` の FD) と、そのジャーナル (`<名前>-journal`)、およびそれらの祖先ディレクトリの rename を `OS32_ERR_BUSY` 相当で断る** (既存のコードが無ければ新設、-16 の NAMETOOLONG の次)。
+- 実装で守ること (Opus / Codex の実装メモ): 利用中による拒否・INVAL・NAMETOOLONG は**印を付ける前**に判定し、印は FS の操作に入った場合だけ / `rename(f,f)` と同じ inode のハードリンク間は印を付けない / 失効の判定は read・write・fstat・truncate・seek の全部、umount 後の fstat が解放済み ctx を触らない / 常駐 SQLite の開き直しで hot journal が見つかったら**開かない** (辞書無し / cfg 無効、画面に出す)、開き直しは失効 1 回につき 1 回 / O_CREAT で作った後に inode が取れなければ作ったファイルを消して失敗 / `_close` は int のまま (void なのは KAPI の sys_close) / `sys_switch_shell` (`kernel/gui.c:130`) の切り詰めも長さ検査の入口に入れる / cwd が長いときは大きい一時バッファで正規化してから結果を判定。
