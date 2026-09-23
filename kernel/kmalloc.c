@@ -148,6 +148,7 @@ void *kheap_alloc(KHeap *h, u32 size)
 
         blk->magic = BLK_MAGIC_USED;
         h->used += blk->size + BLK_HDR_SIZE;
+        if (h->used > kmalloc_peak_bytes) kmalloc_peak_bytes = h->used;
         return (void *)(p + BLK_HDR_SIZE);
     }
 
@@ -332,6 +333,10 @@ void *krealloc(void *ptr, u32 new_size)
 /* ======================================================================== */
 /*  ヒープ情報                                                              */
 /* ======================================================================== */
+/* 使用中バイト数の最大値 (起動から)。KHEAP_SIZE を切り直す根拠にする — シェルには
+ * 出さず、NP21/W の /api/mem か実機のシリアルで kernel.map の番地を読む。 */
+u32 kmalloc_peak_bytes = 0;
+
 u32 kmalloc_total(void) { return kernel_heap.size; }
 u32 kmalloc_used(void)  { return kernel_heap.used; }
 

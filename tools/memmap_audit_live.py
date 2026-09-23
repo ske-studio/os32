@@ -9,7 +9,7 @@ BSS_END = 0x16BF20                       # build/out/kernel.map の実値
 # --- memmap.h の定数を実値で解く -----------------------------------------
 K = {}
 K['KHEAP_BASE']        = (BSS_END + 0xFFF) & ~0xFFF
-K['KHEAP_SIZE']        = 0x50000
+K['KHEAP_SIZE']        = 0x30000
 K['MEM_KAPI_SIZE']     = 0x1000
 K['MEM_KAPI_BASE']     = K['KHEAP_BASE'] + K['KHEAP_SIZE']
 K['MEM_SHM_GUARD_LO']  = K['KHEAP_BASE'] + K['KHEAP_SIZE'] + K['MEM_KAPI_SIZE']

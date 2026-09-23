@@ -47,6 +47,7 @@ void *krealloc(void *ptr, u32 new_size);
 /* ヒープ情報 */
 u32 kmalloc_total(void);  /* ヒープ総サイズ */
 u32 kmalloc_used(void);   /* 使用中サイズ */
+extern u32 kmalloc_peak_bytes;   /* 使用中サイズの最大値 (起動から)。KHEAP_SIZE の根拠 */
 u32 kmalloc_free(void);   /* 空き容量 */
 
 /* ブロックのデータ部サイズを取得 (テスト用) */

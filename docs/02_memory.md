@@ -107,13 +107,13 @@ __sqlite_end   = 0x2BC060   (SQLite 本体 752.1KB)
 [ カーネル帯域 (0x100000-0x1FFFFF) ]
 0x100000 - 0x17375F 461.8KB  カーネル .text/.data/.bss  (kernel.map の __bss_end まで)     RW
 0x173760 - 0x173FFF 2.2KB    空き
-0x174000 - 0x1C3FFF 320KB    カーネルヒープ (kmalloc)  (__bss_end を 4KB に切り上げた位置から) RW
-0x1C4000 - 0x1C4FFF 4KB      KernelAPI テーブル  (KAPI_ADDR)                               RW
-0x1C5000 - 0x1C5FFF 4KB      SHM 前方ガード                                                NP
-0x1C6000 - 0x1FDFFF 224KB    共有メモリ本体  (16KB x SHM_BLOCK_COUNT。CPL=3 アプリの起動時に USER へ昇格 (exec.c、PDE 0 は全 PD 共有)) RW
-0x1EE000 - 0x1FDFFF 64KB     GUI 予約 (末尾 4 ブロック)  (契約 T2。SDK の GUI_SHM_OFFSET = MEM_SHM_GUI_OFFSET) RW
-0x1FE000 - 0x1FEFFF 4KB      SHM 後方ガード                                                NP
-0x1FF000 - 0x1FFFFF 4KB      SHM 後方予約  (カーネルが予算いっぱいなら空になる (それは正しい)) NP
+0x174000 - 0x1A3FFF 192KB    カーネルヒープ (kmalloc)  (__bss_end を 4KB に切り上げた位置から) RW
+0x1A4000 - 0x1A4FFF 4KB      KernelAPI テーブル  (KAPI_ADDR)                               RW
+0x1A5000 - 0x1A5FFF 4KB      SHM 前方ガード                                                NP
+0x1A6000 - 0x1DDFFF 224KB    共有メモリ本体  (16KB x SHM_BLOCK_COUNT。CPL=3 アプリの起動時に USER へ昇格 (exec.c、PDE 0 は全 PD 共有)) RW
+0x1CE000 - 0x1DDFFF 64KB     GUI 予約 (末尾 4 ブロック)  (契約 T2。SDK の GUI_SHM_OFFSET = MEM_SHM_GUI_OFFSET) RW
+0x1DE000 - 0x1DEFFF 4KB      SHM 後方ガード                                                NP
+0x1DF000 - 0x1FFFFF 132KB    SHM 後方予約  (カーネルが予算いっぱいなら空になる (それは正しい)) NP
 
 [ SQLite 帯域 (0x200000-0x2FFFFF) ]
 0x200000 - 0x2BC05F 752.1KB  SQLite code+BSS  (kernel.map の __sqlite_start / __sqlite_end) RW
@@ -144,14 +144,18 @@ __sqlite_end   = 0x2BC060   (SQLite 本体 752.1KB)
   アプリ固有 PDE (0x400000 から 4MB 単位) は最大 0xC00000 まで伸びる。
 ```
 
-**地図の矛盾: 0 件** (重なりも逆転も無い。`--check` が毎回確かめる)
+**地図の矛盾 (1 件)** — `python3 tools/gen_memmap.py --check` が同じものを出す。
 
-**カーネル本体の予算**: 468KB 中 461.8KB を使用 (残り 6.2KB)。
+- 写しのずれ: build/os32.ld = 0x75000 だが memmap.h の MEM_KERNEL_IMAGE_MAX は 0x95000
+
+直し方は票 [`tasks/memory/TASK_KSTACK_USER.md`](tasks/memory/TASK_KSTACK_USER.md) §4 の 4。
+
+**カーネル本体の予算**: 596KB 中 461.8KB を使用 (残り 134.2KB)。
 
 **カーネルがあと何 KB 育つと何が壊れるか** (`__bss_end` が伸びると `KHEAP_BASE` 以降が芋づるで動く)
 
 - `__bss_end` +2.2KB で KHEAP_BASE が 1 ページ上がる。0x174000 → 0x175000。以降の KAPI / SHM / ガードが全部 4KB 動く
-- `__bss_end` +6.2KB で **build/os32.ld の ASSERT がリンクを止める** (予算 MEM_KERNEL_IMAGE_MAX 超過)。止めるのが目的。超えたぶんだけ SHM 帯が カーネル帯域 0x1FFFFF を突き抜ける
+- `__bss_end` +134.2KB で **build/os32.ld の ASSERT がリンクを止める** (予算 MEM_KERNEL_IMAGE_MAX 超過)。止めるのが目的。超えたぶんだけ SHM 帯が カーネル帯域 0x1FFFFF を突き抜ける
 
 <!-- /生成: tools/gen_memmap.py -->
 

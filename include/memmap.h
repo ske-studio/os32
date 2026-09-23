@@ -38,7 +38,9 @@
 /* ====================================================================== */
 extern u32 __bss_end;
 #define KHEAP_BASE            ((((u32)&__bss_end) + 0xFFF) & ~0xFFFUL)
-#define KHEAP_SIZE            0x050000UL  /* カーネルヒープサイズ (320KB) */
+#define KHEAP_SIZE            0x030000UL  /* カーネルヒープサイズ (192KB。2026-09-23 に 320KB から。実測の使用は
+                                                * FD 起動で 3.6KB、kmalloc_peak_bytes で根拠を取る。浮いた 128KB は
+                                                * MEM_KERNEL_IMAGE_MAX へ。docs/tasks/memory/ の予算の節) */
 
 /* ====================================================================== */
 /*  ページング保護範囲                                                      */
