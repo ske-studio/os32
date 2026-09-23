@@ -144,11 +144,7 @@ __sqlite_end   = 0x2BC060   (SQLite 本体 752.1KB)
   アプリ固有 PDE (0x400000 から 4MB 単位) は最大 0xC00000 まで伸びる。
 ```
 
-**地図の矛盾 (1 件)** — `python3 tools/gen_memmap.py --check` が同じものを出す。
-
-- 写しのずれ: build/os32.ld = 0x75000 だが memmap.h の MEM_KERNEL_IMAGE_MAX は 0x95000
-
-直し方は票 [`tasks/memory/TASK_KSTACK_USER.md`](tasks/memory/TASK_KSTACK_USER.md) §4 の 4。
+**地図の矛盾: 0 件** (重なりも逆転も無い。`--check` が毎回確かめる)
 
 **カーネル本体の予算**: 596KB 中 461.8KB を使用 (残り 134.2KB)。
 
