@@ -42,7 +42,12 @@ void _start(void)
     CHECK(!paging_is_present(0xFFFFFFFFUL));
     CHECK(paging_set_page(0xFFFFF000UL, 0, PAGE_RW) == -1);
     CHECK(used == 0);
-    CHECK(sizeof(pt_raw) == 8 * PAGE_SIZE + PAGE_SIZE - 1);
+    /* 2026-09-23: aligned(4096) にして +4095 の捨てを無くした (TASK_MEMMAP_V3 2-3)。
+     * 大きさは表そのもの、先頭は 4KB 境界。 */
+    CHECK(sizeof(pt_raw) == 8 * PAGE_SIZE);
+    CHECK(((unsigned long)(void *)pt_raw & (PAGE_SIZE - 1)) == 0);
+    CHECK(sizeof(pd_raw) == PAGE_SIZE);
+    CHECK(((unsigned long)(void *)pd_raw & (PAGE_SIZE - 1)) == 0);
     pgalloc_init(16384);
     CHECK(paging_map_phys(0xFFFFF000UL, 0xFFFFF000UL, 1, PAGE_RW | PTE_PCD) == 0);
     CHECK(paging_is_present(0xFFFFFFFFUL));
