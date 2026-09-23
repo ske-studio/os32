@@ -31,7 +31,8 @@ int vfs_chdir(const char *path)
 {
     char resolved[VFS_MAX_PATH];
     int kind;
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    kind = vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (kind != VFS_OK) return kind;
 
     /* 実在するディレクトリだけ受け付ける。以前は検証なしに cwd を書き換えて
      * いたので `cd /nonexistent` が成功して見え、以後の相対パスが全部壊れた */
@@ -50,35 +51,59 @@ int vfs_chdir(const char *path)
     return VFS_OK;
 }
 
-/* パスの正規化: 相対パス→絶対パス */
-void vfs_resolve_path(const char *input, char *output, int out_size)
+/* パスの正規化: 相対パス→絶対パス。
+ *
+ * **切り詰めずに断る** (票 TASK_VFS_FD_PATH 方針 v2 の 8 / v3 の追記)。
+ * 以前は 256 バイトの作業領域へ kstrncpy / kstrncat で**切り詰めてから**
+ * 正規化し、要素表 (VFS_MAX_PATH_DEPTH) から溢れた要素は黙って捨てていた。
+ * `/` + `a`×254 + `X` と `…Y` が同じ名前に解決され、書き込み・削除・rename が
+ * 別の対象へ作用し得た。深い `mkdir -p` は捨てた要素の手前を作り直して
+ * EXIST で成功に見えた。
+ *
+ *   - 入力は**コピーの前に**長さを見る (NUL 抜き VFS_MAX_PATH - 1 まで)
+ *   - 相対パスは cwd + "/" + 入力を大きい作業領域で正規化してから、**結果**の
+ *     長さで判定する (cwd が長くても `..` で戻る入力は通る)
+ *   - 要素表は積み上げの時点で見る — 32 個を保持しているところへ 33 個目を
+ *     積もうとしたら断る (正規化後の数ではない。溢れた後の `..` が保持済みの
+ *     要素を消して別の名前になるのを防ぐ)
+ *   - 要素 1 つが 255 バイトを超えるのも断る */
+#define VFS_NAME_MAX 255
+/* cwd (NUL 込み VFS_MAX_PATH) + "/" + 入力 (NUL 込み VFS_MAX_PATH)。VFS は
+ * 非再入 (呼び手の約束) なので static に置き、カーネルスタックを使わない。 */
+static char resolve_tmp[VFS_MAX_PATH * 2 + 1];
+
+int vfs_resolve_path(const char *input, char *output, int out_size)
 {
-    char tmp[VFS_MAX_PATH];
+    char *tmp = resolve_tmp;
     const char *parts[VFS_MAX_PATH_DEPTH];
+    int part_len[VFS_MAX_PATH_DEPTH];
     int num_parts = 0;
-    int i, p, o;
+    int i, p, o, in_len, t;
 
     /* out_size<=0 の u32 キャストは巨大長に化ける */
-    if (!output || out_size <= 0) return;
+    if (!output || out_size <= 0) return VFS_ERR_INVAL;
+    output[0] = '\0';
 
     if (!input || !input[0]) {
+        if ((int)kstrlen(cwd) + 1 > out_size) return VFS_ERR_NAMETOOLONG;
         kstrncpy(output, cwd, (u32)out_size);
-        return;
+        return VFS_OK;
     }
 
-    if (input[0] == '/') {
-        kstrncpy(tmp, input, VFS_MAX_PATH);
-    } else {
-        /* cwd + "/" + input を安全に結合 */
-        kstrncpy(tmp, cwd, VFS_MAX_PATH);
-        {
-            int len = (int)kstrlen(tmp);
-            if (len > 0 && tmp[len - 1] != '/') {
-                kstrncat(tmp, "/", VFS_MAX_PATH);
-            }
-        }
-        kstrncat(tmp, input, VFS_MAX_PATH);
+    /* コピーの前に長さを見る。上限まで数えて NUL が無ければ断る
+     * (上限の先を読まない) */
+    for (in_len = 0; in_len < VFS_MAX_PATH && input[in_len]; in_len++) { }
+    if (in_len >= VFS_MAX_PATH) return VFS_ERR_NAMETOOLONG;
+
+    t = 0;
+    if (input[0] != '/') {
+        /* cwd + "/" + input。作業領域は両方の最大が入る大きさ */
+        const char *c = cwd;
+        while (*c) tmp[t++] = *c++;
+        if (t > 0 && tmp[t - 1] != '/') tmp[t++] = '/';
     }
+    for (i = 0; i < in_len; i++) tmp[t++] = input[i];
+    tmp[t] = '\0';
 
     p = 0;
     while (tmp[p] != '\0') {
@@ -93,31 +118,59 @@ void vfs_resolve_path(const char *input, char *output, int out_size)
         len = p - start;
         c = tmp[p];
         tmp[p] = '\0';
-        
+
         if (len == 1 && tmp[start] == '.') {
             /* nop */
         } else if (len == 2 && tmp[start] == '.' && tmp[start+1] == '.') {
             if (num_parts > 0) num_parts--;
         } else {
-            if (num_parts < VFS_MAX_PATH_DEPTH) parts[num_parts++] = &tmp[start];
+            if (len > VFS_NAME_MAX) return VFS_ERR_NAMETOOLONG;
+            /* 33 個目を積もうとした時点で断る (黙って捨てない) */
+            if (num_parts >= VFS_MAX_PATH_DEPTH) return VFS_ERR_NAMETOOLONG;
+            parts[num_parts] = &tmp[start];
+            part_len[num_parts] = len;
+            num_parts++;
         }
-        
+
         if (c == '\0') break;
         p++;
     }
 
+    /* 組み立ても切り詰めない。溢れるなら output を空にして断る */
+    o = 1;
+    for (i = 0; i < num_parts; i++) {
+        o += part_len[i] + ((i < num_parts - 1) ? 1 : 0);
+    }
+    if (o + 1 > out_size) return VFS_ERR_NAMETOOLONG;
+
     output[0] = '/';
     o = 1;
     for (i = 0; i < num_parts; i++) {
-        int j = 0;
-        while (parts[i][j] && o < out_size - 1) {
-            output[o++] = parts[i][j++];
-        }
-        if (i < num_parts - 1 && o < out_size - 1) {
-            output[o++] = '/';
-        }
+        int j;
+        for (j = 0; j < part_len[i]; j++) output[o++] = parts[i][j];
+        if (i < num_parts - 1) output[o++] = '/';
     }
     output[o] = '\0';
+    return VFS_OK;
+}
+
+/* 末尾の "/" を落とした後の最終要素が "." か ".." か (票 TASK_VFS_FD_PATH
+ * 方針 v2 の 10)。rmdir / rename (両引数) / unlink / mkdir は正規化の**前**に
+ * これを見て INVAL で断る。正規化すると `rmdir a/.` が `a` 自体を消し、
+ * `mkdir a/..` が親の EXIST になる — POSIX も最終要素の `.` / `..` は断る。
+ * 上限を超える長さは見ない (resolver が NAMETOOLONG で断る)。 */
+static int vfs_last_is_dot(const char *path)
+{
+    int n, s, len;
+    if (!path) return 0;
+    for (n = 0; n < VFS_MAX_PATH && path[n]; n++) { }
+    if (n >= VFS_MAX_PATH) return 0;
+    while (n > 0 && path[n - 1] == '/') n--;
+    s = n;
+    while (s > 0 && path[s - 1] != '/') s--;
+    len = n - s;
+    return (len == 1 && path[s] == '.') ||
+           (len == 2 && path[s] == '.' && path[s + 1] == '.');
 }
 
 /* ======== FSプラグイン登録 ======== */
@@ -261,6 +314,12 @@ int vfs_mount(const char *prefix, const char *dev_name, const char *fstype)
     VfsOps *ops = (VfsOps *)0;
     void *fs_ctx;
 
+    if (!prefix || !dev_name || !fstype) return VFS_ERR_INVAL;
+    /* prefix は切り詰めて登録しない (票 TASK_VFS_FD_PATH v3 の追記)。
+     * 切り詰めた prefix は別の場所にマウントされたことになる */
+    for (i = 0; i < VFS_MAX_PATH && prefix[i]; i++) { }
+    if (i >= VFS_MAX_PATH) return VFS_ERR_NAMETOOLONG;
+
     rc = vfs_dev_parse(dev_name, &dev_type, &dev_id);
     if (rc != VFS_OK) return VFS_ERR_INVAL;
 
@@ -313,6 +372,10 @@ void vfs_umount(const char *prefix)
     int i;
     for (i = 0; i < VFS_MAX_FS; i++) {
         if (mounts[i].in_use && kstrcmp(mounts[i].prefix, prefix) == 0) {
+            /* そのマウントの FD 全部に失効の印を付けてから fs_ctx を解放する
+             * (票 TASK_VFS_FD_PATH)。印を先に見るので、以後の read / write /
+             * fstat / seek が解放済みの fs_ctx を触らない。 */
+            vfs_fd_invalidate_mount(mounts[i].fs_ctx);
             mounts[i].ops->umount(mounts[i].fs_ctx);
             mounts[i].in_use = 0;
             mounts[i].fs_ctx = (void *)0;
@@ -354,7 +417,8 @@ int vfs_ls(const char *path, vfs_dir_cb cb, void *ctx)
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     void *fs_ctx;
     VfsOps *ops;
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    int rc = vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->list_dir) return VFS_ERR_NOMOUNT;
     return ops->list_dir(fs_ctx, rel_path, cb, ctx);
@@ -365,7 +429,8 @@ int vfs_read(const char *path, void *buf, u32 max_size)
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     void *fs_ctx;
     VfsOps *ops;
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    int rc = vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->read_file) return VFS_ERR_NOMOUNT;
     return ops->read_file(fs_ctx, rel_path, buf, max_size);
@@ -376,11 +441,30 @@ int vfs_write(const char *path, const void *data, u32 size)
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     void *fs_ctx;
     VfsOps *ops;
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    int rc = vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->write_file) return VFS_ERR_NOMOUNT;
     if (vfs_rel_is_root(rel_path)) return VFS_ERR_ISDIR;
     return ops->write_file(fs_ctx, rel_path, data, size);
+}
+
+/* inode を持つ FS で、対象の inode を**操作の前に**取る (票 TASK_VFS_FD_PATH
+ * 方針 v3 の 2)。*has = 1 で *ino に番号。NOTFOUND は「無い」(*has = 0、
+ * VFS_OK)。それ以外の失敗はそのまま返し、呼び手は**操作をしない** — 取れない
+ * まま消すと、その実体を開いている FD に失効の印を付けられない。 */
+static int vfs_target_ino(VfsOps *ops, void *fs_ctx, const char *rel,
+                          int *has, u32 *ino)
+{
+    int rc;
+    *has = 0;
+    *ino = 0;
+    if (!ops->ino || !ops->ino->lookup) return VFS_OK;
+    rc = ops->ino->lookup(fs_ctx, rel, ino);
+    if (rc == VFS_ERR_NOTFOUND) return VFS_OK;
+    if (rc != VFS_OK) return rc;
+    *has = 1;
+    return VFS_OK;
 }
 
 int vfs_rm(const char *path)
@@ -388,11 +472,27 @@ int vfs_rm(const char *path)
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     void *fs_ctx;
     VfsOps *ops;
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    int rc, has_ino;
+    u32 ino;
+
+    if (vfs_last_is_dot(path)) return VFS_ERR_INVAL;
+    rc = vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->unlink) return VFS_ERR_NOMOUNT;
     if (vfs_rel_is_root(rel_path)) return VFS_ERR_ISDIR;
-    return ops->unlink(fs_ctx, rel_path);
+
+    rc = vfs_target_ino(ops, fs_ctx, rel_path, &has_ino, &ino);
+    if (rc != VFS_OK) return rc;
+    /* 使用中の loop イメージは消させない (幾何や D88 索引を持つので、
+     * 開き直しでは続けられない) */
+    if (vfs_fd_pinned_busy(fs_ctx, has_ino, ino, rel_path)) return VFS_ERR_BUSY;
+
+    rc = ops->unlink(fs_ctx, rel_path);
+    /* **成否を問わず**印を付ける (票 v3 の 2 / Codex A-R2-2)。名前を消した後の
+     * 失敗でも旧実体は解放されうる。余分に STALE にするほうへ倒す。 */
+    if (has_ino) vfs_fd_invalidate_ino(fs_ctx, ino);
+    return rc;
 }
 
 int vfs_rename(const char *oldpath, const char *newpath)
@@ -401,9 +501,16 @@ int vfs_rename(const char *oldpath, const char *newpath)
     char new_abs[VFS_MAX_PATH], new_rel[VFS_MAX_PATH];
     void *old_ctx, *new_ctx;
     VfsOps *old_ops, *new_ops;
+    int rc, has_old, has_new;
+    u32 old_ino, new_ino;
 
-    vfs_resolve_path(oldpath, old_abs, VFS_MAX_PATH);
-    vfs_resolve_path(newpath, new_abs, VFS_MAX_PATH);
+    /* 利用中による拒否・INVAL・NAMETOOLONG は**印を付ける前**に判定する
+     * (ラリー 3 の実装メモ)。印は FS の操作に入った場合だけ。 */
+    if (vfs_last_is_dot(oldpath) || vfs_last_is_dot(newpath)) return VFS_ERR_INVAL;
+    rc = vfs_resolve_path(oldpath, old_abs, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
+    rc = vfs_resolve_path(newpath, new_abs, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
 
     old_ops = vfs_route(old_abs, old_rel, VFS_MAX_PATH, &old_ctx);
     new_ops = vfs_route(new_abs, new_rel, VFS_MAX_PATH, &new_ctx);
@@ -416,7 +523,32 @@ int vfs_rename(const char *oldpath, const char *newpath)
     if (!old_ops->rename) return VFS_ERR_INVAL;
     /* マウント点そのものは付け替えられないし、付け替え先にもならない */
     if (vfs_rel_is_root(old_rel) || vfs_rel_is_root(new_rel)) return VFS_ERR_INVAL;
-    return old_ops->rename(old_ctx, old_rel, new_rel);
+
+    /* ユーザー決裁 ① (ラリー 3、A-R3-1): 開いている SQLite DB とその
+     * ジャーナル、およびそれらの祖先ディレクトリは付け替えさせない。SQLite は
+     * ジャーナルを**開いた時の名前**で作り・消すので、付け替えるとジャーナルが
+     * 別の場所に残る / 見つからない (hot journal を取り逃がす)。 */
+    if (vfs_fd_rename_busy(old_ctx, old_rel, new_rel)) return VFS_ERR_BUSY;
+
+    /* 置き換えられる宛先の inode を操作の前に取る。宛先の NOTFOUND は正常。
+     * 元の inode も取る — rename(f,f) や同じ inode のハードリンク間では宛先の
+     * 実体は解放されないので印を付けない。 */
+    rc = vfs_target_ino(old_ops, old_ctx, old_rel, &has_old, &old_ino);
+    if (rc != VFS_OK) return rc;
+    rc = vfs_target_ino(old_ops, old_ctx, new_rel, &has_new, &new_ino);
+    if (rc != VFS_OK) return rc;
+    if (has_new && has_old && old_ino == new_ino) has_new = 0;
+    /* 使用中の loop イメージを置き換えさせない。inode を持たない FS の FD は
+     * パスで動くので、元の名前 (と祖先) が動くのも断る */
+    if (vfs_fd_pinned_busy(old_ctx, has_new, new_ino, new_rel)) return VFS_ERR_BUSY;
+    if (!old_ops->ino && vfs_fd_pinned_busy(old_ctx, 0, 0, old_rel))
+        return VFS_ERR_BUSY;
+
+    rc = old_ops->rename(old_ctx, old_rel, new_rel);
+    /* 成否を問わず、置き換えられうる宛先の FD に印を付ける (公開後の失敗でも
+     * 旧宛先は解放されうる、Codex A-R2-2) */
+    if (has_new && has_old) vfs_fd_invalidate_ino(old_ctx, new_ino);
+    return rc;
 }
 
 int vfs_mkdir(const char *path)
@@ -424,7 +556,10 @@ int vfs_mkdir(const char *path)
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     void *fs_ctx;
     VfsOps *ops;
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    int rc;
+    if (vfs_last_is_dot(path)) return VFS_ERR_INVAL;
+    rc = vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->mkdir) return VFS_ERR_NOMOUNT;
     /* マウント点 (= FS のルート) は必ず在る。POSIX の mkdir("/") と同じ EXIST。
@@ -441,10 +576,15 @@ int vfs_rmdir(const char *path)
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     void *fs_ctx;
     VfsOps *ops;
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    int rc;
+    /* `rmdir a/.` を正規化すると a 自体を消す。正規化の前に断る */
+    if (vfs_last_is_dot(path)) return VFS_ERR_INVAL;
+    rc = vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->rmdir) return VFS_ERR_NOMOUNT;
     if (vfs_rel_is_root(rel_path)) return VFS_ERR_INVAL;   /* マウント中のルート */
+    /* ディレクトリは open できないので失効させる FD は無い */
     return ops->rmdir(fs_ctx, rel_path);
 }
 
@@ -502,7 +642,7 @@ u32 vfs_path_dev(const char *path)
     char resolved[VFS_MAX_PATH];
 
     if (!path) return 0U;
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (vfs_resolve_path(path, resolved, VFS_MAX_PATH) != VFS_OK) return 0U;
     return vfs_dev_of_resolved(resolved);
 }
 
@@ -525,7 +665,8 @@ int vfs_stat(const char *path, OS32_Stat *buf)
 
     if (!buf) return VFS_ERR_INVAL;
 
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    rc = vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
 
     if (!ops) return VFS_ERR_NOMOUNT;
@@ -566,11 +707,13 @@ int vfs_set_mtime(const char *path, os_time_t mtime)
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     void *fs_ctx;
     VfsOps *ops;
+    int rc;
 
     if (!path || !path[0]) return VFS_ERR_INVAL;
     if (mtime == 0) return VFS_ERR_INVAL;      /* 0 = 不明。書かせない */
 
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    rc = vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops) return VFS_ERR_NOMOUNT;
     if (!ops->set_mtime) return VFS_ERR_NOSYS;
@@ -591,7 +734,8 @@ int vfs_path_kind(const char *path)
     OS32_Stat st;
     int rc;
 
-    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    rc = vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    if (rc != VFS_OK) return rc;
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops) return VFS_ERR_NOMOUNT;
 

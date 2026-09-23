@@ -392,6 +392,11 @@ typedef struct {
  * 変えない**ので KAPI 版数は据え置き。KAPI_SPEC §3-2 の予約を 1 つ進め、
  * ネットワークは -16 以降へずらした (ネットワーク側は番号を 1 つも使っていない)。 */
 #define OS32_ERR_ROFS      -15  /* 書き込みを受け付けない (FS がエラー状態、再マウントまで) */
+/* 票 TASK_VFS_FD_PATH (2026-09-24)。**番号の追加だけで構造体・スロットは変えない**
+ * ので KAPI 版数は据え置き。KAPI_SPEC §3-2 の予約を 2 つ進め、ネットワークは
+ * -18 以降へずらした (ネットワーク側は番号を 1 つも使っていない)。 */
+#define OS32_ERR_NAMETOOLONG -16 /* パスが長すぎる / 深すぎる (切り詰めずに断る) */
+#define OS32_ERR_BUSY      -17  /* 使用中 (開いている SQLite DB の rename、使用中の loop イメージ) */
 
 /* ファイル種別 (OS32_FILE_TYPE_*) */
 #define OS32_FILE_TYPE_FILE 1

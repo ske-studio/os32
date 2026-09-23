@@ -357,6 +357,10 @@ static int os32VfsOpen(sqlite3_vfs *pVfs, const char *zName,
     } else {
         /* Legacy default retained until all connection boundaries migrate. */
         p->fd = vfs_open(zName, oflags);
+        /* 開いている DB / ジャーナルの rename は BUSY で断る (票
+         * TASK_VFS_FD_PATH のユーザー決裁 ①)。group の FD (vfs_open_sqlite)
+         * には最初から付いている。旧来の経路 (IME 辞書の常駐接続など) にも付ける */
+        if (p->fd >= 0) (void)vfs_fd_set_sqlite_db(p->fd);
     }
     if (p->fd < 0) return SQLITE_CANTOPEN;
 

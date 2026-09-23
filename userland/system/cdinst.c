@@ -281,6 +281,15 @@ static int install_package_hd(const char *path, const char *label)
     api->kprintf(COL_NORMAL, " (%d files, v%d)", info.entry_count,
                  info.header.version);
 
+    /* 前置 (/hd0) で溢れる項目があれば**展開を始める前に**断る (票
+     * TASK_VFS_FD_PATH v3 の追記)。以前は溢れた分を切り詰め、後のファイルが
+     * 前のファイルを上書きし得た。外部で作られた PKG への消費側の保護。 */
+    i = pkg_first_overflow(&info, 4);   /* strlen("/hd0") */
+    if (i >= 0) {
+        api->kprintf(COL_RED, " PATH TOO LONG: %s\n", info.entries[i].path);
+        return PKG_ERR_TOOLONG;
+    }
+
     /* パスに /hd0 プレフィックスを追加 */
     for (i = 0; i < info.entry_count; i++) {
         char orig[PKG_MAX_PATH];

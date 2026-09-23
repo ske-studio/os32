@@ -396,10 +396,12 @@ static void case_vfs(void)
     REFUSED_AS(vfs_mkdir("/hd0"), VFS_ERR_EXIST);
     REFUSED_AS(vfs_mkdir("/hd0/"), VFS_ERR_EXIST);
     REFUSED_AS(vfs_mkdir("/hd0//"), VFS_ERR_EXIST);
-    REFUSED_AS(vfs_mkdir("/hd0/."), VFS_ERR_EXIST);
-    REFUSED_AS(vfs_mkdir("/hd0/tmp/.."), VFS_ERR_EXIST);
+    /* 最終要素が "." / ".." の mkdir は正規化の前に INVAL (票
+     * TASK_VFS_FD_PATH 方針 v2 の 10。以前は正規化してマウント点の EXIST) */
+    REFUSED_AS(vfs_mkdir("/hd0/."), VFS_ERR_INVAL);
+    REFUSED_AS(vfs_mkdir("/hd0/tmp/.."), VFS_ERR_INVAL);
     CHECK(vfs_chdir("/hd0") == VFS_OK);
-    REFUSED_AS(vfs_mkdir("."), VFS_ERR_EXIST);
+    REFUSED_AS(vfs_mkdir("."), VFS_ERR_INVAL);
     REFUSED_AS(vfs_mkdir(""), VFS_ERR_EXIST);
     kstrncpy(cwd, "/", VFS_MAX_PATH);   /* "/" には何も載っていない */
 
@@ -445,8 +447,8 @@ static void case_root(void)
     disk_setup("/");
     REFUSED_AS(vfs_mkdir("/"), VFS_ERR_EXIST);
     REFUSED_AS(vfs_mkdir("//"), VFS_ERR_EXIST);
-    REFUSED_AS(vfs_mkdir("/."), VFS_ERR_EXIST);
-    REFUSED_AS(vfs_mkdir("/.."), VFS_ERR_EXIST);
+    REFUSED_AS(vfs_mkdir("/."), VFS_ERR_INVAL);    /* 票 TASK_VFS_FD_PATH */
+    REFUSED_AS(vfs_mkdir("/.."), VFS_ERR_INVAL);
     REFUSED_AS(vfs_mkdir(""), VFS_ERR_EXIST);
     REFUSED(vfs_write("/", "x", 1));
     REFUSED(vfs_rmdir("/"));
@@ -626,7 +628,7 @@ static void case_synth(void)
     s_calls = 0;
     CHECK(vfs_mkdir("/syn") == VFS_ERR_EXIST);
     CHECK(vfs_mkdir("/syn/") == VFS_ERR_EXIST);
-    CHECK(vfs_mkdir("/syn/.") == VFS_ERR_EXIST);
+    CHECK(vfs_mkdir("/syn/.") == VFS_ERR_INVAL);   /* 票 TASK_VFS_FD_PATH */
     CHECK(vfs_rmdir("/syn") < 0);
     CHECK(vfs_rm("/syn") < 0);
     CHECK(vfs_write("/syn", "x", 1) < 0);

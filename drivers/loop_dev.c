@@ -882,6 +882,9 @@ int loop_dev_attach_fd(int fd, int slot, int fmt)
     /* デバイス活性化 */
     s->fd = fd;
     s->in_use = 1;
+    /* 使用中のイメージの置き換え・削除を VFS に断らせる (票 TASK_VFS_FD_PATH
+     * 方針 v3 の 6)。幾何や D88 索引を持つので、開き直しでは続けられない */
+    (void)vfs_fd_set_pinned(fd, 1);
     s->owns_fd = 0;  /* fd は呼び出し側が管理 */
     s->dev.sect_size   = (int)s->lba_sect_size;
     s->dev.total_sects = s->total_lba;
@@ -956,6 +959,8 @@ void loop_dev_detach(int slot)
     s = &loop_slots[slot];
     if (!s->in_use) return;
 
+    /* 使用中の印を外す (attach_fd 経由の FD は呼び出し側に残る) */
+    if (s->fd >= 0) (void)vfs_fd_set_pinned(s->fd, 0);
     /* owns_fd の場合のみ close (attach_fd 経由では呼び出し側が管理) */
     if (s->fd >= 0 && s->owns_fd)
         vfs_close(s->fd);

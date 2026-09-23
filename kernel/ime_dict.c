@@ -58,6 +58,8 @@ static const char SQL_LEARN[] =
 /*  公開API                                                                  */
 /* ======================================================================== */
 
+static void ime_dict_close(IME_Dict *dict);
+
 int ime_dict_open(IME_Dict *dict, const char *path)
 {
     sqlite3 *db;
@@ -65,6 +67,10 @@ int ime_dict_open(IME_Dict *dict, const char *path)
     int rc;
 
     kmemset(dict, 0, sizeof(IME_Dict));
+    /* 開き直しに使う名前。収まらなければ覚えない (= 開き直さない)。
+     * 切り詰めた名前で別の DB を開き直さない */
+    if (path && kstrlen(path) < sizeof(dict->path))
+        kstrncpy(dict->path, path, sizeof(dict->path));
 
     /* DBファイルを読み書き可能で開く (ユーザー辞書のため) */
     rc = sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, (const char *)0);
@@ -135,8 +141,80 @@ int ime_dict_open(IME_Dict *dict, const char *path)
     return 0;
 }
 
+/* ======================================================================== */
+/*  常駐接続の開き直し (票 TASK_VFS_FD_PATH 方針 v3 の 6 / ラリー 3)          */
+/*                                                                          */
+/*  辞書の実体が置き換えられる (unlink・置き換え rename、hsync の差し替え) と  */
+/*  VFS は開いていた FD に失効の印を付け、以後の読みは OS32_ERR_STALE になる   */
+/*  (SQLite には SQLITE_IOERR として届く)。そのときは **SQLite 接続ごと**     */
+/*  開き直す — ステートメント 3 本の finalize → sqlite3_close → open →     */
+/*  prepare → dict_fd_protect (ime_dict_close + ime_dict_open)。              */
+/*                                                                          */
+/*  - 失効 1 回につき 1 回。新しい FD はまた失効しうる (次の置き換え) ので、   */
+/*    印の付いた FD を見たら開き直す。失効を伴わない I/O エラーは 1 回だけ   */
+/*    (io_retried、成功した検索で戻す)。                                     */
+/*  - `<名前>-journal` が中身を持って残っていたら (hot journal) **開かない**。 */
+/*    辞書無しで動き、画面に出す。前の接続の途中の書き込みを、新しい実体に    */
+/*    巻き戻させない。                                                       */
+/*  戻り値: 1 = 開き直した (呼び手は 1 回だけやり直してよい) / 0 = しない     */
+/* ======================================================================== */
+static int dict_recover(IME_Dict *dict)
+{
+    /* `<名前>-journal` を組み、stat の後で末尾を落として名前に戻す
+     * (ime_dict_open は dict を消してから名前を写すので、別に持つ) */
+    static char name[OS32_MAX_PATH];
+    OS32_Stat st;
+    int fd, stale, rc;
+    u32 n;
+
+    if (!dict || !dict->db || !dict->path[0]) return 0;
+    fd = os32_sqlite_db_fd(dict->db);
+    stale = (fd >= 0) ? vfs_fd_is_stale(fd) : 0;
+    if (!stale && dict->io_retried) return 0;
+
+    n = kstrlen(dict->path);
+    if (n + 9u > sizeof(name)) return 0;   /* "-journal" + NUL */
+    kstrncpy(name, dict->path, sizeof(name));
+    kstrncat(name, "-journal", sizeof(name));
+
+    ime_dict_close(dict);
+    rc = vfs_stat(name, &st);
+    if (rc != OS32_ERR_NOTFOUND && !(rc == 0 && st.st_size == 0)) {
+        /* hot journal (か、有無を判定できない)。開かない */
+        kprintf(ATTR_RED, "IME: %s remains (rc=%d), dictionary disabled\r\n",
+                name, rc);
+        return 0;
+    }
+    name[n] = '\0';
+    if (ime_dict_open(dict, name) != 0) {
+        kprintf(ATTR_RED, "IME: dictionary reopen failed, running without it\r\n");
+        return 0;
+    }
+    /* 失効による開き直しは印を持ち越さない。I/O エラーによる開き直しは 1 回 */
+    dict->io_retried = stale ? 0 : 1;
+    serial_puts("IME: dictionary reopened\r\n");
+    return 1;
+}
+
+static int ime_dict_search_once(IME_Dict *dict, const char *yomi,
+                                IME_Result *results, int max_results,
+                                int *io_error);
+
 int ime_dict_search(IME_Dict *dict, const char *yomi,
                     IME_Result *results, int max_results)
+{
+    int io_error = 0;
+    int n = ime_dict_search_once(dict, yomi, results, max_results, &io_error);
+    if (io_error && dict_recover(dict)) {
+        n = ime_dict_search_once(dict, yomi, results, max_results, &io_error);
+    }
+    if (n > 0 && dict) dict->io_retried = 0;
+    return n;
+}
+
+static int ime_dict_search_once(IME_Dict *dict, const char *yomi,
+                                IME_Result *results, int max_results,
+                                int *io_error)
 {
     sqlite3_stmt *stmt;
     int yomi_chars;
@@ -145,6 +223,7 @@ int ime_dict_search(IME_Dict *dict, const char *yomi,
     const char *kanji_text;
     int copy_len;
 
+    *io_error = 0;
     if (!dict || !dict->db || !yomi || !results || max_results <= 0)
         return 0;
     if (yomi[0] == '\0') return 0;
@@ -205,6 +284,8 @@ int ime_dict_search(IME_Dict *dict, const char *yomi,
 
         /* 診断: step がエラーで終わった場合のみ表示 (SQLITE_DONE は正常) */
         if (count == 0 && step_rc != SQLITE_DONE) {
+            /* 読めなかった (FD の失効を含む) — 呼び手が開き直しを判断する */
+            if ((step_rc & 0xFF) == SQLITE_IOERR) *io_error = 1;
             kprintf(ATTR_RED,
                     "IME: search 0hit len=%d chars=%d step=%d err=%d ext=%d %s\r\n",
                     yomi_len, yomi_chars, step_rc,
@@ -233,6 +314,16 @@ void ime_dict_learn(IME_Dict *dict, const char *yomi, const char *kanji)
     sqlite3_bind_int(stmt, 3, 0 /* sys_time() is not easily available here, use 0 for now */);
 
     rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE && (rc & 0xFF) == SQLITE_IOERR && dict_recover(dict) &&
+        dict->learn_stmt) {
+        /* 開き直した接続で 1 回だけやり直す */
+        stmt = (sqlite3_stmt *)dict->learn_stmt;
+        sqlite3_reset(stmt);
+        sqlite3_bind_text(stmt, 1, yomi, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, kanji, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 3, 0);
+        rc = sqlite3_step(stmt);
+    }
     if (rc != SQLITE_DONE) {
         kprintf(ATTR_RED, "IME: Learn failed (rc=%d)\r\n", rc);
     }

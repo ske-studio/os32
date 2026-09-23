@@ -69,6 +69,9 @@ int ext2_read_stream(Ext2Ctx *ctx, u32 ino, void *buf, u32 size, u32 offset)
 
     ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
+    /* 通常ファイル以外は読まない (票 TASK_VFS_FD_PATH の最後の砦)。
+     * ディレクトリのブロックをファイルの中身として返さない。 */
+    if ((inode.mode & EXT2_S_IFMT) != EXT2_S_IFREG) return EXT2_ERR_ISDIR;
 
     if (offset >= inode.size) return 0;
     remaining = inode.size - offset;
@@ -323,6 +326,10 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
 
     ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
+    /* 通常ファイル以外へは書かない (票 TASK_VFS_FD_PATH 欠陥 1: 開いた FD の
+     * 書き込みが、同じ名前に作り直したディレクトリのブロックを上書きした)。
+     * FD の失効 (VFS) が無い経路・将来の FS の呼び手に対する最後の砦。 */
+    if ((inode.mode & EXT2_S_IFMT) != EXT2_S_IFREG) return EXT2_ERR_ISDIR;
 
     now = ext2_current_time();
     inode.mtime = now;

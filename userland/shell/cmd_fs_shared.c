@@ -191,6 +191,9 @@ const char *fs_strerror(int rc)
     case OS32_ERR_NOTEMPTY: return "Directory not empty";
     case OS32_ERR_ISDIR:    return "Is a directory";
     case OS32_ERR_INVAL:    return "Invalid argument";
+    case OS32_ERR_STALE:    return "Stale file handle";
+    case OS32_ERR_NAMETOOLONG: return "File name too long";
+    case OS32_ERR_BUSY:     return "Device or resource busy";
     default:                return "Unknown error";
     }
 }

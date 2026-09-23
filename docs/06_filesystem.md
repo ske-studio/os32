@@ -48,6 +48,35 @@ FDD ブート (root = FAT) で `db_open_existing` が落ちていた。
 **型の検査は VFS 側で行う**: `vfs_open` はディレクトリを開くことを拒否し、
 `vfs_chdir` はディレクトリ以外を拒否する。これは FS ドライバ内部の型検査を禁止するものではない。
 
+#### FD の同一性と失効 (票 TASK_VFS_FD_PATH)
+
+- **ext2 の FD は open 時の inode で読み書きする** (`VfsOps.ino`、任意実装で ext2 だけ)。
+  read / write / fstat / `O_TRUNC` はパスを引き直さないので、rename・親の rename の後も同じ実体を指す。
+  inode が取れなければ open は失敗する (`O_CREAT` で作った後なら作ったものを消す)。
+  FAT / HostDrv / ISO の FD は従来どおりパスで動く (ここの保証は ext2 だけ)。
+- **失効**: `vfs_rm` と置き換え `vfs_rename` の宛先は、対象の inode を**操作の前に**取り
+  (NOTFOUND 以外で取れなければ操作しない)、FS の操作に入ったら**成否を問わず**同じ inode の FD に
+  印を付ける。`rename(f,f)` と同じ inode のハードリンク間は付けない。`vfs_umount` はそのマウントの
+  全 FD に印を付けてから fs_ctx を解放する。印の付いた FD の read / write / fstat / seek は
+  **`OS32_ERR_STALE`**、close (`vfs_close_sqlite` も) は通る。
+- **使用中** (`OS32_ERR_BUSY`): 開いている SQLite の DB (`vfs_open_sqlite` の FD と、旧来の
+  vfs_open 経路で `vfs_fd_set_sqlite_db` を付けた FD) とそのジャーナル `<名前>-journal`、それらの
+  祖先ディレクトリは rename できない (元でも宛先でも)。loop デバイスが使用中のイメージ
+  (`vfs_fd_set_pinned`) は unlink・置き換えできない。どちらも印を付ける前に断る。
+- 最後の砦: `ext2_read_stream` / `ext2_write_stream` / 切り詰めは通常ファイル以外を `ISDIR` で断る。
+
+#### パスの長さと最終要素 (票 TASK_VFS_FD_PATH)
+
+- `vfs_resolve_path` は **切り詰めずに断る** (int を返す)。入力が NUL 抜き 255 バイトを超える、
+  正規化の途中で要素が 32 個を超えて積まれる (33 個目で断る — 正規化後の数ではない)、要素 1 つが
+  255 バイトを超える、結果が器に収まらない — どれも **`OS32_ERR_NAMETOOLONG`**。相対パスは
+  cwd + "/" + 入力を大きい作業領域で正規化してから結果で判定する。
+  切り詰めていた入口 (exec のコマンド名と `/usr/bin/` 等の連結、`kapi_db_open`、`vfs_mount` の
+  prefix、`sys_switch_shell`) も断るようにした。
+- rmdir / rename (両引数) / unlink / mkdir は、末尾の `/` を落とした後の**最終要素が `.` / `..`**
+  なら正規化の前に `OS32_ERR_INVAL` (`rmdir a/.` が a を消さない)。
+- マウント点への `O_CREAT|O_EXCL` は (NOSYS の判定の後で) `OS32_ERR_EXIST`。
+
 #### 排他的作成 `O_EXCL` (KAPI v53、票 H2)
 
 `sys_open` の `KAPI_O_EXCL` (`0x0400`) は「**無いことを確かめて作る**」を

@@ -811,7 +811,10 @@ static void path_len(void)
      * このとき **本体は存在する** ので、旧実装は BUSY_RECOVERY を返していた。 */
     longp[room] = 'a';
     longp[room + 1] = '\0';
-    make_db(longp, "CREATE TABLE t(x)");
+    /* 本体は fixture に直接置く。legacy db_open で作ると、SQLite が開く
+     * journal 名 (256B) を VFS が NAMETOOLONG で断るので書けない
+     * (票 TASK_VFS_FD_PATH 以降。以前は切り詰めて本体と衝突していた)。 */
+    CHECK(fixture_create(NULL, longp, "db", 2) == VFS_OK);
     CHECK(kapi_db_open_existing(longp, 0) == -1);
     CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
     CHECK(kapi_db_open_existing(longp, 1) == -1);
@@ -1064,9 +1067,9 @@ static void resolve_len(void)
      * path を 254B で切るので、ここは fixture に直接置く。 */
     CHECK(fixture_create(NULL, abs_name, "db", 2) == VFS_OK);
     resolve_cwd = cwd;
-    /* 模型でも本当に衝突することを見せる (これが旧実装の BUSY_RECOVERY の元) */
-    CHECK(fixture_find(host_resolve("f.db-journal"), 0) ==
-          fixture_find(abs_name, 0));
+    /* 旧実装はここで journal 名を切り詰めて本体と衝突させた (BUSY_RECOVERY
+     * の元)。票 TASK_VFS_FD_PATH 以降の resolver は切り詰めずに断る */
+    CHECK(host_resolve("f.db-journal")[0] == '\0');
     CHECK(kapi_db_open_existing("f.db", 0) == -1);
     CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);   /* BUSY_RECOVERY でない */
     CHECK(kapi_db_open_existing("f.db", 1) == -1);
@@ -1130,12 +1133,13 @@ static void resolve_truncate(void)
     make_db("/tmp/b", "CREATE TABLE decoy(x)");        /* 化けた先の DB */
     resolve_cwd = "/tmp";
 
-    /* 模型が実物と同じ順序 (連結 → 切り詰め → 正規化) であることを見せる。
-     * ここが `/tmp/b` にならなければ反例が成り立っていない。 */
+    /* 旧実装は連結 → 切り詰め → 正規化の順で `/tmp/b` に化けた。票
+     * TASK_VFS_FD_PATH 以降の resolver は大きい作業領域で正規化してから
+     * 長さを見るので、正しい名前 `/tmp/b.db` になる (化けない)。kapi_db は
+     * 入口の長さ検査 (db_resolve_fits) で従来どおり安全側に断る。 */
     resolved = host_resolve(evil);
     printf("TRUNCATE resolved=%s\n", resolved);
-    CHECK(!strcmp(resolved, "/tmp/b"));
-    CHECK(fixture_find(resolved, 0) != NULL);
+    CHECK(!strcmp(resolved, "/tmp/b.db"));
 
     /* 要求は `.../b.db`。解決名を信じると **別の DB** の RW handle を返す。 */
     CHECK(kapi_db_open_existing(evil, 1) == -1);
@@ -1190,12 +1194,11 @@ static void resolve_depth(void)
 
     make_db("/b.db", "CREATE TABLE decoy(x)");  /* 化けた先の DB */
 
-    /* 模型が実物と同じ捨て方をすることを見せる (ここが `/b.db` でなければ
-     * 反例が成り立っていない)。正しい正規化は `/a/b.db`。 */
+    /* 旧実装は溢れた成分を捨てて `/b.db` に化けた。票 TASK_VFS_FD_PATH
+     * 以降の resolver は 33 個目を積む時点で断る (NAMETOOLONG、結果は空)。 */
     resolved = host_resolve(evil);
     printf("DEPTH resolved=%s\n", resolved);
-    CHECK(!strcmp(resolved, "/b.db"));
-    CHECK(fixture_find(resolved, 0) != NULL);
+    CHECK(resolved[0] == '\0');
 
     /* 要求は `/a/.../b.db`。解決名を信じると **別の DB** の handle が返る。 */
     CHECK(kapi_db_open_existing(evil, 1) == -1);

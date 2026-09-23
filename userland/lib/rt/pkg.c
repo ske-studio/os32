@@ -144,28 +144,43 @@ int pkg_parse(KernelAPI *api, const char *path, PkgInfo *info)
         return PKG_ERR_MAGIC;
     }
 
-    /* ファイルテーブル読み込み */
+    /* ファイルテーブル読み込み。
+     * **過長の項目・項目数の超過・途中で切れた表は即エラー** (票
+     * TASK_VFS_FD_PATH 方針 v2 の 9)。以前は長いパスを PKG_MAX_PATH - 1 だけ
+     * 読んで残りを次の項目の頭として読み (読み位置がずれ)、129 項目目以降は
+     * 黙って捨て、切れた表は「そこまで」として成功を返していた。 */
     info->entry_count = 0;
-    while (info->entry_count < PKG_MAX_ENTRIES) {
+    for (;;) {
         u8 path_len;
-        PkgEntry *ent = &info->entries[info->entry_count];
+        PkgEntry *ent;
 
         /* パス長 (1バイト) */
         rd = api->sys_read(fd, &path_len, 1);
-        if (rd != 1) break;
+        if (rd != 1) { api->sys_close(fd); return PKG_ERR_CORRUPT; }
 
         /* 終端マーカー */
         if (path_len == 0) break;
 
+        /* 128 項目の後に終端以外が来たら超過 */
+        if (info->entry_count >= PKG_MAX_ENTRIES) {
+            api->sys_close(fd);
+            return PKG_ERR_CORRUPT;
+        }
+        /* NUL を足して収まらないパスは読まずに断る (切り詰めない) */
+        if (path_len >= PKG_MAX_PATH) {
+            api->sys_close(fd);
+            return PKG_ERR_TOOLONG;
+        }
+        ent = &info->entries[info->entry_count];
+
         /* パス文字列 */
-        if (path_len >= PKG_MAX_PATH) path_len = PKG_MAX_PATH - 1;
         rd = api->sys_read(fd, ent->path, path_len);
-        if (rd != (int)path_len) break;
+        if (rd != (int)path_len) { api->sys_close(fd); return PKG_ERR_CORRUPT; }
         ent->path[path_len] = '\0';
 
         /* サイズ (4バイト) + タイプ (1バイト) */
         rd = api->sys_read(fd, tbuf, 5);
-        if (rd != 5) break;
+        if (rd != 5) { api->sys_close(fd); return PKG_ERR_CORRUPT; }
 
         ent->size = (u32)tbuf[0] | ((u32)tbuf[1] << 8)
                   | ((u32)tbuf[2] << 16) | ((u32)tbuf[3] << 24);
@@ -175,6 +190,9 @@ int pkg_parse(KernelAPI *api, const char *path, PkgInfo *info)
     }
 
     api->sys_close(fd);
+
+    /* ヘッダの項目数と表が食い違うなら壊れている */
+    if ((int)info->header.entry_count != info->entry_count) return PKG_ERR_CORRUPT;
 
     /* データ部オフセットを計算して保存 */
     {
@@ -191,6 +209,17 @@ int pkg_parse(KernelAPI *api, const char *path, PkgInfo *info)
     }
 
     return PKG_OK;
+}
+
+int pkg_first_overflow(const PkgInfo *info, int prefix_len)
+{
+    int i;
+    for (i = 0; i < info->entry_count; i++) {
+        int n = 0;
+        while (info->entries[i].path[n]) n++;
+        if (prefix_len + n + 1 > PKG_MAX_PATH) return i;
+    }
+    return -1;
 }
 
 int pkg_extract(KernelAPI *api, const char *path, const PkgInfo *info)
@@ -233,15 +262,19 @@ int pkg_extract(KernelAPI *api, const char *path, const PkgInfo *info)
 
             ensure_parent_dirs(api, ent->path);
             wfd = api->sys_open(ent->path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
+            /* 失敗を飲み込まない (票 TASK_VFS_FD_PATH 方針 v2 の 9)。以前は
+             * 開けなくても書けなくても PKG_OK を返し、cdinst は「OK」と出した */
+            if (wfd < 0) { api->sys_close(fd); return PKG_ERR_IO; }
 
             while (remains > 0) {
                 int req = (remains > sizeof(tbuf)) ? sizeof(tbuf) : remains;
                 int r = api->sys_read(fd, tbuf, req);
                 if (r <= 0) break;
-                if (wfd >= 0) api->sys_write(wfd, tbuf, r);
+                if (api->sys_write(wfd, tbuf, r) != r) break;
                 remains -= r;
             }
-            if (wfd >= 0) api->sys_close(wfd);
+            api->sys_close(wfd);
+            if (remains > 0) { api->sys_close(fd); return PKG_ERR_IO; }
         }
         api->sys_close(fd);
         return PKG_OK;
@@ -288,17 +321,27 @@ int pkg_extract(KernelAPI *api, const char *path, const PkgInfo *info)
             int wfd;
 
             if (ent->type != PKG_TYPE_FILE) continue;
-            if (offset + ent->size > (u32)decoded) break;
+            if (offset + ent->size > (u32)decoded) {
+                api->mem_free(data_buf);
+                return PKG_ERR_CORRUPT;
+            }
 
             /* 親ディレクトリ作成 */
             ensure_parent_dirs(api, ent->path);
 
-            /* ファイル書き込み */
+            /* ファイル書き込み。失敗を飲み込まない */
             wfd = api->sys_open(ent->path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
-            if (wfd >= 0) {
-                api->sys_write(wfd, data_buf + offset, (int)ent->size);
-                api->sys_close(wfd);
+            if (wfd < 0) {
+                api->mem_free(data_buf);
+                return PKG_ERR_IO;
             }
+            if (api->sys_write(wfd, data_buf + offset, (int)ent->size)
+                    != (int)ent->size) {
+                api->sys_close(wfd);
+                api->mem_free(data_buf);
+                return PKG_ERR_IO;
+            }
+            api->sys_close(wfd);
 
             offset += ent->size;
         }
