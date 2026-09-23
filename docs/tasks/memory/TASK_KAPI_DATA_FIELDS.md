@@ -1,6 +1,6 @@
 # TASK_KAPI_DATA_FIELDS — KAPI のデータ欄 (sbrk_heap_limit / shm_base) が関数追加のたびにずれ、旧バイナリが黙って壊れる
 
-> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-23) / 状態: **方針レビュー (Codex + Opus、ラリー 1)** — ユーザー指示「別票を着手」(2026-09-24)。カーネル層 (KAPI / exec) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
+> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-23) / 状態: **v2 — ラリー 1 (Codex / Opus とも Request changes) を反映、ラリー 2 待ち** — ユーザー指示「別票を着手」(2026-09-24)。カーネル層 (KAPI / exec) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
 > 出所: キーボード修正 (bda95fa / f924275、KAPI v62) の実装レビュー。ラリー 1 で Codex が blocker、Opus が非 blocker と判定が分かれ、ラリー 2 で**両者とも「この commit 固有ではない構造問題、別票 (b)」で一致**。
 
 ## 事実
@@ -33,3 +33,13 @@ KAPI を上げたら `make clean` → `make all` → `make external` → **カ�
 6. 段 2 は KAPI 構造体の大きさが変わる ABI 変更なので、段 1 の検出が入った後に行う (旧バイナリは段 1 の検査で確実に断られる)。
 
 受入: ホスト試験 (mkos32x がヘッダ v3 を焼く、exec の判定関数: v2 → 断る、v3 で値違い → 断る、一致 → 通す)、NP21/W で旧バイナリ (v62 でビルドしたもの) が `rebuild required` で断られ、作り直したものは動く、shlib の検査、kselftest。
+
+## 方針 v2 (ラリー 1 を反映、段 1 / 段 2 を置き換える) — **検出と固定を同じ v63 で 1 回だけ** (両者の代案、全再ビルドを 2 回にしない)
+
+1. **固定配置**: 関数表の容量を **R = 300 スロット**予約し、データ欄 (`sbrk_heap_limit` / `shm_base`) を `8 + 4×300 = 0x4B8` に固定する。R は「トランポリンの 1 ページ (`sizeof(KernelAPI)` + スタブ 8B×R + 写し場 256B ≤ 4096 → 12R + 272 ≤ 4096 → R ≤ 318)」から決めた (Codex/Opus B-3)。スタブも R 本ぶんを前提にした STATIC_ASSERT、関数数が R を超えたら `sdk/gen_kapi.py` が生成を拒否する。**CPL=3 の表 `tbl[...]` の初期化・アプリ切替 (`exec/exec.c:945`)・起動時更新 (`:1870`) もすべて生成した固定オフセットを使う** (Codex B-4)。
+2. **照合のヘッダ v3**: OS32X ヘッダの末尾に `kapi_data_off` (u32)。値は包装時ではなく**コードが実際に使った配置**から取る (両者): crt0 / 生成ヘッダが ELF の `.os32_kapi_layout` セクションに `KAPI_DATA_FIELDS_OFF` を置き (Rust は os32api の static)、生成器はそれを読んでヘッダへ写す。無ければ生成器が失敗する。
+3. **生成器を 1 つに** (両者 B-1/B-2): 実際の生成器は `sdk/mkos32x.py` (SDK 配布 `$(OS32_SDK)/bin` のコピーを含む) と `tools/mkshlib.py`。ヘッダ生成を共通モジュールにし、shlib も v3。生成器は v3 のとき **`min_api_ver` を 63 以上**にする (旧カーネルが v3 バイナリを受け入れない、Codex B-2)。
+4. **照合する側**: exec (アプリ)、`kernel/shlib.c` (shlib、不一致なら shlib 無効 → gshell は CUI に落ちる旨を表示)、常駐シェル (不一致なら「`/sys` を作り直して配備せよ」と明示して停止 — 走らせても malloc が壊れる。FD 起動で直す)。v3 検査は version・`header_size`・実読込長が v3 全体を含むことも見る。
+5. **hsync**: 名札 (`.deploy/manifest.txt`) に `kapi=` を足し (format を上げる)、カーネルと違えば**既定で断る** (`--force` で越える)。最初の移行 (旧 hsync) は運用で補う。
+6. **移行手順** (08_build / ROADMAP に明記): `make clean && make clean-external` → `make all external fd144` → **NHD はエミュレータ停止中に一式** (カーネル・/sys・shlib・userland) → HostDrv だけ・`/sys` を外した hsync は移行完了ではない。配備順は「ユーザーランドを先、カーネルを後」。実機は FD / CD の入れ直し。CI の成果物は全媒体が v63。
+7. 受入: gen_kapi の容量拒否、ヘッダ v3 (C / Rust / shlib / 外部 repo) の値がセクションと一致、exec / shlib / 常駐シェルの判定関数 (v2 → 断る、v3 値違い → 断る、一致 → 通す)、NP21/W で v62 のバイナリが `rebuild required` で断られ作り直したものは動く、kselftest。
