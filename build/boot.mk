@@ -16,7 +16,7 @@ CFLAGS_BOOT = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie \
               -fno-stack-protector -nostdlib -mno-red-zone -Os -Wall -fcommon \
               -Iboot
 
-BOOT_C_SRC = boot/boot_main.c boot/ext2_mini.c boot/lz4_mini.c
+BOOT_C_SRC = boot/boot_main.c boot/ext2_mini.c boot/lz4_mini.c boot/vk32_boot.c
 # 区画表の共有部 (drivers/pc98pt.c) を**写さずに**ローダにも組む
 # (票 TASK_HDD_INSTALL 段 1-4)。カーネル・シェル・nhd_deploy.py と同じ配置で読む。
 BOOT_PT_OBJ = boot/pc98pt_boot.o
@@ -37,6 +37,11 @@ boot/ext2_mini.o: boot/ext2_mini.c boot/boot_defs.h
 	$(CC) $(CFLAGS_BOOT) -c -o $@ $<
 
 boot/lz4_mini.o: boot/lz4_mini.c boot/boot_defs.h
+	$(CC) $(CFLAGS_BOOT) -c -o $@ $<
+
+# VK32 v2 の検査と展開 (票 TASK_SERIAL_HOSTFS A-4)。CRC32 の核は
+# lib/crc32_core.inc (カーネル・hsync と同じ) を #include する。
+boot/vk32_boot.o: boot/vk32_boot.c boot/boot_defs.h lib/crc32_core.inc
 	$(CC) $(CFLAGS_BOOT) -c -o $@ $<
 
 boot/loader_hdd.elf: $(BOOT_ALL_OBJ)

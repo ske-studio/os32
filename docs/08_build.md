@@ -31,6 +31,13 @@ kernel.bin + sqlite.bin → mkvmkernel.py      → build/out/vmkernel.lz4 (LZ4�
                                                合計が MAX_IMAGE_SIZE (boot/boot_defs.h、508KiB) を
                                                超えたら出力を消して失敗 (HDD ローダが読めない)。
                                                試験: make check-vmkernel-lz4-host
+                                               形式は VK32 v2 (エントリごとの展開後 CRC32 +
+                                               完全長 + ファイル全体の CRC32)。両ローダが
+                                               全部検査して外れたら止まる。
+                                               試験: make check-vk32-crc-host
+kernel.elf のリンクに build/out/build_id.c   → tools/gen_build_id.py (コミット ID。中身が
+                                               変わったときだけ書くので、組み直すのは
+                                               build_id.o とリンクだけ)。試験: make check-build-id-host
 
 ※ カーネル関連のビルド成果物はすべて `build/out/` に集約される (`BUILD_OUT`、gitignore対象)。
   `tools/gen_unicode` の出力 `unicode.bin` も同ディレクトリへ移動される。

@@ -4,7 +4,7 @@
 /*  ASM (loader_hdd_new.asm) から呼び出される。                              */
 /*  1. PC-98パーティションテーブルからext2パーティションを特定               */
 /*  2. ext2から /boot/vmkernel.lz4 を読み込み                               */
-/*  3. VK32ヘッダ解析 + LZ4展開                                             */
+/*  3. VK32 v2 の検査 (長さ・範囲・CRC32) + LZ4展開 (vk32_boot.c)          */
 /*  4. 正常終了時は呼び出し元ASMに戻り、ASMがカーネルにジャンプ              */
 /* ======================================================================== */
 
@@ -33,6 +33,22 @@ static int find_partition(u32 *out_lba)
 }
 
 /* ================================================================ */
+/*  ブート情報域のイメージ欄 (正典 include/bootinfo.h、写しは boot_defs.h) */
+/* ================================================================ */
+static void wr32_low(u32 addr, u32 v)
+{
+    *(volatile u32 *)addr = v;
+}
+
+static void bootinfo_set_image(u32 crc, u32 size)
+{
+    wr32_low(BOOTINFO_BASE + BI_OFF_IMG_CRC, crc);
+    wr32_low(BOOTINFO_BASE + BI_OFF_IMG_SIZE, size);
+    /* **最後に**チェック語 — ここまでで止まった欄は無効に見える */
+    wr32_low(BOOTINFO_BASE + BI_OFF_IMG_CHECK, crc ^ size ^ BOOTINFO_IMG_KEY);
+}
+
+/* ================================================================ */
 /*  boot_main — ローダーメイン (ASMから呼ばれる)                     */
 /*  戻り値: 0=成功, 負数=エラー                                     */
 /* ================================================================ */
@@ -41,9 +57,9 @@ int boot_main(void)
     u32 part_lba;
     u32 ino;
     int file_size;
-    BootVK32Header *hdr;
     u8 *file_base;
-    int i;
+    u32 img_crc = 0;
+    int rc;
 
     /* 1. パーティション検索 */
     boot_print_asm(0xA0000 + 160, "Finding partition...");
@@ -80,28 +96,20 @@ int boot_main(void)
         return -3;
     }
 
-    /* 5. VK32ヘッダ検証 */
-    hdr = (BootVK32Header *)file_base;
-    if (hdr->magic != VK32_MAGIC) {
-        boot_print_asm(0xA0000 + 480, "Bad VK32 magic!");
-        return -4;
+    /* 5. VK32 v2 の検査と展開 (boot/vk32_boot.c)。外れたら画面に出して止まる
+     *    (完全長・entry_count・範囲・decoded == raw_size・CRC32、部品 A-4)。 */
+    boot_print_asm(0xA0000 + 480, "Checking + decompressing...");
+    rc = vk32_boot(file_base, (u32)file_size, (u8 *)VK32_LOAD_MIN, &img_crc);
+    if (rc != VK32_OK) {
+        /* 5 行目 (+800)。4 行目 (+640) は ASM が戻り値の表示で上書きする */
+        boot_print_asm(0xA0000 + 800, vk32_strerror(rc));
+        return -5;
     }
 
-    /* 6. 各エントリをLZ4展開 */
-    boot_print_asm(0xA0000 + 480, "Decompressing...");
-    for (i = 0; i < (int)hdr->entry_count && i < VK32_MAX_ENTRIES; i++) {
-        u8 *src     = file_base + hdr->entries[i].data_offset;
-        u32 csz     = hdr->entries[i].compressed_size;
-        u32 raw_sz  = hdr->entries[i].raw_size;
-        u8 *dst     = (u8 *)hdr->entries[i].load_addr;
-        int decoded;
-
-        decoded = boot_lz4_decode(src, (int)csz, dst, (int)raw_sz);
-        if (decoded < 0) {
-            boot_print_asm(0xA0000 + 640, "LZ4 decode FAIL!");
-            return -5;
-        }
-    }
+    /* 6. 起動したイメージの CRC をブート情報域へ (include/bootinfo.h の
+     *    イメージ欄)。主部は実モードで封じ済み — イメージ欄は自分の
+     *    チェック語を**最後に**書く。 */
+    bootinfo_set_image(img_crc, (u32)file_size);
 
     boot_print_asm(0xA0000 + 640, "Kernel loaded. Booting...");
     return 0;

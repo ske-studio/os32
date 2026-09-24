@@ -43,7 +43,7 @@ static void drive(u8 *raw, int slot, unsigned da, unsigned valid, unsigned cf,
 static void make_fd(u8 *raw)
 {
     memset(raw, 0, BOOTINFO_WIRE_SIZE);
-    put16(raw + BI_OFF_VERSION, 1);
+    put16(raw + BI_OFF_VERSION, 2);
     raw[BI_OFF_SOURCE] = 1;
     raw[BI_OFF_NDRIVES] = 2;
     drive(raw, 0, 0x80, 1, 0, 0x00, 512, 16382, 16, 63, 1);
@@ -59,10 +59,10 @@ static void good(void)
     make_fd(raw);
     /* 封の値は数で見る (式で作ると両方同じだけずれても気づけない) */
     CHECK(raw[0] == 0x42 && raw[1] == 0x4F && raw[2] == 0x54 && raw[3] == 0x49);
-    CHECK(raw[0x2C] == 0xBC && raw[0x2D] == 0xB0 && raw[0x2E] == 0xAB && raw[0x2F] == 0xB6);
+    CHECK(raw[0x2C] == 0xBF && raw[0x2D] == 0xB0 && raw[0x2E] == 0xAB && raw[0x2F] == 0xB6);
     CHECK(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_OK);
     CHECK(bi.status == BOOTINFO_OK);
-    CHECK(bi.source == 1 && bi.ndrives == 2 && bi.version == 1);
+    CHECK(bi.source == 1 && bi.ndrives == 2 && bi.version == 2);
     CHECK(bi.drive[0].da == 0x80 && bi.drive[0].valid == 1);
     CHECK(bi.drive[0].seclen == 512 && bi.drive[0].cyl == 16382);
     CHECK(bi.drive[0].heads == 16 && bi.drive[0].spt == 63);
@@ -113,7 +113,10 @@ static void version(void)
     struct bootinfo bi;
 
     make_fd(raw);
-    put16(raw + BI_OFF_VERSION, 2);
+    put16(raw + BI_OFF_VERSION, 1);   /* 旧 v1 (イメージ欄なし) のローダ */
+    CHECK(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_ERR_VERSION);
+    make_fd(raw);
+    put16(raw + BI_OFF_VERSION, 3);
     CHECK(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_ERR_VERSION);
     make_fd(raw);
     raw[BI_OFF_NDRIVES] = 3;
@@ -206,6 +209,56 @@ static void format(void)
     CHECK(line[7] == '\0' && line[8] == 'X');
 }
 
+/* イメージ欄 (v2): ローダが検査済みイメージの CRC を記録したときだけ有効 */
+static void image(void)
+{
+    u8 raw[BOOTINFO_WIRE_SIZE];
+    struct bootinfo bi;
+
+    /* 記録なし (bi_clear の 0 のまま = FD/HDD ローダが展開前に止まった) */
+    make_fd(raw);
+    CHECK(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_OK);
+    CHECK(bi.img_valid == 0 && bi.img_crc == 0);
+
+    /* 記録あり。チェック語の値は数で見る: 0x12345678 ^ 446969 ^ 'IMGC' */
+    make_fd(raw);
+    bootinfo_seal_image(raw, 0x12345678UL, 446969UL);
+    CHECK(raw[0x38] == 0xC8 && raw[0x39] == 0xCA && raw[0x3A] == 0x75 && raw[0x3B] == 0x51);
+    CHECK(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_OK);
+    CHECK(bi.img_valid == 1 && bi.img_crc == 0x12345678UL && bi.img_size == 446969UL);
+
+    /* CRC の欄だけ化けた (チェック語が合わない) */
+    raw[BI_OFF_IMG_CRC] ^= 1;
+    CHECK(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_OK);
+    CHECK(bi.img_valid == 0 && bi.img_crc == 0);
+
+    /* チェック語を書く前に止まった */
+    make_fd(raw);
+    bootinfo_seal_image(raw, 0xCAFEF00DUL, 1000UL);
+    memset(raw + BI_OFF_IMG_CHECK, 0, 4);
+    CHECK(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_OK);
+    CHECK(bi.img_valid == 0);
+
+    /* 大きさ 0 は記録なし (crc = size = 0 のとき check = KEY になる偶然を拾わない) */
+    make_fd(raw);
+    bootinfo_seal_image(raw, 0UL, 0UL);
+    CHECK(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_OK);
+    CHECK(bi.img_valid == 0);
+
+    /* 主部が無効ならイメージ欄も使わない */
+    make_fd(raw);
+    bootinfo_seal_image(raw, 0x12345678UL, 446969UL);
+    raw[BI_OFF_CHECK] ^= 1;
+    CHECK(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_ERR_CHECK);
+    CHECK(bi.img_valid == 0);
+
+    /* イメージ欄は主部の sum に入らない (後から書いても主部は有効のまま) */
+    make_fd(raw);
+    bootinfo_seal_image(raw, 0xFFFFFFFFUL, 520192UL);
+    CHECK(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_OK);
+    CHECK(bi.img_valid == 1 && bi.img_crc == 0xFFFFFFFFUL && bi.img_size == 520192UL);
+}
+
 /* NASM 側の写しと照合するための値を出す (test_bootinfo.py が読む) */
 static void dump(void)
 {
@@ -216,6 +269,7 @@ static void dump(void)
     D(BI_OFF_DRIVE0); D(BI_DRIVE_SIZE); D(BI_OFF_SUM); D(BI_OFF_CHECK);
     D(BI_DRV_DA); D(BI_DRV_VALID); D(BI_DRV_CF); D(BI_DRV_AH); D(BI_DRV_BX);
     D(BI_DRV_CX); D(BI_DRV_DH); D(BI_DRV_DL); D(BI_DRV_QUERIED);
+    D(BI_OFF_IMG_CRC); D(BI_OFF_IMG_SIZE); D(BI_OFF_IMG_CHECK); D(BOOTINFO_IMG_KEY);
 #undef D
 }
 
@@ -229,6 +283,7 @@ int main(int argc, char **argv)
     else if (!strcmp(c, "sum")) sum();
     else if (!strcmp(c, "rules")) rules();
     else if (!strcmp(c, "format")) format();
+    else if (!strcmp(c, "image")) image();
     else if (!strcmp(c, "dump")) { dump(); return 0; }
     else { fprintf(stderr, "unknown case %s\n", c); return 2; }
     return failed ? 1 : 0;

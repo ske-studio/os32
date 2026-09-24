@@ -224,9 +224,14 @@ check-fdc-seek-host:
 # 本物の fdc.c を µPD765A の模型 (tools/tests/fdc_hostshim/io.h) の上で回す。
 # 変異は一時の木の写しに当てるのでソースは書き換えない。
 # 記録は tools/tests/fdc_track_tdd.md。
-# font_replay (実物のフォントの読み方の再現) は FD イメージを読むので、
-# イメージに依存させる — 無いまま SKIP で通らないように (ラリー 2 の Fable)。
-check-fdc-track-host: images/os32_boot.d88
+# font_replay (実物のフォントの読み方の再現) は FD イメージを読む。無いまま
+# SKIP で通らないように --require-image で FAIL にする (ラリー 2 の Fable)。
+# **イメージを前提 (prerequisite) にはしない** — d88 の規則は phony の boot に
+# 依るので毎回作り直され、そのたびに kernel も組み直される (kapi_sys.o の
+# __DATE__ __TIME__)。check-par の中でそれが起きると vmkernel.lz4 と 1.44MB の
+# イメージ・ISO が食い違い、check-packages-host / check-vk32-crc-host が落ちた
+# (2026-09-24、PM 判断で「無ければ失敗」に)。make all が先。
+check-fdc-track-host:
 	python3 -B tools/tests/test_fdc_track.py --target --mutate --require-image
 
 # PCI コンフィギュレーションの復号 (drivers/pci_decode.c)。実機 PC-9821Ra266 の
@@ -318,6 +323,26 @@ check-pit-clock-host:
 # 記録は tools/tests/vmkernel_lz4_tdd.md。
 check-vmkernel-lz4-host:
 	python3 -B tools/tests/test_vmkernel_lz4.py --real --target --mutate
+
+# VK32 v2 (CRC32 表 + 完全長) の生成と両ローダの検査。票 TASK_SERIAL_HOSTFS 部品 A-4。
+# tools/mkvmkernel.py の生成物を zlib.crc32 と突き合わせ、HDD ローダの
+# boot/vk32_boot.c (+ lz4_mini.c) と FD ローダの pm_vk32_boot (**ASM を切り出して
+# 32bit で実行**) に同じ壊れたイメージ (1 ビット反転・切り詰め・entry_count 0・
+# data_offset の範囲外・raw_size の不一致・展開先の範囲外・重なり・壊れた LZ4 列) を
+# 渡し、同じ VK32_ERR_* で断ること、展開前に止まるものは窓を 1 バイトも書かないこと
+# を見る。FD ローダの FAT チェーン検査 (fat_chain_check、32 ビットの番地で書いた
+# 実モードの手続き) も bits 32 で組んで 2HD / 1.44MB の両方で回す。
+# --real は make all の成果物 (build/out と images/ の 2HD / 1.44MB) が要る。
+# --mutate は写しの上で変異 (組めない変異は ERROR、何も変えない対照を含む)。
+# 記録は tools/tests/vk32_crc_tdd.md。
+check-vk32-crc-host:
+	python3 -B tools/tests/test_vk32_crc.py --real --target --mutate
+
+# カーネルに埋め込むコミット ID の生成器 (tools/gen_build_id.py)。一時の git
+# リポジトリで clean / -dirty (未追跡は数えない) / unknown / 同じなら書かない を見る。
+# 票 TASK_SERIAL_HOSTFS 部品 A-4 (ver の Commit)。記録は tools/tests/vk32_crc_tdd.md。
+check-build-id-host:
+	python3 -B tools/tests/test_build_id.py --mutate
 
 # ブート情報域 0x7E00 (kernel/bootinfo_check.c + boot/bootinfo.inc)。票 TASK_HDD_INSTALL 段 0。
 # ローダが INT 1Bh AH=84h の結果を書き、kernel_main が最初に写す。見るのは
@@ -886,7 +911,7 @@ check:
 check-key-inject-host:
 	python3 -B tools/tests/test_key_inject.py
 
-check-par: check-bootinfo-host check-hdd-stage1-host check-hdd-stage2-host check-vmkernel-lz4-host check-kbd-status-host check-pcm-cs4231-host check-kprintf-attr-host check-key-inject-host check-kapi-version check-kapi-out check-docs-links check-docs-orphans check-tests-inventory check-manifests check-packages-host check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-serial-portc-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-lan-bridge-host check-pci-decode-host check-irq-math-host check-time-math-host check-fdc-track-host
+check-par: check-bootinfo-host check-hdd-stage1-host check-hdd-stage2-host check-vmkernel-lz4-host check-vk32-crc-host check-build-id-host check-kbd-status-host check-pcm-cs4231-host check-kprintf-attr-host check-key-inject-host check-kapi-version check-kapi-out check-docs-links check-docs-orphans check-tests-inventory check-manifests check-packages-host check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-serial-portc-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-lan-bridge-host check-pci-decode-host check-irq-math-host check-time-math-host check-fdc-track-host
 
 check-mut: check-kapi-layout-host check-edit-doc-host check-fstat-redir-host check-kstring-c-host check-kstr-bench-host check-sh-status-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host check-cat-linenum-host check-result-conv-host check-guest-host
 
@@ -906,4 +931,4 @@ check-edit-doc-host:
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: check-packages-host check-kapi-layout-host check-bootinfo-host check-hdd-stage1-host check-hdd-stage2-host check-vmkernel-lz4-host check-kbd-status-host check-pcm-cs4231-host check-kapi-out check-dma8237-host check-dma-pool-host check-pci-bind-host check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-serial-portc-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host check-irq-math-host check-time-math-host check-fdc-track-host
+.PHONY: check-packages-host check-kapi-layout-host check-bootinfo-host check-hdd-stage1-host check-hdd-stage2-host check-vmkernel-lz4-host check-vk32-crc-host check-build-id-host check-kbd-status-host check-pcm-cs4231-host check-kapi-out check-dma8237-host check-dma-pool-host check-pci-bind-host check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-serial-portc-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host check-irq-math-host check-time-math-host check-fdc-track-host

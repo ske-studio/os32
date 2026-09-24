@@ -243,17 +243,18 @@ pub struct KernelAPI {
     /* idx 233 */ pub dev_mount_count: unsafe extern "C" fn(drv: i32) -> i32,
     /* idx 234 */ pub sys_umount_checked: unsafe extern "C" fn(prefix: *const u8) -> i32,
     /* idx 235 */ pub hdd_geom_info: unsafe extern "C" fn(drv: i32, out: *mut u8) -> i32,
-    /* idx 236..301 予約 (C の kapi_reserved[]) */ pub kapi_reserved: [u32; 66],
+    /* idx 236 */ pub boot_image_info: unsafe extern "C" fn(out: *mut u8) -> i32,
+    /* idx 237..301 予約 (C の kapi_reserved[]) */ pub kapi_reserved: [u32; 65],
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 64;
+pub const KAPI_VERSION: u32 = 65;
 
 /* 関数表の容量とデータ欄の固定配置 (票 TASK_KAPI_DATA_FIELDS、v63) */
-pub const KAPI_FUNC_COUNT: u32 = 234;
+pub const KAPI_FUNC_COUNT: u32 = 235;
 pub const KAPI_FUNC_CAPACITY: u32 = 300;
 pub const KAPI_DATA_FIELDS_OFF: u32 = 0x4B8;
 /// データ欄が固定になった KAPI 版 (= C の OS32X_HDR_V3_MIN_API)。これ未満の

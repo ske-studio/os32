@@ -110,6 +110,85 @@ def fat12_extract(img, names):
     return chain_bytes(clst)[:size]
 
 
+def fat12_layout(img, names, spt=8, heads=2):
+    """names (ディレクトリ..., ファイル) の置き場所を LBA で返す。
+
+    戻り値: {"meta": [FAT・ルート・途中のディレクトリの LBA...],
+             "data": [ファイル本体の LBA...]}。
+    font_replay の上限 (シーク回数・まとめ読みの回数) をこの配置から導く —
+    ローダの大きさが変わって配置がずれても意味が保たれるように (PM 判断
+    2026-09-24。以前は 14 / 27 の固定値で、ローダが 1 クラスタ増えただけで落ちた)。"""
+    bps, spc, rsv, nfat, nroot, _tot, _m, spf = struct.unpack_from("<HBHBHHBH", img, 11)
+    fat = img[rsv * bps:(rsv + spf) * bps]
+    root = rsv + nfat * spf
+    data0 = root + (nroot * 32 + bps - 1) // bps
+
+    def nxt(c):
+        o = c * 3 // 2
+        v = fat[o] | fat[o + 1] << 8
+        return v >> 4 if c & 1 else v & 0xFFF
+
+    def chain_lbas(c):
+        out = []
+        while 2 <= c < 0xFF8:
+            out += list(range(data0 + (c - 2) * spc, data0 + (c - 1) * spc))
+            c = nxt(c)
+        return out
+
+    def find(lbas, name):
+        raw = b"".join(img[l * bps:(l + 1) * bps] for l in lbas)
+        for i in range(0, len(raw), 32):
+            e = raw[i:i + 32]
+            if e[0] == 0:
+                break
+            if e[0] == 0xE5 or e[11] == 0x0F:
+                continue
+            base = e[0:8].decode("latin1").strip()
+            ext = e[8:11].decode("latin1").strip()
+            if (base + ("." + ext if ext else "")) == name:
+                return struct.unpack_from("<H", e, 26)[0]
+        raise KeyError(name)
+
+    meta = list(range(rsv, rsv + spf)) + list(range(root, data0))
+    cur = list(range(root, data0))
+    for d in names[:-1]:
+        cur = chain_lbas(find(cur, d))
+        meta += cur
+    return {"meta": meta, "data": chain_lbas(find(cur, names[-1]))}
+
+
+# FAT (シリンダ 0) への往復。FatFs はクラスタ列を辿るとき FAT の区画を読み直し、
+# 先読みの表から追い出されていれば 1 回だけシリンダ 0 へ戻って帰ってくる
+# (実測: 基点の配置でも今の配置でも SEEK 64 -> 0 -> 64 が 1 回)。
+# まとめ読みはその往復で FAT / ルートのトラックを 1 本読み直す。
+FONT_FAT_ROUNDTRIP_SEEKS = 2
+FONT_FAT_ROUNDTRIP_READS = 1
+
+
+def font_bounds(img, spt=8, heads=2):
+    """font_replay の上限を配置から出す。
+
+    シーク ≦ データが跨ぐシリンダの数
+            + データの外にあるメタデータのシリンダの数 (シリンダ 0 を除く —
+              マウントの後でヘッドはシリンダ 0 に居る)
+            + FAT への往復 (FONT_FAT_ROUNDTRIP_SEEKS)
+    まとめ読み ≦ データが跨ぐトラックの数
+                + データの外にあるメタデータのトラックの数
+                + FAT への往復で読み直す分 (FONT_FAT_ROUNDTRIP_READS)"""
+    lay = fat12_layout(img, FONT_GUEST, spt, heads)
+    cyl = lambda l: l // (spt * heads)
+    trk = lambda l: l // spt
+    dcyl = {cyl(l) for l in lay["data"]}
+    dtrk = {trk(l) for l in lay["data"]}
+    mcyl = {cyl(l) for l in lay["meta"]} - dcyl - {0}
+    mtrk = {trk(l) for l in lay["meta"]} - dtrk
+    seek_max = len(dcyl) + len(mcyl) + FONT_FAT_ROUNDTRIP_SEEKS
+    multi_max = len(dtrk) + len(mtrk) + FONT_FAT_ROUNDTRIP_READS
+    desc = (f"data {len(dtrk)} trk / {len(dcyl)} cyl (C{min(dcyl)}-C{max(dcyl)}), "
+            f"meta {len(mtrk)} trk / {len(mcyl)} cyl 外 {sorted(mcyl)}")
+    return seek_max, multi_max, desc
+
+
 def check_read_stream_shape():
     """fatfs_vfs_read_stream が今も「開いて、動いて、読んで、閉じる」か。
     font_replay はこの形を写して回すので、形が変われば試験を直す合図。"""
@@ -134,7 +213,11 @@ def prepare_font(tmp):
     fnt = pathlib.Path(tmp) / "font.kcg"
     img.write_bytes(raw)
     fnt.write_bytes(font)
-    return {"FDC_TRACK_IMAGE": str(img), "FDC_TRACK_FONT": str(fnt)}
+    seek_max, multi_max, desc = font_bounds(raw)
+    print(f"font_replay の上限: seek <= {seek_max}, multi <= {multi_max} ({desc})",
+          flush=True)
+    return {"FDC_TRACK_IMAGE": str(img), "FDC_TRACK_FONT": str(fnt),
+            "FDC_TRACK_SEEK_MAX": str(seek_max), "FDC_TRACK_MULTI_MAX": str(multi_max)}
 
 # fdc.c の fdc_motor_off() は元から未使用の static (test_fdc_seek.py と同じ)。
 # tick_count の差し替えは「volatile u32 * を返す関数」の宣言になるので
@@ -288,9 +371,11 @@ MUTATIONS = [
      r"            fdc_head_settle\(\);\n            fdc_note_cyl\(drv, 0\);",
      "            fdc_note_cyl(drv, 0);",
      "RECALIBRATE の後に整定しない (回復直後の C=0 の READ が整定前に出る)"),
+    # 読み取り側 (READ) だけを消す。WRITE 側 (次の変異) と同じ形なので、count=1 と
+    # ファイルの中の順番に頼らず、read 側にしか無い前置きの注釈で場所を決める。
     ("drivers/fdc.c",
-     r"        if \(\(results\[0\] & FDC_ST0_NR\) != 0\) \{\n            dma_chan_mask\(FDC_DMA_CHANNEL\);\n            dma_armed = 0;\n            phase = \"nr\";\n            break;\n        \}",
-     "",
+     r"(        /\* NR \(媒体無し\) は\*\*回復 \(リセット・RECALIBRATE\) より前に\*\*打ち切る\n[^\n]*\n[^\n]*\n)        if \(\(results\[0\] & FDC_ST0_NR\) != 0\) \{\n            dma_chan_mask\(FDC_DMA_CHANNEL\);\n            dma_armed = 0;\n            phase = \"nr\";\n            break;\n        \}",
+     r"\1",
      "単発の READ の NR で回復とリトライを踏む"),
     # 書き込みの NR は read 側と同じ形。2 つ目の一致 (WRITE 側) だけを消す。
     ("drivers/fdc.c",

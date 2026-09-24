@@ -46,6 +46,19 @@ C_KERNEL = \
 
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
+# === コミット ID (票 TASK_SERIAL_HOSTFS A-4) ===
+# 生成器は毎回走るが、中身が変わったときだけ build_id.c を書き直す。
+# コミット ID が変わっても組み直すのは build_id.o 1 つとリンクだけ。
+BUILD_ID_SRC = $(BUILD_OUT)/build_id.c
+BUILD_ID_OBJ = $(BUILD_OUT)/build_id.o
+
+$(BUILD_ID_SRC): .FORCE
+	@mkdir -p $(BUILD_OUT)
+	@python3 tools/gen_build_id.py -o $@
+
+$(BUILD_ID_OBJ): $(BUILD_ID_SRC)
+	$(CC) $(CFLAGS_BASE) -c $< -o $@
+
 # === SQLite関連 (カーネル拡張域 0x200000 に配置) ===
 C_SQLITE = lib/sqlite3/sqlite3.c lib/sqlite3/os32_sqlite_vfs.c lib/sqlite3/os32_sqlite_test.c
 C_SQLITE_OBJ = $(C_SQLITE:.c=.o)
@@ -153,8 +166,8 @@ lib/sqlite3/os32_sqlite_test.o: lib/sqlite3/os32_sqlite_test.c lib/sqlite3/os32_
 	$(CC) -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O0 -fcommon -Wno-long-long -w $(DEPFLAGS) -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
 
 # === カーネルリンク ===
-$(BUILD_OUT)/kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) $(RUST_LZ4_LIB)
-	$(LD) $(LDFLAGS) -o $@ $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) $(RUST_LZ4_LIB) -lgcc
+$(BUILD_OUT)/kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(BUILD_ID_OBJ) $(C_SQLITE_OBJ) $(RUST_LZ4_LIB)
+	$(LD) $(LDFLAGS) -o $@ $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(BUILD_ID_OBJ) $(C_SQLITE_OBJ) $(RUST_LZ4_LIB) -lgcc
 
 $(BUILD_OUT)/kernel.bin: $(BUILD_OUT)/kernel.elf
 	$(OBJCOPY) -O binary \
@@ -184,7 +197,7 @@ kernel: $(BUILD_OUT)/kernel.bin $(BUILD_OUT)/sqlite.bin $(BUILD_OUT)/vmkernel.lz
 
 # === カーネルクリーン ===
 clean-kernel:
-	rm -f $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) $(BUILD_OUT)/kernel.elf $(BUILD_OUT)/kernel.bin $(BUILD_OUT)/sqlite.bin $(BUILD_OUT)/vmkernel.lz4 $(BUILD_OUT)/kernel.map
+	rm -f $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(BUILD_ID_SRC) $(BUILD_ID_OBJ) $(C_SQLITE_OBJ) $(BUILD_OUT)/kernel.elf $(BUILD_OUT)/kernel.bin $(BUILD_OUT)/sqlite.bin $(BUILD_OUT)/vmkernel.lz4 $(BUILD_OUT)/kernel.map
 	cd $(RUST_LZ4_DIR) && cargo clean 2>/dev/null || true
 
 .PHONY: kernel clean-kernel

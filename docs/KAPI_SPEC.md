@@ -1,4 +1,4 @@
-# KernelAPI v64 仕様書
+# KernelAPI v65 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -108,6 +108,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v63 | **実装済み (2026-09-24、手元ビルドのみ)** | **データ欄の固定配置** (票 TASK_KAPI_DATA_FIELDS)。関数は増えていない。関数表の容量を **R = 300** 予約し (予約スロット 230〜299)、`sbrk_heap_limit` / `shm_base` を **0x4B8 / 0x4BC に固定** — 以後の関数追加でデータ欄は動かない。OS32X ヘッダを **v3** (末尾に `kapi_data_off`) にし、exec / shlib ローダ / 常駐シェルの起動は値がカーネルと違えば断る。crt の `kapi` の実名を `os32_kapi_v63` に変えた。**旧バイナリは一度だけ全部断られる** — 移行は [08_build.md](08_build.md) §8-4 | [tasks/memory/TASK_KAPI_DATA_FIELDS.md](tasks/memory/TASK_KAPI_DATA_FIELDS.md) |
 | v64 | **実装済み (2026-09-24、手元ビルドのみ)** | HDD の一時置き場 (票 TASK_HDD_INSTALL 段 1): `ext2_format_at` / `dev_mount_count` / `sys_umount_checked` / `hdd_geom_info` の 4 本 (slot 230〜233 = 0x3A0〜0x3AC。データ欄は v63 で固定済みなので動かない、crt の `kapi` の実名も `os32_kapi_v63` のまま)。`ext2_format_at` は区画表を読まずに範囲だけに作る (ディスク総数超過・LBA 0〜17・桁あふれは 1 バイトも書かずに断る)、`sys_umount_checked` は sync を先に呼んで失敗なら外さない、`hdd_geom_info` は BIOS 幾何 (INT 1Bh AH=84h) と IDENTIFY と I/O の方式を `HddGeom` (32 バイト) に写す。同じ版で ATA I/O を LBA28 (word 49 bit9) に、区画表を PC-98 標準配置に、ext2 の区画探索を「見つからなければ失敗」に変えた — **旧配置の NHD は `make nhd-migrate-pt` で移す** ([08_build.md](08_build.md) §8-4)。配備は**カーネルを先** | [tasks/realhw/TASK_HDD_INSTALL.md](tasks/realhw/TASK_HDD_INSTALL.md) 段 1 |
 | v62 | **実装済み (2026-09-23、手元ビルドのみ)** | キーボード 8251 の診断 `kbd_diag` 1 本 (slot 229 = 0x39C、data_fields は 0x3A0 / 0x3A4 へ)。`KbdDiag` (24 バイト、`os32_kapi_shared.h`) を呼び手のバッファへ写す — IRQ1 回数・空 IRQ (RxRDY = 0)・エラー (PE/FE)・オーバーラン (OE だけ、バイトは使う)・起動時に読み捨てたバイト数・`kbd_init` の前後の 0043h・直近の 0043h とスキャンコード・書いたコマンド語・呼んだ時点の 0043h。戻り 0 / `OS32_ERR_INVAL` (`out` が NULL)。出力は生成ラッパの `out` 検査 (読み取り専用の USER ページなら `ring3_fault_kill`)。シェルの `kbdstat` が 1 行で出す。同じ変更でカーネルが 0043h に書くコマンド語を **0x14 → 0x16** (DTR = 1 = RTY# HIGH、BIOS の定常値) に直した — 実機 PC-9821Ra266 で打鍵が一切届かなかった件。実体は `drivers/kbd.c` / `drivers/kbd_status.c` | [POLICY_DEBUG.md](POLICY_DEBUG.md) §4-57 |
+| v65 | **実装済み (2026-09-24、手元ビルドのみ)** | 起動したイメージの識別 (票 TASK_SERIAL_HOSTFS 部品 A-4): `boot_image_info` 1 本 (slot 234 = 0x3B0)。`BootImageInfo` (40 バイト) に**ローダが検査して起動した** `vmkernel.lz4` のファイル全体の CRC32・長さ・記録の有無・どのローダか (FD / HDD) と、カーネルを組んだ git のコミット ID を写す。0 / `OS32_ERR_INVAL` (`out` が NULL)。同じ版で **VK32 を v2** (エントリごとの展開後 CRC32 + 完全長 + ファイル全体の CRC32、`boot/boot_defs.h`) に、**ブート情報域を v2** (0x30〜0x3F のイメージ欄、`include/bootinfo.h`) にした — v1 のイメージはどちらのローダも `VK32: unknown version` で止まる。**ローダ (FD イメージ / HDD の LBA 2〜17) と `vmkernel.lz4` を同時に入れ替える** (旧ローダと新イメージ・新ローダと旧イメージはどちらも起動しない)。`ver` と起動画面に `Commit:` / `Image CRC:` | [tasks/realhw/TASK_SERIAL_HOSTFS.md](tasks/realhw/TASK_SERIAL_HOSTFS.md) 部品 A-4 |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -176,7 +177,7 @@ v62 まではデータ欄 (`sbrk_heap_limit` / `shm_base`) を関数表の**直�
 |---|---|---|
 | 関数表の容量 R | **300** スロット (`KAPI_FUNC_CAPACITY`) | `sdk/kapi.json` の `func_capacity` |
 | データ欄の先頭 | **0x4B8** = 8 + 4 × R (`KAPI_DATA_FIELDS_OFF`) | `sdk/gen_kapi.py` が生成 |
-| 予約スロット | 234〜299 (`kapi_reserved[66]`、v64 時点。v63 は 230〜299)。カーネルの表は `kapi_reserved_nosys` (= `OS32_ERR_NOSYS`)、CPL=3 のトランポリンは int 0x80 のスタブ (ディスパッチャが `slot >= KAPI_FUNC_COUNT` で kill)。**NULL にしない** | `exec/exec.c` |
+| 予約スロット | 235〜299 (`kapi_reserved[65]`、v65 時点。v64 は 234〜299、v63 は 230〜299)。カーネルの表は `kapi_reserved_nosys` (= `OS32_ERR_NOSYS`)、CPL=3 のトランポリンは int 0x80 のスタブ (ディスパッチャが `slot >= KAPI_FUNC_COUNT` で kill)。**NULL にしない** | `exec/exec.c` |
 | R の上限 | トランポリン 1 ページ: `sizeof(KernelAPI)` + スタブ 8B × R + 写し場 256B ≤ 4096 → **R ≤ 318** (`STATIC_ASSERT`) | `exec/exec.c` |
 
 関数を足すときは `kapi_reserved[]` が 1 本減るだけで、データ欄は動かない。**関数数が R を
@@ -1061,6 +1062,38 @@ LBA28、無ければ word 53 bit0 の現在の CHS、それも無ければ既定
 出さずに `IDE_ERR_RANGE` (-4)。区画表 (LBA 1) は **PC-98 標準配置** (`drivers/pc98pt.h`)
 で、ext2 の区画探索は見つからない・読めないときに失敗する (以前は LBA 1088 を仮定した)。
 
+### 起動したイメージの識別 (v65)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x3B0 | boot_image_info | `int(BootImageInfo *out)` |
+
+票 [TASK_SERIAL_HOSTFS](tasks/realhw/TASK_SERIAL_HOSTFS.md) 部品 A-4 (§1-v3「`.old` の識別は
+カーネルイメージの CRC」)。シェルの `ver` と、部品 B の `hsync` (`/boot/vmkernel.lz4` を
+置き換える前に「今動いている版か」を比べる) が使う。
+
+- **`boot_image_info`** — `BootImageInfo` (40 バイト、`os32_kapi_shared.h`、
+  `kernel/bootinfo.c` の `STATIC_ASSERT` が見張る) を写す。0 / `OS32_ERR_INVAL`
+  (`out` が NULL)。出力は生成ラッパの `out` 検査。
+- 値の出どころ: ローダ (FD: `boot/loader_fat_new.asm`、HDD: `boot/boot_main.c`) が
+  `vmkernel.lz4` を**全部検査し終えてから** (長さ・範囲・展開後の CRC32・ファイル全体の CRC32)
+  ブート情報域 0x7E00 のイメージ欄 (0x30〜0x3B、自分のチェック語 `img_check` を最後に書く)
+  に残し、`kernel_main` の最初の `bootinfo_capture` が写す。記録が無い (チェック語が合わない、
+  主部が無効、大きさ 0) なら `crc_valid = 0`。
+- `commit` はカーネルのリンク時に埋め込んだ文字列 (`tools/gen_build_id.py` の生成物
+  `build/out/build_id.c`): `git rev-parse --short=7 HEAD`、追跡中のファイルに変更があれば
+  `-dirty`、git が無ければ `unknown`。
+
+| Offset | 型 | フィールド | 意味 |
+|---|---|---|---|
+| 0 | `u32` | `image_crc` | VK32 v2 のファイル全体の CRC32 (ヘッダの `image_crc` 欄の値。`zlib.crc32` と同じ計算で、その欄を 0 として求めたもの) |
+| 4 | `u32` | `image_size` | ローダが読んだ長さ |
+| 8 | `u8` | `crc_valid` | 1 = ローダが記録した |
+| 9 | `u8` | `source` | 1 = FD ローダ、2 = HDD ローダ、0 = 不明 |
+| 10 | `u16` | `reserved` | 0 |
+| 12 | `char[24]` | `commit` | NUL 終端 |
+| 36 | `u32` | `reserved2` | 0 |
+
 ### 排他的作成 (v53)
 
 **スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
@@ -1195,7 +1228,7 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 ### 予約スロット (v63〜)
 
-0x3B0〜0x4B4 (slot 234〜299、66 本、v64 時点) は `kapi_reserved[]`。関数を足すと先頭から使う
+0x3B4〜0x4B4 (slot 235〜299、65 本、v65 時点) は `kapi_reserved[]`。関数を足すと先頭から使う
 (§4-0)。カーネルの表は `kapi_reserved_nosys` (`OS32_ERR_NOSYS`)、トランポリンは
 int 0x80 のスタブで、CPL=3 からの呼び出しはアプリを kill する。
 

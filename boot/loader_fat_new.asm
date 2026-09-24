@@ -7,9 +7,14 @@
 ;;   1. FAT12からVMKRNL.LZ4を検索・メモリにロード
 ;;   2. A20ゲート有効化
 ;;   3. GDT設定 → プロテクトモード遷移
-;;   4. PM後: リアルモードで読んだ断片を0x10000に統合
-;;   5. VK32ヘッダ解析 + LZ4展開 → entry[i].load_addr
+;;   4. PM後: VK32 v2 の検査 (長さ・範囲・CRC32) + LZ4展開 → entry[i].load_addr
+;;      (pm_vk32_boot。HDD ローダの boot/vk32_boot.c と同じ順序・同じ VK32_ERR_*)
+;;   5. 起動したイメージの CRC をブート情報域 (0x7E00) のイメージ欄へ
 ;;   6. メモリプローブ → カーネルにジャンプ
+;;
+;; FAT チェーンは「ファイル長から決まるクラスタ数」だけ読み、その先が EOC で
+;; あることを確かめる (早期終端・範囲外・循環 = 長すぎる を止める)。
+;; 票: docs/tasks/realhw/TASK_SERIAL_HOSTFS.md 部品 A-4 / §1-v3「FD ローダ」
 ;;
 ;; VMKRNL.LZ4のメモリ配置 (リアルモード読み込み):
 ;;   Phase 1: 0:C000h〜0:FFFFh (16KB)
@@ -29,6 +34,7 @@ cpu 386
 ;; **boot/boot_fat.asm と必ず同じ値にすること** (片方だけ直すと静かにずれる)。
 %ifdef FD144
 SECT_SZ     EQU     0200h
+SECT_SHIFT  EQU     9           ;; log2(SECT_SZ)
 SECT_N      EQU     02h
 SPT         EQU     18
 DA_UA       EQU     030h        ;; 1.44MB 対応両用 I/F ユニット0
@@ -36,8 +42,10 @@ ROOT_START  EQU     19
 ROOT_SECTS  EQU     12
 FAT_SECTS   EQU     9
 DATA_START  EQU     31
+TOTAL_SECTS EQU     2880
 %else
 SECT_SZ     EQU     0400h
+SECT_SHIFT  EQU     10          ;; log2(SECT_SZ)
 SECT_N      EQU     03h
 SPT         EQU     8
 DA_UA       EQU     090h
@@ -45,7 +53,10 @@ ROOT_START  EQU     5
 ROOT_SECTS  EQU     6
 FAT_SECTS   EQU     2
 DATA_START  EQU     11
+TOTAL_SECTS EQU     1232
 %endif
+;; 有効なクラスタ番号は [2, MAX_CLUSTER)。1 クラスタ = 1 セクタ (mkfat12 の spc=1)
+MAX_CLUSTER EQU     TOTAL_SECTS - DATA_START + 2
 
 ROOT_ENTS   EQU     192
 FAT_BUF     EQU     6000h
@@ -53,9 +64,6 @@ FAT_START   EQU     1
 LOAD_SEG0   EQU     0000h       ;; Phase 1: セグメント0
 LOAD_OFF0   EQU     0C000h      ;; Phase 1: 0:C000h から (16KB利用可能)
 LOAD_SEG1   EQU     1000h       ;; Phase 2: セグメント0x1000 (物理0x10000)
-
-;; LZ4デコーダ定数
-LZ4_MINMATCH EQU    4
 
 ;; ブート情報域 (0x7E00) の番地とオフセット。正典は include/bootinfo.h。
 %include "boot/bootinfo.inc"
@@ -168,6 +176,7 @@ loader_start:
         ;; ============================================================
         ;; FATテーブルを0:6000にロード (FAT_SECTS セクタ)
         ;; 1.44MB は 9 セクタある。2 セクタ決め打ちだと後ろのクラスタで化ける。
+        ;; (ルートDir のバッファを上書きする — 開始クラスタと長さは写し済み)
         ;; ============================================================
         xor     ax, ax
         mov     es, ax
@@ -185,10 +194,23 @@ loader_start:
         loop    .fat_loop
 
         ;; ============================================================
-        ;; VMKRNL.LZ4をメモリにロード
+        ;; 読む前にチェーン全体を検査する (fat_chain_check)。
+        ;; 長さ 0 < size <= MAX_IMAGE_SIZE、クラスタ数 = ceil(size / SECT_SZ) だけ
+        ;; 辿って全部 [2, MAX_CLUSTER) にあり、その次が EOC であること。
+        ;; ============================================================
+        movzx   eax, word [var_cluster]
+        mov     edx, dword [var_size_lo]
+        mov     esi, FAT_BUF
+        call    fat_chain_check
+        test    eax, eax
+        jnz     .fat_bad
+        mov     word [var_left], cx
+
+        ;; ============================================================
+        ;; VMKRNL.LZ4をメモリにロード (検査済みのチェーンを同じ fat12_next32 で辿る)
         ;; 1000:0000h〜 (物理0x10000以降, 64KB毎にセグメント切替)
         ;; ============================================================
-        mov     ax, word [var_cluster]
+        movzx   eax, word [var_cluster]
         mov     word [var_load_seg], 1000h
         xor     bp, bp
 
@@ -218,10 +240,36 @@ loader_start:
         mov     word [var_load_seg], bx
 
 .seg_ok:
-        call    fat12_next16
-        cmp     ax, 0FF8h
-        jb      .load_kern
+        ;; INT 1Bh が 32 ビットレジスタの上半分を保つとは限らないので揃え直す
+        movzx   eax, ax
+        mov     esi, FAT_BUF
+        call    fat12_next32
+        dec     word [var_left]
+        jnz     .load_kern
+        jmp     .load_done
 
+.fat_bad:
+        ;; EAX = FATCHK_* (1〜4)
+        mov     si, msg_badsize
+        cmp     ax, FATCHK_SIZE
+        je      .fat_err
+        mov     si, msg_fatshort
+        cmp     ax, FATCHK_SHORT
+        je      .fat_err
+        mov     si, msg_fatrange
+        cmp     ax, FATCHK_RANGE
+        je      .fat_err
+        mov     si, msg_fatlong
+.fat_err:
+        mov     ax, 0A000h
+        mov     es, ax
+        mov     di, 320
+        call    print16
+.fat_halt:
+        hlt
+        jmp     .fat_halt
+
+.load_done:
         ;; ============================================================
         ;; PM遷移
         ;; ============================================================
@@ -275,52 +323,27 @@ pm_entry32:
         mov     ss, ax
         mov     esp, 0009FFFCh
 
-        ;; ファイルは既に 0x10000 (1000:0000h) 以降に直接配置されているため
-        ;; Phase 1 / Phase 2 の統合コピー処理は不要
-
-        ;; === VK32ヘッダ解析 + LZ4展開 ===
-        ;; ファイル全体が 0x10000 に配置された状態
-        mov     esi, 10000h
-        cmp     dword [esi], 32334B56h  ;; VK32マジック
-        jne     .bad_magic
-
-        mov     ecx, [esi + 12]         ;; entry_count
-        cmp     ecx, 4
-        ja      .bad_magic
-
-        ;; エントリループ
-        xor     ebx, ebx               ;; エントリインデックス
-.decomp_loop:
-        cmp     ebx, ecx
-        jge     .decomp_done
-
-        ;; entries[ebx]: 16 + ebx*16 からのオフセット
-        lea     edx, [esi + 16]         ;; entries ベース
-        shl     ebx, 4                  ;; *16
-        add     edx, ebx               ;; edx = &entries[ebx]
-        shr     ebx, 4                  ;; ebx 復元
-
-        ;; LZ4展開: boot_lz4_decode(src, csz, dst, raw_sz)
-        ;; src = file_base + data_offset
-        mov     eax, [edx + 8]          ;; data_offset
-        add     eax, 10000h             ;; ファイルベースからの絶対アドレス
-
-        push    dword [edx + 4]         ;; 第4引数: raw_size (dst_capacity)
-        push    dword [edx + 0]         ;; 第3引数: load_addr (dst)
-        push    dword [edx + 12]        ;; 第2引数: compressed_size
-        push    eax                     ;; 第1引数: src
-
-        call    pm_lz4_decode
+        ;; ファイルは 0x10000 (1000:0000h) 以降に直接配置されている。
+        ;; === VK32 v2 の検査 + LZ4展開 (pm_vk32_boot) ===
+        push    dword vk32_img_crc              ;; out_crc
+        push    dword VK32_LOAD_MIN             ;; window = 帯の先頭そのもの
+        push    dword [var_size_lo]             ;; ファイル長 (ディレクトリの値)
+        push    dword 10000h                    ;; file
+        call    pm_vk32_boot
         add     esp, 16
-
-        ;; エラーチェック
         test    eax, eax
-        js      .lz4_fail
+        jnz     .vk32_fail
 
-        inc     ebx
-        jmp     .decomp_loop
+        ;; 起動したイメージの CRC をブート情報域のイメージ欄へ
+        ;; (include/bootinfo.h)。チェック語を**最後に**書く。
+        mov     eax, [vk32_img_crc]
+        mov     [MEM_BOOTINFO_BASE + BI_OFF_IMG_CRC], eax
+        mov     edx, [var_size_lo]
+        mov     [MEM_BOOTINFO_BASE + BI_OFF_IMG_SIZE], edx
+        xor     eax, edx
+        xor     eax, BOOTINFO_IMG_KEY
+        mov     [MEM_BOOTINFO_BASE + BI_OFF_IMG_CHECK], eax
 
-.decomp_done:
         ;; TVRAM: デコード完了
         mov     edi, 0A0000h + 480
         mov     esi, msg_ok32
@@ -355,17 +378,299 @@ pm_entry32:
         dd      00100000h
         dw      0008h
 
-.bad_magic:
+.vk32_fail:
+        ;; EAX = VK32_ERR_* (-1〜VK32_ERR_MIN)。表の外は汎用の文言
+        neg     eax
+        cmp     eax, -VK32_ERR_MIN
+        jbe     .vk32_msg
+        xor     eax, eax
+.vk32_msg:
+        mov     esi, [vk32_msgs + eax * 4]
         mov     edi, 0A0000h + 480
-        mov     esi, msg_badmagic
         call    pm_print32
         jmp     pm_halt
 
-.lz4_fail:
-        mov     edi, 0A0000h + 480
-        mov     esi, msg_lz4err
-        call    pm_print32
-        jmp     pm_halt
+
+;; >>> VK32_HOST_BEGIN
+;; ============================================================
+;; ここから VK32_HOST_END までを tools/tests/test_vk32_crc.py (と
+;; test_vmkernel_lz4.py) が**そのまま切り出して** nasm -f elf32 で組み、
+;; HDD 側の C (boot/vk32_boot.c) と同じ壊れたイメージを渡す。
+;; 外の番地・EQU に頼らないこと (必要な値はこの中に置く)。
+;; ============================================================
+bits 32
+
+;; VK32 v2 (正典は boot/boot_defs.h。名前ごとの一致は test_vk32_crc.py)
+VK32_MAGIC          EQU 32334B56h
+VK32_VERSION        EQU 2
+VK32_MAX_ENTRIES    EQU 4
+VK32_LOAD_MIN       EQU 0x100000
+VK32_LOAD_END       EQU 0x2E8000
+MAX_IMAGE_SIZE      EQU 7F000h          ;; (508*1024)
+VK32_ERR_SIZE       EQU -1
+VK32_ERR_MAGIC      EQU -2
+VK32_ERR_VERSION    EQU -3
+VK32_ERR_COUNT      EQU -4
+VK32_ERR_HEADER     EQU -5
+VK32_ERR_LENGTH     EQU -6
+VK32_ERR_FILE_CRC   EQU -7
+VK32_ERR_SRC        EQU -8
+VK32_ERR_DST        EQU -9
+VK32_ERR_DECODE     EQU -10
+VK32_ERR_RAW_SIZE   EQU -11
+VK32_ERR_ENTRY_CRC  EQU -12
+VK32_ERR_MIN        EQU -12
+
+;; LZ4デコーダ定数
+LZ4_MINMATCH        EQU 4
+
+;; ============================================================
+;; pm_vk32_boot — VK32 v2 の検査と展開 (32bit PM, cdecl)
+;;
+;; int pm_vk32_boot(const u8 *file, u32 size, u8 *window, u32 *out_crc)
+;;   エントリ i は window + (load_addr - VK32_LOAD_MIN) へ展開する
+;;   (ローダでは window = VK32_LOAD_MIN)。
+;; 戻り値: 0 = 成功 (*out_crc = image_crc)、負 = VK32_ERR_*
+;; 検査の順序は boot/vk32_boot.c の頭と同じ。
+;; 局所: [ebp-4] n, [ebp-8] hsz, [ebp-12] crc_off, [ebp-16] i,
+;;       [ebp-20] addr / dst, [ebp-24] raw
+;; ============================================================
+pm_vk32_boot:
+        push    ebp
+        mov     ebp, esp
+        sub     esp, 24
+        push    ebx
+        push    esi
+        push    edi
+        cld
+
+        mov     esi, [ebp+8]            ;; file
+        mov     ecx, [ebp+12]           ;; size
+        ;; 1. 長さ
+        cmp     ecx, 16
+        jb      .e_size
+        cmp     ecx, MAX_IMAGE_SIZE
+        ja      .e_size
+        ;; 2. 共通部
+        cmp     dword [esi], VK32_MAGIC
+        jne     .e_magic
+        cmp     dword [esi + 8], VK32_VERSION
+        jne     .e_version
+        mov     edx, [esi + 12]
+        test    edx, edx
+        jz      .e_count
+        cmp     edx, VK32_MAX_ENTRIES
+        ja      .e_count
+        mov     [ebp-4], edx
+        ;; 3. header_size = 16 + 20n + 8
+        lea     ebx, [edx + edx * 4]    ;; 5n
+        lea     ebx, [ebx * 4 + 24]     ;; 20n + 24
+        cmp     [esi + 4], ebx
+        jne     .e_header
+        cmp     ebx, ecx
+        ja      .e_header
+        mov     [ebp-8], ebx
+        ;; 4. 完全長 (image_size は hsz - 8)
+        cmp     [esi + ebx - 8], ecx
+        jne     .e_length
+        ;; 5. ファイル全体の CRC32 (image_crc = hsz - 4 の欄を 0 として)
+        lea     edi, [ebx - 4]
+        mov     [ebp-12], edi
+        push    edi
+        push    esi
+        push    dword 0FFFFFFFFh
+        call    pm_crc32_update
+        add     esp, 12
+        push    dword 4
+        push    dword vk32_zero4
+        push    eax
+        call    pm_crc32_update
+        add     esp, 12
+        mov     edx, [ebp+12]
+        sub     edx, edi
+        sub     edx, 4
+        lea     ecx, [esi + edi + 4]
+        push    edx
+        push    ecx
+        push    eax
+        call    pm_crc32_update
+        add     esp, 12
+        not     eax
+        cmp     eax, [esi + edi]
+        jne     .e_file_crc
+
+        ;; 6. 全エントリの範囲 (展開の前に)
+        mov     dword [ebp-16], 0
+.rng_loop:
+        mov     ebx, [ebp-16]
+        cmp     ebx, [ebp-4]
+        jae     .rng_done
+        shl     ebx, 4
+        lea     edi, [esi + ebx + 16]   ;; &entry[i]
+        ;; 入力: hsz <= off <= size かつ csz <= size - off
+        mov     edx, [edi + 8]
+        cmp     edx, [ebp-8]
+        jb      .e_src
+        mov     ecx, [ebp+12]
+        cmp     edx, ecx
+        ja      .e_src
+        sub     ecx, edx
+        cmp     [edi + 12], ecx
+        ja      .e_src
+        ;; 展開先: raw != 0、MIN <= addr < END、raw <= END - addr
+        mov     edx, [edi]
+        mov     ecx, [edi + 4]
+        test    ecx, ecx
+        jz      .e_dst
+        cmp     edx, VK32_LOAD_MIN
+        jb      .e_dst
+        cmp     edx, VK32_LOAD_END
+        jae     .e_dst
+        mov     eax, VK32_LOAD_END
+        sub     eax, edx
+        cmp     ecx, eax
+        ja      .e_dst
+        mov     [ebp-20], edx
+        mov     [ebp-24], ecx
+        ;; 前のエントリと重ならない: addr < a2 + r2 かつ a2 < addr + raw なら重なる
+        xor     eax, eax
+.ovl_loop:
+        cmp     eax, [ebp-16]
+        jae     .ovl_done
+        mov     ecx, eax
+        shl     ecx, 4
+        lea     ecx, [esi + ecx + 16]
+        mov     edx, [ecx]
+        add     edx, [ecx + 4]
+        cmp     [ebp-20], edx
+        jae     .ovl_next
+        mov     edx, [ebp-20]
+        add     edx, [ebp-24]
+        cmp     [ecx], edx
+        jb      .e_dst
+.ovl_next:
+        inc     eax
+        jmp     .ovl_loop
+.ovl_done:
+        inc     dword [ebp-16]
+        jmp     .rng_loop
+.rng_done:
+
+        ;; 7. 展開 → decoded == raw_size → 展開後の CRC32
+        mov     dword [ebp-16], 0
+.dec_loop:
+        mov     ebx, [ebp-16]
+        cmp     ebx, [ebp-4]
+        jae     .dec_done
+        shl     ebx, 4
+        lea     edi, [esi + ebx + 16]   ;; &entry[i]
+        mov     edx, [edi]
+        sub     edx, VK32_LOAD_MIN
+        add     edx, [ebp+16]           ;; dst = window + (addr - MIN)
+        mov     [ebp-20], edx
+        mov     eax, [edi + 8]
+        add     eax, esi                ;; src = file + data_offset
+        push    dword [edi + 4]         ;; cap = raw_size
+        push    edx
+        push    dword [edi + 12]
+        push    eax
+        call    pm_lz4_decode
+        add     esp, 16
+        test    eax, eax
+        js      .e_decode
+        cmp     eax, [edi + 4]
+        jne     .e_raw_size
+        push    dword [edi + 4]
+        push    dword [ebp-20]
+        push    dword 0FFFFFFFFh
+        call    pm_crc32_update
+        add     esp, 12
+        not     eax
+        mov     ebx, [ebp-16]
+        mov     edx, [ebp-4]
+        shl     edx, 4
+        add     edx, esi                ;; edx + 16 = &entry_crc[0]
+        cmp     eax, [edx + ebx * 4 + 16]
+        jne     .e_entry_crc
+        inc     dword [ebp-16]
+        jmp     .dec_loop
+.dec_done:
+        mov     edi, [ebp-12]
+        mov     eax, [esi + edi]
+        mov     edx, [ebp+20]
+        mov     [edx], eax
+        xor     eax, eax
+        jmp     .ret
+
+.e_size:        mov     eax, VK32_ERR_SIZE
+                jmp     .ret
+.e_magic:       mov     eax, VK32_ERR_MAGIC
+                jmp     .ret
+.e_version:     mov     eax, VK32_ERR_VERSION
+                jmp     .ret
+.e_count:       mov     eax, VK32_ERR_COUNT
+                jmp     .ret
+.e_header:      mov     eax, VK32_ERR_HEADER
+                jmp     .ret
+.e_length:      mov     eax, VK32_ERR_LENGTH
+                jmp     .ret
+.e_file_crc:    mov     eax, VK32_ERR_FILE_CRC
+                jmp     .ret
+.e_src:         mov     eax, VK32_ERR_SRC
+                jmp     .ret
+.e_dst:         mov     eax, VK32_ERR_DST
+                jmp     .ret
+.e_decode:      mov     eax, VK32_ERR_DECODE
+                jmp     .ret
+.e_raw_size:    mov     eax, VK32_ERR_RAW_SIZE
+                jmp     .ret
+.e_entry_crc:   mov     eax, VK32_ERR_ENTRY_CRC
+.ret:
+        ;; どの出口でも ebp から戻す (途中の push が残っていても正しい)
+        lea     esp, [ebp - 24 - 12]
+        pop     edi
+        pop     esi
+        pop     ebx
+        mov     esp, ebp
+        pop     ebp
+        ret
+
+
+;; ============================================================
+;; pm_crc32_update — CRC-32 (IEEE 802.3) の未確定状態を進める (cdecl)
+;;
+;; u32 pm_crc32_update(u32 state, const u8 *data, u32 len)
+;;   lib/crc32_core.inc と同じ nibble 表。最初は 0FFFFFFFFh、最後に not。
+;;   壊す: EAX ECX EDX (EBX ESI EDI は保存)
+;; ============================================================
+pm_crc32_update:
+        push    ebp
+        mov     ebp, esp
+        push    ebx
+        push    esi
+        mov     eax, [ebp+8]
+        mov     esi, [ebp+12]
+        mov     ecx, [ebp+16]
+        test    ecx, ecx
+        jz      .done
+.lp:
+        xor     al, [esi]
+        inc     esi
+        mov     ebx, eax
+        and     ebx, 0Fh
+        shr     eax, 4
+        xor     eax, [crc32_nib + ebx * 4]
+        mov     ebx, eax
+        and     ebx, 0Fh
+        shr     eax, 4
+        xor     eax, [crc32_nib + ebx * 4]
+        dec     ecx
+        jnz     .lp
+.done:
+        pop     esi
+        pop     ebx
+        pop     ebp
+        ret
 
 
 ;; ============================================================
@@ -373,9 +678,12 @@ pm_entry32:
 ;;
 ;; int pm_lz4_decode(u8 *src, int csz, u8 *dst, int cap)
 ;; スタック: [ebp+8]=src, [ebp+12]=csz, [ebp+16]=dst, [ebp+20]=cap
-;; 戻り値: EAX = 展開バイト数 (負=エラー)
+;; 戻り値: EAX = 展開バイト数、-1 = 入力の異常、-2 = 出力が容量を超える
+;; (boot/lz4_mini.c と同じ境界検査・同じ戻り値)。
+;; 局所: [ebp-24] token, [ebp-28] offset。**どの出口も .lz4_ret で ebp から
+;; 戻す** — 以前は延長読みで入力の終端に達すると token を積んだまま
+;; .lz4_err へ飛び、dst_start の代わりに token を捨てて戻り番地を壊していた。
 ;; ============================================================
-
 pm_lz4_decode:
         push    ebp
         mov     ebp, esp
@@ -384,110 +692,117 @@ pm_lz4_decode:
         push    edx
         push    esi
         push    edi
+        sub     esp, 8
+        cld
 
         mov     esi, [ebp+8]    ;; src (ip)
         mov     ecx, [ebp+12]   ;; compressed_size
+        test    ecx, ecx
+        js      .lz4_err_in
         lea     ebx, [esi+ecx]  ;; ip_end
         mov     edi, [ebp+16]   ;; dst (op)
         mov     ecx, [ebp+20]   ;; cap
+        test    ecx, ecx
+        js      .lz4_err_in
         lea     edx, [edi+ecx]  ;; op_end
-        push    edi             ;; 保存: dst_start
 
 .lz4_loop:
         cmp     esi, ebx
-        jge     .lz4_end
+        jae     .lz4_end
 
         ;; トークン
         movzx   eax, byte [esi]
         inc     esi
-        push    eax             ;; 保存: token
+        mov     [ebp-24], eax
 
         ;; リテラル長
         shr     eax, 4
-        and     eax, 0Fh
         cmp     eax, 15
         jne     .lz4_lit_copy
 .lz4_lit_ext:
         cmp     esi, ebx
-        jge     .lz4_err
+        jae     .lz4_err_in
         movzx   ecx, byte [esi]
         inc     esi
         add     eax, ecx
+        cmp     eax, [ebp+20]   ;; 長さの累積が容量を超えたら正当な流れではない
+        ja      .lz4_err_in
         cmp     ecx, 255
         je      .lz4_lit_ext
 
 .lz4_lit_copy:
-        ;; eax = lit_len
+        ;; eax = lit_len。入力の残りと出力の残りの両方に収まること
+        mov     ecx, ebx
+        sub     ecx, esi
+        cmp     eax, ecx
+        ja      .lz4_err_in
+        mov     ecx, edx
+        sub     ecx, edi
+        cmp     eax, ecx
+        ja      .lz4_err_out
         mov     ecx, eax
-        ;; 境界チェック省略 (ブートローダーなので信頼できるデータ)
         rep     movsb
 
-        ;; 入力終端?
+        ;; 入力終端? (最後の系列はリテラルだけ)
         cmp     esi, ebx
-        jge     .lz4_end_pop
+        jae     .lz4_end
 
-        ;; オフセット (2B LE)
+        ;; オフセット (2B LE)。0 と、出力済みより遠いものは不正
+        mov     ecx, ebx
+        sub     ecx, esi
+        cmp     ecx, 2
+        jb      .lz4_err_in
         movzx   eax, word [esi]
         add     esi, 2
         test    eax, eax
-        jz      .lz4_err_pop
-        push    eax             ;; 保存: offset
+        jz      .lz4_err_in
+        mov     ecx, edi
+        sub     ecx, [ebp+16]
+        cmp     eax, ecx
+        ja      .lz4_err_in
+        mov     [ebp-28], eax
 
-        ;; マッチ長
-        pop     eax             ;; offset 復元 → 後で使う
-        push    eax             ;; 再保存
-
-        ;; token の下位4bit
-        mov     ecx, [esp+4]    ;; token (スタック上)
+        ;; マッチ長 = token の下位 4bit + MINMATCH
+        mov     ecx, [ebp-24]
         and     ecx, 0Fh
         add     ecx, LZ4_MINMATCH
         cmp     ecx, 15 + LZ4_MINMATCH
         jne     .lz4_match_copy
 .lz4_match_ext:
         cmp     esi, ebx
-        jge     .lz4_err_pop2
+        jae     .lz4_err_in
         movzx   eax, byte [esi]
         inc     esi
         add     ecx, eax
+        cmp     ecx, [ebp+20]
+        ja      .lz4_err_in
         cmp     eax, 255
         je      .lz4_match_ext
 
 .lz4_match_copy:
-        ;; ecx = match_len, [esp] = offset
-        pop     eax             ;; offset
-        push    esi             ;; src 保存
+        ;; ecx = match_len。出力の残りに収まること
+        mov     eax, edx
+        sub     eax, edi
+        cmp     ecx, eax
+        ja      .lz4_err_out
+        mov     eax, esi        ;; ip 保存
         mov     esi, edi
-        sub     esi, eax        ;; match_src = op - offset
+        sub     esi, [ebp-28]   ;; match_src = op - offset
         rep     movsb
-        pop     esi             ;; src 復元
-
-        ;; token 除去
-        add     esp, 4
+        mov     esi, eax
         jmp     .lz4_loop
 
-.lz4_end_pop:
-        add     esp, 4          ;; token 除去
 .lz4_end:
-        pop     eax             ;; dst_start
-        sub     edi, eax        ;; 展開バイト数
         mov     eax, edi
-
-        pop     edi
-        pop     esi
-        pop     edx
-        pop     ecx
-        pop     ebx
-        pop     ebp
-        ret
-
-.lz4_err_pop2:
-        add     esp, 4          ;; offset
-.lz4_err_pop:
-        add     esp, 4          ;; token
-.lz4_err:
-        pop     eax             ;; dst_start (捨て)
+        sub     eax, [ebp+16]   ;; 展開バイト数
+        jmp     .lz4_ret
+.lz4_err_out:
+        mov     eax, -2
+        jmp     .lz4_ret
+.lz4_err_in:
         mov     eax, -1
-
+.lz4_ret:
+        lea     esp, [ebp-20]
         pop     edi
         pop     esi
         pop     edx
@@ -495,6 +810,16 @@ pm_lz4_decode:
         pop     ebx
         pop     ebp
         ret
+
+;; CRC-32 nibble 表 (lib/crc32_core.inc の crc32_core_nib と同じ値)
+crc32_nib:
+        dd      000000000h, 01DB71064h, 03B6E20C8h, 026D930ACh
+        dd      076DC4190h, 06B6B51F4h, 04DB26158h, 05005713Ch
+        dd      0EDB88320h, 0F00F9344h, 0D6D6A3E8h, 0CB61B38Ch
+        dd      09B64C2B0h, 086D3D2D4h, 0A00AE278h, 0BDBDF21Ch
+vk32_zero4:
+        dd      0
+;; <<< VK32_HOST_END
 
 
 ;; ============================================================
@@ -563,34 +888,75 @@ disk_err16:
         hlt
         jmp     .halt
 
+;; >>> FAT_HOST_BEGIN
 ;; ============================================================
-;; fat12_next16 — FAT12次クラスタ取得
+;; FAT12 チェーンの検査と次クラスタ。**32 ビットのレジスタとアドレッシング
+;; だけ**で書く — ローダは実モード (bits 16、386 の 66h/67h 前置で同じ意味)、
+;; tools/tests/test_vk32_crc.py はここを切り出して bits 32 で組み、同じ
+;; 手続きをホストで回す (16 ビットの実モードはホストで動かせないため)。
+;; 実モードでは ESI + EBX < 64KB (FAT_BUF 6000h + 最大 4.3KB) なので 67h の
+;; 32 ビット番地でも #GP にならない。
 ;; ============================================================
-fat12_next16:
-        push    bx
-        push    dx
-        push    es
-        xor     bx, bx
-        mov     es, bx
-        mov     bx, ax
-        shr     bx, 1
-        add     bx, ax
-        add     bx, FAT_BUF
-        mov     dx, es:[bx]
-        test    ax, 1
-        jnz     .odd
-        and     dx, 0FFFh
-        jmp     .done
-.odd:
-        mov     cl, 4
-        shr     dx, cl
-        and     dx, 0FFFh
-.done:
-        mov     ax, dx
-        pop     es
-        pop     dx
-        pop     bx
+FATCHK_OK       EQU 0
+FATCHK_SIZE     EQU 1           ;; 長さが 0 か MAX_IMAGE_SIZE 超
+FATCHK_SHORT    EQU 2           ;; 必要な数より前に EOC (早期終端)
+FATCHK_RANGE    EQU 3           ;; [2, MAX_CLUSTER) の外 (0/1、予約・不良 0FF0h〜0FF7h)
+FATCHK_LONG     EQU 4           ;; 必要な数を辿った次が EOC でない (循環・長すぎる)
+
+;; fat12_next32 — EAX = クラスタ、ESI = FAT の先頭 → EAX = 次のクラスタ
+;;   壊す: EBX EDX
+fat12_next32:
+        mov     ebx, eax
+        shr     ebx, 1
+        add     ebx, eax                ;; cluster * 1.5
+        movzx   edx, word [esi + ebx]
+        test    al, 1
+        jz      .even
+        shr     edx, 4
+.even:
+        and     edx, 0FFFh
+        mov     eax, edx
         ret
+
+;; fat_chain_check — EAX = 開始クラスタ、EDX = ファイル長、ESI = FAT の先頭
+;;   → EAX = FATCHK_*、ECX = 読むクラスタ数 (= ceil(長さ / SECT_SZ))
+;;   メモリは読むだけ。壊す: なし (EBX EDX ESI は保存)
+fat_chain_check:
+        push    ebx
+        push    edx
+        push    ebp
+        mov     ebp, FATCHK_SIZE
+        test    edx, edx
+        jz      .out
+        cmp     edx, MAX_IMAGE_SIZE
+        ja      .out
+        lea     ecx, [edx + SECT_SZ - 1]
+        shr     ecx, SECT_SHIFT
+.walk:
+        mov     ebp, FATCHK_SHORT
+        cmp     eax, 0FF8h
+        jae     .out
+        mov     ebp, FATCHK_RANGE
+        cmp     eax, 2
+        jb      .out
+        cmp     eax, MAX_CLUSTER
+        jae     .out
+        call    fat12_next32
+        dec     ecx
+        jnz     .walk
+        mov     ebp, FATCHK_LONG
+        cmp     eax, 0FF8h
+        jb      .out
+        mov     ebp, FATCHK_OK
+.out:
+        pop     eax                     ;; = ebp の旧値 (捨てずに下で戻す)
+        xchg    eax, ebp                ;; EAX = 結果、EBP = 旧値
+        pop     edx
+        lea     ecx, [edx + SECT_SZ - 1]
+        shr     ecx, SECT_SHIFT
+        pop     ebx
+        ret
+;; <<< FAT_HOST_END
 
 ;; ============================================================
 ;; print16 — 16ビットTVRAM表示
@@ -649,10 +1015,31 @@ msg_nokernel:   db 'VMKRNL.LZ4 not found!', 0
 msg_pm:         db 'Entering PM...', 0
 msg_diskerr:    db 'Disk Error!', 0
 msg_ok32:       db 'Kernel loaded. Booting...', 0
-msg_badmagic:   db 'Bad VK32 magic!', 0
-msg_lz4err:     db 'LZ4 decode FAIL!', 0
+msg_badsize:    db 'VMKRNL.LZ4: bad size (0 or > 508KiB)', 0
+msg_fatshort:   db 'VMKRNL.LZ4: FAT chain ends early', 0
+msg_fatrange:   db 'VMKRNL.LZ4: FAT cluster out of range', 0
+msg_fatlong:    db 'VMKRNL.LZ4: FAT chain too long/loop', 0
+;; VK32_ERR_* の文言 (boot/vk32_boot.c の vk32_strerror と同じ)。添字 = -rc
+vk32_msgs:
+        dd      m_vk_err, m_vk_1, m_vk_2, m_vk_3, m_vk_4, m_vk_5, m_vk_6
+        dd      m_vk_7, m_vk_8, m_vk_9, m_vk_10, m_vk_11, m_vk_12
+m_vk_err:       db 'VK32: error', 0
+m_vk_1:         db 'VK32: bad file size', 0
+m_vk_2:         db 'VK32: bad magic', 0
+m_vk_3:         db 'VK32: unknown version (need 2)', 0
+m_vk_4:         db 'VK32: bad entry count', 0
+m_vk_5:         db 'VK32: bad header size', 0
+m_vk_6:         db 'VK32: file truncated/length mismatch', 0
+m_vk_7:         db 'VK32: image CRC mismatch', 0
+m_vk_8:         db 'VK32: entry data outside file', 0
+m_vk_9:         db 'VK32: load address out of range', 0
+m_vk_10:        db 'VK32: LZ4 decode FAIL', 0
+m_vk_11:        db 'VK32: decoded size mismatch', 0
+m_vk_12:        db 'VK32: entry CRC mismatch', 0
 
 var_cluster:    dw 0
 var_size_lo:    dw 0
 var_size_hi:    dw 0
 var_load_seg:   dw 0
+var_left:       dw 0            ;; まだ読むクラスタ数
+vk32_img_crc:   dd 0

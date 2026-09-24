@@ -14,7 +14,8 @@
 #include "kprintf.h"
 #include "ide_addr.h"
 #include "kstring.h"
-#include "os32_kapi_shared.h"   /* HddGeom (KAPI v64) */
+#include "os32_kapi_shared.h"   /* HddGeom (KAPI v64) / BootImageInfo (v65) */
+#include "build_id.h"           /* os32_build_commit (生成物 build/out/build_id.c) */
 
 /* 構造体の並びが NASM 側 (boot/bootinfo.inc) と同じオフセットか。
  * ホストでは u32 が 64bit なのでここ (i386 のカーネルビルド) でだけ見る。 */
@@ -27,7 +28,14 @@ STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire, ndrives) == BI_OFF_NDRIVES, bi_o
 STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire, drive)   == BI_OFF_DRIVE0,  bi_off_drive0);
 STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire, sum)     == BI_OFF_SUM,     bi_off_sum);
 STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire, check)   == BI_OFF_CHECK,   bi_off_check);
+STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire, img_crc)   == BI_OFF_IMG_CRC,   bi_off_img_crc);
+STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire, img_size)  == BI_OFF_IMG_SIZE,  bi_off_img_size);
+STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire, img_check) == BI_OFF_IMG_CHECK, bi_off_img_check);
 STATIC_ASSERT(sizeof(struct bootinfo_wire_drive) == BI_DRIVE_SIZE, bi_drive_size);
+/* boot_image_info の出力は KAPI の契約 (40 バイト、os32_kapi_shared.h) */
+STATIC_ASSERT(sizeof(BootImageInfo) == 40, boot_image_info_size);
+STATIC_ASSERT(BI_OFFSETOF(BootImageInfo, commit) == 12, boot_image_info_commit);
+STATIC_ASSERT(BOOT_IMAGE_COMMIT_MAX == BUILD_COMMIT_MAX, boot_image_commit_max);
 STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire_drive, bx) == BI_DRV_BX, bi_drv_bx);
 STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire_drive, cx) == BI_DRV_CX, bi_drv_cx);
 STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire_drive, dh) == BI_DRV_DH, bi_drv_dh);
@@ -197,4 +205,46 @@ int hdd_geom_info(int drive, void *out_v)
         out->addr_mode     = (u8)ide_addr_mode_of(drive);
     }
     return 0;
+}
+
+/* ======================================================================== */
+/*  起動したイメージ (票 TASK_SERIAL_HOSTFS 部品 A-4)                        */
+/* ======================================================================== */
+
+/* kapi/kapi_sys.c (__DATE__ __TIME__ はそこだけが毎回組み直される) */
+extern void kapi_sys_get_build_info(char *buf, int size);
+
+int boot_image_info(void *out_v)
+{
+    BootImageInfo *out = (BootImageInfo *)out_v;
+
+    if (!out) return OS32_ERR_INVAL;
+    kmemset(out, 0, sizeof(*out));
+    if (s_bootinfo.status == BOOTINFO_OK) {
+        out->source = s_bootinfo.source;
+        if (s_bootinfo.img_valid) {
+            out->crc_valid  = 1;
+            out->image_crc  = s_bootinfo.img_crc;
+            out->image_size = s_bootinfo.img_size;
+        }
+    }
+    kstrncpy(out->commit, os32_build_commit, (u32)sizeof(out->commit));
+    out->commit[sizeof(out->commit) - 1] = '\0';
+    return 0;
+}
+
+void bootinfo_report_image(void)
+{
+    char build[32];
+
+    kapi_sys_get_build_info(build, (int)sizeof(build));
+    kprintf(0x07, "[boot] Build: %s  Commit: %s\n", build, os32_build_commit);
+    if (s_bootinfo.status == BOOTINFO_OK && s_bootinfo.img_valid) {
+        kprintf(0x07, "[boot] Image CRC: %08x (%u bytes, src=%s)\n",
+                s_bootinfo.img_crc, s_bootinfo.img_size,
+                s_bootinfo.source == BOOTINFO_SRC_HDD ? "hdd" :
+                s_bootinfo.source == BOOTINFO_SRC_FD ? "fd" : "?");
+    } else {
+        kprintf(0x07, "[boot] Image CRC: none (loader did not record)\n");
+    }
 }

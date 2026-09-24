@@ -69,7 +69,25 @@ static int cmd_ver(int argc, char **argv)
     g_api->kprintf(ATTR_CYAN, "%s", "  SND: YM2203 (OPN) FM3+SSG3\n");
     g_api->kprintf(ATTR_CYAN, "%s", "  GFX: 640x400x16 CPU direct\n");
     g_api->kprintf(ATTR_WHITE, "  API: v%u\n", g_api->version);
-    g_api->kprintf(ATTR_WHITE, "  Build: %s %s\n", __DATE__, __TIME__);
+    /* Build はカーネルを組んだ日時 (以前はシェル自身の __DATE__ だった)。
+     * Commit / Image CRC は票 TASK_SERIAL_HOSTFS A-4 (KAPI v65)。
+     * 更新の証拠は Image CRC (ローダが検査して起動した vmkernel.lz4)。 */
+    {
+        char build[32];
+        BootImageInfo bi;
+
+        g_api->sys_get_build_info(build, (int)sizeof(build));
+        g_api->kprintf(ATTR_WHITE, "  Build: %s\n", build);
+        if (g_api->version >= 65 && g_api->boot_image_info(&bi) == 0) {
+            g_api->kprintf(ATTR_WHITE, "  Commit: %s\n", bi.commit);
+            if (bi.crc_valid)
+                g_api->kprintf(ATTR_WHITE, "  Image CRC: %08x (%u bytes, %s loader)\n",
+                               bi.image_crc, bi.image_size,
+                               bi.source == 2 ? "HDD" : bi.source == 1 ? "FD" : "?");
+            else
+                g_api->kprintf(ATTR_WHITE, "%s", "  Image CRC: none (loader did not record)\n");
+        }
+    }
     return 0;
 }
 

@@ -26,7 +26,7 @@ INC = ROOT / "boot/bootinfo.inc"
 TARGET_SRCS = ["kernel/bootinfo_check.c", "kernel/bootinfo.c", "drivers/ide.c"]
 
 CASES = ["good", "magic", "check_word", "version", "sum", "rules", "format",
-         "inc_mirror"]
+         "image", "inc_mirror"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl="]
@@ -53,16 +53,30 @@ MUTATIONS = [
     (r"d->valid = \(u8\)\(\(d->loader_valid == 1 && bootinfo_drive_usable\(d\)\) \? 1 : 0\);",
      "d->valid = (u8)bootinfo_drive_usable(d);", "ローダが 0 と書いたものを拾い直す"),
     (r"    if \(!d->queried\) return 0;\n", "", "問い合わせていないドライブを使う"),
+    # イメージ欄 (v2、票 TASK_SERIAL_HOSTFS A-4)
+    (r"rd32\(raw \+ BI_OFF_IMG_CHECK\) == BOOTINFO_IMG_CHECK_OF\(crc, size\)",
+     "1", "イメージ欄のチェック語を見ない (書きかけ・化けた CRC を記録ありにする)"),
+    (r"        if \(size != 0 &&\n", "        if (",
+     "大きさ 0 を記録ありにする"),
+    (r"    out->status = BOOTINFO_OK;\n    return out->status;",
+     "    out->status = BOOTINFO_OK;\n    out->img_crc ^= 1;\n    return out->status;",
+     "記録した CRC を 1 ビット化かして返す"),
 ]
 
 # NASM 側の写しを 1 つずつ壊す (inc_mirror が RED になること)
 INC_MUTATIONS = [
     (r"BI_OFF_CHECK        EQU 0x2C", "BI_OFF_CHECK        EQU 0x28",
      "check の位置を sum に重ねる"),
-    (r"BOOTINFO_CHECK      EQU 0xB6ABB0BC", "BOOTINFO_CHECK      EQU 0xB6ABB0BD",
+    (r"BOOTINFO_CHECK      EQU 0xB6ABB0BF", "BOOTINFO_CHECK      EQU 0xB6ABB0BE",
      "反転語の値が 1 ビット違う"),
     (r"BI_DRV_DL           EQU 0x09", "BI_DRV_DL           EQU 0x08",
      "DL を DH と同じ位置に書く"),
+    (r"BI_OFF_IMG_CHECK    EQU 0x38", "BI_OFF_IMG_CHECK    EQU 0x34",
+     "イメージ欄のチェック語を大きさの位置に書く"),
+    (r"BOOTINFO_IMG_KEY    EQU 0x43474D49", "BOOTINFO_IMG_KEY    EQU 0x43474D48",
+     "イメージ欄の鍵が 1 ビット違う"),
+    (r"BOOTINFO_VERSION    EQU 2", "BOOTINFO_VERSION    EQU 1",
+     "ローダが旧版 (v1) を名乗る"),
 ]
 
 
@@ -119,7 +133,9 @@ def inc_mirror(exe, inc_text=None):
             bad += 1
     # ローダが使う名前が inc に全部あること
     for name in ("BOOTINFO_MAGIC", "BOOTINFO_CHECK", "BI_OFF_CHECK", "BI_OFF_SUM",
-                 "BI_DRV_BX", "BI_DRV_DH", "BI_DRV_DL", "BI_DRV_QUERIED"):
+                 "BI_DRV_BX", "BI_DRV_DH", "BI_DRV_DL", "BI_DRV_QUERIED",
+                 "BI_OFF_IMG_CRC", "BI_OFF_IMG_SIZE", "BI_OFF_IMG_CHECK",
+                 "BOOTINFO_IMG_KEY"):
         if name not in got:
             print(f"  inc_mirror: {name} が inc に無い", file=sys.stderr)
             bad += 1
@@ -173,7 +189,9 @@ def mutate(tmp):
         try:
             exe = host_build(tmp, mutated)
         except subprocess.CalledProcessError:
-            print(f"MUTATION {i} RED (compile): {why}", flush=True)
+            # 組めない変異は何も確かめていない — RED に数えない
+            print(f"MUTATION {i} ERROR (compile): {why}", flush=True)
+            bad += 1
             continue
         hits = sum(subprocess.run([str(exe), c], cwd=ROOT,
                                   stderr=subprocess.DEVNULL).returncode != 0

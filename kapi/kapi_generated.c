@@ -53,7 +53,7 @@ extern int kapi_pci_bind_info(u32 idx, void *out);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[234];
+volatile u32 kapi_hits[235];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -293,6 +293,7 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     4,  /* dev_mount_count */
     4,  /* sys_umount_checked */
     8,  /* hdd_geom_info */
+    4,  /* boot_image_info */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -532,6 +533,7 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* dev_mount_count */
     0x0001,  /* sys_umount_checked: prefix */
     0x0002,  /* hdd_geom_info: out */
+    0x0001,  /* boot_image_info: out */
 };
 
 /* ---- 出力ポインタの書き込み可検査 (票 TASK_KAPI_OUTPUT_GUARD) --------
@@ -2167,5 +2169,16 @@ int __cdecl wrap_hdd_geom_info(int drv, HddGeom *out)
         ring3_fault_kill();   /* 戻らない */
     }
     return hdd_geom_info(drv, (void *)out);
+}
+
+int __cdecl wrap_boot_image_info(BootImageInfo *out)
+{
+    KAPI_HIT(234);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)out, KAPI_OUT_LEN(out, sizeof(BootImageInfo)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
+    return boot_image_info((void *)out);
 }
 
