@@ -1044,6 +1044,15 @@ static void ksel_irq_snap_take(struct ksel_irq_snap *s)
 
 static void test_irq_dynamic_body(int skip_unmask);
 
+/* IMR を開ける部分 (test_irq_dynamic_body の skip_unmask より後) の check 数。
+ * IRR に本物の要求が来ていて飛ばしたとき、飛ばした件数としてログに出す
+ * (実機の合計が NP21/W より少なく見える理由を行で分かるように。レビュー
+ * 往復 2)。**数え違いは本体の最後の "irq:unmask count" が検出する** —
+ * 飛ばさなかった起動 (NP21/W) で、実際に走った check の数と突き合わせる。
+ * 飛ばす件数は、その突き合わせの 1 件を足した値。 */
+#define KSEL_IRQ_UNMASK_CHECKS   28
+#define KSEL_IRQ_UNMASK_SKIPPED  (KSEL_IRQ_UNMASK_CHECKS + 1)
+
 /* マスタ PIC の IRR (要求が来ているか) を OCW3 で読む。IMR に関係なく立つ。
  * 読んだ後は既定の IRR 読み出しのまま (irq_finish と同じ流儀)。 */
 static int ksel_irq_pending(unsigned int irq)
@@ -1112,7 +1121,8 @@ static void test_irq_dynamic(void)
 
     if (pending)
         kprintf(0x07, "[selftest] irq: IRQ%d pending in IRR -> unmask part "
-                "skipped (not a failure)\n", KSEL_IRQ_LINE);
+                "skipped %d checks (not a failure)\n", KSEL_IRQ_LINE,
+                (int)KSEL_IRQ_UNMASK_SKIPPED);
 
     check(after.masked == before.masked &&
           after.quarantined == before.quarantined &&
@@ -1128,6 +1138,7 @@ static void test_irq_dynamic_body(int skip_unmask)
 {
     u32 ctx_before = irq_ctx_violations;
     u32 deferred_before;
+    int unmask_base;
     int i;
 
     ksel_irq_reset_devs();
@@ -1145,6 +1156,7 @@ static void test_irq_dynamic_body(int skip_unmask)
           == IRQ_ERR_INVAL, "irq:regflag=INVAL");
 
     if (skip_unmask) return;   /* ここから先は IRQ3 の IMR を開ける */
+    unmask_base = ksel_pass + ksel_fail;
 
     /* --- 登録数で PIC のマスクを持つ --- */
     check(ksel_irq_masked(KSEL_IRQ_LINE) == 1, "irq:masked b4 reg");
@@ -1252,6 +1264,10 @@ static void test_irq_dynamic_body(int skip_unmask)
     check(ksel_irq_masked(KSEL_IRQ_LINE) == 1,
           "irq:masked at end");
     check(irq_lines[0].count == 0, "irq:table empty");
+
+    /* 飛ばしたときに出す件数 (KSEL_IRQ_UNMASK_SKIPPED) の元の数と一致するか */
+    check(ksel_pass + ksel_fail - unmask_base == KSEL_IRQ_UNMASK_CHECKS,
+          "irq:unmask count");
 }
 
 /* ------------------------------------------------------------------------ */

@@ -70,7 +70,7 @@ static int s_sys16m_ram = 0;  /* 043Bh bit2 の読み値 (1 = 通常 RAM 扱い)
 
 /* 起動時 (BIOS が作ったまま) の水平走査周波数。pegc_boot_sync_record() が
  * 1 回だけ埋め、480 ラインから戻る pegc_shutdown() がこの値へ戻す。
- * -1 = 分からない (09A8h も 054Ch も当てにならなかった)。 */
+ * -1 = まだ記録していない (probe が通る前)。 */
 static int s_boot_recorded = 0;
 static int s_boot_hsync    = -1;  /* PEGC_HSYNC_24KHZ / PEGC_HSYNC_31KHZ / -1 */
 
@@ -194,7 +194,27 @@ static void pegc_tvram_clear(int row0, int row1)
 /*  読めるものだけ読む:                                                      */
 /*    09A8h D0      水平走査周波数 ([U] io_disp.md「I/O 09A8h」READ/WRITE、  */
 /*                  [B] §3-2 表3-1 は読み出しの D0=HF だけを定義し、D7〜D1   */
-/*                  は不定)。FFh (open bus) だけを「読めていない」とする。   */
+/*                  は不定)。**読み値でポートの有無を判定しない** — FFh も    */
+/*                  D0=1 の正常な読みでありうる (レビュー往復 2)。           */
+/*                                                                          */
+/*  「PEGC probe が通った機種には 09A8h がある」の裏付けと限界:              */
+/*    - [B] §3-2 表3-1 は「H98・MATE 共通の拡張 I/O ポート」として 09A8H の  */
+/*      リード (D0=HF) を載せている。MATE = PC-9821 系、PEGC もこの節の      */
+/*      「MATE の 256 色表示」。                                             */
+/*    - [U] io_disp.md「I/O 09A8h」の対象は PC-98GS, PC-H98,                  */
+/*      PC-9821[Ts を除く], PC-9801BA2･BS2･BX2, PC-9801NS/A。READ/WRITE は    */
+/*      NS/A 以外 (NS/A は bit7 不明・他は未使用で意味が違う)。              */
+/*    - probe の段 4 が見る 09A0h の対象 ([U] 同 1585 行) は PC-98GS, PC-H98, */
+/*      PC-9821[Ts を除く], PC-9801BA2･BS2･BX2･BX3･BA3･BX4･NS/A。            */
+/*      つまり **09A0h があって 09A8h の対象に無いのは BX3･BA3･BX4 だけ**、   */
+/*      読みの意味が違うのが NS/A。これらは 9801 で、probe の段 1            */
+/*      (045Ch bit6 と 0597h bit2) と段 5 (F00000h の PEGC リニア窓の        */
+/*      書き読み) まで通る機種だという記述は資料に無い — **通らないはずだが、 */
+/*      資料で直接「PEGC 機 ⇒ 09A8h あり」と書いた箇所は無い** (推論)。       */
+/*    - PC-H98 は対象に入るが、H98 の 256 色は PEGC ではなく probe の段 5 を */
+/*      通らない想定 (未確認)。                                               */
+/*  この前提が崩れた機種では hsync= の値が当てにならない。行の MISMATCH と、 */
+/*  480 ラインから戻った後の表示で気づける。                                 */
 /*    054Ch bit5    BIOS の記録する水平走査周波数 ([US] memsys.md PRXCRT)。  */
 /*                  9821 初代は 31kHz でも 0 なので補助にだけ使う。          */
 /*    0459h bit0    BIOS の 480 ラインフラグ ([US] memsys.md CRT_EXT_STS)。   */
@@ -205,7 +225,6 @@ static void pegc_tvram_clear(int row0, int row1)
 static void pegc_boot_sync_record(void)
 {
     u8 raw, prxcrt, crtext;
-    int hs_port = -1;
     int hs_bios;
 
     if (s_boot_recorded) return;
@@ -216,38 +235,27 @@ static void pegc_boot_sync_record(void)
     crtext = bios_flag(PEGC_BIOS_CRT_EXT_STS);
     gfx_counters.io_accesses++;
 
-    if (raw != PEGC_HSYNC_OPEN_BUS) {
-        hs_port = (raw & PEGC_HSYNC_READ_HF) ? PEGC_HSYNC_31KHZ
-                                             : PEGC_HSYNC_24KHZ;
-    }
+    /* ここへ来るのは probe が通った後だけ (pegc_prepare / pegc_init)。
+     * ポートはある前提 (上の注記) で、定義のある D0 だけを採る。 */
+    s_boot_hsync = (raw & PEGC_HSYNC_READ_HF) ? PEGC_HSYNC_31KHZ
+                                              : PEGC_HSYNC_24KHZ;
     hs_bios = (prxcrt & PEGC_BIOS_PRXCRT_31KHZ) ? 1 : 0;
 
-    /* 09A8h が読めればそれを採る。読めなければ 054Ch bit5 が 1 のときだけ
-     * 31kHz と採る (bit5=0 は「24kHz」と「対象外/初代で常に 0」を区別
-     * できないので、分からないまま -1 にする)。 */
-    if (hs_port >= 0) {
-        s_boot_hsync = hs_port;
-    } else if (hs_bios) {
-        s_boot_hsync = PEGC_HSYNC_31KHZ;
-    } else {
-        s_boot_hsync = -1;
-    }
-
     /* 09A8h と 054Ch bit5 の食い違いは行に出す (採るのは 09A8h)。
-     * 054Ch bit5=0 は 9821 初代では 31kHz でも起きる ([US] memsys.md)。 */
-    kprintf(0x07, "[pegc] hsync=%s 09a8=%02x%s bios054c.b5=%d bios0459.b0=%d%s\n",
-            s_boot_hsync == PEGC_HSYNC_31KHZ ? "31k" :
-            s_boot_hsync == PEGC_HSYNC_24KHZ ? "24k" : "?",
-            (unsigned int)raw, hs_port >= 0 ? "" : "(unreadable)",
-            hs_bios, (crtext & PEGC_BIOS_CRT_480LINE) ? 1 : 0,
-            (hs_port >= 0 && (hs_port == PEGC_HSYNC_31KHZ) != hs_bios)
+     * 054Ch bit5=0 は 9821 初代では 31kHz でも起きる ([US] memsys.md)。
+     * 09a8= は生の読み値 (D7〜D1 は不定なので値そのものに意味は無い)。 */
+    kprintf(0x07, "[pegc] hsync=%s 09a8=%02x bios054c.b5=%d bios0459.b0=%d%s\n",
+            s_boot_hsync == PEGC_HSYNC_31KHZ ? "31k" : "24k",
+            (unsigned int)raw, hs_bios,
+            (crtext & PEGC_BIOS_CRT_480LINE) ? 1 : 0,
+            ((s_boot_hsync == PEGC_HSYNC_31KHZ) != hs_bios)
                 ? " MISMATCH(09a8 vs 054c)" : "");
 }
 
 /* 480 ラインから戻るときの周波数。起動時に記録した値。分からなかったとき
- * だけ従来の 24kHz (OS32 のテキストの前提、資料の標準 SYNC と対) に落とす —
- * これは推測ではなく H2 以来の既定動作で、記録できなかった機種の挙動は
- * 変えない。 */
+ * (-1 = まだ記録していない。init は必ず先に記録するので、ここへは来ない
+ * はず) だけ従来の 24kHz (OS32 のテキストの前提、資料の標準 SYNC と対) に
+ * 落とす — H2 以来の既定動作。 */
 static u8 pegc_restore_hsync(void)
 {
     if (s_boot_hsync == PEGC_HSYNC_31KHZ) return PEGC_HSYNC_31KHZ;
