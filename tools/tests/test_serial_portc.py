@@ -27,8 +27,23 @@ HARNESS = ROOT / "tools/tests/serial_portc_host.c"
 SRCS = {
     "drivers/serial.c": ROOT / "drivers/serial.c",
     "include/pc98.h": ROOT / "include/pc98.h",
+    "kernel/sys.c": ROOT / "kernel/sys.c",
 }
-CASES = ["bsr_polarity", "init_bsr_only", "isr_edge_bsr", "real_hw_story"]
+CASES = ["bsr_polarity", "init_bsr_only", "isr_edge_bsr", "real_hw_story",
+         "init_from_all_ones", "isr_drain_limit_edge", "vfast_fifo_path",
+         "sys_buz_values"]
+
+# kernel/sys.c は pgalloc や rtc まで引くので丸ごとは載せない。buz_on /
+# buz_off の関数本体を**そのまま**切り出して sys_buz.inc にする (写経しない)。
+BUZ_RE = re.compile(r"^void buz_on\(void\)\n\{.*?^\}\n\s*^void buz_off\(void\)\n\{.*?^\}\n",
+                    re.S | re.M)
+
+
+def extract_buz(sys_c):
+    m = BUZ_RE.search(sys_c)
+    if not m:
+        raise SystemExit("kernel/sys.c に buz_on / buz_off が見つからない")
+    return m.group(0)
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl=",
          "-Wno-unused-function"]
@@ -72,13 +87,24 @@ static inline void io_wait_n(int n) { while (n-- > 0) io_wait(); }
 # (ソース, パターン, 置換, 説明)
 MUTATIONS = [
     ("drivers/serial.c",
+     r"        u8 cur = \(u8\)\(inp\(SER_MASK\) & \(IEN_RX \| IEN_TXEMP \| IEN_TX\)\);\n"
+     r"        ser_ien_bsr\(cur, 0\);\n",
+     "        ser_ien_bsr((u8)(IEN_RX | IEN_TXEMP | IEN_TX), 0);\n",
+     "初期化で 0 のビットにも落とす BSR を書く (TXRE への 04h が NP21/W で"
+     "余分な IRQ4 を起こしうる)"),
+    ("kernel/sys.c",
+     r"(void buz_off\(void\)\n\{\n    outp\(SYSPORT_C_BSR, )BSR_BUZ_OFF",
+     r"\1BSR_BUZ_ON",
+     "kernel/sys.c の buz_off() が 06h (鳴動) を書く (rshell が応答のたびに鳴らす)"),
+    ("drivers/serial.c",
      r"    ser_ien_bsr\(s_mask_ien, 0\);\n    ser_ien_bsr\(s_mask_ien, s_mask_ien\);\n",
      "    outp(SER_MASK, 0x00);\n    outp(SER_MASK, s_mask_ien);\n",
      "ISR のエッジ作りを直す前の 0035h 全体書き (0x00 → 許可) に戻す"
      " — 受信のたびに BUZ = 0 = 鳴動"),
     ("drivers/serial.c",
-     r"    ser_ien_bsr\(\(u8\)\(IEN_RX \| IEN_TXEMP \| IEN_TX\), 0\);\n",
-     "    outp(SER_MASK, 0x00);\n",
+     r"        u8 cur = \(u8\)\(inp\(SER_MASK\) & \(IEN_RX \| IEN_TXEMP \| IEN_TX\)\);\n"
+     r"        ser_ien_bsr\(cur, 0\);\n",
+     "        outp(SER_MASK, 0x00);\n",
      "初期化の全マスクを 0035h 全体書きに戻す (SHUT0/SHUT1/BUZ も 0 になる)"),
     ("drivers/serial.c",
      r"    ser_ien_bsr\(s_mask_ien, 0\);\n    ser_ien_bsr\(s_mask_ien, s_mask_ien\);\n",
@@ -119,6 +145,10 @@ def host_build(tmp, mutated=None):
     (work / "platform_io.h").write_text(FAKE_PLATFORM_IO, encoding="utf-8")
     for rel, path in SRCS.items():
         text = (mutated or {}).get(rel, path.read_text(encoding="utf-8"))
+        if rel == "kernel/sys.c":
+            (work / "sys_buz.inc").write_text(extract_buz(text),
+                                              encoding="utf-8")
+            continue
         (work / pathlib.Path(rel).name).write_text(text, encoding="utf-8")
     exe = work / "serial-portc-host"
     cmd = ["gcc", *FLAGS, "-I" + str(work),

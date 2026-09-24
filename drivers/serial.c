@@ -190,9 +190,9 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
     /* ==================================================================== */
     /*  切替のあいだは IRQ4 を止める                                        */
     /*                                                                      */
-    /*  **`0035h` に 0 を書くだけでは排他にならない。** NP21/W の            */
-    /*  `rs232c_callback` は `0035h` を見ずに `pic_setirq(4)` を上げるし、   */
-    /*  こちらの ISR 末尾も無条件で `0035h` を再許可する。止めないと:        */
+    /*  **割り込み許可 (0035h bit0-2) を BSR で落とすだけでは排他にならない。*/
+    /*  NP21/W の `rs232c_callback` は許可ビットを見ずに `pic_setirq(4)` を  */
+    /*  上げるし、こちらの ISR 末尾も無条件で BSR により再許可する。止めないと:*/
     /*    - `ser_head=0; ser_tail=0;` の直後に ISR が添字 0 へ書いて tail=1、 */
     /*      そのあと初期化側が `ser_count=0` を書く → 読み手は head=0 から   */
     /*      **古い値を 1 バイト返す**                                        */
@@ -250,8 +250,14 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
     }
 
     /* ---- ここから実際に書く ---- */
-    /* 全割り込みマスク (3 ビットとも BSR で落とす。0035h 全体は書かない) */
-    ser_ien_bsr((u8)(IEN_RX | IEN_TXEMP | IEN_TX), 0);
+    /* 全割り込みマスク。0035h を読み、**いま 1 のビットだけ** BSR で落とす
+     * (0035h 全体は書かない)。0 のビットへ書かないのは、NP21/W の sysp_o37 が
+     * bit2 (TXRE) への BSR 書きを送信要求と読み、余分な IRQ4 を 1 回起こし
+     * うるため。8255 のポート C は出力ラッチを読み返せる。 */
+    {
+        u8 cur = (u8)(inp(SER_MASK) & (IEN_RX | IEN_TXEMP | IEN_TX));
+        ser_ien_bsr(cur, 0);
+    }
 
     /* ---- いまのモードから抜ける ----
      * V･FAST / FIFO から互換へ戻すときは **8251 を触る前に** 013Ah bit7 と
@@ -355,7 +361,7 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
      * (直値を書いていたころは、モードごとにマスクを変えた瞬間に ISR が
      * 1 回目の受信でそれを踏み潰す形になっていた)。 */
     s_mask_ien = IEN_RX;
-    /* 3 ビットとも上で落としてあるので、立てるビットだけ書く。 */
+    /* 3 ビットとも上で 0 にしてあるので、立てるビットだけ書く。 */
     ser_ien_bsr(s_mask_ien, s_mask_ien);
 
     /* ---- PIC IRQ4 有効化 ---- */
