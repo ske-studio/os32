@@ -12,7 +12,10 @@
 #    `git rev-parse --short=7 HEAD`。追跡中のファイルに変更があれば "-dirty"
 #    (`git status --porcelain --untracked-files=no` が空でない)。未追跡の
 #    ファイルは数えない (ビルドの生成物・docs/hw のリンクで常に dirty に
-#    なるのを避ける — `git describe --dirty` と同じ基準)。
+#    なるのを避ける — `git describe --dirty` と同じ基準)。サブモジュール
+#    (apps/ game/) の**中の**変更・生成物も数えない (`--ignore-submodules=dirty`、
+#    make external がサブモジュールの中に成果物を置く)。サブモジュールの
+#    指すコミットが記録と違うときは数える (本体の組み合わせが違う)。
 #    git が無い・リポジトリでない・失敗したら "unknown"。
 #
 #  **中身が同じなら書かない** (mtime を動かさない)。make はこれを毎回走らせるが、
@@ -45,7 +48,8 @@ def commit_id(cwd=ROOT):
         if not h or any(c not in '0123456789abcdef' for c in h):
             return 'unknown'
         h = h[:HASH_MAX]
-        dirty = git(['status', '--porcelain', '--untracked-files=no'], cwd).strip()
+        dirty = git(['status', '--porcelain', '--untracked-files=no',
+                     '--ignore-submodules=dirty'], cwd).strip()
         return h + ('-dirty' if dirty else '')
     except (OSError, subprocess.SubprocessError):
         return 'unknown'

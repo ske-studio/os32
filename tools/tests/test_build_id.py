@@ -113,6 +113,31 @@ def run_all(script):
             raise Fail("commit 後: {} (want {})".format(got, want2))
         lines.append("staged: -dirty、commit 後: {}".format(got))
 
+        # サブモジュールの中の変更では dirty にしない / 指すコミットが違えば dirty
+        sub = work / "subsrc"
+        sub.mkdir()
+        git(sub, "init", "-q")
+        (sub / "s.txt").write_text("s\n")
+        git(sub, "add", "s.txt")
+        git(sub, "commit", "-q", "-m", "s1")
+        git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "apps")
+        git(repo, "commit", "-q", "-m", "add sub")
+        want3 = git(repo, "rev-parse", "--short=7", "HEAD")
+        (repo / "apps" / "s.txt").write_text("changed\n")          # 中の追跡ファイル
+        (repo / "apps" / "build.out").write_text("x")               # 中の生成物
+        got = gen(script, repo)
+        if got != want3:
+            raise Fail("サブモジュールの中の変更で dirty になった: {}".format(got))
+        git(repo / "apps", "commit", "-q", "-am", "s2")               # 指す先を動かす
+        got = gen(script, repo)
+        if got != want3 + "-dirty":
+            raise Fail("サブモジュールの指すコミットが違うのに dirty にならない: {}".format(got))
+        lines.append("submodule: 中の変更・生成物は数えない / 指す先が違えば -dirty")
+        want2 = want3
+        git(repo, "add", "apps")
+        git(repo, "commit", "-q", "-m", "bump sub")
+        want2 = git(repo, "rev-parse", "--short=7", "HEAD")
+
         norepo = work / "norepo"
         norepo.mkdir()
         got = gen(script, norepo)
@@ -169,6 +194,8 @@ MUTATIONS = [
     ("h = git(['rev-parse', '--short=7', 'HEAD'], cwd).strip()",
      "h = git(['rev-parse', 'HEAD'], cwd).strip()", "短縮しない"),
     ("COMMIT_MAX = 24", "COMMIT_MAX = 32", "ヘッダの上限とずれる"),
+    ("                     '--ignore-submodules=dirty'], cwd)", "                     ], cwd)",
+     "サブモジュールの中の変更でも dirty にする"),
 ]
 
 

@@ -53,7 +53,7 @@ MAX_IMAGE = 508 * 1024
 E = {"SIZE": -1, "MAGIC": -2, "VERSION": -3, "COUNT": -4, "HEADER": -5,
      "LENGTH": -6, "FILE_CRC": -7, "SRC": -8, "DST": -9, "DECODE": -10,
      "RAW_SIZE": -11, "ENTRY_CRC": -12}
-FATCHK = {"OK": 0, "SIZE": 1, "SHORT": 2, "RANGE": 3, "LONG": 4}
+FATCHK = {"OK": 0, "SIZE": 1, "SHORT": 2, "RANGE": 3, "LONG": 4, "START": 5}
 GEOMS = {"2hd": dict(sect=1024, total=1232, data=11, fat_bytes=2 * 1024),
          "144": dict(sect=512, total=2880, data=31, fat_bytes=9 * 512)}
 
@@ -89,7 +89,8 @@ def asm_vk32(text):
 
 def geometry_block(text, geom):
     """%ifdef FD144 〜 MAX_CLUSTER の行を、ジオメトリを決めた形で返す。"""
-    blk = between(text, "%ifdef FD144", "MAX_CLUSTER EQU")
+    # 行頭の %ifdef だけを見る (注記の中の「%ifdef FD144」に当たらないように)
+    blk = between(text, "\n%ifdef FD144\n", "MAX_CLUSTER EQU")
     line = re.search(r"^MAX_CLUSTER EQU.*$", text, re.MULTILINE).group(0)
     pre = "%define FD144\n" if geom == "144" else ""
     return pre + blk + line + "\n"
@@ -387,9 +388,33 @@ def corrupt_cases(img):
     return cases
 
 
+def outside_touched(win, data):
+    """展開の後に止まる場合: ヘッダのエントリ (壊した後の値) の外を書いていないか。
+    書いていたら最初の番地 (帯の中の物理番地) を返す。無傷なら None。"""
+    n = struct.unpack_from("<I", data, 12)[0]
+    spans = []
+    for i in range(min(n, 4)):
+        a, r = struct.unpack_from("<2I", data, 16 + 16 * i)
+        s = max(a - LOAD_MIN, 0)
+        e = min(a - LOAD_MIN + r, WINDOW)
+        if s < e:
+            spans.append((s, e))
+    spans.sort()
+    pos = 0
+    for s, e in spans + [(WINDOW, WINDOW)]:
+        if s > pos:
+            seg = win[pos:s]
+            if seg.count(0xCC) != len(seg):
+                k = next(i for i, b in enumerate(seg) if b != 0xCC)
+                return LOAD_MIN + pos + k
+        pos = max(pos, e)
+    return None
+
+
 def check_corrupt(exe, img, label):
     out = []
     bad = []
+    post = 0
     for name, data, want, pre in corrupt_cases(img):
         got = []
         for mode in (0, 1):
@@ -397,12 +422,18 @@ def check_corrupt(exe, img, label):
             got.append(rc)
             if pre and win.count(0xCC) != WINDOW:
                 bad.append("{}: mode {} が展開の前に止まらず窓を書いた".format(name, mode))
+            if not pre:
+                where = outside_touched(win, data)
+                if where is not None:
+                    bad.append("{}: mode {} がエントリの外 0x{:X} を書いた".format(name, mode, where))
+        post += 0 if pre else 1
         if got != [want, want]:
             bad.append("{}: 期待 {} / C {} / ASM {}".format(name, want, got[0], got[1]))
     if bad:
         raise Fail("[{}] 壊したイメージ:\n  ".format(label) + "\n  ".join(bad))
-    out.append("[{}] corrupt: {} 通りすべて C / ASM が同じ VK32_ERR_* で断った".format(
-        label, len(corrupt_cases(img))))
+    out.append("[{}] corrupt: {} 通りすべて C / ASM が同じ VK32_ERR_* で断った "
+               "(展開の後に止まる {} 通りもエントリの外は無傷)".format(
+                   label, len(corrupt_cases(img)), post))
     # 通る側の境界: 末尾がちょうど帯の上端
     h = parse(img)
     s_raw = h["ents"][1][1]
@@ -477,16 +508,24 @@ def check_fat(exe, geom):
     expect("自己循環", 10, 20 * sect, fat, "LONG")
     for v, why in ((0, "0"), (1, "1"), (max_cl, "MAX_CLUSTER"), (0xFF0, "予約 0xFF0"),
                    (0xFF7, "不良 0xFF7")):
-        expect("範囲外の開始 " + why, v, size, chain_fat(geom, good), "RANGE")
+        expect("範囲外の開始 " + why, v, size, chain_fat(geom, good), "START")
         fat = chain_fat(geom, good)
         fat12_set(fat, 11, v)
         expect("範囲外の途中 " + why, 10, size, fat, "RANGE")
+    # 開始クラスタが EOC (0xFF8〜) — ディレクトリの値が壊れている。早期終端とは言わない
+    for v in (0xFF8, 0xFFF):
+        expect("開始が EOC {:#x}".format(v), v, size, chain_fat(geom, good), "START")
     # 範囲外のクラスタの FAT 欄に EOC が書いてあっても断る (次を読んで気づくのでは遅い)
     for v in (max_cl, 0xFEF):
         fat = chain_fat(geom, [])
         if v + v // 2 + 1 < len(fat):
             fat12_set(fat, v, 0xFFF)
-        expect("範囲外 {:#x} (欄は EOC)".format(v), v, 1, fat, "RANGE")
+        expect("開始が範囲外 {:#x} (欄は EOC)".format(v), v, 1, fat, "START")
+        fat = chain_fat(geom, [10])
+        fat12_set(fat, 10, v)
+        if v + v // 2 + 1 < len(fat):
+            fat12_set(fat, v, 0xFFF)
+        expect("途中が範囲外 {:#x} (欄は EOC)".format(v), 10, 2 * sect, fat, "RANGE")
     # 上限ちょうど (508KiB) は通る: 連続 (上限 / sect) クラスタ
     ncl = MAX_IMAGE // sect
     if 2 + ncl <= max_cl:
@@ -495,8 +534,8 @@ def check_fat(exe, geom):
         bad.append("上限ちょうどのチェーンがディスクに収まらない (試験の前提)")
     if bad:
         raise Fail("[fat {}]\n  ".format(geom) + "\n  ".join(bad))
-    out.append("[fat {}] 正常・長さ・早期終端・循環・範囲外 (0/1/MAX/0xFF0/0xFF7) を "
-               "fat_chain_check が区別した (MAX_CLUSTER={})".format(geom, max_cl))
+    out.append("[fat {}] 正常・長さ・開始クラスタ (0/1/MAX/0xFF0/0xFF7/EOC)・早期終端・循環・"
+               "途中の範囲外を fat_chain_check が区別した (MAX_CLUSTER={})".format(geom, max_cl))
     return out
 
 
@@ -679,6 +718,8 @@ MUTATIONS = [
      "C: CRC の欄を 0 として計算しない"),
     ("mini", "if (lit_len > (int)(op_end - op)) return -2;", ";", 0,
      "lz4_mini: リテラルの出力境界を見ない"),
+    ("mini", "if (match_len > (int)(op_end - op)) return -2;", ";", 0,
+     "lz4_mini: マッチの出力境界を見ない (エントリの外を書く)"),
     ("asm", "jne     .e_file_crc", "nop", 0, "ASM: ファイル全体の CRC を見ない"),
     ("asm", "jne     .e_entry_crc", "nop", 0, "ASM: 展開後の CRC を見ない"),
     ("asm", "jne     .e_raw_size", "nop", 0, "ASM: decoded == raw_size を見ない"),
@@ -700,12 +741,18 @@ MUTATIONS = [
      "スタックを崩す・境界検査なし)"),
     ("asm", "        cld\n", "", -1, "ASM: cld しない (DF=1 で呼ばれると逆向きに写す)"),
     ("asm", "        cmp     eax, MAX_CLUSTER\n        jae     .out",
-     "        cmp     eax, MAX_CLUSTER\n        nop", 0, "FAT: MAX_CLUSTER 以上を通す"),
+     "        cmp     eax, MAX_CLUSTER\n        nop", 0, "FAT: 開始クラスタが MAX_CLUSTER 以上 (EOC 含む) を通す"),
+    ("asm", "        cmp     eax, MAX_CLUSTER\n        jae     .out",
+     "        cmp     eax, MAX_CLUSTER\n        nop", 1, "FAT: 途中のクラスタが MAX_CLUSTER 以上を通す"),
     ("asm", "        mov     ebp, FATCHK_LONG\n        cmp     eax, 0FF8h\n        jb      .out",
      "        mov     ebp, FATCHK_LONG\n        cmp     eax, 0FF8h\n        nop", 0,
      "FAT: 必要な数の次が EOC でなくても通す (循環を見逃す)"),
     ("asm", "        cmp     eax, 2\n        jb      .out", "        cmp     eax, 2\n        nop", 0,
-     "FAT: クラスタ 0 / 1 を通す"),
+     "FAT: 開始クラスタ 0 / 1 を通す"),
+    ("asm", "        cmp     eax, 2\n        jb      .out", "        cmp     eax, 2\n        nop", 1,
+     "FAT: 途中のクラスタ 0 / 1 を通す"),
+    ("asm", "        mov     ebp, FATCHK_START\n", "        mov     ebp, FATCHK_RANGE\n", 0,
+     "FAT: 開始クラスタの壊れを範囲外と同じ文言にする"),
     ("asm", "        shr     edx, 4\n.even:", "        nop\n.even:", 0,
      "FAT: 奇数クラスタの上位 12 ビットを取らない"),
     ("asm", "        jz      .out\n        cmp     edx, MAX_IMAGE_SIZE",

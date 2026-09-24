@@ -17,14 +17,13 @@
 ;; 票: docs/tasks/realhw/TASK_SERIAL_HOSTFS.md 部品 A-4 / §1-v3「FD ローダ」
 ;;
 ;; VMKRNL.LZ4のメモリ配置 (リアルモード読み込み):
-;;   Phase 1: 0:C000h〜0:FFFFh (16KB)
-;;   Phase 2: 1000:0000h〜 (物理0x10000以降, 64KB毎にセグメント切替)
-;;   PM移行後: 全データを 0x10000 に再配置
+;;   1000:0000h〜 (物理 0x10000〜0x8EFFF、MAX_IMAGE_SIZE まで) へ直接読む。
+;;   64KB ごとにセグメントを切り替える。PM へ移った後の再配置は無い
+;;   (以前の Phase 1 = 0:C000h への読み込みと PM での統合は廃止済み)。
 ;;
-;; PC-98 2HD FAT12:
-;;   セクタ5-10: ルートDir (192エントリ)
-;;   セクタ1-2:  FAT
-;;   セクタ11〜: データ (クラスタ2から)
+;; ジオメトリ (下の %ifdef FD144 の表、正典は tools/mkfat12.py の GEOMETRIES):
+;;   2HD 1232KB: FAT 1-2 / ルートDir 5-10 / データ 11〜 (1024B/セクタ)
+;;   1.44MB    : FAT 1-9 / ルートDir 19-30 / データ 31〜 (512B/セクタ)
 ;; ============================================================
 
 cpu 386
@@ -61,9 +60,6 @@ MAX_CLUSTER EQU     TOTAL_SECTS - DATA_START + 2
 ROOT_ENTS   EQU     192
 FAT_BUF     EQU     6000h
 FAT_START   EQU     1
-LOAD_SEG0   EQU     0000h       ;; Phase 1: セグメント0
-LOAD_OFF0   EQU     0C000h      ;; Phase 1: 0:C000h から (16KB利用可能)
-LOAD_SEG1   EQU     1000h       ;; Phase 2: セグメント0x1000 (物理0x10000)
 
 ;; ブート情報域 (0x7E00) の番地とオフセット。正典は include/bootinfo.h。
 %include "boot/bootinfo.inc"
@@ -92,7 +88,7 @@ loader_start:
         mov     es, ax
 
         ;; ============================================================
-        ;; ブート情報域 (0x7E00〜0x7E2F) — HDD の BIOS 幾何を測る
+        ;; ブート情報域 (0x7E00〜0x7E3F、v2) — HDD の BIOS 幾何を測る
         ;; (票 TASK_HDD_INSTALL 段 0)。**起動のたびにまず無効にしてから**
         ;; DA=80h / 81h に INT 1Bh AH=84h (新センス)。失敗 (CF=1) も
         ;; cf / ah として残す。最後に magic と反転チェック語を書く。
@@ -168,10 +164,8 @@ loader_start:
         ;; 開始クラスタとサイズ取得
         mov     ax, es:[di + 1Ah]
         mov     word [var_cluster], ax
-        mov     ax, es:[di + 1Ch]
-        mov     word [var_size_lo], ax
-        mov     ax, es:[di + 1Eh]
-        mov     word [var_size_hi], ax
+        mov     eax, es:[di + 1Ch]      ;; ファイル長 (u32、ディレクトリの 1Ch〜1Fh)
+        mov     dword [var_size], eax
 
         ;; ============================================================
         ;; FATテーブルを0:6000にロード (FAT_SECTS セクタ)
@@ -199,7 +193,7 @@ loader_start:
         ;; 辿って全部 [2, MAX_CLUSTER) にあり、その次が EOC であること。
         ;; ============================================================
         movzx   eax, word [var_cluster]
-        mov     edx, dword [var_size_lo]
+        mov     edx, dword [var_size]
         mov     esi, FAT_BUF
         call    fat_chain_check
         test    eax, eax
@@ -252,6 +246,9 @@ loader_start:
         ;; EAX = FATCHK_* (1〜4)
         mov     si, msg_badsize
         cmp     ax, FATCHK_SIZE
+        je      .fat_err
+        mov     si, msg_fatstart
+        cmp     ax, FATCHK_START
         je      .fat_err
         mov     si, msg_fatshort
         cmp     ax, FATCHK_SHORT
@@ -327,7 +324,7 @@ pm_entry32:
         ;; === VK32 v2 の検査 + LZ4展開 (pm_vk32_boot) ===
         push    dword vk32_img_crc              ;; out_crc
         push    dword VK32_LOAD_MIN             ;; window = 帯の先頭そのもの
-        push    dword [var_size_lo]             ;; ファイル長 (ディレクトリの値)
+        push    dword [var_size]                ;; ファイル長 (ディレクトリの値)
         push    dword 10000h                    ;; file
         call    pm_vk32_boot
         add     esp, 16
@@ -338,7 +335,7 @@ pm_entry32:
         ;; (include/bootinfo.h)。チェック語を**最後に**書く。
         mov     eax, [vk32_img_crc]
         mov     [MEM_BOOTINFO_BASE + BI_OFF_IMG_CRC], eax
-        mov     edx, [var_size_lo]
+        mov     edx, [var_size]
         mov     [MEM_BOOTINFO_BASE + BI_OFF_IMG_SIZE], edx
         xor     eax, edx
         xor     eax, BOOTINFO_IMG_KEY
@@ -902,6 +899,7 @@ FATCHK_SIZE     EQU 1           ;; 長さが 0 か MAX_IMAGE_SIZE 超
 FATCHK_SHORT    EQU 2           ;; 必要な数より前に EOC (早期終端)
 FATCHK_RANGE    EQU 3           ;; [2, MAX_CLUSTER) の外 (0/1、予約・不良 0FF0h〜0FF7h)
 FATCHK_LONG     EQU 4           ;; 必要な数を辿った次が EOC でない (循環・長すぎる)
+FATCHK_START    EQU 5           ;; 開始クラスタが [2, MAX_CLUSTER) の外 (EOC 0FF8h〜 を含む)
 
 ;; fat12_next32 — EAX = クラスタ、ESI = FAT の先頭 → EAX = 次のクラスタ
 ;;   壊す: EBX EDX
@@ -932,6 +930,13 @@ fat_chain_check:
         ja      .out
         lea     ecx, [edx + SECT_SZ - 1]
         shr     ecx, SECT_SHIFT
+        ;; 開始クラスタはディレクトリの値。EOC や 0/1 はチェーンの途中の
+        ;; 「早期終端・範囲外」とは別の壊れ方なので別の文言にする
+        mov     ebp, FATCHK_START
+        cmp     eax, 2
+        jb      .out
+        cmp     eax, MAX_CLUSTER
+        jae     .out
 .walk:
         mov     ebp, FATCHK_SHORT
         cmp     eax, 0FF8h
@@ -1017,6 +1022,7 @@ msg_diskerr:    db 'Disk Error!', 0
 msg_ok32:       db 'Kernel loaded. Booting...', 0
 msg_badsize:    db 'VMKRNL.LZ4: bad size (0 or > 508KiB)', 0
 msg_fatshort:   db 'VMKRNL.LZ4: FAT chain ends early', 0
+msg_fatstart:   db 'VMKRNL.LZ4: bad start cluster', 0
 msg_fatrange:   db 'VMKRNL.LZ4: FAT cluster out of range', 0
 msg_fatlong:    db 'VMKRNL.LZ4: FAT chain too long/loop', 0
 ;; VK32_ERR_* の文言 (boot/vk32_boot.c の vk32_strerror と同じ)。添字 = -rc
@@ -1038,8 +1044,7 @@ m_vk_11:        db 'VK32: decoded size mismatch', 0
 m_vk_12:        db 'VK32: entry CRC mismatch', 0
 
 var_cluster:    dw 0
-var_size_lo:    dw 0
-var_size_hi:    dw 0
+var_size:       dd 0            ;; VMKRNL.LZ4 の長さ (u32。2 つの dw の隣接に頼らない)
 var_load_seg:   dw 0
 var_left:       dw 0            ;; まだ読むクラスタ数
 vk32_img_crc:   dd 0

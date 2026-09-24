@@ -10,7 +10,7 @@
 ;;
 ;; メモリマップ:
 ;;   0x7C00 から下  実モードのスタック
-;;   0x7E00-0x7E2F  ブート情報域 (include/bootinfo.h、kernel_main が写す)
+;;   0x7E00-0x7E3F  ブート情報域 (include/bootinfo.h v2、kernel_main が写す)
 ;;   0x7F00-0x7F11  パラメータ受け渡し (16bit→32bit、+16/+17 は読みの CF/AH)
 ;;   0x8000-0x9FFF  ローダー自身 (8KB)
 ;;   0x10000-       vmkernel.lz4 一時読み込み先

@@ -36,31 +36,31 @@ bits 32 で組み、2HD / 1.44MB の両ジオメトリの `MAX_CLUSTER` で回�
 | mirror | ASM の `VK32_*` / `MAX_IMAGE_SIZE` の EQU と `boot/boot_defs.h`、`boot_defs.h` のイメージ欄と `include/bootinfo.h` が名前ごとに一致 (番地の 3 つは `tools/gen_memmap.py --check` の MIRRORS) |
 | format | 生成物の `entry_crc` / `image_crc` / `image_size` / `header_size` を `zlib.crc32` と長さで突き合わせる |
 | good | C と ASM がどちらも 0 と同じ `image_crc` を返し、窓のエントリ部が元の kernel / sqlite と一致、外は 0xCC のまま |
-| corrupt (43 通り) | 空・15B・上限 +1・magic・version 1・entry_count 0 / 5・header_size (+1 / 旧形式 / 途中まで)・切り詰め (header だけ / 末尾 1B)・1B 足す・image_size +1・1 ビット反転 5 か所・data_offset (ファイル長 / +1 / header の中 / 桁あふれ)・compressed_size (+1 / 0xFFFFFFFF)・load_addr (帯の下 / 読み込み域 / 上端 / 末尾が上端 +1 / 桁あふれ)・重なり・raw_size 0 / +1 / -1・壊れた LZ4 列 7 種 (リテラル延長・マッチ延長の途中で尽きる、リテラルが入力より長い、offset が遠い / 0 / 途中で尽きる、マッチが出力を越える)・entry_crc 2 種。**C と ASM が同じ `VK32_ERR_*`** を返し、展開前に止まる 32 通りは窓を 1 バイトも書かない |
+| corrupt (43 通り) | 空・15B・上限 +1・magic・version 1・entry_count 0 / 5・header_size (+1 / 旧形式 / 途中まで)・切り詰め (header だけ / 末尾 1B)・1B 足す・image_size +1・1 ビット反転 5 か所・data_offset (ファイル長 / +1 / header の中 / 桁あふれ)・compressed_size (+1 / 0xFFFFFFFF)・load_addr (帯の下 / 読み込み域 / 上端 / 末尾が上端 +1 / 桁あふれ)・重なり・raw_size 0 / +1 / -1・壊れた LZ4 列 7 種 (リテラル延長・マッチ延長の途中で尽きる、リテラルが入力より長い、offset が遠い / 0 / 途中で尽きる、マッチが出力を越える)・entry_crc 2 種。**C と ASM が同じ `VK32_ERR_*`** を返し、展開前に止まる 32 通りは窓を 1 バイトも書かない。展開の後に止まる 11 通りは、ヘッダのエントリ (壊した後の値) の外を 1 バイトも書かない (2026-09-24、Fable の指摘) |
 | edge | 末尾がちょうど 0x2E8000 のエントリは通る |
-| fat (2HD / 1.44MB) | 連続・飛び飛び・1 クラスタ・最後の有効クラスタ・上限ちょうど (508KiB) は通る。長さ 0 / 上限 +1、早期終端 (EOC 0xFFF / 0xFF8)、長すぎる、循環 (13→11)、自己循環、範囲外 (0 / 1 / MAX_CLUSTER / 0xFF0 / 0xFF7、開始と途中)、範囲外なのに欄が EOC を区別する。EBX / EDX / ESI を保つ |
+| fat (2HD / 1.44MB) | 連続・飛び飛び・1 クラスタ・最後の有効クラスタ・上限ちょうど (508KiB) は通る。長さ 0 / 上限 +1、早期終端 (EOC 0xFFF / 0xFF8)、長すぎる、循環 (13→11)、自己循環、**開始クラスタの壊れ** (0 / 1 / MAX_CLUSTER / 0xFF0 / 0xFF7 / EOC 0xFF8・0xFFF → FATCHK_START、文言「bad start cluster」)、途中の範囲外 (同じ値 → FATCHK_RANGE)、範囲外なのに欄が EOC (開始と途中) を区別する。EBX / EDX / ESI を保つ |
 | real (`--real`) | build/out/vmkernel.lz4 で format (中身は python-lz4 で展開したものを正とする) / good / corrupt。images/ の 2HD / 1.44MB から `VMKRNL.LZ4` と `LOADER.BIN` を FAT で辿り、`fat_chain_check` が通すこと・FD の `VMKRNL.LZ4` を C / ASM が通すこと・`LOADER.BIN` が boot/ の実物と一致すること。build/out の kernel.bin とは比べない (make check の並列の中で kernel が組み直されて一瞬食い違うため) (ローダが 1 クラスタを超えても IPL が辿る形になっている) |
 
 `test_build_id.py`: 一時の git リポジトリで clean = `rev-parse --short=7`、未追跡だけなら
 dirty にしない、追跡中の変更・index に載せた変更で `-dirty`、リポジトリでない / git が無い
 で `unknown`、同じ中身なら書き直さない (mtime が動かない)、生成した C を組んで文字列が一致、
-長さが `BUILD_COMMIT_MAX` 未満。
+長さが `BUILD_COMMIT_MAX` 未満。サブモジュールの中の変更・生成物では dirty にせず (`--ignore-submodules=dirty`)、サブモジュールの指すコミットが記録と違えば `-dirty`。
 
 ## 変異
 
-`test_vk32_crc.py --mutate` は 35 件 (対照 1 を含む)。組めない変異は ERROR に数える。
-2026-09-24: **RED 34 / 対照 GREEN 1 / 生き残り・ERROR 0**。
+`test_vk32_crc.py --mutate` は 39 件 (対照 1 を含む)。組めない変異は ERROR に数える。
+2026-09-24 (Fable の minor の後): **RED 38 / 対照 GREEN 1 / 生き残り・ERROR 0**。
 
 | 対象 | 変異 |
 |---|---|
 | C (`vk32_boot.c`) | 完全長を見ない、ファイル CRC を見ない、展開後 CRC を見ない、末尾が帯を越えるのを見ない、重なりを見ない、decoded == raw_size を見ない、entry_count 0 を通す、compressed_size の範囲を見ない、data_offset が header の中を通す、CRC の欄を 0 として計算しない |
-| C (`lz4_mini.c`) | リテラルの出力境界を見ない |
+| C (`lz4_mini.c`) | リテラル / マッチの出力境界を見ない (マッチはエントリの外を書くことで捕まる) |
 | ASM (`pm_vk32_boot`) | ファイル CRC・展開後 CRC・decoded == raw_size・完全長・重なり・末尾の帯越え・compressed_size の範囲・entry_count 0 のそれぞれを見ない |
 | ASM (`pm_lz4_decode`) | リテラル / マッチの出力境界、リテラルの入力境界、offset の遠さを見ない、**基点の旧版に差し戻す** (SIGSEGV で落ちる)、`cld` しない |
-| ASM (FAT) | MAX_CLUSTER 以上を通す、必要数の次が EOC でなくても通す (循環)、クラスタ 0 / 1 を通す、奇数クラスタの上位 12 ビットを取らない、長さ 0 を通す |
+| ASM (FAT) | 開始 / 途中それぞれで MAX_CLUSTER 以上を通す・クラスタ 0 / 1 を通す、開始の壊れを範囲外と同じ文言にする、必要数の次が EOC でなくても通す (循環)、奇数クラスタの上位 12 ビットを取らない、長さ 0 を通す |
 | mkvmkernel | CRC の欄を 0 にせずに計算、image_size を 1 ずらす、エントリ CRC を 1 バイト抜きで計算、header_size を 4 多く書く |
 
-`test_build_id.py --mutate` は 7 件 (対照 1): RED 6 / 対照 GREEN 1。
+`test_build_id.py --mutate` は 8 件 (対照 1): RED 7 / 対照 GREEN 1 (サブモジュールの中の変更で dirty にする変異を含む)。
 
 ## 未検証
 
