@@ -138,6 +138,7 @@ class AidebugPort(object):
         self.timeout = timeout
         self.pending = bytearray()
         self._urlopen = urlopen or urllib.request.urlopen
+        self._cancel = False
 
     def _read_once(self):
         import json
@@ -150,15 +151,23 @@ class AidebugPort(object):
         return len(self.pending)
 
     def read(self, n):
+        """来ている分が無ければ timeout まで待つ (pyserial と同じ)。待ちは 10ms
+        刻みで、cancel_read() が来たら空で戻る (受信スレッドを止めるため)。
+        pending に残った分は捨てない (次の read が返す)。"""
         deadline = time.monotonic() + self.timeout
-        while not self.pending:
+        while not self.pending and not self._cancel:
             self.pending += self._read_once()
             if self.pending or time.monotonic() >= deadline:
                 break
             time.sleep(0.01)
+        self._cancel = False
         out = bytes(self.pending[:n])
         del self.pending[:n]
         return out
+
+    def cancel_read(self):
+        """待っている read を空で戻す (pyserial の Serial.cancel_read と同じ名)。"""
+        self._cancel = True
 
     def write(self, data):
         import urllib.request

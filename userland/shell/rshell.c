@@ -401,9 +401,10 @@ static int cmd_rshell(int argc, char **argv)
          * T10: 上限を超えたら**そこで読み取りを止めない**。止めると残りが
          * 次の入力になって勝手に実行される。行末まで読み捨てて印だけ立てる。
          * ESC を含んで拒否した行は、**本当の行末まで**拒否のまま読む
-         * (受信の間で解けると残りが次の行として実行される、Codex 8)。 */
+         * (受信の間で解けると残りが次の行として実行される、Codex 8)。沈黙
+         * では解かない (往復 2、Codex 3) — 閉じるのはホストの次の改行か
+         * 本体の Enter、本体の ESC は rshell を抜ける。 */
         {
-            u32 last = g_api->get_tick();
             while (r == RSH_LINE_MORE) {
                 if (ch < 0) {
                     int t = 0;
@@ -414,14 +415,13 @@ static int cmd_rshell(int argc, char **argv)
                     }
                 }
                 if (ch < 0) {
-                    r = rsh_line_idle(&ln, (unsigned long)(g_api->get_tick() - last));
+                    r = rsh_line_idle(&ln);
                     if (r == RSH_LINE_MORE) {
                         u32 w = g_api->get_tick() + 1;
                         while (g_api->get_tick() < w) g_api->sys_halt();
                     }
                     continue;
                 }
-                last = g_api->get_tick();
                 r = rsh_line_feed(&ln, ch, fs, 0, 1);
                 ch = -1;
             }

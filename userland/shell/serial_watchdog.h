@@ -97,11 +97,12 @@ int rsh_esc_classify(int ch, int from_serial, int at_line_start, int followed);
 /*  rshell の 1 行の組み立て (レビュー往復 1、Codex 8)                        */
 /*                                                                          */
 /*  ESC を含んで拒否した行は、**本当の行末 (\n / \r) まで**拒否のまま読み捨て */
-/*  る。受信に間が空いても解かない (解くと残りが次の行として実行される)。    */
-/*  間が RSH_JUNK_IDLE_TICKS 続いたら、行末が来なくても拒否のまま閉じる。    */
+/*  る。受信に間が空いても (沈黙が何秒続いても) 解かない — 解くと残りが次の  */
+/*  行として実行される (レビュー往復 2、Codex 3)。行末はホストの次の行の    */
+/*  改行でも、本体キーボードの Enter でも閉じる (その行は拒否のまま、EOT を  */
+/*  1 つ返す)。本体の ESC は rshell を閉じる (回復の口)。                    */
 /*  拒否していない行は従来どおり、短い空回りで行が終わる。                   */
 /* ------------------------------------------------------------------------ */
-#define RSH_JUNK_IDLE_TICKS 200   /* 2 秒 */
 #define RSH_LINE_MORE 0           /* 続きを待つ */
 #define RSH_LINE_DONE 1           /* 行が終わった */
 #define RSH_LINE_EXIT 2           /* rshell を閉じる */
@@ -120,9 +121,9 @@ void rsh_line_begin(struct rsh_line *l, char *buf, int cap);
  * 後ろに続きが来たか (それ以外は 0)。戻りは RSH_LINE_*。buf は常に NUL 終端。 */
 int  rsh_line_feed(struct rsh_line *l, int ch, int from_serial, int at_start,
                    int followed);
-/* バイトが来なかった。idle_ticks = 最後のバイトからの tick。戻りは
- * RSH_LINE_MORE (待ち続ける) / RSH_LINE_DONE。 */
-int  rsh_line_idle(const struct rsh_line *l, unsigned long idle_ticks);
+/* バイトが来なかった (短い空回りの後)。戻りは RSH_LINE_DONE (普通の行は
+ * 終わり) / RSH_LINE_MORE (拒否した行は行末まで待ち続ける)。 */
+int  rsh_line_idle(const struct rsh_line *l);
 
 /* `sfs run <コマンド行>` の行から子のコマンド行を取り出す。行全体が
  * 空白* "sfs" 空白+ "run" 空白+ <1 文字以上> の形でなければ NULL。

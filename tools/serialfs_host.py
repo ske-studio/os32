@@ -262,13 +262,19 @@ class HostFS(object):
     WRITE / MKDIR / RMDIR / UNLINK / RENAME は OS32_ERR_ROFS。
 
     **2 つの作り**:
-      - 固定 (POSIX、既定): 根のディレクトリを開いた fd から、各要素を
-        `O_DIRECTORY | O_NOFOLLOW` で 1 段ずつ開き (openat 相当の dir_fd)、最後の
-        操作も dir_fd と O_NOFOLLOW / follow_symlinks=False で行う。**symlink は
-        一切辿らない** (根の中を指すものも)。検査と操作の間に symlink を
-        差し替えられても根の外へは出ない (Codex 5)
+      - 固定 (POSIX、既定): **起動時に根のディレクトリを `O_NOFOLLOW` で開いて
+        fd を保持し** (root_fd、往復 2 の Codex 2)、操作のたびにそれを dup した
+        起点から各要素を `O_DIRECTORY | O_NOFOLLOW` で 1 段ずつ開き (openat 相当の
+        dir_fd)、最後の操作も dir_fd と O_NOFOLLOW / follow_symlinks=False で行う。
+        **symlink は一切辿らない** (根の中を指すものも)。検査と操作の間に
+        symlink を差し替えられても、根そのものを差し替えられても、根の外へは
+        出ない (Codex 5)。書き込みの許可も辿らない名前で当たるので、リンク越しに
+        `--allow-write` の外へ書く道は無い
       - パス (Windows など dir_fd の無いホスト): realpath を取って根と
         **要素単位で** (commonpath / normcase) 比べてから、パスで操作する。
+        書き込みの許可は wire の名前と **realpath で解決した実体の両方**に当てる
+        (`out/link -> protected` のとき `/out/link/f` は protected への書き込み
+        なので ROFS、往復 2 の Codex 1)。
         **検査と操作の間に symlink / junction を差し替えられる競合は残る**
         (man sfs に書いた)。Windows では `:` (代替データストリーム) も断る
     pm に ntpath を渡すと Windows の規則で判定だけを試せる (試験用)。
@@ -286,6 +292,12 @@ class HostFS(object):
                       and os.open in os.supports_dir_fd
                       and os.stat in os.supports_dir_fd)
         self.secure = bool(secure)
+        self.root_fd = -1
+        if self.secure:
+            # 起点は 1 回だけ開いて保持する。根がその後で symlink に差し替えられ
+            # ても、この fd は元のディレクトリを指し続ける
+            self.root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY |
+                                   os.O_NOFOLLOW)
         self.allow = []
         for a in allow_write:
             raw_a = a
@@ -297,6 +309,17 @@ class HostFS(object):
             except SfsError:
                 raise ValueError("--allow-write: bad path %r (root-relative, "
                                  "no . / .. / backslash)" % (raw_a,))
+
+    def close(self):
+        if self.root_fd >= 0:
+            os.close(self.root_fd)
+            self.root_fd = -1
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---- パスの規則 ----
     def _comps(self, wire):
@@ -312,15 +335,24 @@ class HostFS(object):
                 raise SfsError(ERR_NAMETOOLONG)
         return comps
 
-    def contained(self, path):
-        """path (realpath を取る) が根の中か。**要素単位で**比べる。"""
+    def real_comps(self, path):
+        """path の realpath の、根からの相対の要素 (根の外なら None)。
+        **要素単位で**比べる (`C:\\hostile` は `C:\\host` の中でない)。"""
         real = self.pm.realpath(path)
         nc = self.pm.normcase
         try:
             common = self.pm.commonpath([nc(self.root), nc(real)])
         except ValueError:            # 別のドライブなど
-            return False
-        return common == nc(self.root)
+            return None
+        if common != nc(self.root):
+            return None
+        rel = nc(real)[len(nc(self.root)):]
+        return [c for c in rel.replace(self.pm.sep.encode(), b"/").split(b"/")
+                if c != b""]
+
+    def contained(self, path):
+        """path (realpath を取る) が根の中か。"""
+        return self.real_comps(path) is not None
 
     def resolve(self, wire, allow_root=True):
         """ワイヤ上のパス → ホストのパス (パスの作りで使う)。断るときは SfsError。"""
@@ -332,18 +364,44 @@ class HostFS(object):
             raise SfsError(ERR_INVAL)       # symlink で根の外へ出る
         return path
 
+    def _allowed(self, comps):
+        nc = self.pm.normcase
+        key = tuple(nc(c) for c in comps)
+        for a in self.allow:
+            a = tuple(nc(c) for c in a)
+            if key[:len(a)] == a:
+                return True
+        return False
+
     def _need_write(self, comps):
         if not comps:
             raise SfsError(ERR_INVAL)       # 根そのものは変えない
-        for a in self.allow:
-            if tuple(comps[:len(a)]) == a:
-                return
-        raise SfsError(ERR_ROFS)
+        if not self._allowed(comps):
+            raise SfsError(ERR_ROFS)
+
+    def resolve_write(self, wire):
+        """パスの作りの書き込み: wire の名前で許可を見てから、**realpath で解決した
+        実体**にも許可を当てる (リンク越しに --allow-write の外へ書かない)。
+        親がリンクでも、名前そのものがリンクでも、実体の側で判定する。"""
+        comps = self._comps(wire)
+        self._need_write(comps)
+        path = self.resolve(wire, allow_root=False)
+        rc = self.real_comps(path)
+        if rc is None:
+            raise SfsError(ERR_INVAL)
+        if not rc:
+            raise SfsError(ERR_INVAL)       # 実体が根そのもの
+        if not self._allowed(rc):
+            raise SfsError(ERR_ROFS)
+        return path
 
     # ---- 固定の作りの道具 ----
     def _open_dir(self, comps):
-        """根から comps を 1 段ずつ辿ったディレクトリの fd (呼び手が閉じる)。"""
-        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        """根から comps を 1 段ずつ辿ったディレクトリの fd (呼び手が閉じる)。
+        起点は起動時に固定した root_fd (パスで開き直さない)。"""
+        if self.root_fd < 0:
+            raise SfsError(ERR_IO)
+        fd = os.dup(self.root_fd)
         try:
             for c in comps:
                 try:
@@ -467,6 +525,19 @@ class HostFS(object):
             data = f.read(count)
         return len(data), data
 
+    @staticmethod
+    def _pwrite_all(fd, data, offset):
+        """pwrite は一部しか書かずに戻ることがある (往復 2、Codex 5)。書けた分を
+        くり返し書き、1 バイトも進まなければ IO。戻りは書けた数 (= len(data))。"""
+        done = 0
+        data = bytes(data)
+        while done < len(data):
+            n = os.pwrite(fd, data[done:], offset + done)
+            if n <= 0:
+                raise SfsError(ERR_IO)
+            done += n
+        return done
+
     def write(self, wire, offset, flags, data):
         comps = self._comps(wire)
         self._need_write(comps)
@@ -480,11 +551,11 @@ class HostFS(object):
             finally:
                 os.close(pfd)
             try:
-                os.pwrite(fd, data, offset)
+                n = self._pwrite_all(fd, data, offset)
             finally:
                 os.close(fd)
-            return len(data), b""
-        path = self.resolve(wire, allow_root=False)
+            return n, b""
+        path = self.resolve_write(wire)
         if os.path.isdir(path):
             raise SfsError(ERR_ISDIR)
         if flags & WF_TRUNC:
@@ -493,8 +564,10 @@ class HostFS(object):
             mode = "r+b" if os.path.exists(path) else "w+b"
         with open(path, mode) as f:
             f.seek(offset)
-            f.write(data)
-        return len(data), b""
+            n = f.write(data)
+            if n != len(data):
+                raise SfsError(ERR_IO)
+        return n, b""
 
     def _at_parent(self, comps, fn):
         pfd = self._open_dir(comps[:-1])
@@ -509,7 +582,7 @@ class HostFS(object):
         if self.secure:
             self._at_parent(comps, lambda n, fd: os.mkdir(n, 0o755, dir_fd=fd))
         else:
-            os.mkdir(self.resolve(wire, allow_root=False))
+            os.mkdir(self.resolve_write(wire))
         return 0, b""
 
     def rmdir(self, wire):
@@ -518,7 +591,7 @@ class HostFS(object):
         if self.secure:
             self._at_parent(comps, lambda n, fd: os.rmdir(n, dir_fd=fd))
         else:
-            os.rmdir(self.resolve(wire, allow_root=False))
+            os.rmdir(self.resolve_write(wire))
         return 0, b""
 
     def unlink(self, wire):
@@ -532,7 +605,7 @@ class HostFS(object):
                 os.unlink(n, dir_fd=fd)
             self._at_parent(comps, op)
             return 0, b""
-        path = self.resolve(wire, allow_root=False)
+        path = self.resolve_write(wire)
         if os.path.isdir(path) and not os.path.islink(path):
             raise SfsError(ERR_ISDIR)
         os.unlink(path)
@@ -553,8 +626,7 @@ class HostFS(object):
             finally:
                 os.close(sfd)
             return 0, b""
-        os.replace(self.resolve(old, allow_root=False),
-                   self.resolve(new, allow_root=False))
+        os.replace(self.resolve_write(old), self.resolve_write(new))
         return 0, b""
 
 
@@ -749,12 +821,17 @@ class PortReceiver(object):
         return d
 
     def _run(self):
-        while not self.stop_ev.is_set():
-            try:
-                self.step()
-            except Exception as e:  # noqa: BLE001
-                self.error = e
-                break
+        try:
+            while not self.stop_ev.is_set():
+                try:
+                    self.step()
+                except Exception as e:  # noqa: BLE001
+                    if self.stop_ev.is_set():
+                        break           # cancel_read で起こされた
+                    self.error = e
+                    break
+        finally:
+            self.stop_ev.set()
 
     def get(self, timeout):
         items = []
@@ -769,9 +846,29 @@ class PortReceiver(object):
             except queue.Empty:
                 return items
 
-    def close(self):
+    def close(self, timeout=30.0):
+        """受信を止め、**スレッドが終わったことを確かめてから**戻る (往復 2、
+        Codex 4)。read の中で待っているスレッドは port.cancel_read() で起こす
+        (pyserial の Serial と AidebugPort が持つ。無ければ port の timeout まで
+        待つ)。終わらないうちにポートを次の行へ渡すと、この受信器が次の行の
+        応答を奪う。戻り値: True = 終わった / False = timeout 内に終わらなかった
+        (呼び手は port を使ってはいけない)。"""
         self.stop_ev.set()
-        self.thread.join(2.0)
+        cancel = getattr(self.port, "cancel_read", None)
+        deadline = time.monotonic() + timeout
+        while self.thread.is_alive():
+            if cancel is not None:
+                try:
+                    cancel()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.thread.join(0.05)
+            if time.monotonic() >= deadline:
+                break
+        return not self.thread.is_alive()
+
+    def stopped(self):
+        return not self.thread.is_alive()
 
 
 def serve_line(port, line, server, timeout_s, out, now=time.monotonic,
@@ -861,8 +958,9 @@ def serve_line(port, line, server, timeout_s, out, now=time.monotonic,
                 port.flush()
                 stats["sent"] += 1
     finally:
-        if own_rx:
-            rx.close()
+        if own_rx and not rx.close():
+            raise RuntimeError("serialfs_host: receiver thread did not stop; "
+                               "the port must not be reused")
     # 行が終わった = セッションも終わっている。以後このセッションには答えない
     if server.sid:
         server.closed.add(server.sid)

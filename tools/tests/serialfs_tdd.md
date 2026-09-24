@@ -93,6 +93,16 @@ EXIT の後の保留を捨てる (4bde23b の `if (sid == 0)`) / BYE を送ら�
 RED、ERROR 0 (`make check-serialfs-host`)。`--allow-write /` は根の全体、`..` を含む指定は
 起動時に ValueError で断る (試験 `paths`)。
 
+レビュー往復 2 (2026-09-25、Codex ラリー 2 の未完了 3 件 + 新規 2 件):
+
+| 指摘 | 直し | 試験 | 変異 |
+|---|---|---|---|
+| Codex 1 [P1] リンク越しに `--allow-write` の外へ書ける | パスの作りは `resolve_write` が wire の名前に加えて **realpath で解決した実体** (`real_comps`) にも許可を当てる (write / mkdir / rmdir / unlink / rename)。固定の作りは名前を辿らないので穴が無いことを試験で確かめた (最後の要素の symlink も `O_NOFOLLOW`) | `paths`: `out/link → protected`、`out/f2 → protected/x` に対する write / mkdir / rename / unlink / rmdir が、パスの作りでは ROFS、固定の作りでは INVAL (rmdir は ENOTDIR)、protected には何も届かない。許可の中に留まるリンク (`out/self → out/inner`) はパスの作りで通る。ntpath は `real_comps` と大文字小文字を無視した許可 | 実体に許可を当てない / 固定の作りの最後の open から O_NOFOLLOW を外す |
+| Codex 2 [P2] openat の起点が固定されていない | 起動時に根を `O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW` で開いて `root_fd` に保持、`_open_dir` は `dup` した起点から辿る。`close()` を足した | `paths`: HostFS を作った後に根を rename して外を指す symlink に差し替えても stat / list / write は元のディレクトリに当たる。realpath を解かない pm で根が symlink なら起動時に ELOOP | 操作のたびにパスで開き直す / 起点の open から O_NOFOLLOW を外す |
+| Codex 3 [P2] ESC の拒否が 2 秒の沈黙で解ける | `rsh_line_idle` は拒否した行に対して**常に** MORE (沈黙で閉じない、`RSH_JUNK_IDLE_TICKS` を廃止)。閉じるのは行末 (\n / \r) だけ — ホストの次の行の改行 (その行も拒否、EOT 1 つ) か本体の Enter。本体の ESC は rshell を抜ける (回復の口) | `rshell_rules`: idle を 100,000 回呼んでも MORE、沈黙の後の続きも拒否のまま、`\n` / 本体の `\r` で閉じる、本体の ESC で EXIT | 沈黙で解ける (元) / 200 回の idle で解ける / 本体の Enter で閉じない |
+| Codex 4 [P2] 終わった行の受信スレッドが次の行の応答を奪う | `PortReceiver.close()` は `port.cancel_read()` で待ちを切りながら join し、**スレッドが終わったことを確かめて** True を返す (上限 30 秒)。`serve_line` は終わらなければ RuntimeError (ポートを次へ渡さない)。`AidebugPort` に `cancel_read` (read の 10ms 刻みの待ちを切る、pending は残す) | `read_size`: read が 10 秒待つポートで close が 2 秒未満に戻り、ポートに待ち手が残らず、次の読み手がバイトを受け取る。`AidebugPort(timeout=3)` の read が cancel_read で 1.5 秒未満に空で戻り、pending は残る | close が終わりを確かめずに戻る / cancel_read が起こさない |
+| Codex 5 [P2] pwrite の一部書き込み | `_pwrite_all` が戻り値を見て残りをくり返す (0 なら IO)。パスの作りは `f.write` の戻りを検査 | `paths`: 3 バイトずつしか書かない pwrite で 10 バイトが 4 回で全部届く、進まない pwrite は IO | 戻り値を見ない / 進まない pwrite を成功にする |
+
 ## 試していないこと
 
 - NP21/W と実機 (T2 / T3 / T4)。**NP21/W は通信速度を模擬しない**ので、115200 の

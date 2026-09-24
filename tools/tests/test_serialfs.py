@@ -35,6 +35,7 @@
 恒等の対照を C と Python に 1 本ずつ入れ、それが GREEN であること (試験の枠が
 壊れていないこと) も見る。
 """
+import errno
 import importlib.util
 import io
 import os
@@ -412,6 +413,107 @@ def case_paths(h, r):
                 check(False, "allow %r accepted" % bad_allow)
             except ValueError:
                 pass
+        # **リンク越しに --allow-write の外へ書けない** (往復 2、Codex 1)。
+        # out/link -> protected、out/f2 -> protected/x。パスの作りは実体で判定して
+        # ROFS、固定の作りは辿らないので INVAL。どちらも protected には何も届かない
+        (root / "out").mkdir()
+        (root / "out" / "a").write_bytes(b"a")
+        (root / "out" / "inner").mkdir()
+        (root / "protected").mkdir()
+        (root / "protected" / "victim").write_bytes(b"v")
+        os.symlink(str(root / "protected"), str(root / "out" / "link"))
+        os.symlink(str(root / "protected" / "x"), str(root / "out" / "f2"))
+        os.symlink(str(root / "out" / "inner"), str(root / "out" / "self"))
+        for secure, code in ((False, h.ERR_ROFS), (True, h.ERR_INVAL)):
+            tag = "fd" if secure else "path"
+            fs = h.HostFS(str(root), allow_write=["out"], secure=secure)
+            expect_err(h, lambda: fs.write(b"/out/link/f", 0, h.WF_TRUNC, b"x"), code,
+                       "%s: write through a dir link into protected" % tag)
+            expect_err(h, lambda: fs.write(b"/out/f2", 0, h.WF_TRUNC, b"x"), code,
+                       "%s: write through a file link into protected" % tag)
+            expect_err(h, lambda: fs.mkdir(b"/out/link/d"), code,
+                       "%s: mkdir through a link" % tag)
+            expect_err(h, lambda: fs.rename(b"/out/a", b"/out/link/b"), code,
+                       "%s: rename into protected through a link" % tag)
+            expect_err(h, lambda: fs.unlink(b"/out/link/victim"), code,
+                       "%s: unlink through a link" % tag)
+            # rmdir: パスの作りは実体 (protected) で ROFS、固定の作りはリンクを
+            # ディレクトリとして扱わない (ENOTDIR)
+            expect_err(h, lambda: fs.rmdir(b"/out/link"), h.ERR_NOTDIR if secure else code,
+                       "%s: rmdir of a link" % tag)
+            check(sorted(os.listdir(root / "protected")) == ["victim"] and
+                  (root / "out" / "a").exists() and not (root / "protected" / "x").exists(),
+                  "%s: nothing changed behind the link" % tag)
+            if not secure:
+                # 実体も許可の中なら通る (パスの作りは根の中のリンクを辿る)
+                check(fs.write(b"/out/self/g", 0, h.WF_TRUNC, b"g")[0] == 1 and
+                      (root / "out" / "inner" / "g").read_bytes() == b"g",
+                      "path: link that stays inside the allowed subtree")
+                (root / "out" / "inner" / "g").unlink()
+            fs.close()
+
+        # 一部しか書けない pwrite (往復 2、Codex 5): 全部書けるまでくり返す
+        fs = h.HostFS(str(root), allow_write=["out"])
+        real_pwrite = os.pwrite
+        calls = {"n": 0}
+
+        def short_pwrite(fd, data, off):
+            calls["n"] += 1
+            return real_pwrite(fd, data[:3], off)
+        os.pwrite = short_pwrite
+        try:
+            n, _ = fs.write(b"/out/part", 0, h.WF_TRUNC, b"0123456789")
+        finally:
+            os.pwrite = real_pwrite
+        check(n == 10 and calls["n"] == 4 and
+              (root / "out" / "part").read_bytes() == b"0123456789",
+              "fd: short pwrite is repeated until all is written (n=%d calls=%d)"
+              % (n, calls["n"]))
+        os.pwrite = lambda fd, data, off: 0
+        try:
+            expect_err(h, lambda: fs.write(b"/out/part", 0, h.WF_TRUNC, b"zz"), h.ERR_IO,
+                       "fd: pwrite that makes no progress")
+        finally:
+            os.pwrite = real_pwrite
+        fs.close()
+
+        # **起点の fd は起動時に固定** (往復 2、Codex 2): 根を symlink に差し替えても
+        # 元のディレクトリを見続ける。realpath を解かない pm で根が symlink なら
+        # 起動時に断る (O_NOFOLLOW)
+        fs = h.HostFS(str(root), allow_write=["out"])
+        os.rename(str(root), str(root) + ".bak")
+        os.symlink(str(pathlib.Path(tmp) / "outside"), str(root))
+        try:
+            st, body = fs.stat(b"/hello.txt")
+            check(struct.unpack("<BII", body)[0] == h.KIND_FILE, "fd: pinned root after swap")
+            expect_err(h, lambda: fs.stat(b"/secret"), h.ERR_NOTFOUND,
+                       "fd: swapped root does not show the outside")
+            names, _ = list_all(h, fs, b"/")
+            check(b"secret" not in [n for n, _ in names] and
+                  b"hello.txt" in [n for n, _ in names], "fd: list uses the pinned root")
+            check(fs.write(b"/out/w3", 0, h.WF_TRUNC, b"3")[0] == 1 and
+                  (pathlib.Path(str(root) + ".bak") / "out" / "w3").exists() and
+                  not (pathlib.Path(tmp) / "outside" / "out").exists(),
+                  "fd: write lands in the pinned root")
+        finally:
+            os.unlink(str(root))
+            os.rename(str(root) + ".bak", str(root))
+        fs.close()
+
+        class NoRealpath(object):
+            realpath = staticmethod(lambda p: p)
+            join = staticmethod(os.path.join)
+            normcase = staticmethod(os.path.normcase)
+            commonpath = staticmethod(os.path.commonpath)
+            sep = os.path.sep
+        os.symlink(str(root), str(pathlib.Path(tmp) / "rootlink"))
+        try:
+            h.HostFS(os.fsencode(str(pathlib.Path(tmp) / "rootlink")), pm=NoRealpath,
+                     secure=True)
+            check(False, "fd: root given as a symlink was opened")
+        except OSError as e:
+            check(e.errno in (errno.ELOOP, errno.ENOTDIR), "fd: root symlink refused (%r)" % e)
+
         # 固定の作りは**根の中を指す symlink も辿らない** (差し替えの競合を作らない)
         fs = h.HostFS(str(root), allow_write=["sub"])
         st, body = fs.stat(b"/inside_link")
@@ -457,6 +559,12 @@ def case_ntpath(h, r):
     expect_err(h, lambda: fs.resolve(b"/a:b"), h.ERR_INVAL, "nt: drive-like colon")
     expect_err(h, lambda: fs.resolve(b"/file.txt:stream"), h.ERR_INVAL, "nt: ADS colon")
     expect_err(h, lambda: fs.resolve(b"/a\\..\\..\\x"), h.ERR_INVAL, "nt: backslash")
+    check(fs.real_comps(b"C:\\host\\a\\b") == [b"a", b"b"] and
+          fs.real_comps(b"c:\\HOST") == [] and fs.real_comps(b"C:\\hostile\\x") is None,
+          "nt: real_comps %r" % fs.real_comps(b"C:\\host\\a\\b"))
+    fw = h.HostFS(b"C:\\host", allow_write=["Out"], pm=ntpath, secure=False)
+    check(fw._allowed([b"out", b"f"]) and fw._allowed([b"OUT"]) and not fw._allowed([b"outx"]),
+          "nt: allow-write is case-insensitive and per component")
     top = h.HostFS(b"C:\\", pm=ntpath, secure=False)
     check(top.contained(b"C:\\x") and not top.contained(b"D:\\x"), "nt: drive root")
     # POSIX でも接頭辞の兄弟は外
@@ -849,6 +957,84 @@ def case_read_size(h, r):
     got = rx.step()
     check(got == b"x" * 37 and port.stalls == 0, "receiver: reads what is waiting")
     check(h.read_size(port) == 1, "read_size: 1 when nothing waits")
+
+    # **終わった行の受信スレッドが次の行の応答を奪わない** (往復 2、Codex 4)。
+    # read が 10 秒待つポート (AidebugPort の作り) でも close は cancel_read で
+    # 起こし、スレッドが終わったことを確かめてから戻る
+    import threading as _th
+    import time as _tm
+
+    class BlockingPort(object):
+        def __init__(self):
+            self.ev = _th.Event()
+            self.buf = bytearray()
+            self.waiting = 0
+            self.cancelled = False
+            self.in_waiting = 0
+
+        def read(self, n):
+            self.waiting += 1
+            try:
+                self.ev.wait(10.0)
+                self.ev.clear()
+                if self.cancelled:
+                    self.cancelled = False
+                    return b""
+                out = bytes(self.buf[:n])
+                del self.buf[:n]
+                return out
+            finally:
+                self.waiting -= 1
+
+        def cancel_read(self):
+            self.cancelled = True
+            self.ev.set()
+
+        def push(self, d):
+            self.buf += d
+            self.ev.set()
+    bp = BlockingPort()
+    rx = h.PortReceiver(bp)
+    for _ in range(100):
+        if bp.waiting:
+            break
+        _tm.sleep(0.01)
+    check(bp.waiting == 1, "receiver: thread is blocked in read")
+    t0 = _tm.monotonic()
+    stopped = rx.close()
+    check(stopped and rx.stopped() and _tm.monotonic() - t0 < 2.0,
+          "receiver: close wakes the read and confirms the thread ended (%.2fs)"
+          % (_tm.monotonic() - t0))
+    check(bp.waiting == 0, "receiver: no reader left on the port after close")
+    bp.push(b"next-line")
+    check(bp.read(9) == b"next-line" and rx.q.empty(),
+          "receiver: the next reader gets the bytes, the old thread does not")
+
+    # AidebugPort.read は cancel_read で待ちを切る
+    class FakeResp(object):
+        def __init__(self):
+            self.body = b'{"hex": ""}'
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    ap = r.AidebugPort("aidebug:http://x", timeout=3.0, urlopen=lambda *a, **k: FakeResp())
+    got = {}
+    th = _th.Thread(target=lambda: got.setdefault("d", ap.read(16)))
+    t0 = _tm.monotonic()
+    th.start()
+    _tm.sleep(0.05)
+    ap.cancel_read()
+    th.join(2.5)
+    check(not th.is_alive() and got.get("d") == b"" and _tm.monotonic() - t0 < 1.5,
+          "aidebug: cancel_read returns the waiting read (%.2fs)" % (_tm.monotonic() - t0))
+    ap.pending += b"kept"
+    check(ap.read(4) == b"kept", "aidebug: pending survives a cancel")
     # 実物の PortReceiver (スレッド) で serve_line を回し、要求ごとに待たない
     with tempfile.TemporaryDirectory(prefix="os32-sfs-rs-") as tmp:
         root = mk_tree(tmp)
@@ -1274,6 +1460,14 @@ C_MUTATIONS = [
      r"    if \(!l->junk\) return RSH_LINE_DONE;\n",
      "    return RSH_LINE_DONE;\n", "拒否した行が受信の間で解ける (残りが次の行として走る)"),
     ("userland/shell/serial_watchdog.c",
+     r"    if \(!l->junk\) return RSH_LINE_DONE;\n    /\* 拒否した行は沈黙では閉じない",
+     "    if (!l->junk) return RSH_LINE_DONE;\n    { static int n; if (++n > 200) return RSH_LINE_DONE; }\n    /* 拒否した行は沈黙では閉じない",
+     "拒否した行が 2 秒の沈黙で解ける (往復 2、Codex 3)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    if \(ch == '\\n' \|\| ch == '\\r'\) return RSH_LINE_DONE;",
+     r"    if ((ch == '\\n' || ch == '\\r') && from_serial) return RSH_LINE_DONE;",
+     "本体キーボードの Enter で拒否した行を閉じられない (回復の口が無い)"),
+    ("userland/shell/serial_watchdog.c",
      r"    if \(cls == RSH_ESC_EXIT\) return RSH_LINE_EXIT;\n    l->bytes\+\+;",
      "    l->bytes++;\n    if (cls == RSH_ESC_EXIT) return RSH_LINE_EXIT;",
      "行頭の単独 ESC を数える (閉じるときに余分な EOT を返す)"),
@@ -1346,8 +1540,30 @@ PY_MUTATIONS = [
      "固定の作りで symlink の要素を辿る (差し替えで根の外へ)"),
     ("tools/serialfs_host.py", r"            if self.pm.sep == \"\\\\\" and b\":\" in c:\n                raise SfsError\(ERR_INVAL\)\n",
      "", "Windows で `:` (代替データストリーム) を通す"),
-    ("tools/serialfs_host.py", r"            if tuple\(comps\[:len\(a\)\]\) == a:\n                return\n        raise SfsError\(ERR_ROFS\)",
-     "            pass\n        return", "書き込みの既定の禁止が無い"),
+    ("tools/serialfs_host.py", r"        if not self._allowed\(comps\):\n            raise SfsError\(ERR_ROFS\)",
+     "        pass", "書き込みの既定の禁止が無い"),
+    ("tools/serialfs_host.py", r"        if not self._allowed\(rc\):\n            raise SfsError\(ERR_ROFS\)\n        return path",
+     "        return path", "パスの作りで、解決した実体に許可を当てない (リンク越しに --allow-write の外へ書ける)"),
+    ("tools/serialfs_host.py", r"                fd = os.open\(comps\[-1\], fl, 0o644, dir_fd=pfd\)",
+     "                fd = os.open(comps[-1], fl & ~os.O_NOFOLLOW, 0o644, dir_fd=pfd)",
+     "固定の作りの書き込みが最後の要素の symlink を辿る (リンク越しに --allow-write の外へ書ける)"),
+    ("tools/serialfs_host.py", r"        fd = os.dup\(self.root_fd\)",
+     "        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)",
+     "起点を操作のたびにパスで開き直す (根を差し替えられると外へ出る)"),
+    ("tools/serialfs_host.py", r"            self.root_fd = os.open\(self.root, os.O_RDONLY \| os.O_DIRECTORY \|\n                                   os.O_NOFOLLOW\)",
+     "            self.root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)",
+     "起点の open に O_NOFOLLOW が無い"),
+    ("tools/serialfs_host.py", r"                n = self._pwrite_all\(fd, data, offset\)",
+     "                n = len(data); os.pwrite(fd, data, offset)",
+     "pwrite の戻り値を見ずに全量成功として返す"),
+    ("tools/serialfs_host.py", r"            if n <= 0:\n                raise SfsError\(ERR_IO\)\n",
+     "            if n < 0:\n                raise SfsError(ERR_IO)\n            if n == 0:\n                return done\n",
+     "進まない pwrite を成功として返す"),
+    ("tools/serialfs_host.py", r"        while self.thread.is_alive\(\):\n            if cancel is not None:",
+     "        self.thread.join(0.2)\n        return True\n        while self.thread.is_alive():\n            if cancel is not None:",
+     "close が終わりを確かめずに戻る (終わった行の受信スレッドが次の行の応答を奪う)"),
+    ("tools/rshell_serial.py", r"        self._cancel = True\n",
+     "        pass\n", "AidebugPort の cancel_read が read を起こさない"),
     ("tools/serialfs_host.py", r"                if fr.type in REQUEST_TYPES and now\(\) - t > FIRST_BYTE_S:",
      "                if False:", "到着から期限を過ぎた要求も実行する (再送が二重に走る)"),
     ("tools/serialfs_host.py", r"                pump\(0\)                         # 処理中に届いた分\n",

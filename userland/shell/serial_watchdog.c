@@ -141,9 +141,9 @@ int rsh_line_feed(struct rsh_line *l, int ch, int from_serial, int at_start,
     return RSH_LINE_MORE;
 }
 
-int rsh_line_idle(const struct rsh_line *l, unsigned long idle_ticks)
+int rsh_line_idle(const struct rsh_line *l)
 {
     if (!l->junk) return RSH_LINE_DONE;
-    return idle_ticks >= (unsigned long)RSH_JUNK_IDLE_TICKS
-           ? RSH_LINE_DONE : RSH_LINE_MORE;
+    /* 拒否した行は沈黙では閉じない。行末 (\n / \r) が来るまで待つ */
+    return RSH_LINE_MORE;
 }

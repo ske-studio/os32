@@ -896,19 +896,33 @@ static void rshell_rules(void)
         rsh_line_begin(&l, b, (int)sizeof(b));
         CHECK(rsh_line_feed(&l, 0x1B, 1, 1, 1) == RSH_LINE_MORE && l.junk);
         CHECK(rsh_line_feed(&l, 'x', 1, 0, 1) == RSH_LINE_MORE);
-        CHECK(rsh_line_idle(&l, 0) == RSH_LINE_MORE);        /* 間が空いても解けない */
-        CHECK(rsh_line_idle(&l, RSH_JUNK_IDLE_TICKS - 1) == RSH_LINE_MORE);
+        {
+            int k;
+            /* 沈黙が何度 (何秒) 続いても解けない (往復 2、Codex 3) */
+            for (k = 0; k < 100000; k++)
+                if (rsh_line_idle(&l) != RSH_LINE_MORE) break;
+            CHECK(k == 100000);
+        }
         CHECK(rsh_line_feed(&l, 'l', 1, 0, 1) == RSH_LINE_MORE);
         CHECK(l.junk && l.pos == 2 && strcmp(b, "xl") == 0);
+        /* 沈黙の後に来た同じ行の続きも拒否のまま (実行されない) */
+        CHECK(rsh_line_idle(&l) == RSH_LINE_MORE);
+        CHECK(rsh_line_feed(&l, 's', 1, 0, 1) == RSH_LINE_MORE && l.junk);
+        /* 閉じるのは行末だけ (ホストの改行) */
         CHECK(rsh_line_feed(&l, '\n', 1, 0, 1) == RSH_LINE_DONE && l.junk);
+        /* 本体キーボードの Enter でも閉じる (拒否のまま) — 回復の口 */
         rsh_line_begin(&l, b, (int)sizeof(b));
-        CHECK(rsh_line_idle(&l, RSH_JUNK_IDLE_TICKS) == RSH_LINE_DONE);
-        l.junk = 1;
-        CHECK(rsh_line_idle(&l, RSH_JUNK_IDLE_TICKS) == RSH_LINE_DONE);
+        CHECK(rsh_line_feed(&l, 0x1B, 1, 1, 1) == RSH_LINE_MORE && l.junk);
+        CHECK(rsh_line_idle(&l) == RSH_LINE_MORE);
+        CHECK(rsh_line_feed(&l, '\r', 0, 0, 1) == RSH_LINE_DONE && l.junk);
+        /* 本体の ESC は rshell を閉じる (拒否した行の途中でも) */
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        CHECK(rsh_line_feed(&l, 0x1B, 1, 1, 1) == RSH_LINE_MORE && l.junk);
+        CHECK(rsh_line_feed(&l, 0x1B, 0, 0, 1) == RSH_LINE_EXIT);
         /* 普通の行は短い空回りで終わる (従来どおり) */
         rsh_line_begin(&l, b, (int)sizeof(b));
         CHECK(rsh_line_feed(&l, 'l', 1, 1, 0) == RSH_LINE_MORE);
-        CHECK(rsh_line_idle(&l, 0) == RSH_LINE_DONE && !l.junk && l.bytes == 1);
+        CHECK(rsh_line_idle(&l) == RSH_LINE_DONE && !l.junk && l.bytes == 1);
         /* 行の途中のシリアルの ESC は拒否 (閉じない)、本体の ESC は閉じる */
         rsh_line_begin(&l, b, (int)sizeof(b));
         CHECK(rsh_line_feed(&l, 'a', 1, 1, 0) == RSH_LINE_MORE);
