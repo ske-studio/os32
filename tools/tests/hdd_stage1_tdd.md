@@ -34,16 +34,40 @@
   `tools/tests/hdd_pt_fake.h` に乗せて GREEN (ディスクは FS をシリンダへ切り上げた分だけ広げ、
   FS の大きさ・配置は変えていない)。
 
-## 3. GREEN と変異 (2026-09-24)
+## 3. GREEN と変異
+
+### 3-1. 最初の記録の訂正 (実装レビュー往復 1、Opus M1)
+
+最初の版は `MUTATIONS 34/34 RED` と書いたが、**実態は違った**。C の変異を当てる写し
+(`MIRROR`) に `drivers/ide.h` が無く、`ide_addr.h` の `#include "ide.h"` が解決できずに
+**C の変異 29 本は全部コンパイル失敗**で、それを RED に数えていた。つまり C 側は何も
+確かめていなかった。直したこと:
+
+- `MIRROR` に `drivers/ide.h` を足し、写しに無いヘッダは本物の `drivers/` / `fs/` から引く。
+- **ビルドが通らない変異は RED ではなく ERROR** に数える。Python 側も、試験の失敗 (終了 1) だけを
+  RED にし、読み込みの失敗・例外 (終了 3) は ERROR にする。合格は「全部 RED・ERROR 0・
+  SURVIVED 0・NOT_APPLIED 0」。
+- `-Werror` の未使用警告だけで落ちていた 5 本 (行を消して引数が未使用になる) は、
+  `if (0 && …)` の形でコンパイルが通るように書き直した。
+- 正しく数えると生き残りが出たので、試験を足した: 「format_at がディスクの外まで書く」には
+  ATA の上限 > IDENTIFY の総数のケース、「標準配置の表を旧配置と誤認する」には旧として読んでも
+  ディスクの内側に収まる大きさのケース、「IDENTIFY の総数を見ない」には総数 < BIOS 幾何の容量のケース。
+
+### 3-2. 現在 (往復 1 の修正後、2026-09-24)
 
 ```
-SUMMARY 23/23 PASS
+SUMMARY 25/25 PASS
 TARGET i386-elf GNU89 -Werror COMPILE PASS
-MUTATIONS 34/34 RED
+MUTATIONS 47/47 RED (ERROR 0, SURVIVED 0, NOT_APPLIED 0)
 ```
 
-変異 (C 29 本 + Python 5 本) の一覧は `tools/tests/test_hdd_stage1.py` の `C_MUTATIONS` /
-`PY_MUTATIONS`。写し (一時ディレクトリ) の上で変異させるので `check-par` で並列に回せる。
+変異は C 37 本 + Python 10 本 (`tools/tests/test_hdd_stage1.py` の `C_MUTATIONS` /
+`PY_MUTATIONS`)。往復 1 で足した対象: hdprep の総数 0 (C3)・ATA の上限 (C4)、format_at の
+`ide_range_ok` (C4)、ext2_format の BIOS 幾何の要求 (m3) と 32 グループの頭打ち (m2)、
+旧配置の検出 (M2)、migrate-pt の検査の順序 (C1: ローダ・カーネル・来歴)・1KiB 以外の
+ブロック長 (C2)、旧配置の NHD への配備の門 (M2)。`do_migrate_pt` は全体を回し
+(マウント・コピー・push は贋物)、断るときに**コピーも push も呼ばれず NHD が 1 バイトも
+変わらない**ことを見る。写し (一時ディレクトリ) の上で変異させるので `check-par` で並列に回せる。
 
 ## 4. 見ていないこと
 

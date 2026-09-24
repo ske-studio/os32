@@ -133,6 +133,10 @@ int ide_write_sectors(int drive, u32 lba, u32 count, const void *buf);
 
 /* そのドライブのセクタ指定の方式 (IDE_AMODE_*、drivers/ide_addr.h)。 */
 int ide_addr_mode_of(int drive);
+/* [lba, lba+count) がそのドライブの指定の方式で指せる範囲か (LBA28 の上限・総数・
+ * CHS のシリンダ 16 ビット・桁あふれ)。1 = 収まる / 0 = 収まらないかドライブが無い。
+ * 書き込みの**前に**範囲全体を照合するため (ext2_format_at、Codex C4)。 */
+int ide_range_ok(int drive, u32 lba, u32 count);
 
 /* ドライブ存在チェック */
 int ide_drive_present(int drive);

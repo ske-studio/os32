@@ -12,6 +12,9 @@ int hdprep_check_geom(const HdprepGeom *g)
 {
     if (!g) return HDPREP_E_ARG;
     if (!g->ata_present) return HDPREP_E_NO_ATA;
+    /* 総数が分からなければ書く範囲の上限が決まらない。ext2_format_at も断るので、
+     * 探りを書く前 (計画の段階) で断る (Codex C3) */
+    if (g->ata_total == 0) return HDPREP_E_NO_TOTAL;
     if (!g->bios_queried || !g->bios_valid) return HDPREP_E_NO_BIOS;
     if (g->bios_seclen != HDPREP_SECLEN) return HDPREP_E_SECLEN;
     /* 規則の二重化: bios_valid が立っていても 0 は割り算を壊す */
@@ -88,7 +91,14 @@ int hdprep_plan(const HdprepGeom *g, unsigned long mb, HdprepPlan *out)
      * CX がシリンダ数でも最大番号でも、ここは小さめ (安全側) に出る。
      * bios_cyl ≤ 65535 なので積は 2^32 未満。 */
     limit = g->bios_cyl * cyl;
-    if (g->ata_total != 0 && g->ata_total < limit) limit = g->ata_total;
+    if (g->ata_total < limit) limit = g->ata_total;
+    /* ATA の指定の方式で指せる上限 (drivers/ide_addr.c と同じ規則。Codex C4) */
+    if (g->addr_mode == HDPREP_AMODE_LBA28) {
+        if (limit > HDPREP_LBA28_LIMIT) limit = HDPREP_LBA28_LIMIT;
+    } else {
+        unsigned long chs = g->ata_cur_cyl * g->ata_cur_heads * g->ata_cur_spt;
+        if (chs < limit) limit = chs;
+    }
     out->disk_limit = limit;
     if (limit <= start) return HDPREP_E_TOO_SMALL;
     room = limit - start;
@@ -124,6 +134,7 @@ const char *hdprep_reason(int code)
     case HDPREP_E_TOO_SMALL:     return "disk is too small for the area";
     case HDPREP_E_CYL:           return "end cylinder does not fit in 16 bits";
     case HDPREP_E_STILL_MOUNTED: return "hd0 is still mounted after umount";
+    case HDPREP_E_NO_TOTAL:      return "IDENTIFY reports no total sector count";
     default:                     return "bad argument";
     }
 }

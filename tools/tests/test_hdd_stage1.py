@@ -49,7 +49,7 @@ PURE_CASES = ["pt_offsets", "pt_817", "pt_1663", "pt_reject", "ata_lba28",
               "ata_range", "ata_chs", "layout", "hdprep_geom", "hdprep_disk",
               "hdprep_mounts", "hdprep_plan"]
 PART_CASES = ["find_bios", "find_fail", "format_clamp", "format_at_16652",
-              "format_at_refuse", "mount_bounds"]
+              "format_at_refuse", "mount_bounds", "format_geom", "legacy_hint"]
 # e2fsck にかける format_at の大きさ (開始 2016、16/63 の RAM ディスク 64,512 セクタ)
 FSCK_SIZES = [16652, 20160, 36000, 62496]
 
@@ -66,7 +66,8 @@ PART_INC_DIRS = ["include", "fs", "lib", "kernel", "drivers", "sdk/include/os32"
 C_MUTATIONS = [
     ("drivers/pc98pt.h", "#define PC98PT_OFF_SSECT      8", "#define PC98PT_OFF_SSECT      6",
      "開始セクタを旧配置の +6 で読み書きする"),
-    ("drivers/pc98pt.c", "    if (disk_total != 0 && end_excl > disk_total) return PC98PT_ERR_RANGE;\n", "",
+    ("drivers/pc98pt.c", "    if (disk_total != 0 && end_excl > disk_total) return PC98PT_ERR_RANGE;",
+     "    if (0 && disk_total != 0 && end_excl > disk_total) return PC98PT_ERR_RANGE;",
      "終わりがディスクの外でも通す"),
     ("drivers/pc98pt.c", "    if (end_excl <= start) return PC98PT_ERR_RANGE;\n", "",
      "終わり <= 開始を通す (旧配置を別の場所として読む)"),
@@ -90,15 +91,19 @@ C_MUTATIONS = [
      "最終グループが足りなくても落とさない (F12)"),
     ("fs/ext2_layout.c", "    if (last == 0) l->last_group_need += EXT2L_ROOT_DATA_BLOCKS;\n", "",
      "グループ 0 のルートのデータを数えない"),
-    ("fs/ext2_layout.c", "    if (ext2_layout_is_sparse(g)) n += 1UL + l->gdt_blocks;   /* SB + GDT */\n", "",
+    ("fs/ext2_layout.c", "    if (ext2_layout_is_sparse(g)) n += 1UL + l->gdt_blocks;",
+     "    if (0 && ext2_layout_is_sparse(g)) n += 1UL + l->gdt_blocks;",
      "スパースグループの SB / GDT を数えない"),
-    ("fs/ext2_layout.c", "    if (l->num_groups > max_groups) return EXT2L_ERR_GROUPS;\n", "",
+    ("fs/ext2_layout.c", "    if (l->num_groups > max_groups) return EXT2L_ERR_GROUPS;",
+     "    if (0 && l->num_groups > max_groups) return EXT2L_ERR_GROUPS;",
      "32 グループの上限を見ない"),
-    ("userland/shell/hdprep_plan.c", "        return HDPREP_E_ADDR;\n", "        ;\n",
+    ("userland/shell/hdprep_plan.c", "    if (g->addr_mode != HDPREP_AMODE_LBA28 &&",
+     "    if (0 && g->addr_mode != HDPREP_AMODE_LBA28 &&",
      "LBA も現在の CHS も無いドライブに書く"),
     ("userland/shell/hdprep_plan.c", "    if (lba0[510] == 0x55 && lba0[511] == 0xAA) return HDPREP_E_MBR_SIG;\n", "",
      "LBA 0 の 55AA を見ない"),
-    ("userland/shell/hdprep_plan.c", "    if (root_is_hd0) return HDPREP_E_ROOT;\n", "",
+    ("userland/shell/hdprep_plan.c", "    if (root_is_hd0) return HDPREP_E_ROOT;",
+     "    if (0 && root_is_hd0) return HDPREP_E_ROOT;",
      "ルートの hd0 を外しに行く"),
     ("userland/shell/hdprep_plan.c", "    if (g->bios_seclen != HDPREP_SECLEN) return HDPREP_E_SECLEN;\n", "",
      "BX ≠ 512 を通す"),
@@ -107,19 +112,16 @@ C_MUTATIONS = [
      "    start = HDPREP_BOOT_RESERVE_LBA;",
      "開始をシリンダ境界に揃えない (16/63 で 1632)"),
     ("userland/shell/hdprep_plan.c",
-     "    if (g->ata_total != 0 && g->ata_total < limit) limit = g->ata_total;\n", "",
+     "    if (g->ata_total < limit) limit = g->ata_total;\n", "",
      "IDENTIFY の総数を見ない"),
     ("userland/shell/hdprep_plan.c", "    if (pc98pt_count_used(lba1) != 0) return HDPREP_E_PT_USED;\n", "",
      "既存の区画項目を上書きする"),
     ("fs/ext2_super.c",
-     "    if (pc98pt_find_os32(pt_sect, heads, spt, info.total_sectors,\n"
-     "                         (int *)0, &start, &len) != PC98PT_OK)\n"
-     "        return EXT2_ERR_NOPART;\n",
-     "    if (pc98pt_find_os32(pt_sect, heads, spt, info.total_sectors,\n"
-     "                         (int *)0, &start, &len) != PC98PT_OK) {\n"
-     "        start = 1088; len = 16384;\n    }\n",
+     "        return EXT2_ERR_NOPART;\n    }\n\n    *out_start",
+     "        start = 1088; len = 16384;\n    }\n\n    *out_start",
      "見つからないとき LBA 1088 にフォールバックする (旧動作)"),
-    ("fs/ext2_super.c", "    if (bootinfo_part_geom(ide_drive, &heads, &spt) < 0) return EXT2_ERR_NOPART;\n",
+    ("fs/ext2_super.c", "    src = bootinfo_part_geom(ide_drive, &heads, &spt);\n",
+     "    src = bootinfo_part_geom(ide_drive, &heads, &spt);\n"
      "    heads = info.heads; spt = info.sectors;\n",
      "区画表の CHS を IDENTIFY の幾何で LBA にする (F4)"),
     ("fs/ext2_super.c", "    return (block_num < ctx->part_len / 2U) ? 1 : 0;", "    return 1;",
@@ -135,6 +137,23 @@ C_MUTATIONS = [
      "format_at が IPL / 区画表 / ローダを潰す"),
     ("fs/ext2_fmt.c", "    if (sectors > part_len) sectors = part_len;\n", "",
      "ext2_format が区画の長さで頭打ちにしない"),
+    ("userland/shell/hdprep_plan.c", "    if (g->ata_total == 0) return HDPREP_E_NO_TOTAL;", "",
+     "総数の申告が無いドライブに探りを書く (C3)"),
+    ("userland/shell/hdprep_plan.c", "        if (chs < limit) limit = chs;", "        (void)chs;",
+     "現在の CHS の容量を計画の上限にしない (C4)"),
+    ("userland/shell/hdprep_plan.c", "        if (limit > HDPREP_LBA28_LIMIT) limit = HDPREP_LBA28_LIMIT;",
+     "        (void)0;", "LBA28 の上限を計画の上限にしない (C4)"),
+    ("fs/ext2_fmt.c", "    if (!ide_range_ok(ide_drive, start_lba, length)) return EXT2_ERR_INVAL;\n", "",
+     "format_at が ATA の方式の上限を見ない (C4)"),
+    ("fs/ext2_fmt.c", "        if (src != BOOTINFO_GEOM_BIOS) {", "        if (0) {",
+     "ext2_format が IDENTIFY の幾何で見つけた区画に書く (m3)"),
+    ("fs/ext2_fmt.c", "    if (total_sectors > EXT2L_MAX_SECTORS(EXT2_MAX_GROUPS))\n", "    if (0)\n",
+     "ext2_format が 32 グループを超える区画で頭打ちにせず断る (m2)"),
+    ("drivers/pc98pt.c", "        return 1;\n    }\n    return 0;\n}\n\nint pc98pt_make_os32(",
+     "        return 0;\n    }\n    return 0;\n}\n\nint pc98pt_make_os32(",
+     "旧配置を検出しない (カーネルが移行の案内を出せない、M2)"),
+    ("drivers/pc98pt.c", "            return 0;                       /* 標準配置で読める */",
+     "            (void)0;", "標準配置の表を旧配置と誤認する"),
 ]
 
 # ---- 否定側 (Python) ------------------------------------------------------------
@@ -143,12 +162,24 @@ PY_MUTATIONS = [
      "Python の書き手が旧配置で書く"),
     ("tools/pc98pt.py", "    e[OFF_ESECT] = spt - 1\n", "    e[OFF_ESECT] = 0\n",
      "Python の書き手の終了セクタが C と違う"),
-    ("tools/nhd_deploy.py", "    if blocks is None:\n        raise MigrateError(\"旧配置の開始 LBA {} に ext2 が無い\".format(start))\n", "",
+    ("tools/nhd_deploy.py", "        raise MigrateError(\"旧配置の開始 LBA {} に ext2 が無い\".format(start))\n",
+     "        fs_sect = 0\n",
      "migrate-pt が ext2 の無い位置を区画にする"),
     ("tools/nhd_deploy.py", "    if len(used) != 1:\n", "    if len(used) < 1:\n",
      "migrate-pt が 2 つ以上の項目を持つ表を書き換える"),
-    ("tools/nhd_deploy.py", "    if blocks * 2 > length:\n", "    if False:\n",
+    ("tools/nhd_deploy.py", "    if fs_sect > length:\n", "    if False:\n",
      "migrate-pt が区画より大きい FS を通す"),
+    ("tools/nhd_deploy.py", "    if log != 0:\n", "    if False:\n",
+     "migrate-pt が 1KiB 以外のブロック長を通す (C2)"),
+    ("tools/nhd_deploy.py", "    if not loader_data or len(loader_data) > LOADER_MAX_SECTORS * 512:\n",
+     "    if not loader_data:\n", "ローダの大きさを書き込みの後で見る (C1)"),
+    ("tools/nhd_deploy.py", "    if ksize == 0 or ksize > KERNEL_MAX_BYTES:\n", "    if False:\n",
+     "カーネルの大きさを見ない (C1)"),
+    ("tools/nhd_deploy.py", "        ok, reason = (stamp_check or verify_pull_stamp)()\n",
+     "        ok, reason = True, ''\n", "push の来歴を書き込みの後で見る (C1)"),
+    ("tools/nhd_deploy.py", "    if plan['state'] != 'legacy':\n        return True\n    print(\"Error: {} の区画表は旧配置",
+     "    if True:\n        return True\n    print(\"Error: {} の区画表は旧配置",
+     "旧配置の NHD へ v64 のカーネルを配る (M2)"),
 ]
 
 
@@ -168,7 +199,8 @@ def build_pure(tmp, root=ROOT):
         harness = pathlib.Path(tmp) / "hdd_stage1_host.c"
         harness.write_text(text, encoding="utf-8")
     inc = ["-I" + str(root), "-I" + str(root / "include"), "-I" + str(root / "drivers"),
-           "-I" + str(root / "fs"), "-I" + str(ROOT / "include")]
+           "-I" + str(root / "fs"), "-I" + str(ROOT / "include"),
+           "-I" + str(ROOT / "drivers"), "-I" + str(ROOT / "fs")]
     r = run(["gcc", *HOST_FLAGS, *inc, str(harness), "-o", str(exe)],
             capture_output=True, text=True)
     if r.returncode != 0:
@@ -259,7 +291,7 @@ def py_cross_check(pc98pt, c_exe):
 
 
 def make_legacy_nhd(pc98pt, path, cyls=300, heads=8, spt=17, extra_entry=False,
-                    sid=0xE2, fs_blocks=None, no_fs=False, end_cyl=None):
+                    sid=0xE2, fs_blocks=None, no_fs=False, end_cyl=None, bs=1024):
     """旧配置の区画表 (cdinst / install が書いた形) と mkfs.ext2 の NHD を作る。"""
     total = cyls * heads * spt
     start = 1632
@@ -280,8 +312,8 @@ def make_legacy_nhd(pc98pt, path, cyls=300, heads=8, spt=17, extra_entry=False,
         f.seek(512 + 512)
         f.write(pt)
     if not no_fs:
-        blocks = fs_blocks if fs_blocks is not None else (total - start) // 2
-        r = subprocess.run(["mke2fs", "-q", "-F", "-t", "ext2", "-b", "1024", "-I", "128",
+        blocks = fs_blocks if fs_blocks is not None else (total - start) * 512 // bs
+        r = subprocess.run(["mke2fs", "-q", "-F", "-t", "ext2", "-b", str(bs), "-I", "128",
                             "-L", "OS32_HDD", "-E", "offset={}".format(512 + start * 512),
                             str(path), str(blocks)],
                            capture_output=True, text=True)
@@ -367,6 +399,7 @@ def py_migrate_cases(pc98pt, nhd, tmp, quiet=False):
         ("ext2 が無い", dict(no_fs=True)),
         ("FS が区画より大きい", dict(end_cyl=200)),
         ("終わりがディスクの外", dict(end_cyl=400)),
+        ("ext2 のブロック長が 4KiB (C2)", dict(bs=4096)),
     ]
     for name, kw in refusals:
         q = tmp / "refuse.nhd"
@@ -394,6 +427,86 @@ def py_migrate_cases(pc98pt, nhd, tmp, quiet=False):
     say(f"  {'ok  ' if ok else 'FAIL'} migrate 断る: ローダ 8193 バイト (NHD 不変)")
     bad += not ok
 
+    # --- do_migrate_pt 全体: **全部の検査が最初の書き込みより前** (Codex C1) ---
+    #     マウント・コピー・push は贋物にして、呼ばれたかと NHD の不変を見る
+    calls = []
+    real_deploy = nhd.do_deploy
+    nhd.is_mounted = lambda: False
+    nhd.ensure_local_nhd = lambda: True
+    nhd.do_umount = lambda: True
+    nhd.do_copy = lambda *a, **k: calls.append(("copy", a, k)) or True
+    nhd.do_deploy = lambda *a, **k: calls.append(("deploy",)) or True
+    stamp = {"ok": True}
+    nhd.verify_pull_stamp = lambda *a: (stamp["ok"], "stamp mismatch (試験)")
+    good_loader = tmp / "loader.bin"
+    good_loader.write_bytes(loader)
+    big_loader = tmp / "loader_big.bin"
+    big_loader.write_bytes(bytes(8193))
+    good_kernel = tmp / "vmkernel.lz4"
+    good_kernel.write_bytes(b"VK32" + bytes(1000))
+    big_kernel = tmp / "vmkernel_big.lz4"
+    big_kernel.write_bytes(bytes(nhd.KERNEL_MAX_BYTES + 1))
+    flows = [
+        ("ローダ 8193B", big_loader, good_kernel, False, True),
+        ("カーネル 508KiB+1", good_loader, big_kernel, False, True),
+        ("空のカーネル", good_loader, tmp / "empty.lz4", False, True),
+        ("push で来歴が崩れている", good_loader, good_kernel, True, False),
+        ("ext2 が 4KiB ブロック", good_loader, good_kernel, False, True),
+    ]
+    (tmp / "empty.lz4").write_bytes(b"")
+    for name, ld_path, k_path, push, stamp_ok in flows:
+        q = tmp / "flow.nhd"
+        total_q, _ = make_legacy_nhd(pc98pt, q, bs=4096 if "4KiB" in name else 1024)
+        nhd.NHD_LOCAL = str(q)
+        stamp["ok"] = stamp_ok
+        del calls[:]
+        h0 = region_hash(q, 0, 512 + total_q * 512)
+        rc = _silent_err(nhd.do_migrate_pt, str(ld_path), str(k_path), push)
+        ok = rc is False and not calls and region_hash(q, 0, 512 + total_q * 512) == h0
+        say(f"  {'ok  ' if ok else 'FAIL'} do_migrate_pt 断る: {name} (コピーも push もせず NHD 不変)")
+        bad += not ok
+    # 通る場合: カーネルのコピー 1 回 → 区画表が標準になる (push しない)
+    q = tmp / "flow_ok.nhd"
+    total_q, _ = make_legacy_nhd(pc98pt, q)
+    nhd.NHD_LOCAL = str(q)
+    stamp["ok"] = True
+    del calls[:]
+    rc = _silent_err(nhd.do_migrate_pt, str(good_loader), str(good_kernel), False)
+    with open(q, "rb") as f:
+        f.seek(1024)
+        sect = f.read(512)
+    ok = (rc is True and [c[0] for c in calls] == ["copy"]
+          and pc98pt.find_os32(sect, 8, 17, total_q) == (0, 1632, total_q - 1632))
+    say(f"  {'ok  ' if ok else 'FAIL'} do_migrate_pt: カーネルのコピー → 標準配置 (--no-push)")
+    bad += not ok
+
+    # --- 旧配置の NHD へ v64 以降のカーネルを配らない (Opus M2) ---
+    q = tmp / "guard.nhd"
+    total_q, _ = make_legacy_nhd(pc98pt, q)
+    checks = [
+        ("旧配置 + v64 → 断る", _silent_err(nhd.legacy_pt_guard, str(q), 64) is False),
+        ("旧配置 + v63 → 通す", _silent_err(nhd.legacy_pt_guard, str(q), 63) is True),
+    ]
+    nhd.NHD_LOCAL = str(q)
+    copied = []
+    real_copy2 = nhd.shutil.copy2
+    nhd.shutil.copy2 = lambda *a, **k: copied.append(a)
+    nhd.write_pull_stamp = lambda *a, **k: None     # 門を抜けた場合も例外にしない
+    try:
+        dep = _silent_err(real_deploy, False)
+    finally:
+        nhd.shutil.copy2 = real_copy2
+    checks.append(("do_deploy が旧配置 + このツリー (v64) で断る (NP21/W へ写さない)",
+                   dep is False and not copied))
+    _silent(nhd.update_partition_table, str(q))
+    checks.append(("標準配置 + v64 → 通す", _silent_err(nhd.legacy_pt_guard, str(q), 64) is True))
+    junk = tmp / "junk.nhd"
+    junk.write_bytes(bytes(4096))
+    checks.append(("NHD でない → 通す (判定できない)", _silent_err(nhd.legacy_pt_guard, str(junk), 64) is True))
+    for name, ok in checks:
+        say(f"  {'ok  ' if ok else 'FAIL'} legacy_pt_guard: {name}")
+        bad += not ok
+
     # --- update_partition_table (init の書き手) は標準配置を書く ---
     q = tmp / "init.nhd"
     total_q, _ = make_legacy_nhd(pc98pt, q)
@@ -406,6 +519,13 @@ def py_migrate_cases(pc98pt, nhd, tmp, quiet=False):
     say(f"  {'ok  ' if ok else 'FAIL'} update_partition_table: 標準配置 (1632, {total_q - 1632})")
     bad += not ok
     return bad
+
+
+def _silent_err(fn, *a):
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return fn(*a)
 
 
 def _silent(fn, *a):
@@ -459,7 +579,7 @@ def build_target(tmp):
 #  変異                                                                     #
 # ======================================================================== #
 
-MIRROR = ["drivers/pc98pt.c", "drivers/pc98pt.h", "drivers/ide_addr.c",
+MIRROR = ["drivers/ide.h", "drivers/pc98pt.c", "drivers/pc98pt.h", "drivers/ide_addr.c",
           "drivers/ide_addr.h", "fs/ext2_layout.c", "fs/ext2_layout.h",
           "userland/shell/hdprep_plan.c", "userland/shell/hdprep_plan.h",
           "fs/ext2_super.c", "fs/ext2_fmt.c", "fs/ext2_inode.c", "fs/ext2_dir.c",
@@ -468,8 +588,14 @@ PY_MIRROR = ["tools/pc98pt.py", "tools/nhd_deploy.py", "tools/deploy_protect.py"
              "tools/deploy_manifests.py"]
 
 
-def mutate_c():
-    red = 0
+def _tally(counts, status, why):
+    counts[status] = counts.get(status, 0) + 1
+    print(f"MUTATION {status}: {why}", flush=True)
+
+
+def mutate_c(counts):
+    """C の変異。**ビルドが通って**試験が落ちたものだけを RED に数える。
+    ビルドが通らない変異は ERROR (何も確かめていない — Opus M1)。"""
     for rel, before, after, why in C_MUTATIONS:
         with tempfile.TemporaryDirectory(prefix="os32-hdd1-mut-") as tmp:
             troot = pathlib.Path(tmp) / "root"
@@ -480,47 +606,51 @@ def mutate_c():
             path = troot / rel
             text = path.read_text(encoding="utf-8")
             if before not in text:
-                print(f"MUTATION NOT APPLIED: {why}", flush=True)
-                red -= 1000
+                _tally(counts, "NOT_APPLIED", why)
                 continue
             path.write_text(text.replace(before, after, 1), encoding="utf-8")
-            failed = 0
             exe = build_pure(tmp, troot)
-            failed += 1 if exe is None else run_cases(exe, PURE_CASES, quiet=True)
             pexe = build_part(tmp, troot)
-            failed += 1 if pexe is None else run_cases(pexe, PART_CASES, quiet=True)
-            status = "RED" if failed else "SURVIVED"
-            print(f"MUTATION {status}: {why}", flush=True)
-            red += 1 if failed else 0
-    return red
+            if exe is None or pexe is None:
+                _tally(counts, "ERROR", why + " (ビルドが通らない)")
+                continue
+            failed = run_cases(exe, PURE_CASES, quiet=True)
+            failed += run_cases(pexe, PART_CASES, quiet=True)
+            _tally(counts, "RED" if failed else "SURVIVED", why)
 
 
-def mutate_py(c_exe):
-    red = 0
+def mutate_py(c_exe, counts):
+    """Python の変異。試験の失敗 (終了 1) だけを RED、読み込み・例外 (終了 3) は ERROR。"""
     for rel, before, after, why in PY_MUTATIONS:
         with tempfile.TemporaryDirectory(prefix="os32-hdd1-pymut-") as tmp:
             tdir = pathlib.Path(tmp) / "tools"
             tdir.mkdir()
             for m in PY_MIRROR:
                 shutil.copy2(ROOT / m, tdir / pathlib.Path(m).name)
+            # nhd_deploy.tree_kapi_version は PROJ_DIR/sdk/... を読む (旧配置の門、M2)
+            hdr = pathlib.Path(tmp) / "sdk/include/os32"
+            hdr.mkdir(parents=True)
+            shutil.copy2(ROOT / "sdk/include/os32/os32_kapi_shared.h", hdr)
             path = tdir / pathlib.Path(rel).name
             text = path.read_text(encoding="utf-8")
             if before not in text:
-                print(f"MUTATION NOT APPLIED: {why}", flush=True)
-                red -= 1000
+                _tally(counts, "NOT_APPLIED", why)
                 continue
             path.write_text(text.replace(before, after, 1), encoding="utf-8")
             rc = run_py(tdir, c_exe, quiet=True)
-            status = "RED" if rc != 0 else "SURVIVED"
-            print(f"MUTATION {status}: {why}", flush=True)
-            red += 1 if rc != 0 else 0
-    return red
+            _tally(counts, "RED" if rc == 1 else ("SURVIVED" if rc == 0 else "ERROR"), why)
 
 
 def main(argv):
     if argv and argv[0] == "--py":
         quiet = "--quiet" in argv
-        return 1 if py_main(pathlib.Path(argv[1]), pathlib.Path(argv[2]), quiet) else 0
+        try:
+            return 1 if py_main(pathlib.Path(argv[1]), pathlib.Path(argv[2]), quiet) else 0
+        except Exception:  # noqa: BLE001 — 変異で壊れた読み込み・例外は ERROR (3)
+            import traceback
+            if not quiet:
+                traceback.print_exc()
+            return 3
 
     failed = 0
     with tempfile.TemporaryDirectory(prefix="os32-hdd1-") as tmp:
@@ -549,8 +679,13 @@ def main(argv):
 
         if "--mutate" in argv and failed == 0:
             n = len(C_MUTATIONS) + len(PY_MUTATIONS)
-            red = mutate_c() + mutate_py(exe)
-            print(f"MUTATIONS {red}/{n} RED", flush=True)
+            counts = {}
+            mutate_c(counts)
+            mutate_py(exe, counts)
+            red = counts.get("RED", 0)
+            print("MUTATIONS {}/{} RED (ERROR {}, SURVIVED {}, NOT_APPLIED {})".format(
+                red, n, counts.get("ERROR", 0), counts.get("SURVIVED", 0),
+                counts.get("NOT_APPLIED", 0)), flush=True)
             if red != n:
                 failed += 1
     return 1 if failed else 0

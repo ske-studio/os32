@@ -1,6 +1,8 @@
 #include "ext2_priv.h"
 #include "ext2_layout.h"   /* 大きさの固定点 (票 TASK_HDD_INSTALL N7) */
 #include "ide.h"
+#include "bootinfo.h"   /* BOOTINFO_GEOM_BIOS */
+#include "kprintf.h"
 
 /*  ext2_format — ディスクにext2ファイルシステムを作成                       */
 /*                                                                          */
@@ -359,8 +361,22 @@ int ext2_format(int ide_drive, u32 total_sectors)
     /* 区画表の OS32 区画に作る。区画が無ければ作らない (以前は LBA 1088 を
      * 仮定して書き始めた、F12)。長さは区画で頭打ち — インストーラは
      * 「総数 - 1632」を渡すが、区画はシリンダ単位で切り下げてある。 */
-    ret = ext2_find_partition(ide_drive, &start, &len);
-    if (ret != EXT2_OK) return ret;
+    {
+        int src = 0;
+        ret = ext2_find_partition_src(ide_drive, &start, &len, &src);
+        if (ret != EXT2_OK) return ret;
+        /* 区画表の位置を IDENTIFY の幾何で読んだだけのときは書かない (m3)。
+         * BIOS の幾何と違えば別の場所を指している (F4)。 */
+        if (src != BOOTINFO_GEOM_BIOS) {
+            kprintf(0x0C, "[EXT2] format: no BIOS geometry for hd%d; "
+                          "refusing to write\n", ide_drive & 3);
+            return EXT2_ERR_INVAL;
+        }
+    }
+    /* 区画が 32 グループ (256MiB) より大きければ、上限の大きさへ頭打ちにする
+     * (m2)。format_at は大きすぎる範囲を断る (hdprep は上限の内側で計画する)。 */
+    if (total_sectors > EXT2L_MAX_SECTORS(EXT2_MAX_GROUPS))
+        total_sectors = EXT2L_MAX_SECTORS(EXT2_MAX_GROUPS);
     return ext2_format_range(ide_drive, start, len, total_sectors);
 }
 
@@ -378,5 +394,9 @@ int ext2_format_at(int ide_drive, u32 start_lba, u32 length)
     if (info.total_sectors == 0) return EXT2_ERR_INVAL;
     if (start_lba >= info.total_sectors) return EXT2_ERR_INVAL;
     if (length > info.total_sectors - start_lba) return EXT2_ERR_INVAL;
+    /* 総数だけでなく、ATA の指定の方式で**本当に指せる**範囲か (LBA28 の上限・
+     * 現在の CHS の容量・シリンダ 16 ビット)。最初の書き込みの前に範囲全体で
+     * 照合する (Codex C4)。 */
+    if (!ide_range_ok(ide_drive, start_lba, length)) return EXT2_ERR_INVAL;
     return ext2_format_range(ide_drive, start_lba, length, length);
 }

@@ -118,6 +118,9 @@ static void hp_geom_from_kapi(const HddGeom *hg, HdprepGeom *g)
     g->ata_present  = hg->ata_present;
     g->addr_mode    = hg->addr_mode;
     g->ata_total    = hg->ata_total;
+    g->ata_cur_cyl  = hg->ata_cur_cyl;
+    g->ata_cur_heads = hg->ata_cur_heads;
+    g->ata_cur_spt  = hg->ata_cur_spt;
     g->bios_queried = hg->bios_queried;
     g->bios_valid   = hg->bios_valid;
     g->bios_cyl     = hg->bios_cyl;

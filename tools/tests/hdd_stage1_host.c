@@ -74,6 +74,9 @@ static void case_pt_817(void)
     CHECK(pc98pt_count_used(sect) == 1);
     CHECK(pc98pt_find_os32(sect, 8, 17, 409496, &idx, &st, &ln) == PC98PT_OK);
     CHECK(idx == 0 && st == 1632 && ln == 407864);
+    /* 標準配置で読める表は「旧配置」と言わない (旧として読んでもディスクの内側に
+     * 収まってしまう大きさで確かめる) */
+    CHECK(pc98pt_os32_is_legacy(sect, 8, 17, 409496) == 0);
     /* ディスクが 1 セクタ短いと外 */
     CHECK(pc98pt_find_os32(sect, 8, 17, 409495, &idx, &st, &ln) == PC98PT_ERR_RANGE);
 }
@@ -130,6 +133,9 @@ static void case_pt_reject(void)
     sect[6] = 0; sect[7] = 0; sect[8] = 12; sect[9] = 0;         /* 旧: 開始 */
     sect[10] = 16; sect[11] = 7; sect[12] = 0xC2; sect[13] = 0x0B; /* 旧: 終了 */
     CHECK(pc98pt_find_os32(sect, 8, 17, 409496, 0, &st, &ln) != PC98PT_OK);
+    /* カーネルの案内用: 旧配置の OS32 項目と分かる (M2) */
+    CHECK(pc98pt_os32_is_legacy(sect, 8, 17, 409496) == 1);
+    CHECK(pc98pt_os32_is_legacy(sect, 8, 17, 3000) == 0);      /* 旧でもディスクの外 */
     /* 開始ヘッド・セクタが幾何の外 */
     memset(sect, 0, sizeof(sect));
     CHECK(pc98pt_make_os32(&e, 1632, 136, 8, 17) == PC98PT_OK);
@@ -356,6 +362,9 @@ static HdprepGeom hp_geom(unsigned long h, unsigned long s, unsigned long c,
     g.bios_heads = h;
     g.bios_spt = s;
     g.bios_seclen = 512;
+    g.ata_cur_cyl = 16383;
+    g.ata_cur_heads = 16;
+    g.ata_cur_spt = 63;
     return g;
 }
 
@@ -373,6 +382,10 @@ static void case_hdprep_geom(void)
     g = hp_geom(16, 63, 16382, 16514063UL, HDPREP_AMODE_LBA28);
     g.ata_present = 0;
     CHECK(hdprep_check_geom(&g) == HDPREP_E_NO_ATA);
+    g = hp_geom(16, 63, 16382, 0UL, HDPREP_AMODE_LBA28);   /* 総数の申告なし (C3) */
+    CHECK(hdprep_check_geom(&g) == HDPREP_E_NO_TOTAL);
+    g.addr_mode = HDPREP_AMODE_CHS_CUR;
+    CHECK(hdprep_check_geom(&g) == HDPREP_E_NO_TOTAL);
     g = hp_geom(16, 63, 16382, 16514063UL, HDPREP_AMODE_LBA28);
     g.bios_queried = 0;                              /* HDD ローダが問い合わせなかった */
     CHECK(hdprep_check_geom(&g) == HDPREP_E_NO_BIOS);
@@ -460,6 +473,19 @@ static void case_hdprep_plan(void)
     g = hp_geom(8, 17, 200, 409496UL, HDPREP_AMODE_LBA28);
     CHECK(hdprep_plan(&g, 256, &p) == HDPREP_OK);
     CHECK(p.start + p.len <= 200UL * 136UL);
+    /* IDENTIFY の総数が BIOS 幾何の容量より小さい → 総数で頭打ち */
+    g = hp_geom(16, 63, 16382, 2016UL + 1008UL * 100UL + 500UL, HDPREP_AMODE_LBA28);
+    CHECK(hdprep_plan(&g, 256, &p) == HDPREP_OK);
+    CHECK(p.len == 1008UL * 100UL && p.disk_limit == 2016UL + 1008UL * 100UL + 500UL);
+    /* 現在の CHS の容量が総数より小さい (CHS_CUR) → CHS の容量で頭打ち (C4) */
+    g = hp_geom(16, 63, 16382, 16514063UL, HDPREP_AMODE_CHS_CUR);
+    g.ata_cur_cyl = 102; g.ata_cur_heads = 16; g.ata_cur_spt = 63;
+    CHECK(hdprep_plan(&g, 256, &p) == HDPREP_OK);
+    CHECK(p.start + p.len <= 102UL * 1008UL && p.len == 100UL * 1008UL);
+    /* LBA28 は 2^28 で頭打ち (BIOS と総数がそれより大きい申告) */
+    g = hp_geom(255, 63, 65535, 0xFFFFFFF0UL, HDPREP_AMODE_LBA28);
+    CHECK(hdprep_plan(&g, 256, &p) == HDPREP_OK);
+    CHECK(p.disk_limit == 0x10000000UL);
     /* ディスクが開始より小さい */
     g = hp_geom(8, 17, 3011, 1000UL, HDPREP_AMODE_LBA28);
     CHECK(hdprep_plan(&g, 8, &p) == HDPREP_E_TOO_SMALL);

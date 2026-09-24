@@ -31,6 +31,8 @@
 #define HDPREP_AMODE_LBA28      1
 #define HDPREP_AMODE_CHS_CUR    2
 #define HDPREP_AMODE_CHS_DEF    3
+/* LBA28 で指せるセクタ数 (drivers/ide_addr.h の IDE_LBA28_LIMIT と同じ) */
+#define HDPREP_LBA28_LIMIT      0x10000000UL
 
 /* 判定の結果。0 = 可、正 = 追加の手順が要る、負 = 断る */
 #define HDPREP_OK               0
@@ -47,11 +49,15 @@
 #define HDPREP_E_CYL          (-10) /* 終了シリンダが 16 ビットを超える */
 #define HDPREP_E_STILL_MOUNTED (-11) /* umount の後もまだ hd0 がマウントされている */
 #define HDPREP_E_ARG          (-12) /* NULL */
+#define HDPREP_E_NO_TOTAL     (-13) /* IDENTIFY の総数 (word 60-61) が 0 = 大きさが分からない */
 
 typedef struct {
     int           ata_present;
     int           addr_mode;       /* HDPREP_AMODE_* */
-    unsigned long ata_total;       /* IDENTIFY word 60-61 (0 = 申告なし) */
+    unsigned long ata_total;       /* IDENTIFY word 60-61 (0 = 申告なし → 断る) */
+    unsigned long ata_cur_cyl;     /* word 54-56 (現在の CHS。CHS_CUR の上限に使う) */
+    unsigned long ata_cur_heads;
+    unsigned long ata_cur_spt;
     int           bios_queried;
     int           bios_valid;      /* カーネルの規則 (CF=0・BX=512・CX/DH/DL≠0) */
     unsigned long bios_cyl;        /* CX */
@@ -67,10 +73,10 @@ typedef struct {
     unsigned long len;             /* 区画の長さ (シリンダの倍数) */
     unsigned long end_cyl;         /* 終了シリンダ (含む) */
     unsigned long probe_lba;       /* 書き込みの探り = 区画の最終セクタ */
-    unsigned long disk_limit;      /* 置ける上限 (BIOS 幾何と IDENTIFY の小さい方) */
+    unsigned long disk_limit;      /* 置ける上限 (BIOS 幾何・IDENTIFY の総数・ATA の方式の上限の最小) */
 } HdprepPlan;
 
-/* 幾何の条件 (ATA の有無・BIOS 幾何・BX・I/O の方式)。 */
+/* 幾何の条件 (ATA の有無・総数・BIOS 幾何・BX・I/O の方式)。 */
 int hdprep_check_geom(const HdprepGeom *g);
 
 /* ディスクが空か。lba0 / lba1 は 512 バイト。 */

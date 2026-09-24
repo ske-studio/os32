@@ -142,6 +142,9 @@ static u32 g_rd, g_wr;
 static u32 g_wr_min, g_wr_max;          /* 書いた LBA の範囲 */
 static u32 g_fail_read_lba = 0xFFFFFFFFu;
 static u32 g_ide_total = DISK_TOTAL;    /* IDENTIFY の総数 (ide_get_info) */
+/* 配列より大きいディスクの真似 (m2 の頭打ち)。DISK_TOTAL 以上の LBA は
+ * 書いても捨て (範囲だけ数える)、読むと 0 が返る */
+static u32 g_virtual_total = DISK_TOTAL;
 
 static void io_reset(void)
 {
@@ -164,9 +167,10 @@ int dev_blk_read_lba(Device *dev, u32 lba, int count, void *buf)
     if (!dev) return -1;
     for (i = 0; i < count; i++) {
         u32 cur = lba + (u32)i;
-        if (cur >= DISK_TOTAL) return -1;
+        if (cur >= g_virtual_total) return -1;
         if (cur == g_fail_read_lba) return -1;
-        kmemcpy((u8 *)buf + i * 512, g_disk + cur * 512u, 512);
+        if (cur >= DISK_TOTAL) kmemset((u8 *)buf + i * 512, 0, 512);
+        else kmemcpy((u8 *)buf + i * 512, g_disk + cur * 512u, 512);
         g_rd++;
     }
     return 0;
@@ -178,8 +182,9 @@ int dev_blk_write_lba(Device *dev, u32 lba, int count, const void *buf)
     if (!dev) return -1;
     for (i = 0; i < count; i++) {
         u32 cur = lba + (u32)i;
-        if (cur >= DISK_TOTAL) return -1;
-        kmemcpy(g_disk + cur * 512u, (const u8 *)buf + i * 512, 512);
+        if (cur >= g_virtual_total) return -1;
+        if (cur < DISK_TOTAL)
+            kmemcpy(g_disk + cur * 512u, (const u8 *)buf + i * 512, 512);
         g_wr++;
         if (cur < g_wr_min) g_wr_min = cur;
         if (cur > g_wr_max) g_wr_max = cur;
@@ -202,6 +207,18 @@ int ide_get_info(int drive, IdeInfo *info)
         info->total_sectors = g_ide_total;
     }
     return IDE_OK;
+}
+
+/* ATA の指定の方式で指せる上限 (ide.c の ide_range_ok の贋物)。既定は総数と同じ。
+ * LBA28 の上限や現在の CHS の容量が総数より小さいドライブを g_ata_limit で作る */
+static u32 g_ata_limit = DISK_TOTAL;
+
+int ide_range_ok(int drive, u32 lba, u32 count)
+{
+    if ((drive & 3) != 0) return 0;
+    if (count == 0) return 1;
+    if (lba >= g_ata_limit) return 0;
+    return count <= g_ata_limit - lba ? 1 : 0;
 }
 
 /* 区画表の幾何 (カーネルでは BIOS 幾何、無ければ IDENTIFY)。 */
@@ -244,6 +261,8 @@ static void disk_reset(u16 heads, u16 spt)
     g_hd0.total_sects = DISK_TOTAL;
     g_fail_read_lba = 0xFFFFFFFFu;
     g_ide_total = DISK_TOTAL;
+    g_ata_limit = DISK_TOTAL;
+    g_virtual_total = DISK_TOTAL;
     g_geom_rc = 1;
     g_geom_heads = heads;
     g_geom_spt = spt;
@@ -347,6 +366,7 @@ static void case_format_clamp(void)
     CHECK(g_wr_min >= 1632u && g_wr_max < 1632u + 13600u);
     CHECK(ext2_mount(&g_ctx, 0) == EXT2_OK);
     CHECK(g_ctx.base_lba == 1632u && g_ctx.part_len == 13600u);
+    CHECK(g_ctx.sb_info.total_blocks == 6800u);
     CHECK(g_ctx.sb_info.total_blocks * 2u <= 13600u);
     ext2_unmount(&g_ctx);
 }
@@ -392,6 +412,14 @@ static void case_format_at_refuse(void)
     g_ide_total = 0;                                                 /* 総数の申告が無い */
     CHECK(ext2_format_at(0, 2016, 16384) == EXT2_ERR_INVAL);
     g_ide_total = DISK_TOTAL;
+    /* 総数の内側でも ATA の方式で指せない範囲 (LBA28 の上限・現在の CHS の容量) (C4) */
+    g_ata_limit = 2016u + 16000u;
+    CHECK(ext2_format_at(0, 2016, 16001) == EXT2_ERR_INVAL);
+    g_ata_limit = DISK_TOTAL;
+    /* ATA の方式では指せても IDENTIFY の総数の外 */
+    g_ide_total = DISK_TOTAL - 1000u;
+    CHECK(ext2_format_at(0, DISK_TOTAL - 20160u, 20160u) == EXT2_ERR_INVAL);
+    g_ide_total = DISK_TOTAL;
     CHECK(ext2_format_at(0, 2016, 120) == EXT2_ERR_NOSPC);           /* 64 ブロック未満 */
     CHECK(g_wr == 0);
     /* ちょうどディスクの終わりまでは通る (範囲の中だけを書く) */
@@ -428,6 +456,62 @@ static void case_mount_bounds(void)
     ext2_unmount(&g_ctx);
 }
 
+/* ext2_format は BIOS 幾何で区画を見つけたときだけ書く (m3)。
+ * 区画が 32 グループより大きければ上限の大きさへ頭打ち (m2) */
+static void case_format_geom(void)
+{
+    disk_reset(8, 17);
+    pt_write(1632, 136u * 100u, 8, 17);
+    g_geom_rc = 2;                                /* IDENTIFY に落ちた */
+    io_reset();
+    CHECK(ext2_format(0, 13600) == EXT2_ERR_INVAL);
+    CHECK(g_wr == 0);
+    /* 読むだけ (マウント) は IDENTIFY でも通る */
+    g_geom_rc = 1;
+    CHECK(ext2_format(0, 13600) == EXT2_OK);
+    g_geom_rc = 2;
+    CHECK(ext2_mount(&g_ctx, 0) == EXT2_OK);
+    ext2_unmount(&g_ctx);
+    CHECK(EXT2L_MAX_SECTORS(EXT2_MAX_GROUPS) == 524290u);
+
+    /* 300MiB の区画 (33 グループ分) → ext2_format は 32 グループへ頭打ちして作る */
+    disk_reset(16, 63);
+    g_virtual_total = 2016u + 1008u * 610u;       /* 616,896 セクタ */
+    g_ide_total = g_virtual_total;
+    g_ata_limit = g_virtual_total;
+    pt_write(2016, 1008u * 608u, 16, 63);         /* 612,864 セクタ = 299MiB */
+    io_reset();
+    CHECK(ext2_format(0, 0xFFFFFFF0u) == EXT2_OK);
+    CHECK(g_wr_min == 2016u && g_wr_max < 2016u + 524290u);
+    CHECK(ext2_mount(&g_ctx, 0) == EXT2_OK);
+    CHECK(g_ctx.num_groups == 32u && g_ctx.sb_info.total_blocks == 262145u);
+    ext2_unmount(&g_ctx);
+    /* format_at は大きすぎる範囲を頭打ちにせず断る (hdprep は上限の内側で計画する) */
+    io_reset();
+    CHECK(ext2_format_at(0, 2016, 1008u * 608u) == EXT2_ERR_NOSPC);
+    CHECK(g_wr == 0);
+}
+
+/* 旧配置の区画表でマウントすると NOPART (案内は kprintf、ここでは判定だけ) */
+static void case_legacy_hint(void)
+{
+    disk_reset(8, 17);
+    g_disk[512 + 0] = 0x80; g_disk[512 + 1] = 0xE2;
+    g_disk[512 + 8] = 12;
+    g_disk[512 + 10] = 16; g_disk[512 + 11] = 7;
+    g_disk[512 + 12] = 400u & 0xFFu; g_disk[512 + 13] = (u8)(400u >> 8);
+    CHECK(pc98pt_os32_is_legacy(g_disk + 512, 8, 17, DISK_TOTAL) == 1);
+    CHECK(ext2_mount(&g_ctx, 0) == EXT2_ERR_NOPART);
+    /* 標準配置の表は legacy ではない */
+    pt_write(1632, 136u * 100u, 8, 17);
+    CHECK(pc98pt_os32_is_legacy(g_disk + 512, 8, 17, DISK_TOTAL) == 0);
+    /* 空の表・FAT だけも legacy ではない */
+    kmemset(g_disk + 512, 0, 512);
+    CHECK(pc98pt_os32_is_legacy(g_disk + 512, 8, 17, DISK_TOTAL) == 0);
+    g_disk[512 + 0] = 0x80; g_disk[512 + 1] = 0xA1;
+    CHECK(pc98pt_os32_is_legacy(g_disk + 512, 8, 17, DISK_TOTAL) == 0);
+}
+
 /* 像の書き出し (test_hdd_stage1.py が e2fsck -fn にかける) */
 static void dump_format_at(u32 start, u32 len)
 {
@@ -454,6 +538,8 @@ int os32_main(int argc, char **argv)
     else if (streq(c, "format_at_16652")) case_format_at_16652();
     else if (streq(c, "format_at_refuse")) case_format_at_refuse();
     else if (streq(c, "mount_bounds")) case_mount_bounds();
+    else if (streq(c, "format_geom")) case_format_geom();
+    else if (streq(c, "legacy_hint")) case_legacy_hint();
     else if (streq(c, "dump") && argc == 4) { dump_format_at(atou(argv[2]), atou(argv[3])); return 0; }
     else { report("unknown case\n"); return 2; }
     report("ext2_part: PASS (");

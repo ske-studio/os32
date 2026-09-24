@@ -29,7 +29,15 @@ int bootinfo_part_geom(int ide_drive, u16 *heads, u16 *spt)
     if ((ide_drive & 3) != 0) return -1;
     if (heads) *heads = (u16)PT_FAKE_HEADS;
     if (spt)   *spt = (u16)PT_FAKE_SPT;
-    return 2;   /* BOOTINFO_GEOM_IDENTIFY */
+    return 1;   /* BOOTINFO_GEOM_BIOS (ext2_format は BIOS 幾何でないと書かない、m3) */
+}
+
+/* ATA の方式の上限 (ide.c の ide_range_ok)。これらの試験は ext2_format_at の範囲を
+ * 見ないので、hd0 なら通す (範囲は RAM ディスクの dev_blk_* が断る)。 */
+int ide_range_ok(int drive, u32 lba, u32 count)
+{
+    (void)lba; (void)count;
+    return (drive & 3) == 0 ? 1 : 0;
 }
 
 /* disk の LBA 1 に [base, base+len) の OS32 区画を書く (len はシリンダの倍数)。

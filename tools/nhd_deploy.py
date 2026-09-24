@@ -32,6 +32,7 @@ import hashlib
 import json
 import subprocess
 import shutil
+import re
 import struct
 import glob as globmod
 import yaml
@@ -571,6 +572,9 @@ def do_deploy(force=False):
 
     if not ensure_local_nhd():
         return False
+    # 旧配置の区画表へ v64 以降のカーネルを送らない (Opus M2)。--force でも通さない
+    if not legacy_pt_guard():
+        return False
 
     ok, reason = verify_pull_stamp()
     if not ok:
@@ -724,6 +728,10 @@ def update_partition_table(nhd_path):
 EXT2_MAGIC = 0xEF53
 LOADER_LBA = 2
 LOADER_MAX_SECTORS = 16   # 8KB (IPL が LBA 2 から 16 セクタを読む)
+# ローダが読める圧縮カーネルの上限 (boot/boot_defs.h の MAX_IMAGE_SIZE = 508KiB)
+KERNEL_MAX_BYTES = 508 * 1024
+# 移行を必要とするカーネルの KAPI 版 (v64 から標準配置しか読まない)
+PT_STANDARD_KAPI = 64
 
 
 class MigrateError(Exception):
@@ -731,12 +739,21 @@ class MigrateError(Exception):
 
 
 def _ext2_blocks_at(img, hs, start):
-    """区画の先頭に ext2 のスーパーブロックがあれば s_blocks_count、無ければ None。"""
+    """区画の先頭に ext2 のスーパーブロックがあれば 512B セクタ換算の大きさ、無ければ None。
+
+    OS32 の ext2 は 1KiB ブロック専用 (fs/ext2_fmt.c・ローダの ext2_mini)。
+    s_log_block_size が 0 でない FS は容量を正しく数えられない上に OS32 が
+    読めないので、ここで MigrateError にする (Codex C2)。
+    """
     img.seek(hs + start * 512 + 1024)
     sb = img.read(1024)
     if len(sb) < 1024 or struct.unpack_from('<H', sb, 56)[0] != EXT2_MAGIC:
         return None
-    return struct.unpack_from('<I', sb, 4)[0]
+    log = struct.unpack_from('<I', sb, 24)[0]
+    if log != 0:
+        raise MigrateError("ext2 のブロック長が {}B (OS32 は 1KiB だけを扱う)"
+                           .format(1024 << min(log, 16)))
+    return struct.unpack_from('<I', sb, 4)[0] * 2
 
 
 def plan_migrate_pt(img):
@@ -772,8 +789,8 @@ def plan_migrate_pt(img):
     # もう標準配置か (標準で読めて、その先頭に ext2 がある)
     try:
         s_std, l_std = pc98pt.entry_range(ent, heads, spt, total)
-        blocks = _ext2_blocks_at(img, hs, s_std)
-        if blocks is not None and blocks * 2 <= l_std:
+        fs_sect = _ext2_blocks_at(img, hs, s_std)
+        if fs_sect is not None and fs_sect <= l_std:
             return {'state': 'standard', 'geom': geom, 'idx': idx,
                     'start': s_std, 'length': l_std}
     except pc98pt.PtError:
@@ -784,12 +801,12 @@ def plan_migrate_pt(img):
     except pc98pt.PtError as exc:
         raise MigrateError("旧配置としても読めない: {}".format(exc))
 
-    blocks = _ext2_blocks_at(img, hs, start)
-    if blocks is None:
+    fs_sect = _ext2_blocks_at(img, hs, start)
+    if fs_sect is None:
         raise MigrateError("旧配置の開始 LBA {} に ext2 が無い".format(start))
-    if blocks * 2 > length:
-        raise MigrateError("ext2 ({} ブロック) が区画 ({} セクタ) より大きい"
-                           .format(blocks, length))
+    if fs_sect > length:
+        raise MigrateError("ext2 ({} セクタ) が区画 ({} セクタ) より大きい"
+                           .format(fs_sect, length))
 
     try:
         new_ent = pc98pt.make_os32(start, length, heads, spt)
@@ -836,29 +853,56 @@ def migrate_pt_raw(nhd_path, loader_data):
     return plan
 
 
+def migrate_preflight(nhd_path, loader_bin, kernel_file, push, stamp_check=None):
+    """migrate-pt の**全部の検査**。どの書き込みよりも前に呼ぶ (Codex C1 / Opus m1)。
+
+    戻り値 (plan, loader_data)。断るときは MigrateError (NHD には何も書いていない)。
+    stamp_check は push するときの来歴の検査 (既定 verify_pull_stamp)。
+    """
+    for path, what in ((loader_bin, 'ローダ'), (kernel_file, 'カーネル')):
+        if not os.path.isfile(path):
+            raise MigrateError("{} {} が無い (make all を先に)".format(what, path))
+    with open(loader_bin, 'rb') as f:
+        loader_data = f.read()
+    if not loader_data or len(loader_data) > LOADER_MAX_SECTORS * 512:
+        raise MigrateError("ローダが空か {}B を超える ({} bytes)".format(
+            LOADER_MAX_SECTORS * 512, len(loader_data)))
+    ksize = os.path.getsize(kernel_file)
+    if ksize == 0 or ksize > KERNEL_MAX_BYTES:
+        raise MigrateError("カーネルが空か {}B を超える ({} bytes)".format(
+            KERNEL_MAX_BYTES, ksize))
+    try:
+        with open(nhd_path, 'rb') as img:
+            plan = plan_migrate_pt(img)
+    except pc98pt.PtError as exc:
+        raise MigrateError(str(exc))
+    if plan['state'] == 'legacy' and plan['start'] != HDD_PARTITION_LBA:
+        # ホスト側のマウントは PARTITION_OFFSET (LBA 1632) 固定。違う位置の
+        # ext2 にカーネルを置く手段が無いので断る。
+        raise MigrateError("区画の開始 LBA {} が {} でない (このツールはマウントできない)"
+                           .format(plan['start'], HDD_PARTITION_LBA))
+    if plan['state'] == 'legacy' and push:
+        ok, reason = (stamp_check or verify_pull_stamp)()
+        if not ok:
+            raise MigrateError("push できない (NHD 全体の上書きを断る来歴): {}".format(reason))
+    return plan, loader_data
+
+
 def do_migrate_pt(loader_bin, kernel_file, push=True):
     """旧配置の NHD を標準配置へ移し、ローダとカーネルを同時に入れ替える (N3)。
 
     [D1] NP21/W を**止めてから**実行する (push は NP21/W の NHD を上書きする)。
-    順序: 検査 → カーネルを ext2 の /boot へ → ローダ → 区画表 (最後) → push。
-    どこかで落ちたら push しない (ローカルの作業用 NHD だけが途中の状態になる)。
+    順序: **全部の検査** (migrate_preflight) → カーネルを ext2 の /boot へ →
+    ローダ → 区画表 (最後) → push。検査で断ったら NHD は 1 バイトも変わらない。
+    書き始めた後に落ちたら push しない (ローカルの作業用 NHD だけが途中の状態)。
     """
-    for path, what in ((loader_bin, 'ローダ'), (kernel_file, 'カーネル')):
-        if not os.path.isfile(path):
-            print("Error: {} {} が無い (make all を先に)".format(what, path),
-                  file=sys.stderr)
-            return False
     if is_mounted() and not do_umount():
         return False
     if not ensure_local_nhd():
         return False
-
-    with open(loader_bin, 'rb') as f:
-        loader_data = f.read()
     try:
-        with open(NHD_LOCAL, 'rb') as img:
-            plan = plan_migrate_pt(img)
-    except (MigrateError, pc98pt.PtError) as exc:
+        plan, loader_data = migrate_preflight(NHD_LOCAL, loader_bin, kernel_file, push)
+    except MigrateError as exc:
         print("Error: 移行を断る: {} (何も書いていない)".format(exc), file=sys.stderr)
         return False
     if plan['state'] == 'standard':
@@ -866,12 +910,6 @@ def do_migrate_pt(loader_bin, kernel_file, push=True):
               "カーネルは deploy-kernel、ローダは deploy-boot で".format(
                   plan['start'], plan['length']))
         return True
-    if plan['start'] != HDD_PARTITION_LBA:
-        # ホスト側のマウントは PARTITION_OFFSET (LBA 1632) 固定。違う位置の
-        # ext2 にカーネルを置く手段が無いので断る。
-        print("Error: 区画の開始 LBA {} が {} でない (このツールはマウントできない)"
-              .format(plan['start'], HDD_PARTITION_LBA), file=sys.stderr)
-        return False
     print("移行: 旧配置 → 標準配置 (開始 LBA {} 長さ {}、H={} S={})".format(
         plan['start'], plan['length'], plan['geom']['heads'], plan['geom']['spt']))
 
@@ -894,6 +932,47 @@ def do_migrate_pt(loader_bin, kernel_file, push=True):
         print("完了 (--no-push: NP21/W 側へはまだ送っていない)")
         return True
     return do_deploy()
+
+
+def tree_kapi_version():
+    """このツリーのカーネルの KAPI 版 (sdk/include/os32/os32_kapi_shared.h)。読めなければ None。"""
+    path = os.path.join(PROJ_DIR, 'sdk', 'include', 'os32', 'os32_kapi_shared.h')
+    try:
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                m = re.match(r'#define\s+KAPI_VERSION\s+(\d+)', line)
+                if m:
+                    return int(m.group(1))
+    except OSError:
+        return None
+    return None
+
+
+def legacy_pt_guard(nhd_path=None, kapi=None):
+    """旧配置の NHD へ v64 以降のカーネルを配らない (Opus M2)。
+
+    v64 のカーネルとローダは標準配置しか読まないので、旧配置のまま
+    deploy / sync-from-hostdrv / sync でカーネルだけ新しくすると `/` がマウント
+    できなくなる。区画表が読めない・OS32 の表でない NHD は判定できないので通す。
+    戻り値 True = 配ってよい。
+    """
+    path = nhd_path or NHD_LOCAL
+    kapi = tree_kapi_version() if kapi is None else kapi
+    if kapi is None or kapi < PT_STANDARD_KAPI or not os.path.isfile(path):
+        return True
+    try:
+        with open(path, 'rb') as img:
+            plan = plan_migrate_pt(img)
+    except (MigrateError, pc98pt.PtError, OSError):
+        return True
+    if plan['state'] != 'legacy':
+        return True
+    print("Error: {} の区画表は旧配置 (v63 まで)。KAPI v{} のカーネルは標準配置しか"
+          "読まないので、このまま配ると / がマウントできない。".format(path, kapi),
+          file=sys.stderr)
+    print("  先に 'make nhd-migrate-pt' (区画表・ローダ・カーネルを同時に移す) を。"
+          "docs/08_build.md §8-4", file=sys.stderr)
+    return False
 
 
 def do_pull():
@@ -1063,6 +1142,8 @@ def do_sync(tag_filter=None):
     """
     if not ensure_local_nhd():
         return False
+    if not legacy_pt_guard():
+        return False
     cfg = load_deploy_yaml()
     if cfg is None:
         return False
@@ -1200,6 +1281,10 @@ def do_sync_from_hostdrv():
               file=sys.stderr)
         return False
 
+    # 旧配置の NHD へ v64 以降のカーネルを配らない (Opus M2)。NHD が無ければ判定
+    # できないので通し、取り込みは従来どおり ensure_mounted に任せる
+    if not legacy_pt_guard():
+        return False
     if not ensure_mounted():
         return False
     # 宛先 (NHD) だけでなく **source の HostDrv ツリー**も検査する。

@@ -104,6 +104,17 @@
   シリンダ境界、長さ = 指定 (既定 256MiB) をシリンダへ切り下げ、上限は BIOS の CX × シリンダと IDENTIFY の
   総数の小さい方。`yes` は打鍵で読む (rshell の `/api/cmd` からは答えられない)。
 - **migrate-pt**: `tools/nhd_deploy.py migrate-pt` / `make nhd-migrate-pt` (08_build.md §8-4)。
+- **実装レビュー往復 1 (Codex C1〜C4 / Opus M1・M2・m2〜m5) で足したもの**:
+  migrate-pt は全部の検査 (ローダ ≤ 8KiB・カーネル ≤ 508KiB・表・1KiB ブロックの ext2・push の来歴) を
+  **最初の書き込みの前**に行う (`migrate_preflight`)。`hdprep` は IDENTIFY の総数 0 を計画の段階で断り、
+  上限を BIOS 幾何・総数・ATA の方式 (LBA28 の 2^28 / 現在の CHS の容量) の最小にする。`ext2_format_at` は
+  範囲全体を `ide_range_ok` で照合する。`ext2_format` は 32 グループへ頭打ち (断らない) にし、区画の位置を
+  BIOS 幾何で決められないときは書かない。マウントはどちらの幾何を使ったかを出し、旧配置の表を見つけたら
+  「migrate-pt が要る」と出す。`fatfs_vfs.c` の区画走査も `bootinfo_part_geom` を使う。ホストの
+  `deploy` / `sync-from-hostdrv` / `sync` は旧配置の NHD に v64 以降のカーネルを配らない (`legacy_pt_guard`)。
+- **組み合わせの危険** (08_build.md §8-4): 旧配置の NHD + v64 のカーネル (HostDrv + `hsync boot` で起きる) は
+  `/` がマウントできない。v63 以前のカーネル + 標準配置の表は、OS32 項目 (シリンダ 12) を **LBA 12** と読み、
+  `format 0` がローダと ext2 を壊す。
 - 試験: `make check-hdd-stage1-host` (`tools/tests/test_hdd_stage1.py`、記録 `tools/tests/hdd_stage1_tdd.md`)。
   既存の ext2 の RAM ディスク試験 5 本は LBA 1 に区画表を置く足場 `tools/tests/hdd_pt_fake.h` に乗せた。
 

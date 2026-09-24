@@ -16,6 +16,7 @@
 #include "dev.h"
 #include "os_time.h"
 #include "pc98pt.h"   /* PC98PartEntry (票 TASK_HDD_INSTALL 段 1-4) */
+#include "bootinfo.h" /* bootinfo_part_geom (区画表の幾何、m4) */
 
 extern void diskio_set_fdd_drive(int drv);
 extern void diskio_set_hdd_drive(int drv);
@@ -486,10 +487,10 @@ static u32 pc98_find_fat_partition(int drv, u16 phys_sec_size)
     char devname[8];
     Device *dev;
 
-    /* ジオメトリ取得 */
+    /* ジオメトリ取得。区画表の CHS → LBA は ext2 と同じ規則 (BIOS 幾何、無ければ
+     * IDENTIFY の既定) で読む — 票 TASK_HDD_INSTALL 段 1 (m4)。 */
     if (ide_get_info(drv, &info) != 0) return 0;
-    heads = info.heads;
-    spt   = info.sectors;
+    if (bootinfo_part_geom(drv, &heads, &spt) < 0) return 0;
 
     /* Device API ポインタ取得 */
     devname[0] = 'h'; devname[1] = 'd';

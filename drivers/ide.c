@@ -423,6 +423,13 @@ int ide_addr_mode_of(int drive)
     return ide_addr_mode(&drive_geom[drive], (u16 *)0, (u16 *)0, (u32 *)0);
 }
 
+int ide_range_ok(int drive, u32 lba, u32 count)
+{
+    if (drive < 0 || drive >= IDE_MAX_DRIVES) return 0;
+    if (!drive_present[drive]) return 0;
+    return ide_addr_range_ok(&drive_geom[drive], lba, count);
+}
+
 int ide_read_sector(int drive, u32 lba, void *buf)
 {
     IdeAddr a;

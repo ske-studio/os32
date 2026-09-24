@@ -156,6 +156,34 @@ int pc98pt_find_os32(const unsigned char *sect,
     return PC98PT_ERR_NOTFOUND;
 }
 
+int pc98pt_os32_is_legacy(const unsigned char *sect,
+                          unsigned long heads, unsigned long spt,
+                          unsigned long disk_total)
+{
+    PC98PartEntry e;
+    const unsigned char *p;
+    unsigned long st, ln, lstart, lend;
+    int i;
+
+    if (!sect) return 0;
+    for (i = 0; i < PC98PT_MAX_ENTRIES; i++) {
+        (void)pc98pt_get(sect, i, &e);
+        if (e.sys_id != PC98PT_SID_OS32) continue;
+        if (pc98pt_entry_range(&e, heads, spt, disk_total, &st, &ln) == PC98PT_OK)
+            return 0;                       /* 標準配置で読める */
+        p = sect + i * PC98PT_ENTRY_SIZE;
+        /* 旧: +6 開始セクタ、+7 開始ヘッド、+8-9 開始シリンダ、+12-13 終了シリンダ */
+        if (pc98pt_chs_to_lba(rd16(p + 8), p[7], p[6], heads, spt, &lstart)
+            != PC98PT_OK)
+            return 0;
+        lend = ((unsigned long)rd16(p + 12) + 1UL) * heads * spt;
+        if (lend <= lstart) return 0;
+        if (disk_total != 0 && lend > disk_total) return 0;
+        return 1;
+    }
+    return 0;
+}
+
 int pc98pt_make_os32(PC98PartEntry *e, unsigned long start, unsigned long len,
                      unsigned long heads, unsigned long spt)
 {

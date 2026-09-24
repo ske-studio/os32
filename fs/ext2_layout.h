@@ -39,6 +39,9 @@
  * グループ数 + 1 回で必ず止まる。念のための上限) */
 #define EXT2L_MAX_ITER          40
 
+/* g グループに収まる最大の長さ (セクタ)。ブロック 0 + g × 8192 ブロック */
+#define EXT2L_MAX_SECTORS(g)    ((EXT2L_FIRST_DATA_BLOCK + (u32)(g) * EXT2L_BLOCKS_PER_GROUP) * 2UL)
+
 #define EXT2L_OK                0
 #define EXT2L_ERR_SMALL       (-1)   /* 収まる大きさが無い (64 ブロック未満) */
 #define EXT2L_ERR_GROUPS      (-2)   /* グループ上限を超える */

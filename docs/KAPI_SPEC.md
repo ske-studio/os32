@@ -1003,12 +1003,15 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 
 - **`ext2_format_at`** — 区画表を**読まずに** `[start_lba, start_lba + length)` だけに
   ext2 を作る。長さ 0・`start_lba < 18` (IPL / 区画表 / ローダ)・IDENTIFY の総数が 0・
-  開始 + 長さがディスクの外 (足し算の桁あふれも) は **1 バイトも書かずに**
+  開始 + 長さがディスクの外 (足し算の桁あふれも)・ATA の指定の方式で指せない範囲
+  (LBA28 の上限 2^28・現在の CHS の容量、`ide_range_ok`) は **1 バイトも書かずに**
   `EXT2_ERR_INVAL` (-10)。ドライブが無ければ `EXT2_ERR_IO`。大きさは
   `fs/ext2_layout.c` の固定点で決まる (最終グループに SB・GDT・bitmap 2・inode 表・
   グループ 0 のルートが収まる長さへ切り下げ、上限 32 グループ = 256MiB、超えれば
   `EXT2_ERR_NOSPC`)。既存の `ext2_format` は区画表の OS32 区画を探し (無ければ
-  `EXT2_ERR_NOPART` = -13)、区画の長さで頭打ちにする。
+  `EXT2_ERR_NOPART` = -13)、区画の長さと 32 グループ (524,290 セクタ) で頭打ちにする
+  (断らない)。区画の位置を **BIOS 幾何で**決められなかった (IDENTIFY に落ちた) ときは
+  書かずに `EXT2_ERR_INVAL` (読むだけのマウントは IDENTIFY でも通る)。
 - **`dev_mount_count`** — `hd<drv>` を指す VFS のマウントの数 (どの prefix でも、
   ルートも数える)。`drv` が 0〜3 の外なら `OS32_ERR_INVAL`。ルートかどうかは
   `vfs_devname("/")` で見る。

@@ -224,6 +224,19 @@ make nhd-migrate-pt           # = python3 tools/nhd_deploy.py migrate-pt (push �
 CD インストーラ (`cdinst` / `install`) は段 2 まで**旧配置で書く**ので、v64 のカーネルで
 CD から入れた HDD は区画が見つからず format で止まる (段 2 で直す)。
 
+- **旧配置の NHD には下の HostDrv の手順 (`make deploy` → ゲストで `hsync boot`) を使わない。**
+  カーネルだけが v64 になり、次の起動で `/` がマウントできない (ローダは旧いままなので起動は
+  進み、カーネルが `[EXT2] hd0: partition table is in the pre-v64 OS32 layout; migrate it
+  (host: make nhd-migrate-pt) or reinstall` を出す)。ホスト側の `deploy` / `deploy-kernel`
+  (`sync-from-hostdrv`) / `deploy-nhd` (`sync`) は、ローカルの NHD が旧配置でこのツリーの
+  KAPI が v64 以上なら**配らずに断る** (`nhd_deploy.py` の `legacy_pt_guard`、`--force` でも
+  通さない)。`hsync` はゲスト側なので止められない — 先に `make nhd-migrate-pt`。
+- **逆の組み合わせ (v63 以前のカーネル + 標準配置の表) も危険**。旧カーネルは +6〜+9 を
+  開始と読むので、標準配置の OS32 項目 (1632 = シリンダ 12) を **LBA 12** と解釈する。
+  そのカーネルで `format 0` を打つと LBA 12 から書き、第二段ローダ (LBA 2〜17) と ext2 を
+  壊す。移行した NHD・`hdprep` した HDD を旧カーネルで起動しない (FD 起動の FD も v64 に
+  揃える)。
+
 HostDrv 経由 (NP21/W を止めない) で v63 以降の稼働機を v64 以降へ上げる手順:
 
 1. ホストで `make all external` → `make deploy` (HostDrv に一式と名札 `kapi_version=64…`)

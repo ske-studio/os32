@@ -127,6 +127,14 @@ int  pc98pt_find_os32(const unsigned char *sect,
                       int *out_idx,
                       unsigned long *out_start, unsigned long *out_len);
 
+/* 2026-09-23 までの OS32 の**旧配置** (+6/+7/+8-9 開始、+10/+11/+12-13 終了) の
+ * OS32 項目があるか。sid 0xE2 の最初の項目が**標準配置では読めず**、旧配置では
+ * 範囲として成り立つとき 1。カーネルが「移行が要る」と案内するためだけに使う
+ * (旧配置を**読む**互換はしない、票 段 1-4)。 */
+int  pc98pt_os32_is_legacy(const unsigned char *sect,
+                           unsigned long heads, unsigned long spt,
+                           unsigned long disk_total);
+
 /* 書き手: [start, start+len) を覆う OS32 の項目を作る。start と len は
  * シリンダ (heads × spt) の倍数、終了シリンダは 16 ビット以内。
  * IPL アドレスは開始と同じ。名前は "OS32" + 空白。 */
