@@ -17,6 +17,11 @@
  *            使用中の loop イメージの unlink / 置き換えは BUSY
  *    dot   … 最終要素の "." / ".." (rmdir / rename 両引数 / unlink / mkdir)
  *    path  … 255/256 バイト、32/33 要素、相対パス + 長い cwd、mount prefix
+ *    namerule … fs/vfs_name_rules.inc の表 (FAT / Win32 が意味を変える綴り)
+ *    fatname  … 実物の fs/fatfs_vfs.c + fs/fatfs/ff.c (RAM の FAT12) で、
+ *               "disk.img " / "d\img.dat" / "db." などを INVAL で断り、
+ *               BUSY / pinned の実体が消えない・動かない (ラリー 2 blocker)
+ *    hostname … Win32 の規則 (末尾の空白・'.'・'\') を合成ドライバで
  *    pkg   … pkg_parse の 127/128 バイト・128/129 項目・切れた表・項目数の
  *            食い違い、pkg_first_overflow (cdinst の 123〜127)、pkg_extract の
  *            失敗の伝播
@@ -1216,6 +1221,343 @@ static void case_cdinst(void)
 }
 #endif
 
+#ifndef FDP_RED
+/* ======================================================================== */
+/*  段 fatname: 実物の fs/fatfs_vfs.c + fs/fatfs/ff.c (RAM の FAT12) で、    */
+/*  FatFs が「別の綴りを同じ名前」と読む名前を入口で断る (TASK_VFS_FD_PATH  */
+/*  実装レビュー ラリー 2 の blocker)。旧実装は vfs_rm("/fd0/disk.img ") が   */
+/*  BUSY の比較 (1 バイトの fold) をすり抜け、FatFs が DISK.IMG を消した。  */
+/*  段 hostname: Win32 の規則 (末尾の空白と '.'、'\') を合成ドライバで。     */
+/*  段 namerule: 規則そのもの (fs/vfs_name_rules.inc) の表。                 */
+/* ======================================================================== */
+
+#include "fatfs/ff.h"
+#include "fatfs/diskio.h"
+
+#define FAT_SECTORS 2880u                   /* 1.44MB */
+static u8 g_fatdisk[FAT_SECTORS * 512u];
+
+DSTATUS disk_initialize(BYTE pdrv) { return pdrv == 0 ? 0 : STA_NOINIT; }
+DSTATUS disk_status(BYTE pdrv) { return pdrv == 0 ? 0 : STA_NOINIT; }
+DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
+{
+    if (pdrv != 0 || sector + count > FAT_SECTORS) return RES_PARERR;
+    kmemcpy(buff, g_fatdisk + sector * 512u, count * 512u);
+    return RES_OK;
+}
+DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
+{
+    if (pdrv != 0 || sector + count > FAT_SECTORS) return RES_PARERR;
+    kmemcpy(g_fatdisk + sector * 512u, buff, count * 512u);
+    return RES_OK;
+}
+DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
+{
+    if (pdrv != 0) return RES_PARERR;
+    if (cmd == CTRL_SYNC) return RES_OK;
+    if (cmd == GET_SECTOR_COUNT) { *(LBA_t *)buff = FAT_SECTORS; return RES_OK; }
+    if (cmd == GET_SECTOR_SIZE) { *(WORD *)buff = 512; return RES_OK; }
+    if (cmd == GET_BLOCK_SIZE) { *(DWORD *)buff = 1; return RES_OK; }
+    return RES_PARERR;
+}
+DWORD get_fattime(void) { return ((DWORD)(2026 - 1980) << 25) | (9u << 21) | (24u << 16); }
+void diskio_set_fdd_drive(int drv) { (void)drv; }
+void diskio_set_hdd_drive(int drv) { (void)drv; }
+void diskio_set_hdd_partition(u32 offset) { (void)offset; }
+void diskio_set_hdd_sector_size(u16 sz) { (void)sz; }
+void diskio_set_hdd_ide_phys_size(u16 sz) { (void)sz; }
+u32 dos_time_to_epoch(u16 fdate, u16 ftime) { (void)fdate; (void)ftime; return 0; }
+int memcmp(const void *a, const void *b, u32 n)
+{
+    const u8 *x = (const u8 *)a, *y = (const u8 *)b;
+    u32 i;
+    for (i = 0; i < n; i++) if (x[i] != y[i]) return (int)x[i] - (int)y[i];
+    return 0;
+}
+char *strchr(const char *s, int c)
+{
+    for (;; s++) {
+        if (*s == (char)c) return (char *)s;
+        if (!*s) return (char *)0;
+    }
+}
+
+#include "fatfs_vfs.c"
+/* 修正前の fatfs_vfs.c (規則を取り込まない) と組んでも規則の表は回せるように */
+#include "vfs_name_rules.inc"
+
+/* FatFs から直に見る (VFS を通さない): 在る / 中身 */
+static int fat_exists(const char *ffpath)
+{
+    FILINFO fno;
+    return f_stat(ffpath, &fno) == FR_OK;
+}
+static int fat_slurp(const char *ffpath, char *buf, u32 cap)
+{
+    FIL fil;
+    UINT br = 0;
+    if (f_open(&fil, ffpath, FA_READ) != FR_OK) return -1;
+    if (f_read(&fil, buf, cap - 1, &br) != FR_OK) br = 0;
+    f_close(&fil);
+    buf[br] = '\0';
+    return (int)br;
+}
+
+static int g_ls_count;
+static void ls_count_cb(const VfsDirEntry *e, void *ctx)
+{
+    (void)e; (void)ctx;
+    g_ls_count++;
+}
+
+static void case_namerule(void)
+{
+    static const struct { const char *p; int fat, win; } t[] = {
+        { "",                   VFS_OK,        VFS_OK },
+        { "/",                  VFS_OK,        VFS_OK },
+        { "/disk.img",          VFS_OK,        VFS_OK },
+        { "a//b/",              VFS_OK,        VFS_OK },
+        { "/a/./b/../c",        VFS_OK,        VFS_OK },   /* "." / ".." そのもの */
+        { "/.x/..y",            VFS_OK,        VFS_OK },   /* 先頭の '.' */
+        { "/\x82\xa0.txt",      VFS_OK,        VFS_OK },   /* 0x80 以上は通す */
+        { "/disk.img ",         VFS_ERR_INVAL, VFS_ERR_INVAL },
+        { "/disk.img /x",       VFS_ERR_INVAL, VFS_ERR_INVAL },
+        { "/disk.img ignored",  VFS_ERR_INVAL, VFS_OK },
+        { "/my file.txt",       VFS_ERR_INVAL, VFS_OK },
+        { "/ lead",             VFS_ERR_INVAL, VFS_OK },
+        { "/disk.",             VFS_ERR_INVAL, VFS_ERR_INVAL },
+        { "/disk.img.",         VFS_ERR_INVAL, VFS_ERR_INVAL },
+        { "/d./x",              VFS_ERR_INVAL, VFS_ERR_INVAL },
+        { "/...",               VFS_ERR_INVAL, VFS_ERR_INVAL },
+        { "/\\disk.img",        VFS_ERR_INVAL, VFS_ERR_INVAL },
+        { "/d\\img.dat",        VFS_ERR_INVAL, VFS_ERR_INVAL },
+        { "/disk.img\x01",      VFS_ERR_INVAL, VFS_ERR_INVAL },
+        { "/a\x1f" "b",         VFS_ERR_INVAL, VFS_ERR_INVAL },
+        { "/a\tb",              VFS_ERR_INVAL, VFS_ERR_INVAL },
+    };
+    u32 i;
+
+    report("case namerule\n");
+    for (i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+        int f = vfs_name_rule_check(t[i].p, VFS_NAME_RULE_FAT);
+        int w = vfs_name_rule_check(t[i].p, VFS_NAME_RULE_WIN32);
+        CHECK(f == t[i].fat);
+        CHECK(w == t[i].win);
+        if (f != t[i].fat || w != t[i].win) {
+            report("    ^ row "); report_i((int)i); report("\n");
+        }
+    }
+    CHECK(vfs_name_rule_check((const char *)0, VFS_NAME_RULE_FAT) == VFS_OK);
+}
+
+static void case_fatname(void)
+{
+    static BYTE work[FF_MAX_SS];
+    static char buf[64];
+    MKFS_PARM opt;
+    VfsSqliteCookie cookie;
+    VfsSqliteLease lease;
+    OS32_Stat st;
+    int fd_img, fd_dat, fd_plain, fd;
+
+    report("case fatname\n");
+    disk_setup();
+    kmemset(g_fatdisk, 0, sizeof(g_fatdisk));
+    kmemset(&opt, 0, sizeof(opt));
+    opt.fmt = FM_FAT;
+    opt.n_fat = 2;
+    CHECK(f_mkfs("0:", &opt, work, sizeof(work)) == FR_OK);
+    pdrv_busy[0] = 0;
+    pdrv_busy[1] = 0;
+    fatfs_init();
+    EQ(vfs_mount("/fd0", "fd0", "fat"), VFS_OK);
+
+    /* ---- 正当な 8.3 名は従来どおり (FD 起動の /sys・/bin の *.bin・/etc) ---- */
+    CHECK(wfile("/fd0/disk.img", "IMAGEDATA") == 9);
+    CHECK(wfile("/fd0/disk", "PLAIN") == 5);
+    CHECK(wfile("/fd0/db", "DBDATA") == 6);
+    CHECK(wfile("/fd0/other", "O") == 1);
+    EQ(vfs_mkdir("/fd0/d"), VFS_OK);
+    CHECK(wfile("/fd0/d/img.dat", "DATDATA") == 7);
+    EQ(vfs_mkdir("/fd0/bin"), VFS_OK);
+    CHECK(wfile("/fd0/bin/ls.bin", "ELF") == 3);
+    EQ(vfs_mkdir("/fd0/etc"), VFS_OK);
+    CHECK(wfile("/fd0/etc/system.cfg", "GUI=0") == 5);
+    EQ(vfs_read("/fd0/BIN/LS.BIN", buf, sizeof(buf)), 3);
+    EQ(vfs_stat("/fd0/etc/system.cfg", &st), VFS_OK);
+    CHECK(st.st_size == 5);
+    EQ(vfs_stat("/fd0/bin/", &st), VFS_OK);
+    /* 8.3 に収まらない名前の stat は従来どおり NOTFOUND (hot journal 検査) */
+    EQ(vfs_stat("/fd0/etc/settings.db-journal", &st), VFS_ERR_NOTFOUND);
+    g_ls_count = 0;
+    EQ(vfs_ls("/fd0", ls_count_cb, (void *)0), VFS_OK);
+    CHECK(g_ls_count == 7);
+    g_ls_count = 0;
+    EQ(vfs_ls("/fd0/bin/", ls_count_cb, (void *)0), VFS_OK);
+    CHECK(g_ls_count == 1);
+    EQ(vfs_rename("/fd0/other", "/fd0/other2.txt"), VFS_OK);
+    EQ(vfs_rename("/fd0/other2.txt", "/fd0/other"), VFS_OK);
+    fd = vfs_open("/fd0/.x", O_RDWR | O_CREAT);   /* 先頭の '.' は正当 */
+    CHECK(fd >= 3);
+    if (fd >= 3) vfs_close(fd);
+    EQ(vfs_rm("/fd0/.x"), VFS_OK);
+
+    /* ---- 使用中の loop イメージ (pinned) ---- */
+    fd_img = vfs_open("/fd0/disk.img", O_RDWR);
+    fd_dat = vfs_open("/fd0/d/img.dat", O_RDWR);
+    fd_plain = vfs_open("/fd0/disk", O_RDWR);
+    CHECK(fd_img >= 3 && fd_dat >= 3 && fd_plain >= 3);
+    EQ(vfs_fd_set_pinned(fd_img, 1), VFS_OK);
+    EQ(vfs_fd_set_pinned(fd_dat, 1), VFS_OK);
+    EQ(vfs_fd_set_pinned(fd_plain, 1), VFS_OK);
+
+    /* 綴りを変えても消せない・動かせない (旧実装は FatFs が同じ実体を消した) */
+    EQ(vfs_rm("/fd0/disk.img "), VFS_ERR_INVAL);
+    EQ(vfs_rm("/fd0/disk.img ignored"), VFS_ERR_INVAL);
+    EQ(vfs_rm("/fd0/disk.img\x01"), VFS_ERR_INVAL);
+    EQ(vfs_rm("/fd0/\\disk.img"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/fd0/disk.img ", "/fd0/moved"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/fd0/other", "/fd0/disk.img "), VFS_ERR_INVAL);
+    EQ(vfs_rename("/fd0/other", "/fd0/\\DISK.IMG"), VFS_ERR_INVAL);
+    EQ(vfs_rm("/fd0/d\\img.dat"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/fd0/d\\img.dat", "/fd0/moved"), VFS_ERR_INVAL);
+    EQ(vfs_rm("/fd0/disk."), VFS_ERR_INVAL);
+    EQ(vfs_rename("/fd0/disk.", "/fd0/moved"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/fd0/other", "/fd0/DISK."), VFS_ERR_INVAL);
+    /* 同じ綴り (大文字小文字違い) は BUSY のまま */
+    EQ(vfs_rm("/fd0/DISK.IMG"), VFS_ERR_BUSY);
+    EQ(vfs_rm("/fd0/D/IMG.DAT"), VFS_ERR_BUSY);
+    EQ(vfs_rm("/fd0/Disk"), VFS_ERR_BUSY);
+
+    /* ---- 開いている SQLite DB ---- */
+    cookie.group_index = 1;
+    cookie.generation = 1;
+    EQ(vfs_open_sqlite("/fd0/db", O_RDWR, 1, &cookie, 0, &lease), VFS_OK);
+    EQ(vfs_rename("/fd0/db.", "/fd0/z"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/fd0/DB ", "/fd0/z"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/fd0/other", "/fd0/DB."), VFS_ERR_INVAL);
+    EQ(vfs_rename("/fd0/other", "/fd0/db\t"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/fd0/DB", "/fd0/z"), VFS_ERR_BUSY);
+    EQ(vfs_close_sqlite(&lease), VFS_OK);
+
+    /* ---- 名前を受け取るほかの入口も同じ ---- */
+    CHECK(vfs_open("/fd0/disk.img ", O_RDONLY) == VFS_ERR_INVAL);
+    CHECK(vfs_open("/fd0/new ", O_RDWR | O_CREAT) == VFS_ERR_INVAL);
+    EQ(vfs_stat("/fd0/disk.img ", &st), VFS_ERR_INVAL);
+    EQ(vfs_read("/fd0/disk.", buf, sizeof(buf)), VFS_ERR_INVAL);
+    CHECK(vfs_write("/fd0/a b", "X", 1) == VFS_ERR_INVAL);
+    EQ(vfs_mkdir("/fd0/new."), VFS_ERR_INVAL);
+    EQ(vfs_rmdir("/fd0/d."), VFS_ERR_INVAL);
+    EQ(vfs_rmdir("/fd0/bin\\"), VFS_ERR_INVAL);
+    EQ(vfs_ls("/fd0/d\\", ls_count_cb, (void *)0), VFS_ERR_INVAL);
+    CHECK(!fat_exists("0:/A") && !fat_exists("0:/NEW"));
+
+    EQ(vfs_fd_set_pinned(fd_img, 0), VFS_OK);
+    EQ(vfs_fd_set_pinned(fd_dat, 0), VFS_OK);
+    EQ(vfs_fd_set_pinned(fd_plain, 0), VFS_OK);
+    vfs_close(fd_img);
+    vfs_close(fd_dat);
+    vfs_close(fd_plain);
+
+    /* 実体は消えず・動かず・中身もそのまま */
+    CHECK(fat_slurp("0:/DISK.IMG", buf, sizeof(buf)) == 9 && streq(buf, "IMAGEDATA"));
+    CHECK(fat_slurp("0:/D/IMG.DAT", buf, sizeof(buf)) == 7 && streq(buf, "DATDATA"));
+    CHECK(fat_slurp("0:/DISK", buf, sizeof(buf)) == 5 && streq(buf, "PLAIN"));
+    CHECK(fat_slurp("0:/DB", buf, sizeof(buf)) == 6 && streq(buf, "DBDATA"));
+    CHECK(fat_slurp("0:/OTHER", buf, sizeof(buf)) == 1);
+    CHECK(!fat_exists("0:/MOVED") && !fat_exists("0:/Z"));
+    /* 放した後は正しい綴りで消せる */
+    EQ(vfs_rm("/fd0/disk.img"), VFS_OK);
+    CHECK(!fat_exists("0:/DISK.IMG"));
+
+    vfs_umount("/fd0");
+}
+
+/* 合成ドライバ: ext2 の口の前に Win32 (HostDrv) の名前の入口検査を置く。
+ * 実物の fs/hostdrvfs.c はハイパーコールを叩くのでホストで組めない。
+ * 規則は同じ vfs_name_rule_check (配線は test_vfs_fd_path.py の hostwire 段が
+ * fs/hostdrvfs.c の本文で確かめる)。 */
+static VfsOps g_win_ops;
+#define WIN_CHK(p) do { int r_ = vfs_name_rule_check((p), VFS_NAME_RULE_WIN32); \
+                        if (r_ != VFS_OK) return r_; } while (0)
+static int win_list(void *c, const char *p, vfs_dir_cb cb, void *u)
+{ WIN_CHK(p); return ext2_ops.list_dir(c, p, cb, u); }
+static int win_mkdir(void *c, const char *p) { WIN_CHK(p); return ext2_ops.mkdir(c, p); }
+static int win_rmdir(void *c, const char *p) { WIN_CHK(p); return ext2_ops.rmdir(c, p); }
+static int win_read(void *c, const char *p, void *b, u32 n)
+{ WIN_CHK(p); return ext2_ops.read_file(c, p, b, n); }
+static int win_write(void *c, const char *p, const void *d, u32 n)
+{ WIN_CHK(p); return ext2_ops.write_file(c, p, d, n); }
+static int win_unlink(void *c, const char *p) { WIN_CHK(p); return ext2_ops.unlink(c, p); }
+static int win_rename(void *c, const char *o, const char *n)
+{ WIN_CHK(n); WIN_CHK(o); return ext2_ops.rename(c, o, n); }
+static int win_get_size(void *c, const char *p, u32 *s)
+{ WIN_CHK(p); return ext2_ops.get_file_size(c, p, s); }
+static int win_read_stream(void *c, const char *p, void *b, u32 n, u32 o)
+{ WIN_CHK(p); return ext2_ops.read_stream(c, p, b, n, o); }
+static int win_write_stream(void *c, const char *p, const void *d, u32 n, u32 o)
+{ WIN_CHK(p); return ext2_ops.write_stream(c, p, d, n, o); }
+static int win_stat(void *c, const char *p, OS32_Stat *s)
+{ WIN_CHK(p); return ext2_ops.stat(c, p, s); }
+
+static void case_hostname(void)
+{
+    int fd;
+    char buf[16];
+
+    report("case hostname\n");
+    disk_setup();
+    CHECK(wfile("/hd0/disk.img", "IMAGEDATA") >= 0);
+    CHECK(wfile("/hd0/other", "O") >= 0);
+    EQ(vfs_sync(), VFS_OK);
+
+    g_win_ops = ext2_ops;
+    g_win_ops.name = "ext2win";
+    g_win_ops.ino = (const VfsInoOps *)0;      /* HostDrv と同じくパスで動く */
+    g_win_ops.name_fold = ci_fold;
+    g_win_ops.set_mtime = 0;
+    g_win_ops.create_excl = 0;
+    g_win_ops.list_dir = win_list;
+    g_win_ops.mkdir = win_mkdir;
+    g_win_ops.rmdir = win_rmdir;
+    g_win_ops.read_file = win_read;
+    g_win_ops.write_file = win_write;
+    g_win_ops.unlink = win_unlink;
+    g_win_ops.rename = win_rename;
+    g_win_ops.get_file_size = win_get_size;
+    g_win_ops.read_stream = win_read_stream;
+    g_win_ops.write_stream = win_write_stream;
+    g_win_ops.stat = win_stat;
+    vfs_register_fs(&g_win_ops);
+    EQ(vfs_mount("/hw", "hd0", "ext2win"), VFS_OK);
+
+    fd = vfs_open("/hw/disk.img", O_RDWR);
+    CHECK(fd >= 3);
+    EQ(vfs_fd_set_pinned(fd, 1), VFS_OK);
+    /* Win32 が同じ実体と読む綴り: 末尾の空白・末尾の '.'・'\'・制御文字 */
+    EQ(vfs_rm("/hw/disk.img "), VFS_ERR_INVAL);
+    EQ(vfs_rm("/hw/DISK.IMG."), VFS_ERR_INVAL);
+    EQ(vfs_rm("/hw/disk.img. ."), VFS_ERR_INVAL);
+    EQ(vfs_rm("/hw/\\disk.img"), VFS_ERR_INVAL);
+    EQ(vfs_rm("/hw/disk.img\x01"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/hw/disk.img ", "/hw/moved"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/hw/other", "/hw/disk.img."), VFS_ERR_INVAL);
+    EQ(vfs_rename("/hw/other", "/hw/disk.img "), VFS_ERR_INVAL);
+    CHECK(vfs_open("/hw/disk.img ", O_RDONLY) == VFS_ERR_INVAL);
+    EQ(vfs_rm("/hw/DISK.IMG"), VFS_ERR_BUSY);
+    /* 途中の空白は Windows の名前として正当 (FAT と違う) */
+    CHECK(wfile("/hw/my file.txt", "SP") >= 0);
+    CHECK(exists("/my file.txt"));
+    EQ(vfs_read("/hw/my file.txt", buf, sizeof(buf)), 2);
+    EQ(vfs_rename("/hw/my file.txt", "/hw/your file.txt"), VFS_OK);
+    EQ(vfs_rm("/hw/your file.txt"), VFS_OK);
+    EQ(vfs_fd_set_pinned(fd, 0), VFS_OK);
+    vfs_close(fd);
+    CHECK(exists("/disk.img") && exists("/other") && !exists("/moved"));
+    CHECK(slurp("/disk.img", buf, sizeof(buf)) == 9 && streq(buf, "IMAGEDATA"));
+}
+#endif
+
 static void run(const char *sel)
 {
     int all = (sel == (const char *)0);
@@ -1227,6 +1569,9 @@ static void run(const char *sel)
 #ifndef FDP_RED
     if (all || kstrcmp(sel, "nocase") == 0) case_nocase();
     if (all || kstrcmp(sel, "cdinst") == 0) case_cdinst();
+    if (all || kstrcmp(sel, "namerule") == 0) case_namerule();
+    if (all || kstrcmp(sel, "fatname") == 0) case_fatname();
+    if (all || kstrcmp(sel, "hostname") == 0) case_hostname();
 #endif
     report("checks "); report_i(g_checks);
     report(" failures "); report_i(g_failures); report("\n");

@@ -33,9 +33,18 @@ int shlib_init(void);
 /* ライブラリが常駐しているか (1=常駐)。 */
 int shlib_loaded(void);
 
-/* shlib_init が KAPI データ欄の配置違い (OS32X ヘッダ v3、票
- * TASK_KAPI_DATA_FIELDS) で断ったなら 1。GUI を CUI へ落とす案内に使う。 */
-int shlib_layout_rejected(void);
+/* shlib_init がライブラリを載せずに断った理由。GUI を CUI へ落とす案内を
+ * 分けるのに使う (直し方が逆向きなので混ぜない)。
+ *   SHLIB_REJECT_LAYOUT  … KAPI データ欄の配置違い (OS32X ヘッダ v3、票
+ *                          TASK_KAPI_DATA_FIELDS)。/sys を作り直して配備する
+ *   SHLIB_REJECT_MIN_API … このカーネルより新しい KAPI を要求している。
+ *                          カーネルを先に更新する (要求版は shlib_reject_min_api)
+ * ファイルが無い・形式不正は NONE のまま (従来どおり静かに未ロード)。 */
+#define SHLIB_REJECT_NONE     0
+#define SHLIB_REJECT_LAYOUT   1
+#define SHLIB_REJECT_MIN_API  2
+int shlib_reject_reason(void);
+u32 shlib_reject_min_api(void);
 
 /* 常駐しているライブラリの版 (OS32ShlibHeader.version)。未ロードなら 0。 */
 u32 shlib_version(void);

@@ -397,7 +397,9 @@ int ime_dict_reopen(IME_Dict *dict, const char *path)
 /*  失敗した」(開き直して 1 回やり直す)。                                   */
 /* ======================================================================== */
 
-/* 一覧: 件数 / -4 = 途中で読めなかった (部分的な一覧を成功にしない) */
+/* 一覧: 件数 / -4 = 読めなかった (部分的な一覧を成功にしない)。
+ * prepare の失敗も -4 — 以前は 0 を返したので、ime コマンドが「学習なし」と
+ * 区別できなかった (実装レビュー ラリー 2 の非 blocker) */
 static int user_list_once(IME_Dict *dict, const char *yomi_prefix,
                           IME_UserEntry *out, int max, int *io_error)
 {
@@ -418,7 +420,7 @@ static int user_list_once(IME_Dict *dict, const char *yomi_prefix,
     if (rc != SQLITE_OK) {
         *io_error = is_ioerr(sqlite3_extended_errcode(db));
         kprintf(ATTR_RED, "IME: user_list prepare failed (rc=%d)\r\n", rc);
-        return 0;
+        return -4;
     }
 
     if (yomi_prefix && yomi_prefix[0] != '\0') {

@@ -245,6 +245,20 @@ static void admin_apis(IME_Dict *d)
     fixture_rm("/db/fep.db-journal");
     CHECK(ime_dict_open(d, "/db/fep.db") == 0);
     printf("PASS admin_hot_journal\n");
+
+    /* list: prepare の失敗は 0 件 (= 学習なし) ではなく負 (途中の失敗と同じ
+     * -4)。ime コマンドは負を「一覧に失敗」と出す (実装レビュー ラリー 2 の
+     * 非 blocker)。I/O エラーではないので開き直さない */
+    CHECK(sqlite3_exec((sqlite3 *)d->db, "DROP TABLE dict_user", 0, 0, 0) == SQLITE_OK);
+    reopened = n_reopened;
+    n_kprintf = 0;
+    CHECK(ime_user_list(d, "", ents, 8) == -4);
+    CHECK(ime_user_list(d, "か", ents, 8) == -4);
+    CHECK(strstr(last_kprintf, "prepare failed") != NULL);
+    CHECK(n_reopened == reopened);
+    CHECK(ime_dict_reopen(d, "/db/fep.db") == 0);   /* dict_user を作り直す */
+    CHECK(ime_user_list(d, "", ents, 8) == 0);
+    printf("PASS admin_list_prepare_error\n");
 }
 
 /* ---- (8) SQLite のファイルメソッドは失効した FD で成功しない (Codex

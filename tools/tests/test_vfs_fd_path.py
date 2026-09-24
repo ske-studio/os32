@@ -30,6 +30,10 @@ userland/lib/rt/pkg.c を取り込み、RAM 上の 8MB の ext2 で
           (B5)・SQLite のファイルメソッドは失効で成功しない (B2)・長すぎる
           DB 名は開く時点で断る (tools/tests/ime_dict_host.c)
   fatfold … fs/fatfs_vfs.c の大文字化表が ff.c の TBL_CT437 と一致する
+  namerule / fatname / hostname … FatFs・Win32 が意味を変える名前 ("disk.img "、
+          "d\\img.dat"、"db." …) を入口で INVAL で断る (ラリー 2 の blocker)。
+          fatname は実物の fs/fatfs_vfs.c + fs/fatfs/ff.c を RAM の FAT12 で回す
+  hostwire … fs/hostdrvfs.c の入口検査の配線 (本文の検査。ホストで組めないため)
 
   python3 -B tools/tests/test_vfs_fd_path.py [--target] [--mutants] [case]
 
@@ -178,6 +182,23 @@ MUTANTS = [
     ("cdinst が失敗しても完了を出す", "system/cdinst.c",
      "    ret = install_step(PKG_MINIMAL, \"MINIMAL\");\n    if (ret != PKG_OK) return ret;",
      "    ret = install_step(PKG_MINIMAL, \"MINIMAL\");\n    if (ret != PKG_OK) ret = PKG_OK;"),
+    ("FAT の入口が名前を見ない", "fs/fatfs_vfs.c",
+     "    rc = vfs_name_rule_check(path, VFS_NAME_RULE_FAT);\n",
+     "    rc = VFS_OK; (void)path;\n"),
+    ("名前の規則が '\\' を通す", "fs/vfs_name_rules.inc",
+     "        if (c == '\\\\') return VFS_ERR_INVAL;\n", ""),
+    ("名前の規則が制御文字を通す", "fs/vfs_name_rules.inc",
+     "        if (c < 0x20) return VFS_ERR_INVAL;\n", ""),
+    ("FAT が途中の空白を通す", "fs/vfs_name_rules.inc",
+     "        if (c == ' ' && rule == VFS_NAME_RULE_FAT) return VFS_ERR_INVAL;\n", ""),
+    ("名前の規則が末尾の空白を通す", "fs/vfs_name_rules.inc",
+     "                if (last == ' ') return VFS_ERR_INVAL;\n", ""),
+    ("名前の規則が末尾の '.' を通す", "fs/vfs_name_rules.inc",
+     "if (last == '.' && !dot_entry)", "if (last == '.' && !dot_entry && 0)"),
+    ("Win32 でも途中の空白を断る", "fs/vfs_name_rules.inc",
+     "if (c == ' ' && rule == VFS_NAME_RULE_FAT)", "if (c == ' ')"),
+    ("'.' / '..' の要素まで断る", "fs/vfs_name_rules.inc",
+     "if (last == '.' && !dot_entry)", "if (last == '.' && (dot_entry || 1))"),
     ("pkg_extract (LZSS) が開けない失敗を飲む", "lib/rt/pkg.c",
      "            if (wfd < 0) {\n                api->mem_free(data_buf);\n                return PKG_ERR_IO;\n            }",
      "            if (wfd < 0) continue;"),
@@ -228,6 +249,9 @@ IME_MUTANTS = [
     ("clear が I/O エラーで開き直さない",
      "        dict_recover(dict)) {\n        rc = sqlite3_exec",
      "        0) {\n        rc = sqlite3_exec"),
+    ("list の prepare の失敗を 0 件にする",
+     '"IME: user_list prepare failed (rc=%d)\\r\\n", rc);\n        return -4;',
+     '"IME: user_list prepare failed (rc=%d)\\r\\n", rc);\n        return 0;'),
     ("学習が旧接続で先に SQL を流す",
      "    if (!dict_ready(dict) || !dict->learn_stmt) return;",
      "    if (!dict->db || !dict->learn_stmt) return;"),
@@ -400,6 +424,52 @@ def check_fatfold():
     return ok
 
 
+def check_hostwire(text=None):
+    """fs/hostdrvfs.c の名前の入口検査の配線 (実物はハイパーコールを叩くので
+    ホストで組めない。規則そのものは段 namerule / hostname が回す)。
+      - 名前をホストへ渡す口は setup_create → session_set_path だけで、
+        setup_create を呼ぶのは hostdrv_create だけ
+      - hostdrv_create は setup_create の**前に** Win32 の規則で断る
+      - rename の宛先 (hostdrv_create を通らない) は元を開く**前に**断る
+      - パスを受け取る VfsOps の口は全部 hostdrv_create(path, …) を通る"""
+    import re
+    src = text if text is not None else (ROOT / "fs/hostdrvfs.c").read_text(encoding="utf-8")
+    bad = []
+
+    def body(name):
+        m = re.search(r"^static int %s\(.*?\n\{(.*?)^\}" % name, src, re.S | re.M)
+        return m.group(1) if m else None
+
+    def calls(fn):
+        return len(re.findall(r"(?<![\w])%s\(" % fn, src))
+
+    if calls("session_set_path") != 2:          # 定義 + setup_create の中の 1 回
+        bad.append("session_set_path の呼び手が setup_create だけでない")
+    if calls("setup_create") != 2:              # 定義 + hostdrv_create の中の 1 回
+        bad.append("setup_create の呼び手が hostdrv_create だけでない")
+    b = body("hostdrv_create") or ""
+    i = b.find("vfs_name_rule_check(path, VFS_NAME_RULE_WIN32)")
+    if i < 0 or i > b.find("setup_create("):
+        bad.append("hostdrv_create が setup_create の前に名前を見ない")
+    b = body("hdrv_rename") or ""
+    i = b.find("vfs_name_rule_check(new_path, VFS_NAME_RULE_WIN32)")
+    if i < 0 or i > b.find("session_begin();"):
+        bad.append("hdrv_rename が宛先を元を開く前に見ない")
+    ops = re.findall(r"^static int (hdrv_\w+)\(void \*ctx, const char \*path", src, re.M)
+    if len(ops) < 10:
+        bad.append("パスを受け取る口が %d 本しか見つからない" % len(ops))
+    for name in ops:
+        if "hostdrv_create(path," not in (body(name) or ""):
+            bad.append(name + " が hostdrv_create(path, …) を通らない")
+    if "hostdrv_create(old_path," not in (body("hdrv_rename") or ""):
+        bad.append("hdrv_rename が hostdrv_create(old_path, …) を通らない")
+    for m in bad:
+        print("  FAIL hostwire: " + m)
+    print(f"case hostwire (fs/hostdrvfs.c の入口検査の配線, {len(ops)} 口): "
+          f"{'PASS' if not bad else 'FAIL'}")
+    return not bad
+
+
 def find_e2fsck():
     for cand in ("/usr/sbin/e2fsck", "/sbin/e2fsck"):
         if os.access(cand, os.X_OK):
@@ -530,7 +600,20 @@ def build(tmp, fsdir, libdir, exe_name="fdpath", extra=()):
             ("include", "lib", "kernel", "drivers", "sdk/include/os32",
              "userland/lib")]
     exe = tmp / exe_name
-    res = subprocess.run(["gcc", *HOST_FLAGS, *extra, *inc, str(SRC), "-o", str(exe)],
+    # 段 fatname は実物の FatFs (fs/fatfs/ff.c) と組む。ff.c は別の翻訳単位で、
+    # <string.h> を fs/fatfs/string.h (= kstring.h) に向ける (カーネルと同じ)。
+    # FatFs 本体は第三者のソースなので警告では落とさない (-w)。
+    ffo = tmp / f"{exe_name}_ff.o"
+    res = subprocess.run(["gcc", "-std=gnu89", "-m32", "-march=i386", "-ffreestanding",
+                          "-fno-pie", "-fno-stack-protector", "-O1", "-w",
+                          "-I" + str(fsdir / "fatfs"), "-I" + str(ROOT / "lib"),
+                          "-I" + str(ROOT / "include"), "-c",
+                          str(fsdir / "fatfs/ff.c"), "-o", str(ffo)],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if res.returncode != 0:
+        return None, res.stdout.decode("utf-8", "replace")
+    res = subprocess.run(["gcc", *HOST_FLAGS, *extra, *inc, str(SRC), str(ffo),
+                          "-o", str(exe)],
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if res.returncode != 0:
         return None, res.stdout.decode("utf-8", "replace")
@@ -711,7 +794,9 @@ def main():
             ok = run_ime(tmp) and ok
         if case in (None, "fatfold"):
             ok = check_fatfold() and ok
-        if case not in ("errno", "mkpkg", "ime", "fatfold"):
+        if case in (None, "hostwire"):
+            ok = check_hostwire() and ok
+        if case not in ("errno", "mkpkg", "ime", "fatfold", "hostwire"):
             exe, err = build(tmp, ROOT / "fs", ROOT / "userland/lib")
             if exe is None:
                 print(err)

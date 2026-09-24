@@ -197,6 +197,9 @@ v63 で KernelAPI のデータ欄を 0x4B8 に固定し、OS32X ヘッダを v3 
 データ欄が固定になったので、新しいカーネルは古いユーザーランドをそのまま動かせる。
 逆 (新しいユーザーランド + 古いカーネル) は、`min_api_ver` (exec と shlib ローダ) と
 `hsync` の「配備物の版 > カーネルの版」の拒否 (`reason=kapi_newer_than_kernel`) が止める。
+shlib ローダが要求版で断ったときは、GUI を選んでいても CUI shell で起動し
+`GUI shlib: needs a newer kernel -> CUI shell` (カーネルを先に更新する案内) を出す —
+配置違いの `rebuild required (KAPI data layout)` とは直し方が逆なので案内を分けてある。
 
 HostDrv 経由 (NP21/W を止めない) で v63 以降の稼働機を v64 以降へ上げる手順:
 
