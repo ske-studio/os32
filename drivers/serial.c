@@ -10,6 +10,10 @@
 /*    - pc98_set_baud_rate(): PIT #2 (0x75/0x77), I/Oウェイト(0x5f)         */
 /*    - pc98_ttspeedtab(): 8MHz系 1996800 / 16 / speed                     */
 /*    - IRQ4固定、ポート {0x30, 0x32, 0x32, 0x33, 0x35}                    */
+/*                                                                          */
+/*  **0035h (8255 ポート C) は丸ごと書かない** — 割り込み許可 bit0-2 と同じ */
+/*  バイトに BUZ・MCHKEN・SHUT0/1・PSTBM がいる。許可ビットは 0037h の BSR */
+/*  で 1 ビットずつ操作する (ser_ien_bsr、POLICY_DEBUG §4-59)。          */
 /* ======================================================================== */
 
 #include "serial.h"
@@ -80,9 +84,33 @@ static unsigned int s_port_cmd   = SER_CMD;
 static u8 s_mask_txrdy = STS_TXRDY;
 static u8 s_mask_rxrdy = STS_RXRDY;
 static u8 s_mask_err   = (u8)(STS_PE | STS_OE | STS_FE);
-/* `0035h` に書く割り込み許可。**ISR 末尾の再許可もこれを使う** — 直値だと
+/* 割り込み許可 (0035h bit0-2 の望む値)。**ISR 末尾の再許可もこれを使う** — 直値だと
  * 切替でマスクを変えた瞬間に ISR が踏み潰す (Codex レビュー blocker 1)。 */
 static u8 s_mask_ien   = IEN_RX;
+
+/* ======================================================================== */
+/*  割り込み許可を 0037h の BSR で 1 ビットずつ書く                         */
+/*                                                                          */
+/*  **0035h へ全体を書かない。** 同じバイトの bit3 が BUZ (0 = 鳴動)、      */
+/*  bit7/5 が SHUT0/SHUT1 (リセット後の ITF の動作)、bit4 が MCHKEN、       */
+/*  bit6 が PSTBM (docs/hw/undocumented/io_syste.md の I/O 0035h)。以前は   */
+/*  ここで 0x00 → 0x01 を全体に書いていたので、受信のたびに BUZ = 0 と    */
+/*  なり、実機 PC-9821Ra266 で rshell 中にビープが鳴り続けた (2026-09-24)。 */
+/*                                                                          */
+/*  `which` に立っているビットだけを触る。触らないビットの今の値は保つ。     */
+/*  **TXRE (bit2) を用もなく書かない**: NP21/W の sysp_o37 は bit2 への BSR */
+/*  書きを「送信要求」と読み、rs232c.result の状態しだいで IRQ4 を立てる。  */
+/*  ISR の中で毎回書くと自分で割り込みを作り続けうる。                     */
+/* ======================================================================== */
+static void ser_ien_bsr(u8 which, u8 ien)
+{
+    if (which & IEN_RX)
+        outp(SYSPORT_C_BSR, (ien & IEN_RX)    ? BSR_RXRE_ON : BSR_RXRE_OFF);
+    if (which & IEN_TXEMP)
+        outp(SYSPORT_C_BSR, (ien & IEN_TXEMP) ? BSR_TXEE_ON : BSR_TXEE_OFF);
+    if (which & IEN_TX)
+        outp(SYSPORT_C_BSR, (ien & IEN_TX)    ? BSR_TXRE_ON : BSR_TXRE_OFF);
+}
 
 /* TxRDY を待つ予算 [tick]。serial_init で実効速度から決める。
  * **µs の数え上げではなく tick** — cpu_delay_us の校正が丸めに負けていた
@@ -222,7 +250,8 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
     }
 
     /* ---- ここから実際に書く ---- */
-    outp(SER_MASK, 0x00);   /* 全割り込みマスク */
+    /* 全割り込みマスク (3 ビットとも BSR で落とす。0035h 全体は書かない) */
+    ser_ien_bsr((u8)(IEN_RX | IEN_TXEMP | IEN_TX), 0);
 
     /* ---- いまのモードから抜ける ----
      * V･FAST / FIFO から互換へ戻すときは **8251 を触る前に** 013Ah bit7 と
@@ -264,10 +293,11 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
     outp(s_port_cmd, 0x00); io_wait();
     outp(s_port_cmd, CMD_RESET); io_wait();   /* 内部リセット (0x40) */
 
-    /* PC-98: BUZ OFF (ポート0x37 BSRモード)
-     * PC9800Bible: 0x06=OFF, 0x07=ON だが NP21/Wでは極性逆
-     * NP21/W: BSR_BUZ_ON (0x07) = BUZ OFF */
-    outp(SYSPORT_C_BSR, BSR_BUZ_ON);
+    /* ブザー停止 (0037h BSR 07h = BUZ bit3 を 1)。極性は UNDOCUMENTED
+     * (io_syste.md の I/O 0037h: 06h = 鳴動、07h = 停止) を採る。Bible §2-2 は
+     * 逆に書いているが、NP21/W (sound/beepc.c) も UNDOCUMENTED と同じ向きで、
+     * 以前ここにあった「NP21/W では極性逆」は読み違い (書く値 07h は正しかった)。 */
+    outp(SYSPORT_C_BSR, BSR_BUZ_OFF);
 
     /* **要求どおりに出るかを記録して報告する** ([V4]: 黙ってずれたまま進まない)。
      * 互換モードの分周比は整数しか設定できないので、割り切れない速度は必ずずれる。
@@ -319,18 +349,20 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
     /* ---- 受信割り込みを有効化 ----
      * **資料に FIFO モードでの割り込みマスクの記述は無い。** 0136h は
      * 「割り込み参照」で、許可/禁止のレジスタではない。NP21/W も 0035h
-     * 以外でマスクしていないので、両モードとも従来どおり 0035h を使う。
+     * 以外でマスクしていないので、両モードとも従来どおり 0035h の bit0-2 を
+     * (0037h の BSR 経由で) 使う。
      * ISR 末尾の再許可は s_mask_ien を書くので、ここで決めた値と食い違わない
      * (直値を書いていたころは、モードごとにマスクを変えた瞬間に ISR が
      * 1 回目の受信でそれを踏み潰す形になっていた)。 */
     s_mask_ien = IEN_RX;
-    outp(SER_MASK, s_mask_ien);
+    /* 3 ビットとも上で落としてあるので、立てるビットだけ書く。 */
+    ser_ien_bsr(s_mask_ien, s_mask_ien);
 
     /* ---- PIC IRQ4 有効化 ---- */
     irq_enable(4);
 
     /* ---- BUZ OFF 再確認 (PIT設定の副作用対策) ---- */
-    outp(SYSPORT_C_BSR, BSR_BUZ_ON);  /* NP21/W: BSR_BUZ_ON = BUZ OFF */
+    outp(SYSPORT_C_BSR, BSR_BUZ_OFF);  /* 07h = 停止 (UNDOCUMENTED) */
 
     ser_initialized = 1;
     rc = (plan.mode == SER_MODE_VFAST) ? SER_INIT_VFAST : SER_INIT_COMPAT;
@@ -436,10 +468,15 @@ void serial_irq_handler(void)
         (void)inp(SER_FIFO_IIR);
     }
 
-    /* 再許可は **初期化が決めた値** を書く。直値 IEN_RX だと、将来モードごとに
-     * マスクを変えたときに ISR が 1 回目の受信でそれを踏み潰す。 */
-    outp(SER_MASK, 0x00);
-    outp(SER_MASK, s_mask_ien);
+    /* 許可ビットを一度落として戻し、IRQ4 の立ち上がりエッジを作り直す
+     * (Bible §2-10「送受信両方の割り込みを利用する方法」の意図: 汲み残しが
+     * あっても次の割り込みが上がるようにする)。
+     * 再許可は **初期化が決めた値** を書く。直値 IEN_RX だと、将来モードごとに
+     * マスクを変えたときに ISR が 1 回目の受信でそれを踏み潰す。
+     * **0035h 全体へは書かない** — BUZ などが巻き添えで 0 になる (§4-59)。
+     * 触るのは許可しているビットだけ (TXRE を用もなく書かない、ser_ien_bsr)。 */
+    ser_ien_bsr(s_mask_ien, 0);
+    ser_ien_bsr(s_mask_ien, s_mask_ien);
 }
 
 /* ======================================================================== */

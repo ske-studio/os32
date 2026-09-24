@@ -45,6 +45,11 @@ void sys_halt(void)
     _halt();
 }
 
+/* 内蔵ブザー。0037h の BSR で 0035h bit3 (BUZ) だけを操作する。
+ * **極性は UNDOCUMENTED** (bit3 = 1 で停止、06h = 鳴動 / 07h = 停止)。
+ * 2026-09-24 までは pc98.h が Bible の向きで名前を付けていたので、
+ * buz_off() は実機で**鳴らし**、buz_on() は止めていた (rshell は応答の
+ * たびに buz_off() を呼ぶ — POLICY_DEBUG §4-59)。 */
 void buz_on(void)
 {
     outp(SYSPORT_C_BSR, BSR_BUZ_ON);

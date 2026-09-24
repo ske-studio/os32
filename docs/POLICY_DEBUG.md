@@ -1158,6 +1158,34 @@ read-modify-write で保つ。
   本物の `e2fsck -fn` を当てる** (clean = 終了コード 0)。ホスト試験で像を書き出して当てる形は `test_b8_open.py` /
   `test_ext2_empty_name.py`。インストーラの受入 (TASK_HDD_INSTALL) も、できた NHD をホストで `e2fsck -fn` する。
 
+### 4-59. 0035h (8255 ポート C) は全体で書かない — rshell 中に実機のビープが鳴り続けた (2026-09-24)
+
+- **症状**: 実機 PC-9821Ra266 で rshell (シリアル) で会話している間、ビープが鳴り続ける。NP21/W では鳴らない。
+- **原因 (2 経路、どちらも BUZ = 0 を書く)**:
+  1. `drivers/serial.c` が RS-232C の割り込み許可を **0035h へ全体で**書いていた — 初期化で `0x00` → `0x01`、
+     ISR では**受信のたびに** `0x00` → `0x01` (IRQ4 のエッジを作り直すため)。0035h はポート C で、bit0-2 の
+     RXRE / TXEE / TXRE と同じバイトに **bit3 = BUZ (0 = 鳴動)**、bit4 = MCHKEN、bit5 = SHUT1、bit6 = PSTBM、
+     bit7 = SHUT0 がいる (`docs/hw/undocumented/io_syste.md` の I/O 0035h)。1 バイト受けるごとに BUZ・SHUT0・
+     SHUT1 が 0 になり、ブザーが鳴る。SHUT0 = 0 のままリセットがかかると ITF は初期化せず 0000:0404h から続行する。
+  2. `include/pc98.h` の `BSR_BUZ_OFF` / `BSR_BUZ_ON` が **Bible §2-2 の向き (06h = OFF)** で名前を付けていた。
+     UNDOCUMENTED (I/O 0037h) は **06h = 鳴動、07h = 停止**。rshell は応答の始めと終わりに `buz_off()` を呼ぶので、
+     実機ではコマンドのたびに**鳴らしていた**。serial.c が書いていた `BSR_BUZ_ON` (07h) は値としては停止で正しく、
+     添えてあった「NP21/W では極性逆」は読み違い。
+- **資料の食い違い**: BUZ の極性は Bible と UNDOCUMENTED で逆。UNDOCUMENTED を採る (§4-50 と同じ判断)。
+  NP21/W の `sound/beepc.c` (`buz = (sysport.c & 8)?0:1`) も UNDOCUMENTED と同じ向き。
+- **エミュレータで出なかった理由は未確認**: NP21/W は BUZ を**模擬している** (0035h / 0037h の書き込みで
+  `beep_oneventset()`) のに鳴らなかった。ビープの音量設定か PIT #1 の状態かは調べていない (ini は見ていない)。
+  「NP21/W で鳴らない」は書き方が正しい証拠にならない。
+- **対策**: 割り込み許可は 0037h の BSR (00h/01h、02h/03h、04h/05h) で 1 ビットずつ書く (`ser_ien_bsr`)。ISR は
+  許可しているビットだけを落として戻す (Bible §2-10 の「一度落として戻す」意図は残す)。**TXRE (bit2) を用もなく
+  書かない** — NP21/W の `sysp_o37` は bit2 への BSR を送信要求と読み、IRQ4 を立てうる。`pc98.h` は
+  `BSR_BUZ_ON = 06h` / `BSR_BUZ_OFF = 07h` に改め、`buz_on()` / `buz_off()` の意味が名前どおりになった
+  (ほかの BSR 行は両資料で一致)。ホスト試験 `make check-serial-portc-host` (偽の outp で 8255 を模型にし、
+  0035h への書き込みを違反に数える)。
+- **教訓**: **0035h は全体で書かない**。同居するビットの面倒を見られるのは BSR だけ。ポート C のように
+  別機能が 1 バイトに同居するレジスタへの全体書きは、エミュレータで副作用が見えなくても実機で必ず表に出る。
+  極性が資料で割れる出力ビットは、UNDOCUMENTED の信号レベルの記述を採り、名前と値を同じ行に書く。
+
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 
 - **症状**: NHD 配備 (`os32-cycle deploy`) 直後に、試験用ファイルを 1 本足す目的でゲストの `hsync` を実行したら、
