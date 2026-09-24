@@ -503,28 +503,19 @@ def mk_prereqs(text, target):
 
 
 class RealPackageDefs(unittest.TestCase):
-    """リポジトリ自身のパッケージ定義が厳格化した mkpkg と噛み合うか。
+    """リポジトリ自身のパッケージ構成が厳格化した mkpkg と噛み合うか。
 
-    glob の 0 件がエラーになったので、定義側に「今は 1 つも無いパターン」が
-    残っていると `make iso` が落ちる。それをビルドではなくここで先に見つける。
+    構成 (build/packages.yaml) は配備マニフェストのタグから中身を作る。
+    振り分けの問題 (当たらないタグ、古い除外 …) があると `make iso` が落ちる。
+    それをビルドではなくここで先に見つける。ファイルの有無は見ない。
     """
 
-    def test_every_registered_glob_matches_something(self):
+    def test_plan_has_no_problems(self):
         sys.path.insert(0, str(ROOT / 'tools'))
         import mkpkg
-        defs = mkpkg.merge_package_defs([
-            str(ROOT / 'build' / 'core_packages.yaml'),
-            str(ROOT / 'userland' / 'package_defs.yaml')])
-        empty = []
-        for pkg_name, pdef in defs.items():
-            for fdef in pdef.get('files', []):
-                host = fdef.get('host', '')
-                if '*' not in host:
-                    continue
-                if not glob.glob(str(ROOT / host)):
-                    empty.append('%s: %s' % (pkg_name, host))
-        self.assertEqual(empty, [],
-                         '0 件の glob が登録されている (make iso が落ちる)')
+        plan = mkpkg.load_plan(str(ROOT / 'build' / 'packages.yaml'))
+        _, problems = mkpkg.expand_plan(plan, str(ROOT))
+        self.assertEqual(problems, [], 'パッケージ構成に問題がある')
 
 
 class BuildWiring(unittest.TestCase):
@@ -556,8 +547,8 @@ class BuildWiring(unittest.TestCase):
                     'unicode_bin', 'boot'):
             self.assertIn(dep, pkg, 'packages の依存に %s が無い' % dep)
 
-    def test_core_packages_has_settings_db(self):
-        text = (ROOT / 'build' / 'core_packages.yaml').read_text(
+    def test_packages_plan_has_settings_db(self):
+        text = (ROOT / 'build' / 'packages.yaml').read_text(
             encoding='utf-8')
         self.assertIn('guest: /etc/settings.db', text)
         self.assertIn('host: build/out/settings.db', text)

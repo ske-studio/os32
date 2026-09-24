@@ -238,7 +238,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 ## man ページ
 
 `docs/manpages/*.1` — ゲスト内 `man` コマンド用マニュアル (約60ページ)。
-`make packages` で `/usr/man/` に配置される (`tools/package_defs.yaml`)。
+`userland/deploy.yaml` の登録 (タグ `docs`) で `/usr/man/` に配備され、CD では `NORMAL.PKG` に入る ([08_build.md](08_build.md) の `tools/mkpkg.py` の節)。
 
 ## ソースツリー概要
 

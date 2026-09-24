@@ -3,7 +3,15 @@
 #  mkpkg.py — OS32 パッケージ (.pkg) 作成ツール
 #
 #  使用法:
-#    python3 tools/mkpkg.py --defs tools/package_defs.yaml --output packages/
+#    python3 tools/mkpkg.py --plan build/packages.yaml --output packages/
+#        CD 媒体の全パッケージ。中身は配備マニフェスト (tools/deploy_manifests.py)
+#        のタグから決める (make packages)
+#    python3 tools/mkpkg.py --plan build/packages.yaml --check-plan
+#        振り分けの検査だけ (ファイルは読まない)
+#    python3 tools/mkpkg.py --list packages/NORMAL.PKG
+#        PKG の中身の一覧
+#    python3 tools/mkpkg.py --defs defs.yaml --output out/
+#        ファイル一覧を直に書いた定義から (試験用)
 #    python3 tools/mkpkg.py --name edit --version 1 --lzss \
 #        /usr/bin/edit=programs/edit.bin -o EDIT.PKG
 #
@@ -354,24 +362,295 @@ def build_from_yaml(yaml_paths, output_dir, base_dir):
             print(f"ERROR: {reason} (package '{pkg_name}')", file=sys.stderr)
         raise SystemExit(1)
 
+    write_packages(resolved, output_dir, base_dir)
+
+
+
+# ======================================================================== #
+#  CD 媒体の構成 (--plan)
+#
+#  中身は配備マニフェスト (build/core.yaml + userland/deploy.yaml) のタグで
+#  決める。以前は package_defs.yaml に一覧を手で写していて、配備に足した物が
+#  CD に入らなかった (gshell / libos32gui.shlib / 既定フォント …)。
+# ======================================================================== #
+
+# PKG のベース名の上限。ISO 9660 の 8.3 に収め、分割の連番 1 桁を足せるように
+PKG_BASE_NAME_MAX = 7
+# userland/tests/ 由来の行は DEBUG へ (試験バイナリが NORMAL に混ざらないように)
+TEST_HOST_PREFIX = 'userland/tests/'
+TEST_TAG = 'test'
+
+
+def load_plan(plan_path):
+    import yaml
+    with open(plan_path, 'r', encoding='utf-8') as f:
+        plan = yaml.safe_load(f) or {}
+    if not isinstance(plan.get('packages'), dict):
+        raise SystemExit(f"ERROR: {plan_path}: packages: が無い")
+    return plan
+
+
+def plan_packages(plan, base_dir, manifest=None):
+    """配備マニフェストを振り分けて [(name, meta, [(guest, host_rel), ...])] を返す
+
+    戻り値: (packages, problems)。problems は人が読む文字列の list で、
+    空でなければ媒体を作ってはいけない。ファイルの有無は見ない
+    (--check-plan はビルド前でも回せるように)。
+    manifest を渡すとそれを使う (試験用。load_merged() と同じ形)。
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import deploy_manifests as dm
+
+    problems = []
+    if manifest is None:
+        manifest = dm.load_merged(dm.CORE_MANIFEST_RELPATHS)
+        if manifest is None:
+            return [], ['配備マニフェストが読めない']
+
+    pkgs = []           # 定義順
+    tag_to_pkg = {}
+    for name, pdef in plan['packages'].items():
+        pdef = pdef or {}
+        if len(name) > PKG_BASE_NAME_MAX:
+            problems.append(f"パッケージ名 {name!r} が {PKG_BASE_NAME_MAX} 文字を超える "
+                            "(ISO 9660 の 8.3 と分割の連番)")
+        files = []
+        for fdef in pdef.get('files') or []:
+            files.append((fdef['guest'], fdef['host']))
+        for t in pdef.get('tags') or []:
+            if t in tag_to_pkg:
+                problems.append(f"タグ {t!r} が 2 つのパッケージ "
+                                f"({tag_to_pkg[t]}, {name}) にある")
+            tag_to_pkg[t] = name
+        pkgs.append((name, pdef, files))
+    by_name = {n: f for n, _, f in pkgs}
+
+    exclude = {}
+    for ex in plan.get('exclude') or []:
+        g = ex.get('guest', '')
+        if not (ex.get('reason') or '').strip():
+            problems.append(f"除外 {g!r} に理由 (reason:) が無い")
+        exclude[g] = False
+
+    for e in manifest['filesystem']['files']:
+        where = f"{e.get('_manifest', '?')}: {e['host']}"
+        tags = e.get('tags') or []
+        if e['host'].startswith(TEST_HOST_PREFIX) and TEST_TAG not in tags:
+            problems.append(f"{where}: {TEST_HOST_PREFIX} 由来なのにタグが "
+                            f"{tags} ({TEST_TAG!r} にすること)")
+        targets = sorted({tag_to_pkg[t] for t in tags if t in tag_to_pkg})
+        unknown = [t for t in tags if t not in tag_to_pkg]
+        pairs = dm.resolve_entry(e, base_dir)
+        live = []
+        for host, guest in pairs:
+            if guest in exclude:
+                exclude[guest] = True
+            else:
+                live.append((host, guest))
+        if not live:
+            continue
+        if unknown:
+            problems.append(f"{where}: どのパッケージにも当たらないタグ {unknown}")
+        if len(targets) != 1:
+            problems.append(f"{where}: タグ {tags} が当たるパッケージが "
+                            f"{len(targets)} 個 ({targets}) — ちょうど 1 つにすること")
+            continue
+        by_name[targets[0]].extend((g, h) for h, g in live)
+
+    for g, used in exclude.items():
+        if not used:
+            problems.append(f"除外 {g!r} が配備マニフェストのどれにも当たらない (古い除外)")
+
+    seen = {}
+    for name, _, files in pkgs:
+        for g, h in files:
+            if g in seen:
+                problems.append(f"ゲストパス {g} が 2 回 ({seen[g]} と {name})")
+            seen[g] = name
+
+    # BOOT のローダは配備マニフェストの boot: と同じ物であること
+    loader = (manifest.get('boot') or {}).get('loader')
+    for name, pdef, files in pkgs:
+        if pdef.get('type') == 'boot' and loader and \
+                loader not in [h for _, h in files]:
+            problems.append(f"{name}: 配備マニフェストの boot.loader {loader} を含まない")
+    return pkgs, problems
+
+
+def entry_dirs(guest_paths):
+    """build_pkg が作るディレクトリ項目の集合"""
+    dirs = set()
+    for g in guest_paths:
+        parts = g.split('/')
+        for i in range(2, len(parts)):
+            dirs.add('/'.join(parts[:i]))
+    return dirs
+
+
+def split_files(name, files, limit=PKG_MAX_ENTRIES):
+    """項目数 (ファイル + ディレクトリ) が limit 以下になるよう順に切る
+
+    戻り値: [(name, files), (name2, files), ...]。1 つ目だけ連番なし。
+    """
+    chunks = []
+    cur = []
+    for f in files:
+        trial = cur + [f]
+        if cur and len(trial) + len(entry_dirs(g for g, _ in trial)) > limit:
+            chunks.append(cur)
+            cur = [f]
+        else:
+            cur = trial
+    if cur:
+        chunks.append(cur)
+    return [(name if i == 0 else f"{name}{i + 1}", c)
+            for i, c in enumerate(chunks)]
+
+
+def expand_plan(plan, base_dir, manifest=None):
+    """plan_packages + 分割。[(pkg_name, version, lzss, [(guest, host_abs)])] と problems"""
+    pkgs, problems = plan_packages(plan, base_dir, manifest)
+    out = []
+    for name, pdef, files in pkgs:
+        if not files:
+            problems.append(f"{name}: 中身が 0 件")
+            continue
+        files = [(g, os.path.join(base_dir, h)) for g, h in files]
+        version = int(pdef.get('version', 1))
+        use_lzss = bool(pdef.get('lzss', False))
+        parts = split_files(name, files)
+        if pdef.get('type') == 'boot' and len(parts) > 1:
+            problems.append(f"{name}: boot 型は分割できない")
+        if len(parts) > 9:
+            problems.append(f"{name}: {len(parts)} 分割 (連番は 1 桁まで)")
+        for pname, pfiles in parts:
+            out.append((pname, version, use_lzss, pfiles))
+    return out, problems
+
+
+def build_from_plan(plan_path, output_dir, base_dir):
+    plan = load_plan(plan_path)
+    resolved, problems = expand_plan(plan, base_dir)
+    problems += [f"{h} not found (package '{n}')" for n, _, _, fs in resolved
+                 for _, h in fs if not os.path.isfile(h)]
+    if problems:
+        for p in problems:
+            print(f"ERROR: {p}", file=sys.stderr)
+        raise SystemExit(1)
+    write_packages(resolved, output_dir, base_dir, prune=True)
+
+
+def write_packages(resolved, output_dir, base_dir, prune=False):
+    """解決済みのパッケージを書く。prune なら出力先の他の *.PKG を消す
+    (ISO は出力先のディレクトリを丸ごと焼くので、名前の変わった古い PKG が
+    媒体に残らないように)。"""
+    kapi_ver = read_kapi_version(base_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    written = set()
     for pkg_name, version, use_lzss, files in resolved:
         out_name = pkg_name.upper() + '.PKG'
         out_path = os.path.join(output_dir, out_name)
-
         pkg_data = build_pkg(pkg_name, version, files, use_lzss, kapi_ver)
         with open(out_path, 'wb') as f:
             f.write(pkg_data)
-
-        total_files = sum(1 for _, _, t in [] if t == 0)
-        # リアルなファイル数カウント
-        nfiles = len([f for f in files if os.path.isfile(f[1])])
+        written.add(out_name)
+        nent = len(files) + len(entry_dirs(g for g, _ in files))
         ratio = ''
-        if use_lzss and len(pkg_data) > PKG_HEADER_SIZE:
-            orig = sum(os.path.getsize(f[1]) for _, f1 in [] if os.path.isfile(f1))
-            orig = sum(os.path.getsize(h) for _, h in files if os.path.isfile(h))
+        if use_lzss:
+            orig = sum(os.path.getsize(h) for _, h in files)
             if orig > 0:
                 ratio = f' ({len(pkg_data)*100//orig}%)'
-        print(f"  {out_name}: {nfiles} files, {len(pkg_data)} bytes{ratio}")
+        print(f"  {out_name}: {len(files)} files, {nent} entries, "
+              f"{len(pkg_data)} bytes{ratio}")
+    if prune:
+        for old in sorted(os.listdir(output_dir)):
+            if old.upper().endswith('.PKG') and old not in written:
+                os.remove(os.path.join(output_dir, old))
+                print(f"  removed stale {old}")
+
+
+# ======================================================================== #
+#  読み手 (ホストでの検査用。消費側 userland/lib/rt/pkg.c と同じ解釈)
+# ======================================================================== #
+
+def lzss_decode(data):
+    orig = struct.unpack_from('<I', data, 0)[0]
+    out = bytearray()
+    text_buf = bytearray(b' ' * (N + F - 1))
+    r = N - F
+    p = 4
+    while len(out) < orig and p < len(data):
+        flags = data[p]
+        p += 1
+        for bit in range(8):
+            if len(out) >= orig or p >= len(data):
+                break
+            if flags & (1 << bit):
+                c = data[p]
+                p += 1
+                out.append(c)
+                text_buf[r] = c
+                r = (r + 1) % N
+            else:
+                i = data[p] | ((data[p + 1] & 0xF0) << 4)
+                j = (data[p + 1] & 0x0F) + THRESHOLD
+                p += 2
+                for k in range(j + 1):
+                    c = text_buf[(i + k) % N]
+                    out.append(c)
+                    text_buf[r] = c
+                    r = (r + 1) % N
+    return bytes(out[:orig])
+
+
+def read_pkg(path):
+    """PKG を読む。戻り値: (header dict, [(path, type, bytes or None)])"""
+    with open(path, 'rb') as f:
+        blob = f.read()
+    if blob[0:4] != PKG_MAGIC:
+        raise ValueError(f"{path}: bad magic")
+    hdr = {
+        'name': blob[4:12].rstrip(b'\x00').decode('utf-8'),
+        'version': blob[12],
+        'flags': blob[13],
+        'kapi_ver': struct.unpack_from('<H', blob, 14)[0],
+        'entry_count': struct.unpack_from('<H', blob, 16)[0],
+        'orig_size': struct.unpack_from('<I', blob, 18)[0],
+        'comp_size': struct.unpack_from('<I', blob, 22)[0],
+    }
+    p = PKG_HEADER_SIZE
+    table = []
+    while True:
+        n = blob[p]
+        p += 1
+        if n == 0:
+            break
+        name = blob[p:p + n].decode('utf-8')
+        p += n
+        size = struct.unpack_from('<I', blob, p)[0]
+        ftype = blob[p + 4]
+        p += 5
+        table.append((name, size, ftype))
+    if len(table) != hdr['entry_count']:
+        raise ValueError(f"{path}: entry_count {hdr['entry_count']} != {len(table)}")
+    data = blob[p:p + hdr['comp_size']]
+    if len(data) != hdr['comp_size']:
+        raise ValueError(f"{path}: truncated data")
+    if hdr['flags'] & PKG_FLAG_LZSS:
+        data = lzss_decode(data)
+    if len(data) != hdr['orig_size']:
+        raise ValueError(f"{path}: orig_size {hdr['orig_size']} != {len(data)}")
+    entries = []
+    off = 0
+    for name, size, ftype in table:
+        if ftype == PKG_TYPE_FILE:
+            entries.append((name, ftype, data[off:off + size]))
+            off += size
+        else:
+            entries.append((name, ftype, None))
+    if off != len(data):
+        raise ValueError(f"{path}: data length {len(data)} != sum of files {off}")
+    return hdr, entries
 
 
 def parse_simple_yaml(path):
@@ -438,6 +717,12 @@ def parse_simple_yaml(path):
 
 def main():
     parser = argparse.ArgumentParser(description='OS32 Package (.pkg) Builder')
+    parser.add_argument('--plan',
+                        help='CD 媒体の構成 (build/packages.yaml)。中身は配備マニフェストのタグから決める')
+    parser.add_argument('--check-plan', action='store_true',
+                        help='--plan の振り分けだけ検査する (ファイルは読まない)')
+    parser.add_argument('--list', nargs='+', metavar='PKG',
+                        help='PKG の中身を一覧する')
     parser.add_argument('--defs', action='append', default=None,
                         help='Package definitions YAML file (層ごとに複数指定できる。同名パッケージはマージされる)')
     parser.add_argument('--output', '-o', default='packages/',
@@ -453,7 +738,31 @@ def main():
                         help='guest=host file mappings (single pkg mode)')
     args = parser.parse_args()
 
-    if args.defs:
+    if args.list:
+        for path in args.list:
+            hdr, entries = read_pkg(path)
+            nfile = sum(1 for _, t, _ in entries if t == PKG_TYPE_FILE)
+            print(f"{path}: name={hdr['name']} v{hdr['version']} "
+                  f"flags=0x{hdr['flags']:02x} kapi={hdr['kapi_ver']} "
+                  f"entries={hdr['entry_count']} files={nfile} "
+                  f"orig={hdr['orig_size']} comp={hdr['comp_size']}")
+            for name, t, data in entries:
+                if t == PKG_TYPE_FILE:
+                    print(f"  {len(data):>9}  {name}")
+                else:
+                    print(f"  {'<dir>':>9}  {name}")
+    elif args.plan and args.check_plan:
+        resolved, problems = expand_plan(load_plan(args.plan), args.base)
+        for p in problems:
+            print(f"ERROR: {p}", file=sys.stderr)
+        for n, _, _, fs in resolved:
+            nent = len(fs) + len(entry_dirs(g for g, _ in fs))
+            print(f"  {n.upper()}.PKG: {len(fs)} files, {nent} entries")
+        sys.exit(1 if problems else 0)
+    elif args.plan:
+        print(f"Building packages from {args.plan} (+ deploy manifests)...")
+        build_from_plan(args.plan, args.output, args.base)
+    elif args.defs:
         print("Building packages from {}...".format(", ".join(args.defs)))
         build_from_yaml(args.defs, args.output, args.base)
     elif args.name and args.files:

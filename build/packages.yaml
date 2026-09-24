@@ -1,0 +1,72 @@
+# ============================================================================
+#  packages.yaml — CD インストール媒体 (.PKG) の構成
+#
+#  **中身は配備の正典 (build/core.yaml + userland/deploy.yaml) から生成する。**
+#  ここに書くのは「どのタグをどのパッケージに入れるか」と、配備マニフェストに
+#  載らない媒体だけの物 (ブートセクタ、settings.db) だけ。ファイルの一覧を
+#  ここに写さないこと — 2026-09-24 まで手書きの二重管理で、配備 179 本の
+#  うち 27 本 (gshell / libos32gui.shlib / 既定フォント …) が CD に入って
+#  いなかった。生成は tools/mkpkg.py --plan、検査は make check-packages-host。
+#
+#  振り分け (deploy マニフェストの各行の tags:):
+#    core      → MINIMAL  起動と GUI シェルに要るもの (カーネル、shell、gshell、
+#                         libos32gui、既定フォント、設定の初期値)
+#    base      → MINIMAL  基本コマンド (more / less / grep / find / sort / head /
+#                         tail / wc / tee / touch / hexdump / sleep / sndctl) と
+#                         install / cdinst。Minimal =「シェル + 基本コマンド」
+#    programs  → NORMAL   コマンドとアプリ
+#    docs      → NORMAL   man ページ
+#    data      → NORMAL   FEP 辞書、TTF、MGX サンプル
+#    test      → DEBUG    試験バイナリと試験用データ (userland/tests/ 由来は必ずこれ)
+#  1 行のタグはちょうど 1 つのパッケージに当たること (検査が見る)。
+#
+#  cdinst の選択肢との対応 (userland/system/cdinst.c):
+#    1. Minimal = BOOT + MINIMAL
+#    2. Normal  = 1 + NORMAL
+#    3. Full    = 2 + DEBUG
+#
+#  項目数 (ファイル + ディレクトリ) が消費側の上限 128 (userland/lib/rt/pkg.h
+#  PKG_MAX_ENTRIES) を超えるパッケージは mkpkg が NAME.PKG, NAME2.PKG, … に
+#  自動で分け、cdinst は連番を欠けるまで順に展開する。名前は ISO 9660 の
+#  8.3 に収めるため 7 文字以下 (連番 1 桁を足して 8)。
+#
+#  配備マニフェストの層は本体の 2 つだけ (tools/deploy_manifests.py
+#  CORE_MANIFEST_RELPATHS)。apps/ と game/ (private submodule) は `make all`
+#  では作られず CI では空なので、CD には入れない (hsync / make deploy で配る)。
+# ============================================================================
+
+packages:
+  # --- ブートセクタ (cdinst がセクタへ直接書く。配備マニフェストの boot: と同じ物) ---
+  boot:
+    type: boot
+    version: 1
+    lzss: false
+    files:
+      - host: boot/boot_hdd.bin
+        guest: /boot/boot_hdd.bin
+      - host: boot/loader_hdd.bin
+        guest: /boot/loader_hdd.bin
+
+  minimal:
+    version: 2
+    lzss: false
+    tags: [core, base]
+    # 媒体だけが持つ物 (通常配備は /etc/settings.tsv を配り、DB は作らない。
+    # 票 TASK_S0 §3。生成は build/assets.mk)
+    files:
+      - host: build/out/settings.db
+        guest: /etc/settings.db
+
+  normal:
+    version: 2
+    lzss: false
+    tags: [programs, docs, data]
+
+  debug:
+    version: 2
+    lzss: false
+    tags: [test]
+
+# 配備マニフェストにあってもパッケージに入れない物。**理由を必ず書く。**
+# guest はゲストパス (glob 不可)。今は無い。
+exclude: []

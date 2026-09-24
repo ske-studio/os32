@@ -1197,30 +1197,39 @@ static void case_cdinst(void)
     if (!g_pkg_dir) { report("  (harness) pkg dir missing\n"); g_failures++; return; }
 
     /* A: NORMAL が格納パス 124 バイトで PATH TOO LONG → そこで止まる。
-     * FULL は展開しない、完了は表示しない */
+     * DEBUG は展開しない、完了は表示しない */
     cdinst_setup("A_");
-    EQ(install_packages('3', 0, 0), PKG_ERR_TOOLONG);
+    EQ(install_packages('3'), PKG_ERR_TOOLONG);
     CHECK(exists("/good/a.txt"));             /* MINIMAL は済んでいる */
     CHECK(!exists("/full"));
     CHECK(!g_complete_seen);
 
-    /* B: APPEND の展開が置き場の衝突で IO → 止める、完了は表示しない */
+    /* B: 分割の 2 本目 (NORMAL2) の展開が置き場の衝突で IO → 止める。
+     * 1 本目は済み、DEBUG へは進まない、完了は表示しない */
     cdinst_setup("B_");
     EQ(vfs_mkdir("/hd0/clash"), VFS_OK);
-    EQ(install_packages('3', 0, 1), PKG_ERR_IO);
-    CHECK(exists("/full/f.txt"));
+    EQ(install_packages('3'), PKG_ERR_IO);
+    CHECK(exists("/n/a.txt"));
+    CHECK(!exists("/full"));
     CHECK(!g_complete_seen);
 
     /* D: MINIMAL の失敗 (従来から止まる) — NORMAL へ進まない */
     cdinst_setup("D_");
-    EQ(install_packages('2', 0, 0), PKG_ERR_TOOLONG);
+    EQ(install_packages('2'), PKG_ERR_TOOLONG);
     CHECK(!exists("/n"));
     CHECK(!g_complete_seen);
 
-    /* C: 全部通れば完了を表示する (DEBUG / APPEND の PKG は無い = 飛ばす) */
+    /* E: Full を選んだのに DEBUG が媒体に無い → 飛ばさず失敗、完了は表示しない */
+    cdinst_setup("E_");
+    EQ(install_packages('3'), PKG_ERR_IO);
+    CHECK(exists("/n/a.txt"));
+    CHECK(!g_complete_seen);
+
+    /* C: 全部通れば完了を表示する。NORMAL は 2 本に分かれていて両方展開する */
     cdinst_setup("C_");
-    EQ(install_packages('3', 1, 1), PKG_OK);
-    CHECK(exists("/good/a.txt") && exists("/n/a.txt") && exists("/full/f.txt"));
+    EQ(install_packages('3'), PKG_OK);
+    CHECK(exists("/good/a.txt") && exists("/n/a.txt") && exists("/n2/b.txt")
+          && exists("/full/f.txt"));
     CHECK(g_complete_seen);
     g_cd_set = (const char *)0;
 }
