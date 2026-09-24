@@ -88,3 +88,9 @@
 - **8.3 短名 (`DISK-I~1.IMG`)・予約名 (CON)・ASCII 以外の大文字小文字 → 既知の制限** (ユーザー決裁 = 推奨): HostDrv 上のファイルを別名で指したときの BUSY / pinned の保護は保証しない。影響は開発者のホスト上のファイルとそれを載せた loop に限られる。docs/06_filesystem.md にも書く。
 
 **2026-09-24 状態: 実装済み (c7f1ba2)。実装レビュー 3 ラリー + ユーザー決裁で閉じた。NP21/W で CD 新規インストール → e2fsck clean → HDD 起動 kselftest 210/210。FAT 媒体上の BUSY・IME 辞書の rm → 作り直し → 変換は NP21/W / 実機で未確認。**
+
+## NP21/W での未確認項目の確認 (2026-09-24、ユーザー指示「未確認のチェック」)
+
+- **IME 辞書の rm → 作り直し → 変換: 合格**。v63 の HDD 起動で `ime on` (辞書を開く) → `mv /db/fep.db /db/fep_moved.db` は **`Device or resource busy`** (開いている SQLite DB の rename は BUSY、決裁 ①) → `cp /db/fep.db /tmp/fep.bak` → `rm /db/fep.db` → `cp /tmp/fep.bak /db/fep.db` → `ime user list` がエラー無し → rshell を抜けてキー入力 `kanji` + 変換 → **`換字 (01/32)`** = 作り直した辞書から引けた (失効 → 接続ごと開き直し)。
+- **FAT の名前の規則: 一部合格**。FD 起動 (FAT がルート) で `rm /bin/sleep.bin.` が **INVAL**。loop に載せて固定する試験は、`.bin` を losetup が `unsupported format` で断り、1.2MB の FD に loop 用のイメージを置く空きも無いので実地では未確認 (大文字違いで BUSY になることは、実物の FatFs + fatfs_vfs を RAM の FAT12 に載せたホスト試験 fatname 段で確認済み)。
+- 観察: **NP21/W は FD を引数で渡すと FD から起動する** (HDD が起動可能でも)。以前の「FD が入っていても HDD から起動した」は、その回は FD が入っていなかったための誤認。
