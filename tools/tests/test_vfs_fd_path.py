@@ -660,6 +660,7 @@ def build(tmp, fsdir, libdir, exe_name="fdpath", extra=()):
     inc += ["-I" + str(ROOT / p) for p in
             ("include", "lib", "kernel", "drivers", "sdk/include/os32",
              "userland/lib")]
+    inc += ["-I" + str(ROOT)]   # cdinst の共有部 (userland/shell/hdprep_plan.c 等)
     exe = tmp / exe_name
     # 段 fatname は実物の FatFs (fs/fatfs/ff.c) と組む。ff.c は別の翻訳単位で、
     # <string.h> を fs/fatfs/string.h (= kstring.h) に向ける (カーネルと同じ)。
@@ -775,6 +776,8 @@ def mutants(tmp, pkgdir, e2fsck):
         shutil.copytree(ROOT / "userland/lib/rt", mdir / "lib/rt")
         (mdir / "system").mkdir()
         shutil.copy(ROOT / "userland/system/cdinst.c", mdir / "system/cdinst.c")
+        for f in ("inst_hdd.c", "inst_hdd.h", "inst_disk.c", "inst_disk.h"):
+            shutil.copy(ROOT / "userland/system" / f, mdir / "system" / f)
         # lib/kutf16.c (段 utf8 が #include する) は -I の順で写しが先に当たる
         shutil.copy(ROOT / "lib/kutf16.c", mdir / "lib/kutf16.c")
         path = mdir / fname

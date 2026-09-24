@@ -24,6 +24,8 @@
 #include <stddef.h>
 
 #include "os32api.h"
+#include "drivers/pc98pt.h"     /* 区画表を読み戻して確かめる (段 2) */
+#include "userland/system/inst_disk.h"
 
 /* ---- kprintf の捕捉 ---------------------------------------------------- */
 static char cap_buf[65536];
@@ -163,7 +165,26 @@ static struct { u32 lba; u32 cnt; } rec_wr[REC_MAX];
 static int  rec_wr_n;
 
 static int  inj_ide_write_fail_lba = -1;
+static int  inj_readback_bad_lba = -1; /* この LBA の読み戻しを 1 バイト違える */
 static int  inj_format_fail;
+static const char *inj_ls_size_name;  /* 列挙がこの名前に名乗らせる長さ */
+static u32  inj_ls_size;
+static int  inj_umount_fail;
+static int  inj_mount_stays;          /* umount しても hd0 のマウントが残る */
+static int  inj_root_hd0;             /* ルート (/) が hd0 */
+static int  hd0_mounts;               /* dev_mount_count(0) */
+static int  hd0_at_hd0;               /* /hd0 にマウントされている */
+
+/* ---- 贋の hd0: LBA 0〜31 だけを持つ (区画表・IPL・ローダの帯) ---- */
+#define DISK_MODEL_SECTS 32
+static unsigned char disk[DISK_MODEL_SECTS][512];
+static HddGeom geom;
+
+/* 起きた順の記録 ("F" format_at, "W<lba>" 書き, "M" mount, "U" umount) */
+static char ev[4096];
+static void ev_add(const char *e) { strcat(ev, e); strcat(ev, " "); }
+static u32  fmt_start, fmt_len;
+static int  fmt_calls;
 static int  inj_mount_fail;
 static const char *inj_mkdir_fail;
 static const char *inj_ls_fail;
@@ -181,7 +202,19 @@ static void rec_reset(void)
 {
     rec_open_n = rec_stat_n = rec_mkdir_n = rec_wr_n = 0;
     inj_ide_write_fail_lba = -1;
+    inj_readback_bad_lba = -1;
     inj_format_fail = 0;
+    inj_ls_size_name = NULL;
+    inj_ls_size = 0;
+    inj_umount_fail = 0;
+    inj_mount_stays = 0;
+    inj_root_hd0 = 0;
+    hd0_mounts = 0;
+    hd0_at_hd0 = 0;
+    memset(disk, 0, sizeof(disk));
+    ev[0] = '\0';
+    fmt_start = fmt_len = 0;
+    fmt_calls = 0;
     inj_mount_fail = 0;
     inj_sync_fail = 0;
     inj_mkdir_fail = NULL;
@@ -195,6 +228,33 @@ static void rec_reset(void)
     key_script = "y";
     cap_len = 0;
     cap_buf[0] = '\0';
+}
+
+/* 幾何: 8/17 の 200MB NHD (NP21/W) か、16/63 の 8GB (実機 Ra266) */
+static void geom_817(void)
+{
+    memset(&geom, 0, sizeof(geom));
+    geom.bios_queried = 1; geom.bios_valid = 1;
+    geom.bios_heads = 8; geom.bios_spt = 17; geom.bios_cyl = 3011;
+    geom.bios_seclen = 512;
+    geom.ata_def_cyl = 3011; geom.ata_def_heads = 8; geom.ata_def_spt = 17;
+    geom.ata_cur_cyl = 3011; geom.ata_cur_heads = 8; geom.ata_cur_spt = 17;
+    geom.ata_w49 = 0x0200; geom.ata_w53 = 1;
+    geom.ata_total = 409600;
+    geom.ata_present = 1; geom.addr_mode = HDD_AMODE_LBA28; geom.bios_da = 0x80;
+}
+
+static void geom_1663(void)
+{
+    memset(&geom, 0, sizeof(geom));
+    geom.bios_queried = 1; geom.bios_valid = 1;
+    geom.bios_heads = 16; geom.bios_spt = 63; geom.bios_cyl = 16382;
+    geom.bios_seclen = 512;
+    geom.ata_def_cyl = 16382; geom.ata_def_heads = 16; geom.ata_def_spt = 63;
+    geom.ata_cur_cyl = 16382; geom.ata_cur_heads = 16; geom.ata_cur_spt = 63;
+    geom.ata_w49 = 0x0200; geom.ata_w53 = 1;
+    geom.ata_total = 16514063;
+    geom.ata_present = 1; geom.addr_mode = HDD_AMODE_LBA28; geom.bios_da = 0x80;
 }
 
 static int rec_has(char list[][96], int n, const char *path)
@@ -283,25 +343,97 @@ static int fake_ide_identify(int drv, void *out)
     return 0;
 }
 
-static int fake_ide_write_sectors(int drv, u32 lba, u32 cnt, const void *buf)
+/* 1 セクタずつの書き込み (段 2 の手順は ide_write_sector だけを使う) */
+static int fake_ide_write_sector(int drv, u32 lba, const void *buf)
 {
-    (void)drv; (void)buf;
+    char e[16];
+    CHECK(drv == 0);
     if (inj_ide_write_fail_lba >= 0 && (u32)inj_ide_write_fail_lba == lba) return -1;
     if (rec_wr_n < REC_MAX) {
         rec_wr[rec_wr_n].lba = lba;
-        rec_wr[rec_wr_n].cnt = cnt;
+        rec_wr[rec_wr_n].cnt = 1;
         rec_wr_n++;
+    }
+    CHECK(lba < DISK_MODEL_SECTS);            /* 区画の中へは ext2_format_at だけ */
+    memcpy(disk[lba], buf, 512);
+    sprintf(e, "W%u", (unsigned)lba);
+    ev_add(e);
+    return 0;
+}
+
+/* 旧経路 (複数セクタ) は段 2 では使わない。呼ばれたら落とす */
+static int fake_ide_write_sectors(int drv, u32 lba, u32 cnt, const void *buf)
+{
+    (void)drv; (void)lba; (void)cnt; (void)buf;
+    CHECK(!"ide_write_sectors must not be used");
+    return -1;
+}
+
+static int fake_ide_read_sector(int drv, u32 lba, void *buf)
+{
+    CHECK(drv == 0);
+    CHECK(lba < DISK_MODEL_SECTS);
+    memcpy(buf, disk[lba], 512);
+    if (inj_readback_bad_lba >= 0 && (u32)inj_readback_bad_lba == lba && rec_wr_n > 0)
+        ((unsigned char *)buf)[7] ^= 0x5A;
+    return 0;
+}
+
+static int fake_hdd_geom_info(int drv, HddGeom *out)
+{
+    CHECK(drv == 0);
+    *out = geom;
+    return 0;
+}
+
+/* 旧経路 (区画表から位置を決める format) は段 2 では使わない */
+static int fake_ext2_format(int drv, u32 sectors)
+{ (void)drv; (void)sectors; CHECK(!"ext2_format must not be used"); return -1; }
+
+static int fake_ext2_format_at(int drv, u32 start, u32 len)
+{
+    CHECK(drv == 0);
+    fmt_calls++;
+    fmt_start = start;
+    fmt_len = len;
+    ev_add("F");
+    return inj_format_fail ? -1 : 0;
+}
+
+static int fake_sys_mount(const char *pre, const char *dev, const char *fs)
+{
+    (void)fs;
+    if (!strcmp(pre, "/hd0")) {
+        CHECK(!strcmp(dev, "hd0"));
+        ev_add("M");
+        if (inj_mount_fail) return -1;
+        hd0_mounts++;
+        hd0_at_hd0 = 1;
     }
     return 0;
 }
 
-static int fake_ext2_format(int drv, u32 sectors)
-{ (void)drv; (void)sectors; return inj_format_fail ? -1 : 0; }
+static void fake_sys_umount(const char *pre) { (void)pre; CHECK(!"use sys_umount_checked"); }
 
-static int fake_sys_mount(const char *pre, const char *dev, const char *fs)
-{ (void)pre; (void)dev; (void)fs; return inj_mount_fail ? -1 : 0; }
+static int fake_sys_umount_checked(const char *pre)
+{
+    ev_add("U");
+    if (inj_umount_fail) return -5;
+    if (!strcmp(pre, "/hd0") && hd0_at_hd0) {
+        hd0_at_hd0 = 0;
+        if (!inj_mount_stays) hd0_mounts--;
+        return 0;
+    }
+    return -2;
+}
 
-static void fake_sys_umount(const char *pre) { (void)pre; }
+static int fake_sys_is_mounted(const char *pre)
+{ return (!strcmp(pre, "/hd0") && hd0_at_hd0) ? 1 : 0; }
+
+static int fake_dev_mount_count(int drv) { CHECK(drv == 0); return hd0_mounts; }
+
+static const char *fake_vfs_devname(const char *pre)
+{ (void)pre; return inj_root_hd0 ? "hd0" : "fd0"; }
 
 static int fake_sys_mkdir(const char *path)
 {
@@ -337,6 +469,8 @@ static int fake_sys_ls(const char *path, void *cb, void *ctx)
         memset(&e, 0, sizeof(e));
         strncpy(e.name, name, sizeof(e.name) - 1);
         e.size = (u32)fx[i].size;
+        if (inj_ls_size_name && fx_same(fx[i].path, inj_ls_size_name))
+            e.size = inj_ls_size;
         e.type = (u8)(fx[i].is_dir ? OS32_FILE_TYPE_DIR : 1);
         fn(&e, ctx);
         sent++;
@@ -452,9 +586,17 @@ static void api_init(void)
     api.ide_drive_present = fake_ide_drive_present;
     api.ide_identify = fake_ide_identify;
     api.ide_write_sectors = fake_ide_write_sectors;
+    api.ide_write_sector = fake_ide_write_sector;
+    api.ide_read_sector = fake_ide_read_sector;
+    api.hdd_geom_info = fake_hdd_geom_info;
     api.ext2_format = fake_ext2_format;
+    api.ext2_format_at = fake_ext2_format_at;
     api.sys_mount = fake_sys_mount;
     api.sys_umount = fake_sys_umount;
+    api.sys_umount_checked = fake_sys_umount_checked;
+    api.sys_is_mounted = fake_sys_is_mounted;
+    api.dev_mount_count = fake_dev_mount_count;
+    api.vfs_devname = fake_vfs_devname;
     api.sys_mkdir = fake_sys_mkdir;
     api.sys_ls = fake_sys_ls;
     api.sys_open = fake_sys_open;
@@ -492,6 +634,7 @@ static void setup(void)
 {
     api_init();
     rec_reset();
+    geom_817();
     media_fixture();
 }
 
@@ -514,15 +657,15 @@ static void case_nokernel(void)
     CHECK(!rec_has(rec_stat, rec_stat_n, "/kernel.bin"));
     CHECK_NOSTR("kernel.bin");
     CHECK_NOSTR("Written KERNEL");
-    /* 生の書込みは IPL(0,1) / PT(1,1) / ローダ(2,n) の 3 回だけ。
+    /* 生の書込みは (段 2) PT(1) → ローダ(2..) → IPL(0) の順に 1 セクタずつ。
      * LBA 6 はローダの 2..17 に含まれるので「6 に書かない」とはしない。 */
-    CHECK(rec_wr_n == 3);
-    CHECK(rec_wr[0].lba == 0 && rec_wr[0].cnt == 1);
-    CHECK(rec_wr[1].lba == 1 && rec_wr[1].cnt == 1);
-    CHECK(rec_wr[2].lba == 2 && rec_wr[2].cnt == (u32)loader_sects);
+    CHECK(rec_wr_n == 2 + loader_sects);
+    CHECK(rec_wr[0].lba == 1);
+    for (i = 0; i < loader_sects; i++) CHECK(rec_wr[1 + i].lba == (u32)(2 + i));
+    CHECK(rec_wr[rec_wr_n - 1].lba == 0);
     for (i = 0; i < rec_wr_n; i++)
-        CHECK(rec_wr[i].lba <= 2);   /* ローダより後ろへの生書きは無い */
-    CHECK_STR("OS32 HDD Installer v4.1");
+        CHECK(rec_wr[i].lba < (u32)(2 + loader_sects));   /* ローダより後ろへの生書きは無い */
+    CHECK_STR("OS32 HDD Installer v5.0");
     CHECK_STR("[1/3]");
     CHECK_STR("[2/3]");
     CHECK_STR("[3/3]");
@@ -835,6 +978,417 @@ static void case_idetype(void)
     CHECK_STR("200 MB");
 }
 
+/* ========================================================================= */
+/*  段 2 (票 TASK_HDD_INSTALL 段 2 / §1-v3 N4・N6・N8・R3-1)                 */
+/* ========================================================================= */
+
+#define PLAN817_START 1632u
+#define PLAN817_LEN   407864u   /* (409600 - 1632) を 136 に切り下げ */
+#define PLAN1663_START 2016u
+#define PLAN1663_LEN   524160u  /* 256MiB を 1008 に切り下げ */
+
+/* 区画表 (標準配置) に OS32 の項目を置く */
+static void pt_std(int idx, u32 start, u32 len, u32 heads, u32 spt)
+{
+    PC98PartEntry e;
+    CHECK(pc98pt_make_os32(&e, start, len, heads, spt) == PC98PT_OK);
+    CHECK(pc98pt_put(disk[1], idx, &e) == PC98PT_OK);
+}
+
+/* 2026-09-23 までの cdinst / install が書いた旧配置の項目 (cdinst.c の
+ * write_partition_table と同じバイト列) */
+static void pt_legacy(u32 start_cyl, u32 end_cyl, u32 heads, u32 spt)
+{
+    unsigned char *pt = disk[1];
+    int i;
+    memset(pt, 0, 32);
+    pt[0] = 0x80; pt[1] = 0xE2;
+    pt[6] = 0; pt[7] = 0;
+    pt[8] = (unsigned char)(start_cyl & 0xFF); pt[9] = (unsigned char)(start_cyl >> 8);
+    pt[10] = (unsigned char)(spt - 1); pt[11] = (unsigned char)(heads - 1);
+    pt[12] = (unsigned char)(end_cyl & 0xFF); pt[13] = (unsigned char)(end_cyl >> 8);
+    pt[16] = 'O'; pt[17] = 'S'; pt[18] = '3'; pt[19] = '2';
+    for (i = 20; i < 32; i++) pt[i] = ' ';
+}
+
+static void ipl_sig(void) { disk[0][510] = 0x55; disk[0][511] = 0xAA; }
+
+/* 書く前に断った: 1 セクタも書かず、format も umount もしない */
+#define CHECK_NOTHING_WRITTEN() do { \
+    CHECK(rec_wr_n == 0); CHECK(fmt_calls == 0); \
+    CHECK(strchr(ev, 'U') == NULL); CHECK(strchr(ev, 'F') == NULL); \
+    CHECK_STR("Nothing was written"); \
+    CHECK_NOSTR("Installation complete"); } while (0)
+
+/* 出来た hd0: 区画表 (標準配置、項目 1 つ)・IPL の幾何・ローダの中身・format の範囲 */
+static void check_disk(u32 start, u32 len, u32 heads, u32 spt, u32 total)
+{
+    unsigned long st = 0, ln = 0;
+    int idx = -1, k;
+    CHECK(pc98pt_count_used(disk[1]) == 1);
+    CHECK(pc98pt_find_os32(disk[1], heads, spt, total, &idx, &st, &ln) == PC98PT_OK);
+    CHECK(idx == 0 && st == start && ln == len);
+    CHECK(disk[1][PC98PT_OFF_NAME] == 'O' && disk[1][PC98PT_OFF_NAME + 3] == '2');
+    /* IPL の [8]/[9] = 区画表の CHS の幾何 = BIOS 幾何 */
+    CHECK(disk[0][INST_IPL_OFF_HEADS] == heads && disk[0][INST_IPL_OFF_SPT] == spt);
+    CHECK(disk[0][510] == 0x55 && disk[0][511] == 0xAA);
+    for (k = 0; k < 510; k++) {
+        if (k == INST_IPL_OFF_HEADS || k == INST_IPL_OFF_SPT) continue;
+        CHECK(disk[0][k] == fx_byte(k));
+    }
+    for (k = 0; k < LOADER_LEN; k++) CHECK(disk[2 + k / 512][k % 512] == fx_byte(k));
+    CHECK(fmt_calls == 1 && fmt_start == start && fmt_len == len);
+    /* 区画の開始 = 1632 以上の最初のシリンダ境界 */
+    CHECK(start % (heads * spt) == 0 && start >= 1632 && start - (heads * spt) < 1632);
+}
+
+/* 手順の順序: [U] F W1 M W2..W17 W0 (format → 区画表 → マウント → ローダ → IPL) */
+static void check_order(int with_umount)
+{
+    char want[256];
+    int k;
+    want[0] = '\0';
+    if (with_umount) strcat(want, "U ");
+    strcat(want, "F W1 M ");
+    for (k = 2; k < 2 + LOADER_LEN / 512; k++) {
+        char e[8];
+        sprintf(e, "W%d ", k);
+        strcat(want, e);
+    }
+    strcat(want, "W0 ");
+    if (strcmp(ev, want) != 0) {
+        fprintf(stderr, "FAIL order: got '%s' want '%s'\n", ev, want);
+        exit(1);
+    }
+}
+
+/* 8/17 の NHD: 開始 1632、IPL 8/17 */
+static void case_geom817(void)
+{
+    setup();
+    CHECK(run() == 0);
+    check_disk(PLAN817_START, PLAN817_LEN, 8, 17, 409600);
+    check_order(0);
+    CHECK_STR("empty disk");
+    CHECK_NOSTR("WILL BE LOST");
+    CHECK_STR("Installation complete");
+
+    /* BIOS は 8/17 に変換、ドライブ (IDENTIFY) は 16/63 を申告する: 区画表も
+     * IPL も BIOS 幾何 (旧 install は IPL に IDENTIFY の幾何を書いた、F15) */
+    setup();
+    geom.ata_def_cyl = 16383; geom.ata_def_heads = 16; geom.ata_def_spt = 63;
+    geom.ata_cur_cyl = 16383; geom.ata_cur_heads = 16; geom.ata_cur_spt = 63;
+    CHECK(run() == 0);
+    check_disk(PLAN817_START, PLAN817_LEN, 8, 17, 409600);
+}
+
+/* 16/63 の 8GB (実機 Ra266): 開始 2016、長さは 256MiB を 1008 で切り下げ、IPL 16/63。
+ * 8/17 のまま書く旧 install なら IPL は 16/63 (IDENTIFY) で区画表は 8/17 だった (F15) */
+static void case_geom1663(void)
+{
+    setup();
+    geom_1663();
+    CHECK(run() == 0);
+    check_disk(PLAN1663_START, PLAN1663_LEN, 16, 63, 16514063);
+    check_order(0);
+    CHECK_STR("Installation complete");
+}
+
+/* モード: 再作成 (標準配置 / 旧配置 8/17) は通り、他は 1 セクタも書かずに断る */
+static void case_modes(void)
+{
+    /* 再作成 (標準配置、hdprep の一時置き場 64MiB) — マウント中なら外してから */
+    setup();
+    pt_std(0, PLAN817_START, 136u * 900u, 8, 17);
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    CHECK(run() == 0);
+    CHECK_STR("re-create the existing OS32 area");
+    CHECK_STR("ALL FILES IN IT WILL BE LOST");
+    check_disk(PLAN817_START, PLAN817_LEN, 8, 17, 409600);
+    check_order(1);
+
+    /* 再作成 16/63 (hdprep が作った 2016 の区画) */
+    setup();
+    geom_1663();
+    pt_std(0, PLAN1663_START, 1008u * 100u, 16, 63);
+    ipl_sig();
+    CHECK(run() == 0);
+    CHECK_STR("WILL BE LOST");
+    check_disk(PLAN1663_START, PLAN1663_LEN, 16, 63, 16514063);
+
+    /* 項目が表の 2 番目にあっても 1 つなら再作成。新しい表は項目 0 だけ */
+    setup();
+    pt_std(3, PLAN817_START, 136u * 900u, 8, 17);
+    CHECK(run() == 0);
+    check_disk(PLAN817_START, PLAN817_LEN, 8, 17, 409600);
+
+    /* 旧配置 (旧 cdinst / install が 8/17 の NHD に書いた表) は作り直す */
+    setup();
+    pt_legacy(12, 409600u / 136u - 1u, 8, 17);
+    ipl_sig();
+    CHECK(run() == 0);
+    CHECK_STR("old table layout");
+    CHECK_STR("WILL BE LOST");
+    check_disk(PLAN817_START, PLAN817_LEN, 8, 17, 409600);
+
+    /* 旧配置でも 16/63 ではシリンダ 12 = LBA 12,096 ≠ 2016 → 断る */
+    setup();
+    geom_1663();
+    pt_legacy(12, 2000, 16, 63);
+    ipl_sig();
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("does not start where");
+
+    /* 未知の区画 (sid 0x21、名前 MS-DOS) */
+    setup();
+    {
+        PC98PartEntry e;
+        CHECK(pc98pt_make_os32(&e, PLAN817_START, 136u * 100u, 8, 17) == PC98PT_OK);
+        e.sys_id = 0x21;
+        memcpy(e.name, "MS-DOS 6.20     ", 16);
+        CHECK(pc98pt_put(disk[1], 0, &e) == PC98PT_OK);
+    }
+    ipl_sig();
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("OS32 did not create");
+
+    /* sid は OS32 だが名前が違う */
+    setup();
+    pt_std(0, PLAN817_START, 136u * 100u, 8, 17);
+    disk[1][PC98PT_OFF_NAME] = 'X';
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("OS32 did not create");
+
+    /* 2 項目 (OS32 + もう 1 つ) */
+    setup();
+    pt_std(0, PLAN817_START, 136u * 100u, 8, 17);
+    pt_std(1, PLAN817_START + 136u * 100u, 136u * 100u, 8, 17);
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("two or more partitions");
+
+    /* OS32 の項目だが開始が期待値でない (シリンダ 13) */
+    setup();
+    pt_std(0, PLAN817_START + 136u, 136u * 100u, 8, 17);
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("does not start where");
+
+    /* 区画項目が無いのに LBA 0 に 55AA */
+    setup();
+    ipl_sig();
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("55AA");
+
+    /* OS32 の項目が壊れている (どちらの配置でも範囲にならない) */
+    setup();
+    disk[1][0] = 0x80; disk[1][1] = 0xE2;
+    disk[1][8] = 200;       /* 標準: 開始セクタ 200 >= 17、旧: 開始シリンダ 200 > 終了 0 */
+    memcpy(disk[1] + 16, "OS32            ", 16);
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("entry is broken");
+}
+
+/* 事前検査の各失敗: 1 セクタも書かない (段 2-11、N6、N8) */
+static void case_preflight(void)
+{
+    /* 大きさの境界: ローダ 8192 と vmkernel 508KiB ちょうどは通る */
+    setup();
+    fx_put("/VMKRNL.LZ4", 508 * 1024);
+    CHECK(run() == 0);
+    CHECK(fx_size("/hd0/boot/vmkernel.lz4") == 508 * 1024);
+
+    setup();
+    fx_put("/VMKRNL.LZ4", 508 * 1024 + 1);
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("vmkernel.lz4 is empty or larger than 508 KiB");
+
+    setup();
+    fx_put("/SYS/LOADER_H.BIN", 8193);
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("larger than 8192");
+
+    setup();
+    fx_put("/SYS/BOOT_HDD.BIN", 513);
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("larger than 512");
+
+    /* 展開先の容量: FD の 1 本が 300MB を名乗る (列挙の長さで数える) */
+    setup();
+    inj_ls_size_name = "/BIN/LS.BIN";
+    inj_ls_size = 300u * 1024u * 1024u;
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("do not fit");
+
+    /* 列挙の失敗は書く前に分かる (容量を数えられない) */
+    setup();
+    inj_ls_fail = "/sbin";
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+
+    /* BIOS 幾何が無い (FD ローダが問い合わせていない) */
+    setup();
+    geom.bios_valid = 0;
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("no BIOS geometry");
+
+    /* I/O が既定の CHS しか無い */
+    setup();
+    geom.addr_mode = HDD_AMODE_CHS_DEF;
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+
+    /* ディスクが小さすぎる */
+    setup();
+    geom.ata_total = 5000;
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("too small");
+
+    /* ルートが hd0 (HDD 起動中の自分自身) */
+    setup();
+    inj_root_hd0 = 1;
+    hd0_mounts = 1;
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("root file system");
+
+    /* 別の場所にマウントされている (/hd0 ではない) → 外せないので断る */
+    setup();
+    hd0_mounts = 1; hd0_at_hd0 = 0;
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 0 && fmt_calls == 0);
+    CHECK_STR("still mounted");
+
+    /* umount_checked が失敗 (sync の失敗など) */
+    setup();
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    inj_umount_fail = 1;
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 0 && fmt_calls == 0);
+    CHECK_STR("umount /hd0 failed");
+    CHECK_NOSTR("INCOMPLETE");
+
+    /* umount したのにまだ残っている */
+    setup();
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    inj_mount_stays = 1;
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 0 && fmt_calls == 0);
+    CHECK_STR("still mounted");
+
+    /* 承認しなければ umount もしない */
+    setup();
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    key_script = "n";
+    CHECK(run() == 0);
+    CHECK(rec_wr_n == 0 && fmt_calls == 0 && ev[0] == '\0');
+}
+
+/* 書いた後の失敗: INCOMPLETE と出して止まり、完了とは言わない (R3-1) */
+static void case_incomplete(void)
+{
+    /* format の失敗 → 区画表は書かない (次の実行は空のディスクとして通る) */
+    setup();
+    inj_format_fail = 1;
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 0);
+    CHECK_STR("INCOMPLETE");
+    CHECK_NOSTR("Installation complete");
+
+    /* 区画表の読み戻しが違う → マウントもローダ / IPL も書かない */
+    setup();
+    inj_readback_bad_lba = 1;
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 1 && rec_wr[0].lba == 1);
+    CHECK(strchr(ev, 'M') == NULL);
+    CHECK_STR("INCOMPLETE: partition table");
+    CHECK_NOSTR("Installation complete");
+
+    /* 通常のマウントの失敗 → ローダ / IPL を書かない */
+    setup();
+    inj_mount_fail = 1;
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 1 && rec_wr[0].lba == 1);
+    CHECK(disk[0][510] == 0);
+    CHECK_STR("INCOMPLETE: mount /hd0");
+    CHECK_NOSTR("Installation complete");
+
+    /* ローダの読み戻しが違う → IPL を書かない */
+    setup();
+    inj_readback_bad_lba = 5;
+    CHECK(run() == 1);
+    CHECK(disk[0][510] == 0);
+    CHECK_STR("INCOMPLETE: loader");
+
+    /* IPL の読み戻しが違う → 展開しない */
+    setup();
+    inj_readback_bad_lba = 0;
+    CHECK(run() == 1);
+    CHECK(!fx_exists("/hd0/boot/vmkernel.lz4"));
+    CHECK_STR("INCOMPLETE: IPL");
+
+    /* 展開 (コピー) と sync の失敗も INCOMPLETE (完了とは言わない) */
+    setup();
+    inj_read_neg = "/BIN/LS.BIN";
+    CHECK(run() == 1);
+    CHECK_STR("INCOMPLETE");
+    CHECK_NOSTR("Installation complete");
+
+    setup();
+    inj_sync_fail = 1;
+    CHECK(run() == 1);
+    CHECK_STR("INCOMPLETE");
+    CHECK_NOSTR("Installation complete");
+}
+
+/* 途中で止まった hd0 は次の実行で入れ直せる (空 / 再作成のどちらかになる) */
+static void case_rerun(void)
+{
+    static unsigned char keep[DISK_MODEL_SECTS][512];
+
+    /* マウントの失敗の後 (区画表だけ書いた) → 再作成モードで通る */
+    setup();
+    inj_mount_fail = 1;
+    CHECK(run() == 1);
+    memcpy(keep, disk, sizeof(keep));
+    setup();
+    memcpy(disk, keep, sizeof(keep));
+    CHECK(run() == 0);
+    CHECK_STR("re-create the existing OS32 area");
+    check_disk(PLAN817_START, PLAN817_LEN, 8, 17, 409600);
+
+    /* format の失敗の後 → 空のディスクとして通る */
+    setup();
+    inj_format_fail = 1;
+    CHECK(run() == 1);
+    memcpy(keep, disk, sizeof(keep));
+    setup();
+    memcpy(disk, keep, sizeof(keep));
+    CHECK(run() == 0);
+    CHECK_STR("empty disk");
+
+    /* 完了した hd0 をもう一度入れ直す (再作成) */
+    setup();
+    CHECK(run() == 0);
+    memcpy(keep, disk, sizeof(keep));
+    setup();
+    memcpy(disk, keep, sizeof(keep));
+    CHECK(run() == 0);
+    CHECK_STR("WILL BE LOST");
+    check_disk(PLAN817_START, PLAN817_LEN, 8, 17, 409600);
+}
+
 /* 段 fdset (tools/tests/test_packages.py case 9): argv[2] の一覧 (1 行
  * "<FD 上のパス> <大きさ>") を FAT の媒体として並べて install を通し、
  * /hd0 に出来たファイルを "<パス> <大きさ>" で argv[3] へ書く。
@@ -847,6 +1401,7 @@ static void case_fdset(const char *list, const char *out)
 
     api_init();
     rec_reset();
+    geom_817();
     for (i = 0; i < FD_MAX; i++) fds[i].used = 0;
     fx_reset();
     fx_dir("/");
@@ -894,6 +1449,12 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "srcname")) case_srcname();
     else if (!strcmp(argv[1], "sync_fail")) case_sync_fail();
     else if (!strcmp(argv[1], "idetype")) case_idetype();
+    else if (!strcmp(argv[1], "geom817")) case_geom817();
+    else if (!strcmp(argv[1], "geom1663")) case_geom1663();
+    else if (!strcmp(argv[1], "modes")) case_modes();
+    else if (!strcmp(argv[1], "preflight")) case_preflight();
+    else if (!strcmp(argv[1], "incomplete")) case_incomplete();
+    else if (!strcmp(argv[1], "rerun")) case_rerun();
     else if (!strcmp(argv[1], "fdset") && argc >= 4) case_fdset(argv[2], argv[3]);
     else return 2;
     printf("PASS %s\n", argv[1]);

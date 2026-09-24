@@ -86,8 +86,8 @@
   heads × spt、終了ヘッド・セクタは読まない)。OS32 の区画 = sid 0xE2 の最初の項目。読み手は
   `fs/ext2_super.c` (`ext2_find_partition`)・`boot/boot_main.c` (+ `boot_debug.c`)・`fs/fatfs_vfs.c`
   (`PC98PartEntry` を共有、`pc98pt_get` で読む)・`userland/shell/cmd_hdprep.c`。ホスト側は
-  `tools/pc98pt.py` (C と 1 バイトずつ突き合わせる)。**cdinst / install の書き手は段 2 まで旧配置のまま**
-  (並行作業との分担) — v64 のカーネルで CD インストールすると format が `EXT2_ERR_NOPART` で止まる。
+  `tools/pc98pt.py` (C と 1 バイトずつ突き合わせる)。cdinst / install の書き手は段 2 で標準配置に移した
+  (下の「段 2 の実装メモ」)。
 - **`ext2_find_partition(drive, &start, &len)`**: 失敗 (`EXT2_ERR_IO` / `EXT2_ERR_NOPART` = -13) を返す。
   1088 のフォールバックは廃止。CHS → LBA は `bootinfo_part_geom` (DA 80h/81h の BIOS 幾何、無ければ
   IDENTIFY の既定)、終わりは IDENTIFY の総数の内側。マウントは FS が区画より大きければ断り、
@@ -136,6 +136,42 @@
 9. cdinst / install を段 1 の共有部 (区画表・幾何・検査) に乗せる。IPL の `[8]/[9]` には段 0 の BIOS 幾何を書く。区画開始 = LBA 1632 以上の最初の BIOS シリンダ境界 (8/17 なら 1632、16/63 なら 2016)。
 10. 既存区画の再利用は**今回しない** (区画表を 2 回書く現行経路、`/sys` の mkdir 失敗、上書きの扱いが未整理 — Codex B7)。インストールは段 1 の区画を**作り直す** (その旨を確認画面で表示)。一時置き場のデータは失われることを明記。
 11. 事前検査: パッケージの必須内容・ローダ 8192B 以下・展開先の容量。追加パッケージ・sync の失敗で「完了」と言わない。
+
+#### 段 2 の実装メモ (2026-09-24、wt/hdd-stage2、KAPI 変更なし)
+
+- **共有部**: `userland/system/inst_disk.c` (純粋: モードの判定・媒体の大きさ・容量の見積もり・IPL と区画表の
+  組み立て) と `inst_hdd.c` (KAPI で hd0 を検査して書く手順)。cdinst と install の両方がこれを繋ぐ
+  (`build/programs.mk` の `INST_OBJ`)。幾何と計画は hdprep と同じ `hdprep_plan.c`、区画表は `pc98pt.c`、
+  ext2 の配置は `fs/ext2_layout.c` をそのまま組む (写さない)。
+- **計画**: `hdprep_plan(g, 256)` — 開始 = 1632 以上の最初の BIOS シリンダ境界、長さ = 256MiB を
+  シリンダへ切り下げ (上限は BIOS 幾何・IDENTIFY の総数・ATA の方式の最小)。区画表と IPL の [8]/[9] は
+  BIOS 幾何 (旧 install が IPL に書いた IDENTIFY の幾何は使わない、F15)。
+- **モード** (`inst_classify`): 区画項目 0 で LBA 0 に 55AA 無し = 空。項目がちょうど 1 つで sid 0xE2・名前
+  "OS32" (後ろは空白か NUL)・開始 = 計画の開始なら**再作成**。**判断**: 旧配置の OS32 の 1 項目も、旧配置で
+  読んだ開始が計画の開始と同じとき (= 8/17 の NHD、シリンダ 12 = LBA 1632) は再作成の対象にした (PM の推奨、
+  これまでの CD / FD インストールで作った NHD を入れ直せる)。16/63 ではシリンダ 12 は LBA 12,096 で
+  期待値 2016 と違うので断る (実機に旧配置は無い)。それ以外 (未知の区画・2 項目以上・開始違い・
+  どちらの配置でも読めない項目・空の表で 55AA) は断る。再作成では確認画面に「一時置き場 (/hd0) の
+  ファイルは全部消える」と出す。
+- **順序** (R3-1): 全検査 (媒体 → hd0 の幾何・モード・マウント → 大きさ・容量) → 表示 → 承認 (y) →
+  `inst_hdd_release` (hd0 がマウント中なら `sys_umount_checked("/hd0")`、その後 `dev_mount_count(0)` が 0 で
+  なければ断る — ここまでは 1 セクタも書かない) → `ext2_format_at` → 区画表 (項目 0 だけ、他は 0) →
+  読み戻し比較 → `sys_mount("/hd0")` → ローダ (LBA 2〜、512 B ずつ書いて読み戻し) → IPL (LBA 0) →
+  ディレクトリ → 展開 → sync。書いた後の失敗は `INCOMPLETE:` と出し、「完了」は出さない。
+  ローダと IPL をマウントの確認の**後**に書くので、どこで止まっても次の実行は通る (format の失敗なら
+  空のディスク、区画表の後なら再作成)。
+- **事前検査**: cdinst は選んだ型のパッケージを全部 `pkg_parse` し、前置 (/hd0) の溢れ・MINIMAL の
+  `/boot/vmkernel.lz4` と `/sys/shell.bin`・BOOT.PKG の boot_hdd.bin / loader_hdd.bin (無圧縮)・大きさ・容量を
+  書く前に見る (以前は展開の途中で溢れに気付いた)。install は FD を書く前に一度列挙して数える (列挙の
+  失敗もここで分かる)。容量は `ext2_layout_plan` から空き (ブロック・inode) を出し、ファイルごとの
+  データ + 間接ブロック、ディレクトリ 1 ブロック、項目 16 件に 1 ブロック、余白 256 ブロックと比べる。
+  空きの計算は実物の `ext2_format_at` の像の dumpe2fs と一致する (試験)。
+- **ext2_mini の上限** (N8) と **容量表示の 32 ビットの溢れ** (`ide.c` の `size_mb`) は段 0 で直っていた
+  (431822e)。この段では ext2_mini に試験を付けた。
+- **使わなくなった経路**: cdinst / install は `ext2_format` (区画表を読んで位置を決める)・`ide_write_sectors`・
+  `sys_umount` (void) を呼ばない。HDD の自動検出 (`dev_get_info` の hd*) もやめ、hd0 = DA 80h だけを扱う。
+- 試験: `make check-hdd-stage2-host` (`tools/tests/test_hdd_stage2.py`、記録 `tools/tests/hdd_stage2_tdd.md`)、
+  `make check-install-fresh-host` (install.c の段 2 のケース 6 本)。
 
 ### 段 3 — CD インストール → HDD 起動
 

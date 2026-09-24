@@ -30,13 +30,24 @@ CASES = [
     "srcname",    # ソース名の綴り保持 / 正常 EOF での長さ不一致
     "sync_fail",  # (6) vfs_sync の失敗で 1
     "idetype",    # (7) IdeInfo は 96 B の実型
+    # 段 2 (票 TASK_HDD_INSTALL): 共有部 inst_hdd.c / inst_disk.c と組んで回す
+    "geom817",    # 8/17: 区画表の開始 1632・IPL [8]/[9] = 8/17・format の範囲・順序
+    "geom1663",   # 16/63 (実機): 開始 2016・IPL 16/63・256MiB を 1008 で切り下げ
+    "modes",      # 空・再作成 (標準 / 旧配置 8/17)・未知・2 項目・開始違い・55AA・壊れ・旧配置 16/63
+    "preflight",  # 大きさ (IPL / ローダ / vmkernel)・容量・幾何・ルート・マウントで 1 セクタも書かない
+    "incomplete", # format / 区画表の読み戻し / マウント / ローダ / IPL / コピー / sync の失敗は INCOMPLETE
+    "rerun",      # 途中で止まった hd0 を入れ直せる
 ]
 
 INC = ["-I" + str(ROOT / p) for p in
-       ("include", "sdk/include", "sdk/include/os32", "userland/lib")]
+       ("include", "sdk/include", "sdk/include/os32", "userland/lib")] + ["-I" + str(ROOT)]
+# 段 2: install.c が繋ぐ共有部 (build/programs.mk の INST_OBJ と同じ顔ぶれ)。
+# 写さずに実物を別の翻訳単位として組む。
+SHARED = ["userland/system/inst_hdd.c", "userland/system/inst_disk.c",
+          "userland/shell/hdprep_plan.c", "drivers/pc98pt.c", "fs/ext2_layout.c"]
 
 
-def build(tmp, sanitize, extra=()):
+def build(tmp, sanitize, extra=(), root=ROOT):
     exe = str(tmp / "installfresh")
     san = (["-fsanitize=address", "-fno-omit-frame-pointer"]
            if sanitize else [])
@@ -44,8 +55,10 @@ def build(tmp, sanitize, extra=()):
                     "-Wdeclaration-after-statement", "-Wno-unused-function",
                     "-Wno-pointer-to-int-cast", "-D__cdecl=",
                     "-D__OS32_USERLAND__", "-O0",
-                    *san, *extra, *INC,
+                    *san, *extra, "-I" + str(root / "userland/system"),
+                    "-I" + str(root), *INC,
                     str(ROOT / "tools/tests/install_fresh_host.c"),
+                    *[str(root / f) for f in SHARED],
                     "-o", exe], check=True)
     print("HOST GNU89 -Werror compile PASS (real install.c normal path)",
           flush=True)

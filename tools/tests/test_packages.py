@@ -809,12 +809,20 @@ def run_install_fdset(install_src, fd_files):
         shutil.copy(INSTALL_HARNESS, hdir)
         exe = os.path.join(tmp, 'a.out')
         inc = ['-I' + os.path.join(ROOT, d) for d in
-               ('include', 'sdk/include', 'sdk/include/os32', 'userland/lib')]
+               ('include', 'sdk/include', 'sdk/include/os32', 'userland/lib',
+                'userland/system', '')]
+        # install.c が繋ぐ hd0 の共有部 (票 TASK_HDD_INSTALL 段 2、
+        # build/programs.mk の INST_OBJ と同じ顔ぶれ)
+        shared = [os.path.join(ROOT, f) for f in
+                  ('userland/system/inst_hdd.c', 'userland/system/inst_disk.c',
+                   'userland/shell/hdprep_plan.c', 'drivers/pc98pt.c',
+                   'fs/ext2_layout.c')]
         r = subprocess.run(['gcc', '-std=gnu89', '-Wall', '-Wextra', '-Werror',
                             '-Wdeclaration-after-statement', '-Wno-unused-function',
                             '-Wno-pointer-to-int-cast', '-D__cdecl=',
                             '-D__OS32_USERLAND__', '-O0', *inc,
-                            os.path.join(hdir, 'install_fresh_host.c'), '-o', exe],
+                            os.path.join(hdir, 'install_fresh_host.c'), *shared,
+                            '-o', exe],
                            capture_output=True, text=True)
         if r.returncode != 0:
             print(r.stderr[-2000:])

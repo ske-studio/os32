@@ -222,8 +222,10 @@ make nhd-migrate-pt           # = python3 tools/nhd_deploy.py migrate-pt (push �
 書き直す (カーネル → ローダ → 区画表の順、区画表は読み戻して比較)。それ以外は NHD を
 1 バイトも変えずに断る。既に標準配置なら何も書かない。`--no-push` で NP21/W 側へ送らずに
 止められる。確認は起動 → `/` のマウント → 既存ファイルの md5 (受入 H2)。
-CD インストーラ (`cdinst` / `install`) は段 2 まで**旧配置で書く**ので、v64 のカーネルで
-CD から入れた HDD は区画が見つからず format で止まる (段 2 で直す)。
+CD / FD のインストーラ (`cdinst` / `install`) は段 2 から標準配置・BIOS 幾何で書く。
+空の hd0 か OS32 の区画 1 つ (旧配置の 8/17 の NHD を含む) を**作り直す**ので、旧配置の NHD は
+`migrate-pt` の代わりに入れ直してもよい (中のファイルは消える)。規則は
+[TASK_HDD_INSTALL](tasks/realhw/TASK_HDD_INSTALL.md) の「段 2 の実装メモ」。
 
 - **旧配置の NHD には下の HostDrv の手順 (`make deploy` → ゲストで `hsync boot`) を使わない。**
   カーネルだけが v64 になり、次の起動で `/` がマウントできない (ローダは旧いままなので起動は

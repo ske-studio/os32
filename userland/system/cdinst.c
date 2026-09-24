@@ -11,14 +11,23 @@
 /*    タグから tools/mkpkg.py --plan が作る (構成は build/packages.yaml)     */
 /*  - 128 項目を超えるパッケージは NAME.PKG, NAME2.PKG, … に分かれている。   */
 /*    連番を欠けるまで順に展開する                                          */
-/*  - BOOT.PKG はブートセクタ直接書込み (IPL/PT/Loader/Kernel)              */
+/*  - BOOT.PKG はブートセクタ直接書込み (IPL / ローダ)                       */
 /*  - 他のPKGは /hd0 マウントポイントにファイルシステム展開                  */
+/*  v3.0 (票 TASK_HDD_INSTALL 段 2): hd0 の扱いを FD の install と共通の     */
+/*    inst_hdd.c / inst_disk.c に移した。区画表は PC-98 標準配置、IPL の      */
+/*    [8]/[9] と区画の CHS は BIOS 幾何、区画は LBA 1632 以上の最初の BIOS    */
+/*    シリンダ境界から 256MiB まで。空のディスクか OS32 の項目 1 つ (再作成) */
+/*    だけを扱う。**全検査** (パッケージの必須の中身・ローダ ≤ 8192 B・      */
+/*    vmkernel.lz4 ≤ 508KiB・展開先の容量・hd0 の幾何とモードとマウント) → */
+/*    ext2_format_at → 区画表 → 読み戻し → マウント → ローダ / IPL → 展開 →  */
+/*    sync の順。どこかで失敗すれば「完了」とは言わない。                    */
 /* ======================================================================== */
 
 #define OS32_DBG_SERIAL
 #include "os32api.h"
 #include "rt/dbgserial.h"
 #include "rt/pkg.h"
+#include "inst_hdd.h"
 
 #define CD_MOUNT "/cd0"
 #define HDD_MOUNT "/hd0"
@@ -35,15 +44,12 @@
 /* "/cd0/" + 8 文字 + ".PKG" + NUL */
 #define PKG_PATH_BUF     32
 
-/* PC-98ジオメトリ定数 */
-#define PC98_HEADS   8
-#define PC98_SECTORS 17
-#define PC98_CYL0_SECTORS  (PC98_HEADS * PC98_SECTORS)  /* 136 */
-/* ブート予約シリンダ数。LBA 0=IPL / 1=PT / 2..5=loader / 6..=kernel.bin /
- * 262..=sqlite.bin を収めるため 12 シリンダ (1632 セクタ) 必要。
- * tools/nhd_deploy.py の HDD_PARTITION_LBA と必ず一致させること。 */
-#define PC98_BOOT_CYLS     12
-#define HDD_PARTITION_LBA  (PC98_CYL0_SECTORS * PC98_BOOT_CYLS)  /* 1632 */
+/* MINIMAL に無ければ HDD から起動できない物 (段 2-11 の必須の中身) */
+#define PKG_NEED_KERNEL  "/boot/vmkernel.lz4"
+#define PKG_NEED_SHELL   "/sys/shell.bin"
+/* BOOT.PKG の中の名前 (build/packages.yaml の boot:) */
+#define BOOT_IPL_NAME    "boot_hdd.bin"
+#define BOOT_LOADER_NAME "loader_hdd.bin"
 
 /* 色定数 */
 #define COL_TITLE  (0xE1 | 0x40)
@@ -163,160 +169,159 @@ static int str_endswith(const char *s, const char *suffix)
 }
 
 /* ======================================================================== */
-/*  パーティションテーブル作成 (LBA 1)                                       */
+/*  BOOT.PKG の読み込み (承認前。書くのはマウントの確認の後)                 */
+/*  boot_hdd.bin → LBA 0 (IPL)、loader_hdd.bin → LBA 2〜                    */
+/*  注: kernel.bin の生書き込みは廃止した (loader v3 は ext2 の             */
+/*  /boot/vmkernel.lz4 を読む)。                                            */
 /* ======================================================================== */
 
-static int write_partition_table(int ide_drv, u32 total_sectors)
+typedef struct {
+    u8        *data;            /* BOOT.PKG のデータ部 (mem_alloc) */
+    const u8  *ipl;
+    u32        ipl_len;
+    const u8  *loader;
+    u32        loader_len;
+} BootImg;
+
+static void boot_img_free(BootImg *b)
 {
-    u8 pt[512];
-    u32 end_cyl;
-    int i;
-
-    for (i = 0; i < 512; i++) pt[i] = 0;
-
-    pt[0] = 0x80;  /* bootable */
-    pt[1] = 0xE2;  /* system type: ext2 */
-
-    pt[6] = 0;               /* start sector */
-    pt[7] = 0;               /* start head */
-    pt[8] = PC98_BOOT_CYLS;  /* start cylinder low */
-    pt[9] = 0;               /* start cylinder high */
-
-    end_cyl = (total_sectors / PC98_CYL0_SECTORS) - 1;
-    pt[10] = (u8)(PC98_SECTORS - 1);
-    pt[11] = (u8)(PC98_HEADS - 1);
-    pt[12] = (u8)(end_cyl & 0xFF);
-    pt[13] = (u8)((end_cyl >> 8) & 0xFF);
-
-    pt[16] = 'O'; pt[17] = 'S'; pt[18] = '3'; pt[19] = '2';
-    for (i = 20; i < 32; i++) pt[i] = ' ';
-
-    return api->ide_write_sector(ide_drv, 1, pt);
+    if (b->data) api->mem_free(b->data);
+    b->data = 0;
 }
 
-/* ======================================================================== */
-/*  BOOT.PKG → IDEセクタ直接書き込み                                         */
-/*  boot_hdd.bin→LBA0, loader_hdd.bin→LBA2+, kernel.bin→LBA6+             */
-/* ======================================================================== */
-
-static int install_boot_sectors(int ide_drv, u32 total_sectors)
+/* 戻り値 0 = IPL とローダが揃った。失敗は表示して負 (何も書いていない) */
+static int load_boot_pkg(BootImg *b)
 {
-    PkgInfo info;
-    int ret, i;
-    u8 *data_buf;
-    u32 comp_size;
-    int rd;
+    static PkgInfo info;
+    u32 comp_size, offset;
+    int ret, i, rd, fd;
 
-    print(COL_CYAN, "\n  Installing boot sectors...");
+    b->data = 0;
+    b->ipl = 0;
+    b->loader = 0;
+    b->ipl_len = 0;
+    b->loader_len = 0;
 
     ret = pkg_parse(api, PKG_BOOT, &info);
     if (ret != PKG_OK) {
-        println(COL_RED, " BOOT.PKG parse failed");
+        api->kprintf(COL_RED, "  BOOT.PKG parse failed (rc=%d)\n", ret);
         return ret;
     }
-
     DBGF("[cdinst] BOOT.PKG: %d files, flags=0x%02x",
          info.entry_count, info.header.flags);
 
     /* BOOT.PKGは非圧縮でなければならない */
     if (info.header.flags & PKG_FLAG_LZSS) {
-        println(COL_RED, " BOOT.PKG must not be LZSS compressed");
+        println(COL_RED, "  BOOT.PKG must not be LZSS compressed");
         return PKG_ERR_CORRUPT;
     }
 
     comp_size = info.header.comp_size;
-    data_buf = (u8 *)api->mem_alloc(comp_size);
-    if (!data_buf) {
-        println(COL_RED, " out of memory");
+    if (comp_size == 0) {
+        println(COL_RED, "  BOOT.PKG has no data");
+        return PKG_ERR_CORRUPT;
+    }
+    b->data = (u8 *)api->mem_alloc(comp_size);
+    if (!b->data) {
+        println(COL_RED, "  out of memory (BOOT.PKG)");
         return PKG_ERR_NOMEM;
     }
-
-    /* データ部を読み込み */
-    {
-        int fd = api->sys_open(PKG_BOOT, KAPI_O_RDONLY);
-        if (fd < 0) {
-            api->mem_free(data_buf);
-            return PKG_ERR_IO;
-        }
-
-        /* pkg_parseで計算済みのdata_offsetを使用 */
-        api->sys_lseek(fd, (int)info.data_offset, SEEK_SET);
-        rd = api->sys_read(fd, data_buf, (int)comp_size);
-        api->sys_close(fd);
-
-        if (rd != (int)comp_size) {
-            api->mem_free(data_buf);
-            return PKG_ERR_IO;
-        }
+    fd = api->sys_open(PKG_BOOT, KAPI_O_RDONLY);
+    if (fd < 0) { boot_img_free(b); return PKG_ERR_IO; }
+    api->sys_lseek(fd, (int)info.data_offset, SEEK_SET);
+    rd = api->sys_read(fd, b->data, (int)comp_size);
+    api->sys_close(fd);
+    if (rd != (int)comp_size) {
+        println(COL_RED, "  BOOT.PKG is truncated");
+        boot_img_free(b);
+        return PKG_ERR_IO;
     }
 
-    /* 各ファイルをIDEセクタに書き込み */
-    {
-        u32 offset = 0;
-
-        for (i = 0; i < info.entry_count; i++) {
-            const PkgEntry *ent = &info.entries[i];
-            u8 *fdata;
-            int fsize, nsects;
-
-            if (ent->type != PKG_TYPE_FILE) continue;
-            if (offset + ent->size > (u32)rd) break;
-
-            fdata = data_buf + offset;
-            fsize = (int)ent->size;
-
-            if (str_endswith(ent->path, "boot_hdd.bin")) {
-                /* IPL → LBA 0 */
-                u8 ipl[512];
-                int j;
-                for (j = 0; j < 512; j++) ipl[j] = 0;
-                for (j = 0; j < fsize && j < 512; j++) ipl[j] = fdata[j];
-                ipl[8] = PC98_HEADS;
-                ipl[9] = PC98_SECTORS;
-                ipl[510] = 0x55;
-                ipl[511] = 0xAA;
-
-                ret = api->ide_write_sector(ide_drv, 0, ipl);
-                if (ret != 0) {
-                    api->kprintf(COL_RED, " IPL write err=%d\n", ret);
-                    api->mem_free(data_buf);
-                    return -1;
-                }
-                DBGF("[cdinst] IPL written LBA0 (%d bytes)", fsize);
-            }
-            else if (str_endswith(ent->path, "loader_hdd.bin")) {
-                /* ローダ → LBA 2+ */
-                nsects = (fsize + 511) / 512;
-                ret = api->ide_write_sectors(ide_drv, 2, nsects, fdata);
-                if (ret != 0) {
-                    api->kprintf(COL_RED, " Loader write err=%d\n", ret);
-                    api->mem_free(data_buf);
-                    return -1;
-                }
-                DBGF("[cdinst] Loader written LBA2 (%d bytes)", fsize);
-            }
-            /* 注: kernel.bin の LBA 6 への生書き込みは廃止した。
-             * IPL (boot_hdd.asm) は LBA 2 から 16 セクタを読むため、
-             * ローダ領域は LBA 2..17 を占有し LBA 6 と衝突する。
-             * loader v3 はカーネルを ext2 上の /boot/vmkernel.lz4 から
-             * 読むので、生カーネルの書き込み自体が不要。 */
-
-            offset += ent->size;
+    offset = 0;
+    for (i = 0; i < info.entry_count; i++) {
+        const PkgEntry *ent = &info.entries[i];
+        if (ent->type != PKG_TYPE_FILE) continue;
+        if (ent->size > comp_size - offset) {
+            println(COL_RED, "  BOOT.PKG table does not match its data");
+            boot_img_free(b);
+            return PKG_ERR_CORRUPT;
         }
+        if (str_endswith(ent->path, BOOT_IPL_NAME)) {
+            b->ipl = b->data + offset;
+            b->ipl_len = ent->size;
+        } else if (str_endswith(ent->path, BOOT_LOADER_NAME)) {
+            b->loader = b->data + offset;
+            b->loader_len = ent->size;
+        }
+        offset += ent->size;
     }
-
-    api->mem_free(data_buf);
-
-    /* パーティションテーブル → LBA 1 */
-    ret = write_partition_table(ide_drv, total_sectors);
-    if (ret != 0) {
-        api->kprintf(COL_RED, " PT write err=%d\n", ret);
-        return -1;
+    if (!b->ipl || !b->loader) {
+        api->kprintf(COL_RED, "  BOOT.PKG lacks %s\n",
+                     !b->ipl ? BOOT_IPL_NAME : BOOT_LOADER_NAME);
+        boot_img_free(b);
+        return PKG_ERR_CORRUPT;
     }
-    DBG("[cdinst] PT written LBA1");
-
-    println(COL_GREEN, " OK");
     return 0;
+}
+
+/* ======================================================================== */
+/*  展開の事前検査 (承認前): 選んだ型のパッケージを全部 pkg_parse し、       */
+/*  前置 (/hd0) で溢れる項目・必須の中身・要る容量を見る。                   */
+/*  戻り値 0 = 通る。kernel_len に MINIMAL の /boot/vmkernel.lz4 の長さ。    */
+/* ======================================================================== */
+
+static int path_eq(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+static int measure_packages(int choice, InstNeed *need, u32 *kernel_len)
+{
+    static const char *const bases[4] = {
+        PKG_BASE_MINIMAL, PKG_BASE_GUI, PKG_BASE_NORMAL, PKG_BASE_DEBUG
+    };
+    static const char need_from[4] = { '1', '2', '2', '3' };
+    static PkgInfo info;
+    char path[PKG_PATH_BUF];
+    int b, n, count, i, ret, have_shell = 0;
+
+    *kernel_len = 0;
+    for (b = 0; b < 4; b++) {
+        if (choice < need_from[b]) continue;
+        count = pkg_series_count(bases[b]);
+        for (n = 1; n <= count; n++) {
+            pkg_series_path(path, bases[b], n);
+            ret = pkg_parse(api, path, &info);
+            if (ret != PKG_OK) {
+                api->kprintf(COL_RED, "  %s: parse failed (rc=%d)\n", path, ret);
+                return ret;
+            }
+            i = pkg_first_overflow(&info, 4);   /* strlen("/hd0") */
+            if (i >= 0) {
+                api->kprintf(COL_RED, "  %s: PATH TOO LONG: %s\n", path,
+                             info.entries[i].path);
+                return PKG_ERR_TOOLONG;
+            }
+            for (i = 0; i < info.entry_count; i++) {
+                const PkgEntry *ent = &info.entries[i];
+                if (ent->type == PKG_TYPE_DIR) {
+                    inst_need_dir(need);
+                    continue;
+                }
+                inst_need_file(need, ent->size);
+                if (b != 0) continue;
+                if (path_eq(ent->path, PKG_NEED_KERNEL)) *kernel_len = ent->size;
+                if (path_eq(ent->path, PKG_NEED_SHELL)) have_shell = 1;
+            }
+        }
+    }
+    if (*kernel_len == 0 || !have_shell) {
+        api->kprintf(COL_RED, "  MINIMAL.PKG lacks %s\n",
+                     *kernel_len == 0 ? PKG_NEED_KERNEL : PKG_NEED_SHELL);
+        return PKG_ERR_CORRUPT;
+    }
+    return PKG_OK;
 }
 
 /* ======================================================================== */
@@ -477,11 +482,48 @@ static int install_packages(int choice)
 /*  メイン                                                                   */
 /* ======================================================================== */
 
+/* 展開の前に作るディレクトリ (親が先)。新しく作った ext2 なのでどれも作れる
+ * はず — 1 つでも作れなければ未完成として止める */
+static const char *const init_dirs[] = {
+    "/hd0/sys", "/hd0/boot", "/hd0/bin", "/hd0/sbin", "/hd0/usr",
+    "/hd0/usr/bin", "/hd0/usr/man", "/hd0/etc", "/hd0/data", "/hd0/home",
+    "/hd0/home/user", "/hd0/tmp"
+};
+#define INIT_DIRS ((int)(sizeof(init_dirs) / sizeof(init_dirs[0])))
+
+/* 書く前の全検査。0 = 通る (b にブート像、t に hd0 の計画) */
+static int preflight(int choice, BootImg *b, InstTarget *t)
+{
+    static InstNeed need;
+    u32 kernel_len = 0;
+    int i;
+
+    print(COL_NORMAL, "\n");
+    println(COL_NORMAL, "Checking the packages and hd0 (nothing is written yet)...");
+    if (load_boot_pkg(b) != 0) {
+        println(COL_RED, "ERROR: BOOT.PKG is not usable. Nothing was written.");
+        return -1;
+    }
+    inst_need_init(&need);
+    for (i = 0; i < INIT_DIRS; i++) inst_need_dir(&need);
+    if (measure_packages(choice, &need, &kernel_len) != PKG_OK) {
+        println(COL_RED, "ERROR: the packages are not usable. Nothing was written.");
+        boot_img_free(b);
+        return -1;
+    }
+    if (inst_hdd_check(api, t) != 0 ||
+        inst_hdd_check_media(api, t, b->ipl_len, b->loader_len, kernel_len, &need) != 0) {
+        boot_img_free(b);
+        return -1;
+    }
+    return 0;
+}
+
 void __cdecl main(int argc, char **argv, KernelAPI *_api)
 {
-    int choice;
-    int ide_drv;
-    u32 total_sects;
+    static BootImg boot;
+    static InstTarget tgt;
+    int choice, i, ret;
 
     (void)argc;
     (void)argv;
@@ -489,11 +531,8 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     dbg_init(api);
     DBG("[cdinst] started");
 
-    ide_drv = 0;
-    total_sects = 0;
-
     println(COL_TITLE, "========================================");
-    println(COL_TITLE, "      OS32 CD Installer v2.0");
+    println(COL_TITLE, "      OS32 CD Installer v3.0");
     println(COL_TITLE, "========================================");
     print(COL_NORMAL, "\n");
 
@@ -562,128 +601,57 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
         return;
     }
 
+    /* 全検査 (段 2-11 / N4 / N6 / N8)。1 つでも欠ければ 1 セクタも書かない */
+    if (preflight(choice, &boot, &tgt) != 0) return;
+
     print(COL_NORMAL, "\n");
-    println(COL_RED, "WARNING: This will format the HDD and install OS32.");
+    inst_hdd_describe(api, &tgt);
+    println(COL_RED, "WARNING: This will format the OS32 area of hd0 and install OS32.");
     print(COL_YELLOW, "Continue? [y/N]: ");
     {
         int k = getkey();
         api->kprintf(COL_NORMAL, "%c\n", k);
         if (k != 'y' && k != 'Y') {
-            println(COL_NORMAL, "Installation cancelled.");
+            println(COL_NORMAL, "Installation cancelled. Nothing was written.");
+            boot_img_free(&boot);
             return;
         }
     }
 
-    /* === インストール実行 === */
+    /* === インストール実行 (R3-1) === */
     print(COL_NORMAL, "\n");
     println(COL_GREEN, "=== Installing OS32 ===");
 
-    /* HDD自動検出 */
-    {
-        int drv, n;
-        int found = -1;
-
-        n = api->dev_count();
-        for (drv = 0; drv < n; drv++) {
-            char name[32];
-            int type;
-            u32 s;
-            if (api->dev_get_info(drv, name, 32, &type, &s) == 0) {
-                if (type == 1 && s > 0
-                    && name[0] == 'h' && name[1] == 'd') {
-                    found = drv;
-                    ide_drv = name[2] - '0';
-                    total_sects = s;
-                    break;
-                }
-            }
-        }
-
-        if (found < 0) {
-            println(COL_RED, "ERROR: No HDD device found!");
-            return;
-        }
-
-        DBGF("[cdinst] HDD: ide_drv=%d sects=%lu",
-             ide_drv, (unsigned long)total_sects);
-
-        /* 起動時の自動マウントで /hd0 が既に掴まれていることがある。
-         * その ctx はフォーマット前のスーパーブロック/GDT を保持したままなので、
-         * 外さずに進めると mkdir が旧FSのエントリを見つけて EXIST(-6) になる。 */
-        api->sys_umount("/hd0");
-
-        /* パーティションテーブル書き込み (フォーマットより先に行うこと)
-         * ext2_format は内部で ext2_find_partition() が読む LBA 1 の
-         * パーティションテーブルから base_lba を決める。後から書くと
-         * 「旧テーブルの位置にフォーマットし、新テーブルは別の位置を指す」
-         * 状態になり、ローダが ext2 をマウントできなくなる。 */
-        print(COL_CYAN, "  Writing partition table...");
-        if (write_partition_table(ide_drv, total_sects) != 0) {
-            println(COL_RED, " FAILED");
-            return;
-        }
-        println(COL_GREEN, " OK");
-
-        /* ext2フォーマット */
-        {
-            u32 part_sects = total_sects - HDD_PARTITION_LBA;
-            int fret;
-
-            api->kprintf(COL_CYAN,
-                         "\n  Formatting HDD (ide%d, %u part sects)...",
-                         ide_drv, part_sects);
-
-            fret = api->ext2_format(ide_drv, part_sects);
-            DBGF("[cdinst] ext2_format=%d", fret);
-            if (fret != 0) {
-                api->kprintf(COL_RED, " FAILED (rc=%d)\n", fret);
-                return;
-            }
-        }
-        println(COL_GREEN, " OK");
-
-        /* HDDを /hd0 にマウント (FDDの / と共存) */
-        print(COL_CYAN, "  Mounting HDD at /hd0...");
-        {
-            int mret = api->sys_mount("/hd0", "hd0", "ext2");
-            DBGF("[cdinst] mount /hd0=%d", mret);
-            if (mret != 0) {
-                api->kprintf(COL_RED, " FAILED (rc=%d)\n", mret);
-                return;
-            }
-        }
-        println(COL_GREEN, " OK");
-
-        /* ディレクトリ構造を作成 */
-        print(COL_CYAN, "  Creating directories...");
-        {
-            int mr;
-            mr = api->sys_mkdir("/hd0/sys");
-            if (mr != 0) {
-                api->kprintf(COL_RED, "\n    mkdir failed (rc=%d)\n", mr);
-                return;
-            }
-            api->sys_mkdir("/hd0/boot");   /* loader v3 が読む vmkernel.lz4 の置き場 */
-            api->sys_mkdir("/hd0/bin");
-            api->sys_mkdir("/hd0/sbin");
-            api->sys_mkdir("/hd0/usr");
-            api->sys_mkdir("/hd0/usr/bin");
-            api->sys_mkdir("/hd0/usr/man");
-            api->sys_mkdir("/hd0/etc");
-            api->sys_mkdir("/hd0/data");
-            api->sys_mkdir("/hd0/home");
-            api->sys_mkdir("/hd0/home/user");
-            api->sys_mkdir("/hd0/tmp");
-        }
-        println(COL_GREEN, " OK");
-    }
-
-    /* 1. BOOT.PKG → IDEセクタ直接書き込み */
-    if (install_boot_sectors(ide_drv, total_sects) != 0) {
-        println(COL_RED, "Boot sector installation failed!");
+    /* hd0 のマウントを外す (起動時の自動マウントの ctx は旧 FS の
+     * スーパーブロック / GDT を持ったまま)。外れなければ何も書かない */
+    if (inst_hdd_release(api, &tgt) != 0) {
+        boot_img_free(&boot);
         return;
     }
+    /* ext2 → 区画表 → 読み戻し → /hd0 にマウント */
+    if (inst_hdd_prepare(api, &tgt) != 0) {
+        boot_img_free(&boot);
+        return;
+    }
+    /* ローダ → IPL (BIOS 幾何) */
+    ret = inst_hdd_write_boot(api, &tgt, boot.ipl, boot.ipl_len,
+                              boot.loader, boot.loader_len);
+    boot_img_free(&boot);
+    if (ret != 0) return;
 
-    /* 2〜5. パッケージの展開・同期・完了表示 */
-    (void)install_packages(choice);
+    /* ディレクトリ構造を作成 */
+    print(COL_CYAN, "  Creating directories...");
+    for (i = 0; i < INIT_DIRS; i++) {
+        int mr = api->sys_mkdir(init_dirs[i]);
+        if (mr != 0) {
+            api->kprintf(COL_RED, "\n    mkdir %s failed (rc=%d)\n", init_dirs[i], mr);
+            inst_hdd_incomplete(api, "cannot create the directories", mr);
+            return;
+        }
+    }
+    println(COL_GREEN, " OK");
+
+    /* パッケージの展開・同期・完了表示 */
+    ret = install_packages(choice);
+    if (ret != PKG_OK) inst_hdd_incomplete(api, "package installation failed", ret);
 }

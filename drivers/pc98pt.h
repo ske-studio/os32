@@ -6,6 +6,7 @@
 /*    カーネル   fs/fatfs_vfs.c の FAT 区画探索 (PC98PartEntry を共有)       */
 /*    ローダ     boot/boot_main.c の find_partition (loader_hdd.bin)         */
 /*    シェル     userland/shell/cmd_hdprep.c (hdprep)                        */
+/*    インストーラ userland/system/inst_disk.c (cdinst / install、段 2)      */
 /*    ホスト     tools/pc98pt.py (nhd_deploy.py の書き手、同じ値をホスト試験  */
 /*               tools/tests/test_hdd_stage1.py が突き合わせる)              */
 /*                                                                          */
