@@ -164,6 +164,8 @@ FEP は **SHIFT+SPACE** で起動する。`seq=SHIFT+SPACE` は既にあり、
 
 ### エミュレータの入れ替え手順 (既存の道具)
 
+> **2026-09-25 以降は `tools/np21w_ctl.py stop` / `start --ini <name>` を使う** (ロック待ち・exe 一致の停止。[`docs/POLICY_DEBUG.md`](../../POLICY_DEBUG.md) §5)。下は当時の記録。
+
     python3 -c "import sys;sys.path.insert(0,'tools');import np21w_restart as r;r.stop_np21w()"
     # プロセスが 0 になったことを確かめる
     cd /home/hight/np21w-src && make deploy

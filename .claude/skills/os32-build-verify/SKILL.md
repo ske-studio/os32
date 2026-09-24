@@ -53,11 +53,15 @@ ABI が変わっていない通常の変更で、習慣的に `make clean` を�
   **ホットデプロイ (物理末尾 256KB の窓) は 2026-09-09 に撤去した。**
 - NHD 配備は NP21/W の**プロセス終了を確認**してから実行し、その後起動する。
   `emu_pause`、breakpoint 停止、HTTP 無応答は終了の証拠にならない。
-  複数インスタンスがある場合は使用するイメージとプロセスを特定する。
+  `np21w_ctl.py` が止めるのは `NP21W_DIR` の exe と ExecutablePath が一致するプロセスだけ
+  (別の場所の NP21/W や名前が似ているだけのものは「対象外」と表示して触らない)。
+  別の NP21/W が同じイメージを開いていれば、起動前のロック待ちが名指しで止まる。
 - 停止と起動は `tools/np21w_ctl.py` で行う (`docs/POLICY_DEBUG.md` §5)。
-  `stop` はプロセスが消えるまで待ち、`start --ini <name> [--fd <name>] --wait-ready` は
-  媒体 (ini の HDD/CD/FDD と `--fd`) が続けて 5 秒開けるのを待ってから起動し、
-  プロセスの 10 秒生存と `/api/status` の応答まで確かめる。
+  `stop` は `/api/quit` (save=0) で止めてその pid が消えるまで待つ (API が無い・古いフォークの
+  ときだけ exe 一致のものを強制終了)。`start --ini <name> [--fd <name>] --wait-ready` は
+  媒体 (ini の HDD/CD/FDD/SCSI と `--fd`) が続けて 5 秒開けるのを起動の直前まで確かめてから起動し、
+  `/api/instance` の pid と exe の一致とプロセスの 10 秒生存まで確かめる。
+  ダイアログで止まっていればその本文を出して失敗する。
   `taskkill` → `Start-Process` を手で続けて打たない — ロックで起動が途中で止まる (§4-60)。
   ini は書き換えない。FD は ini ではなく `--fd` で渡す。
   旧 `tools/np21w_restart.py` は ini の `FDD1FILE` を書き換えるので使わない ([D2])。

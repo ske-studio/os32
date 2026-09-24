@@ -28,7 +28,10 @@ description: OS32をNP21/Wで実行した際のハング、例外、IRQ不達、
 3. 最初に `emu_status` と `emu_tvram`、例外時は `emu_fault` / `emu_regs` を取得する。
    fault で凍結していれば resume/reset 前に状態を保存する。
    接続失敗はゲストのハングと区別し、URL・起動状態・サーバー有効化を確認する。
-   起動状態は `python3 tools/np21w_ctl.py status` (プロセス・aidebug・媒体のロック)。
+   起動状態は `python3 tools/np21w_ctl.py status` (プロセス・aidebug・ダイアログ・媒体のロック)。
+   HTTP が 503 `{"dialog":true}` を返すのは NP21/W がモーダルのダイアログを出している印で、
+   ゲストのハングではない。本文は `GET /api/dialog`、窓の見た目は `GET /api/appshot`
+   (ゲスト画面の `/api/screenshot` とは別)。
    起動・停止し直すときも `tools/np21w_ctl.py start` / `stop` を使う — 手で続けて打つと
    媒体のロックで起動が途中で止まり、ゲストの障害と取り違える (`docs/POLICY_DEBUG.md` §4-60)。
    `.ini` を自動で書き換えない。ネットワーク制限で失敗した場合は実行環境の承認手順に従う。

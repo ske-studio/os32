@@ -48,7 +48,8 @@ The debug HTTP server is built into `np21x64w.exe` (the ai-debug fork), enabled 
 [`docs/POLICY_DEBUG.md`](docs/POLICY_DEBUG.md) §5. Registers, memory, disassembly, breakpoints and
 tracing go through `tools/np21w_mcp/`. Chasing a failure on the emulator: skill **`os32-emu-debug`**.
 Stop / start NP21/W only with `tools/np21w_ctl.py` (`stop`, `start --ini <name> [--fd <name>] --wait-ready`,
-`status`) — it waits for the image locks to clear; a hand-typed `taskkill` → `Start-Process` stalls the boot
+`status`, `fdd`) — it stops through `/api/quit`, force-kills only the process whose exe path matches, and
+waits for the image locks to clear before starting; a hand-typed `taskkill` → `Start-Process` stalls the boot
 ([`docs/POLICY_DEBUG.md`](docs/POLICY_DEBUG.md) §5, §4-60).
 
 ## Project Constraints

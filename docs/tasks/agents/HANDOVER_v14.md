@@ -40,7 +40,7 @@
 ## 4. 踏むと痛い所 (v1.3 で実際に踏んだもの)
 
 - **PM はビルド・`make check`・配備を自分で回さない** (テスターへ。`tools/emu_agent/agent.py run "<英語のタスク>" --quiet --session <name>`、合否は `tools/emu_agent/logs/<session>/steps.jsonl` の `obs` で判断)。テスターの `make` は `MAKE_TARGETS` に登録された名前だけ通る (新しい `check-*` を足したら `agent.py` にも足す)。
-- **NHD 配備の順序**: taskkill → `nhd-pull` (NP21/W が動いていると Permission denied) → `os32-cycle deploy` → `make deploy` (HostDrv) → 起動 → kselftest。`hsync` の前に `make deploy` (古いカーネルに戻った前例)。
+- **NHD 配備の順序** (2026-09-25 以降、停止・起動は `tools/np21w_ctl.py stop` / `start` — [`docs/POLICY_DEBUG.md`](../../POLICY_DEBUG.md) §5): taskkill → `nhd-pull` (NP21/W が動いていると Permission denied) → `os32-cycle deploy` → `make deploy` (HostDrv) → 起動 → kselftest。`hsync` の前に `make deploy` (古いカーネルに戻った前例)。
 - **FDD ブート中に `make all` をしない** (NP21W_DIR の `os32_boot.d88` を上書きする)。HDD ブートかは `ls /hd0` が無いこと + `/boot/vmkernel.lz4` があることで見る。
 - **`/api/cmd` は POST body** (`curl -X POST .../api/cmd --data-binary "ver"`)。対話プログラムは ESC + `/api/key` + tvram polling (`scratchpad/fdd_run2.py` の方式)、`ime on` 中は `SHIFT+SPACE` を先に。255B 超の引数は rshell の行が壊れる。
 - **worktree の差分は基点 commit と比較して着地** (`git diff --cached <基点>`、feat/gui HEAD と比べると他レーンのファイルが削除として混入)。着地後に D が無いこと、conflict マーカーが無いことを全ファイルで確認。

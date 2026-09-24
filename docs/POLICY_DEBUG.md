@@ -679,32 +679,53 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 
 NP21/W の停止と起動はこの道具で行う。`taskkill` や `Start-Process` を手で打たない —
 落とした直後に起動すると媒体がまだロックされていて、起動が途中で止まる (§4-60)。
+停止はエミュレータ自身に頼む (ai-debug フォークの `/api/instance` → `/api/quit`、
+仕様は `np21w-src/docs/03-api-reference.md` の「アプリ層の口」)。
 
 ```bash
-python3 tools/np21w_ctl.py stop                          # taskkill /F → プロセスが消えるまで待つ
-python3 tools/np21w_ctl.py start --ini np21x64w.ini      # プロセス 0 → 媒体が続けて 5 秒開ける → 起動 → 10 秒生存 + aidebug 応答
+python3 tools/np21w_ctl.py stop                          # /api/quit save=0 → その pid が消えるまで待つ
+python3 tools/np21w_ctl.py start --ini np21x64w.ini      # プロセス 0 → 媒体が続けて 5 秒開ける → 起動 → pid/exe 照合 + 10 秒生存
 python3 tools/np21w_ctl.py start --ini np21w-trial-cdinst.ini --fd os32_boot.d88 --wait-ready
 python3 tools/np21w_ctl.py wait-ready                    # /api/tvram に "Waiting for commands" (既定 180 秒)
-python3 tools/np21w_ctl.py status [--ini <name>]         # プロセス・aidebug・媒体ごとの free/locked/missing
+python3 tools/np21w_ctl.py fdd --drive 1 --insert os32_boot.d88   # FD の出し入れ (--eject)。ini は変えない
+python3 tools/np21w_ctl.py status [--ini <name>]         # プロセス・aidebug (instance)・ダイアログ・媒体の free/locked/missing
 ```
 
-- `start` の順: np21 のプロセスが 0 か確かめる (残れば `--timeout` 秒まで待って失敗) →
-  各媒体を Windows 側から `[IO.File]::Open(path,'Open','ReadWrite','None')` で
-  **続けて `--stable` 秒 (既定 5、1 秒おき) 開けるまで**待つ。途中で 1 回でもロックされたら
-  その媒体は数え直し (上限 `--timeout`、既定 60 秒) → 2 秒置いて
-  `Start-Process "<exe>" "/i<ini>" ["<fd>"]` → 起動したプロセスが `--alive` 秒 (既定 10) 生きていて
-  `/api/status` が応答する (上限 `--api-timeout`、既定 60 秒) ことを確かめる。途中でプロセスが
-  消えたら「起動直後に終了した」で 1 を返す。
+- **止める対象**: `NP21W_DIR` の exe (`--exe`、既定 `np21x64w.exe`) と CIM の `ExecutablePath` が
+  一致するプロセスだけ。名前に np21 を含むだけのもの、別の場所に入っている NP21/W、exe の
+  パスが読めないものには触らない (「対象外」と表示する)。
+- `stop` の順: `/api/instance` で pid と instance_id を得る → exe が一致すれば
+  `/api/quit` (`save=0`、ini と resume を書かない) → その pid が消えるまで待つ。API が応答しない・
+  quit が効かない・**フォークが古い** (`/api/instance` が 404 — 「make deploy が要る」と出す) ときだけ、
+  exe 一致のプロセスを `taskkill /F` する。
+- `start` の順: この exe のプロセスが無いか確かめる (残れば待つ) → 各媒体を Windows 側から
+  `[IO.File]::Open(path,'Open','ReadWrite','None')` で **続けて `--stable` 秒 (既定 5、1 秒おき)
+  開けるまで**待つ。**安定した媒体も毎回プローブし続け**、1 回でもロックされたら数え直す →
+  全部安定したら 2 秒置いて**全部をもう一度**プローブ (ロックされていれば数え直し) →
+  `Start-Process "<exe>" "/i<ini>" ["<fd>"]` → `/api/instance` の pid と exe が起動したものと一致し、
+  プロセスが `--alive` 秒 (既定 10) 生きていることを確かめ、成功を返す直前にもう一度 pid を見る。
+- `--timeout` (既定 60) は起動までの**全体の**期限。プローブには残り時間を渡し、期限を過ぎてから
+  得た結果は成功に数えない。`--timeout` < `--stable` は引数の誤り (2)。
+- `--api-timeout` (既定 60) は起動後に `/api/instance` の応答を待つ上限。**0 は「API を待たない」**
+  (プロセスの生存だけを `--alive` 秒見る。aidebug を切った ini 用)。
+- 起動の確認中に API が黙る・進まないときは `/api/dialog` を見る。NP21/W がモーダルの
+  ダイアログを出していれば、そのタイトル・本文・ボタンを出して 1 で終わる。ダイアログ中は
+  コアに触る口 (`/api/status` `/api/cmd` など) が即座に 503 `{"dialog":true}` を返す。
+  窓の見た目は `/api/appshot` (ゲスト画面の `/api/screenshot` とは別)。
 - 1 回開けただけで通さないのは、`make nhd-pull` の直後に Windows 側 (Defender の走査など) が
   一時的に掴み直し、1 回だけのプローブがその隙間を通して NP21/W がすぐ終了したため (§4-60)。
-- 待つ媒体は ini の `HDD1FILE`〜`HDD4FILE` / `CD1_FILE`〜`CD4_FILE` / `FDD1FILE`〜`FDD4FILE`
-  の値と `--fd`。ini が読めなければ既定の `os32.nhd` / `os32_install.iso` / `os32_boot.d88`。
-  時間切れのときは**ロックされたままのファイルを名指しして** 1 で終わる。
-- `--ini` / `--fd` / `--exe` は `NP21W_DIR` 直下の**名前**だけを受け付ける。ini は読むだけ ([D2])。
-- `stop` は `taskkill /F` なので NP21/W は ini を書き戻さない (通常終了は書き戻す)。
+- 待つ媒体は ini の `[NekoProject21]` 節の `HDD1FILE`〜`HDD4FILE` / `CD1_FILE`〜`CD4_FILE` /
+  `FDD1FILE`〜`FDD4FILE` / `SCSIHDD0`〜`SCSIHDD3` と `--fd`。値は NP21/W と同じ規則で読む
+  (前後の空白、両端の `"` を 1 組外す、節内で最初の値)。ini が読めなければ既定の
+  `os32.nhd` / `os32_install.iso` / `os32_boot.d88`。時間切れのときは**ロックされたままの
+  ファイルを名指しして** 1 で終わる。
+- プローブそのものが壊れたとき (PowerShell の失敗、ロック以外の例外、報告の欠け) はロックと
+  区別して、stderr と例外の型名を添えて即座に 1 で終わる。
+- `--ini` / `--fd` / `--exe` / `--insert` は `NP21W_DIR` 直下の**名前**だけを受け付ける。ini は読むだけ ([D2])。
   ini を変える trial は `tools/np21w_trial.py` の領分で、こちらは使わない (スキル `os32-emu-config`)。
-- 終了コード: 0 成功、1 失敗 (プロセスが残る・ロックが解けない・起動直後に終了した・aidebug が
-  応答しない・起動完了しない)、2 引数の誤り。
+- 終了コード: 0 成功、1 失敗 (プロセスが残る・ロックが解けない・プローブが壊れた・起動直後に
+  終了した・ダイアログ・API が応答しない・起動完了しない)、2 引数の誤り。
+- ホスト試験: `make check-np21w-ctl-host` (変異 24 本 + 恒等の対照)。
 
 ### NP21/W リモート実行 (HTTP API)
 
@@ -1243,6 +1264,10 @@ read-modify-write で保つ。
   「起動直後に終了した」と言って失敗する。ホスト試験は `tools/tests/test_np21w_ctl.py` (`make check-tools-host`)。
 - **教訓**: 起動の前提は「プロセスが無い」でも「1 回開けた」でもなく「媒体を排他で**開け続けられる**」で
   確かめる。起動の成否は Start-Process の戻りではなく、プロセスの生存と API の応答で確かめる。
+- **追記 (2026-09-25)**: `taskkill /F` による停止も、名前の部分一致で別の場所の NP21/W まで巻き込み、
+  起動直後の失敗がモーダルのダイアログで止まっていても外から見えなかった。NP21/W フォークに
+  `/api/instance` `/api/quit` `/api/fdd` `/api/dialog` `/api/appshot` を足し、np21w_ctl は
+  `/api/quit` で止め、強制終了は exe パス一致だけ、起動後は pid/exe の照合とダイアログの確認をする。
 
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 

@@ -1,67 +1,104 @@
 """Host-only tests for tools/np21w_ctl.py.
 
-Windows 側の操作 (tasklist / taskkill / PowerShell) は FakeOps に、時計と sleep は
-FakeClock に差し替える。実プロセス・実 ini・ネットワークには触れない。
+Windows 側の操作 (CIM / taskkill / PowerShell) は FakeOps、aidebug の HTTP は
+FakeHttp、時計と sleep は FakeClock に差し替える。実プロセス・実 ini・
+ネットワークには触れない。
+
+  python3 -B tools/tests/test_np21w_ctl.py            # 全ケース
+  python3 -B tools/tests/test_np21w_ctl.py --mutate   # 否定側 (変異 + 恒等の対照)
+
+`make check-tools-host` は unittest discover でケースだけを、
+`make check-np21w-ctl-host` は変異まで回す。
 """
+import base64
+import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
+from urllib.parse import parse_qs
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import np21w_ctl as ctl  # noqa: E402
+HERE = Path(__file__).resolve()
+SRC = HERE.parents[1] / 'np21w_ctl.py'
+sys.path.insert(0, str(HERE.parents[1]))
+import np21w_ctl as ctl  # noqa: E402  (--mutate が写しに差し替える)
+
+
+WIN = 'C:\\NP21'
+EXE = WIN + '\\np21x64w.exe'
+NHD = WIN + '\\os32.nhd'
+ISO = WIN + '\\os32_install.iso'
+D88 = WIN + '\\os32_boot.d88'
+PID = 4242
 
 
 class FakeClock(object):
     def __init__(self):
         self.now = 0.0
-        self.slept = []
+        self.events = []
 
     def clock(self):
         return self.now
 
     def sleep(self, sec):
-        self.slept.append(sec)
+        self.events.append(('sleep', sec))
         self.now += sec
 
 
 class FakeOps(object):
-    """procs: 呼ぶたびに 1 つずつ消費するプロセス一覧の列 (最後の値を保つ)。
-    locks: {win_path: 何回目の probe まで locked か}。missing: 無いファイル。"""
+    """running: 走っているプロセス。vanish: {pid: 何回目の一覧から消えるか}。
+    lock_seq: {path: 'FLL…'} probe の n 回目の状態 (尽きたら最後の文字)。
+    locks: {path: n} n 回目の probe まではロック。"""
 
-    def __init__(self, procs=None, locks=None, missing=(), clock=None,
-                 lock_seq=None, dies_after=None):
-        self.procs = list(procs or [[]])
-        self.locks = dict(locks or {})
-        # lock_seq: {win_path: 'FLLF...'} — probe n 回目の状態 (F=free, L=locked)。
-        # 尽きたら最後の文字を保つ
+    def __init__(self, fc, running=(), vanish=None, kill_works=True,
+                 lock_seq=None, locks=None, missing=(), dies_after=None,
+                 start_exe=EXE, probe_cost=0.0, probe_error=None):
+        self.fc = fc
+        self.running = {p.pid: p for p in running}
+        self.vanish = dict(vanish or {})
+        self.kill_works = kill_works
         self.lock_seq = dict(lock_seq or {})
-        # dies_after: 起動後の list_processes を何回目まで起動したプロセスを返すか
-        self.dies_after = dies_after
-        self.after_start = 0
+        self.locks = dict(locks or {})
         self.missing = set(missing)
+        self.dies_after = dies_after
+        self.start_exe = start_exe
+        self.probe_cost = probe_cost
+        self.probe_error = probe_error
+        self.list_calls = 0
+        self.after_start = 0
         self.probes = []
+        self.probe_timeouts = []
         self.killed = []
         self.started = []
-        self.clock = clock
 
     def list_processes(self):
+        self.list_calls += 1
+        for pid, n in list(self.vanish.items()):
+            if self.list_calls >= n:
+                self.running.pop(pid, None)
+                del self.vanish[pid]
         if self.started:
             self.after_start += 1
             if self.dies_after is not None and self.after_start > self.dies_after:
-                return []
-            return [('np21x64w.exe', 4242)]
-        if len(self.procs) > 1:
-            return self.procs.pop(0)
-        return self.procs[0]
+                self.running.pop(PID, None)
+        return list(self.running.values())
 
     def kill(self, pid):
         self.killed.append(pid)
+        if self.kill_works:
+            self.running.pop(pid, None)
 
-    def probe(self, paths):
+    def probe(self, paths, timeout=60):
+        if self.probe_error:
+            raise self.probe_error
+        self.fc.events.append(('probe', tuple(paths)))
         self.probes.append(list(paths))
+        self.probe_timeouts.append(timeout)
+        self.fc.now += self.probe_cost
         n = len(self.probes)
         out = {}
         for p in paths:
@@ -77,20 +114,93 @@ class FakeOps(object):
         return out
 
     def start(self, exe, args, cwd):
+        self.fc.events.append(('start', exe))
+        self.start_time = self.fc.now
         self.started.append((exe, list(args), cwd))
-        return 4242
+        self.running[PID] = ctl.Proc(PID, 'np21x64w.exe', self.start_exe)
+        return PID
 
 
-WIN = 'C:\\NP21'
+class FakeHttp(object):
+    """aidebug の偽物。mode: 'new' (instance あり) / 'old' (404) / 'down'。
+    プロセスが 1 つも走っていなければ届かない。"""
+
+    def __init__(self, ops, mode='new', inst_pid=None, inst_exe=EXE,
+                 quit_stops=True, dialog=None, instance_dialog=False,
+                 api_up_after=0, tvram=None, fdd_status=200):
+        self.ops = ops
+        self.mode = mode
+        self.inst_pid = inst_pid
+        self.inst_exe = inst_exe
+        self.quit_stops = quit_stops
+        self.dialog = dialog
+        self.instance_dialog = instance_dialog
+        self.api_up_after = api_up_after
+        self.tvram = tvram
+        self.fdd_status = fdd_status
+        self.calls = []
+
+    def _pid(self):
+        if self.inst_pid is not None:
+            return self.inst_pid
+        return next(iter(self.ops.running), None)
+
+    def request(self, method, path, body=None, timeout=10):
+        self.calls.append((method, path, body, timeout))
+        if self.mode == 'down' or not self.ops.running:
+            return None
+        n = len([c for c in self.calls if c[1] == path])
+        if n <= self.api_up_after and path in ('/api/instance', '/api/status'):
+            return None
+        if path == '/api/dialog':
+            if self.mode == 'old':
+                return 404, '{"ok":false,"error":"unknown endpoint"}'
+            if self.dialog:
+                return 200, json.dumps({'ok': True, 'open': True, 'modal': True,
+                                        'dialogs': [self.dialog]})
+            return 200, '{"ok":true,"open":false,"modal":false,"dialogs":[]}'
+        if self.dialog and path in ('/api/status', '/api/tvram'):
+            return 503, '{"ok":false,"dialog":true}'
+        if path == '/api/instance':
+            if self.mode == 'old':
+                return 404, '{"ok":false,"error":"unknown endpoint"}'
+            return 200, json.dumps({
+                'ok': True, 'api_version': 1, 'pid': self._pid(),
+                'exe': self.inst_exe, 'ini': WIN + '\\test.ini',
+                'instance_id': 'ab' * 16, 'started_at': '2026-09-25T00:00:00.000Z',
+                'dialog': self.instance_dialog,
+                'fdd': [{'drive': 1, 'equip': True, 'path': D88}],
+                'ide': [{'slot': 1, 'type': 'hdd', 'ready': True, 'path': NHD}]})
+        if path == '/api/quit':
+            if self.quit_stops:
+                self.ops.running.pop(self._pid(), None)
+            return 200, '{"ok":true,"quitting":true}'
+        if path == '/api/status':
+            return 200, '{"phase":"p2"}'
+        if path == '/api/tvram':
+            return 200, self.tvram() if callable(self.tvram) else (self.tvram or '')
+        if path == '/api/fdd':
+            if self.mode == 'old':
+                return 404, '{"ok":false,"error":"unknown endpoint"}'
+            return self.fdd_status, '{"ok":%s,"error":"x"}' % (
+                'true' if self.fdd_status == 200 else 'false')
+        return 404, '{"ok":false,"error":"unknown endpoint"}'
+
+
 INI_TEXT = (
+    '[Other]\r\n'
+    'HDD1FILE=C:\\WRONG\\other_section.nhd\r\n'
     '[NekoProject21]\r\n'
     'FDD1FILE=C:\\NP21\\os32_boot.d88\r\n'
     'FDD2FILE=\r\n'
     'HDD1FILE=C:\\NP21\\os32.nhd\r\n'
+    'HDD1FILE=C:\\WRONG\\second_value_ignored.nhd\r\n'
     'HDD2FILE=\r\n'
     'CD1_FILE=C:\\NP21\\os32_install.iso\r\n'
     'CD2_FILE=\r\n'
     'CDfolder=C:\\Users\\x\\\u30c9\u30ad\u30e5\u30e1\u30f3\u30c8\\a.iso\r\n'
+    '[NekoProject21]\r\n'
+    'HDD3FILE=C:\\WRONG\\second_section.nhd\r\n'
 )
 
 
@@ -98,10 +208,9 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = self.tmp.name
-        for name in ('np21x64w.exe', 'os32.nhd', 'os32_boot.d88'):
+        for name in ('np21x64w.exe', 'os32.nhd', 'os32_boot.d88', 'other.d88'):
             open(os.path.join(self.dir, name), 'wb').close()
-        with open(os.path.join(self.dir, 'test.ini'), 'wb') as f:
-            f.write(INI_TEXT.encode('cp932'))
+        self.write_ini(INI_TEXT)
         self.fc = FakeClock()
         self.out = io.StringIO()
         self.err = io.StringIO()
@@ -109,249 +218,544 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def make(self, ops, tvram=None, status_fn=None):
-        self.ops = ops
-        return ctl.Ctl(ctl.Paths(self.dir, WIN), ops=ops,
-                       tvram=tvram or (lambda: None),
-                       status_fn=status_fn or (lambda: '{"phase":"p2"}'),
+    def write_ini(self, text, name='test.ini', encoding='cp932'):
+        with open(os.path.join(self.dir, name), 'wb') as f:
+            f.write(text.encode(encoding) if isinstance(text, str) else text)
+
+    def make(self, http_mode='new', ops=None, **hk):
+        self.ops = ops or FakeOps(self.fc)
+        self.http = FakeHttp(self.ops, http_mode, **hk)
+        return ctl.Ctl(ctl.Paths(self.dir, WIN), ops=self.ops, http=self.http,
                        sleep=self.fc.sleep, clock=self.fc.clock,
                        out=self.out, err=self.err, poll=1.0, settle=2.0)
 
     def run_main(self, c, argv):
         return ctl.main(argv, ctl_factory=lambda: c)
 
+    def ours(self, pid=77):
+        return ctl.Proc(pid, 'np21x64w.exe', EXE)
 
+
+# ---------------------------------------------------------------------------
 class IniParse(Base):
-    def test_reads_media_keys_only_and_leaves_ini_untouched(self):
+    def test_section_first_value_and_untouched(self):
         path = os.path.join(self.dir, 'test.ini')
         before = Path(path).read_bytes()
-        got = ctl.ini_media(path)
-        self.assertEqual(got, ['C:\\NP21\\os32_boot.d88', 'C:\\NP21\\os32.nhd',
-                               'C:\\NP21\\os32_install.iso'])
+        got = ctl.ini_media(path, WIN)
+        # 並びは MEDIA_KEYS 順 (HDD → CD → FDD → SCSI)。他の節・2 つ目の節・
+        # 節内の 2 回目の値は NP21/W と同じく無視する
+        self.assertEqual(got, [NHD, ISO, D88])
         self.assertEqual(Path(path).read_bytes(), before)
+
+    def test_quotes_and_japanese_path(self):
+        jp = 'C:\\\u30c9\u30ad\u30e5\u30e1\u30f3\u30c8\\np21\\os32.nhd'
+        self.write_ini('[NekoProject21]\r\n'
+                       'HDD1FILE =  " %s "  \r\n'
+                       'CD1_FILE="C:\\a b\\x.iso"\r\n'
+                       'FDD1FILE="half\r\n'
+                       'SCSIHDD0=C:\\scsi\\s0.hdd\r\n' % jp)
+        got = ctl.ini_media(os.path.join(self.dir, 'test.ini'), WIN)
+        # 引用符は 1 組だけ外し、中の前後の空白も取る (profile.c ParseLine)。
+        # 片側だけの引用符は外さない。相対値は NP21W_DIR 起点
+        self.assertEqual(got, [jp, 'C:\\a b\\x.iso', WIN + '\\"half',
+                               'C:\\scsi\\s0.hdd'])
+
+    def test_bom_utf8_and_case_insensitive_keys(self):
+        self.write_ini(b'\xef\xbb\xbf[nekoproject21]\nhdd1file=C:\\u\\\xe3\x81\x82.nhd\n')
+        got = ctl.ini_media(os.path.join(self.dir, 'test.ini'), WIN)
+        self.assertEqual(got, ['C:\\u\\\u3042.nhd'])
 
     def test_unreadable_ini_is_none(self):
         self.assertIsNone(ctl.ini_media(os.path.join(self.dir, 'nope.ini')))
 
 
+# ---------------------------------------------------------------------------
 class LockWait(Base):
     def test_waits_until_lock_is_released_then_starts(self):
-        nhd = WIN + '\\os32.nhd'
-        c = self.make(FakeOps(locks={nhd: 3}))
+        c = self.make(ops=FakeOps(self.fc, locks={NHD: 3}))
         rc = self.run_main(c, ['start', '--ini', 'test.ini', '--fd', 'os32_boot.d88'])
         self.assertEqual(rc, 0, self.err.getvalue())
-        # t=0..2 locked、t=3 から free。続けて 5 秒 (t=8) で通す。
-        # 他の 2 つは t=5 で安定したので以後は聞き直さない
-        self.assertEqual(len(self.ops.probes), 9)
-        self.assertEqual(self.ops.probes[-1], [nhd])
-        self.assertEqual(len(self.ops.probes[5]), 3)
-        self.assertEqual(self.ops.probes[6], [nhd])
+        # t=0..2 locked、t=3..8 free (5 秒) → settle 2 秒 → 起動直前の全体プローブ
+        self.assertEqual(len(self.ops.probes), 10)
+        # 安定した媒体も毎回プローブし続ける (Codex 1 / Fable M1)
+        for p in self.ops.probes:
+            self.assertEqual(sorted(p), sorted([NHD, ISO, D88]))
         self.assertEqual(self.ops.started, [(
-            WIN + '\\np21x64w.exe',
-            ['/i' + WIN + '\\test.ini', WIN + '\\os32_boot.d88'], WIN)])
-        self.assertIn('started', self.out.getvalue())
-        # FD は ini と --fd の両方にあるが 1 回だけ数える
-        self.assertEqual(len(self.ops.probes[0]), 3)
+            EXE, ['/i' + WIN + '\\test.ini', D88], WIN)])
+
+    def test_stable_media_relocked_while_waiting_for_another(self):
+        # ISO は最初から free だが、NHD を待っている間の 5 回目に一度掴まれる
+        c = self.make(ops=FakeOps(self.fc, locks={NHD: 6},
+                                  lock_seq={ISO: 'FFFFLF'}))
+        rc = self.run_main(c, ['start', '--ini', 'test.ini'])
+        self.assertEqual(rc, 0, self.err.getvalue())
+        self.assertIn('locked again (数え直し): ' + ISO, self.out.getvalue())
+        # NHD は t=6 から (t=11 で安定)、ISO は t=5 から数え直し (t=10)
+        self.assertEqual(len(self.ops.started), 1)
+        self.assertGreaterEqual(self.fc.now, 13)
+
+    def test_settle_then_final_probe_right_before_start(self):
+        c = self.make()
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 0)
+        ev = [e[0] if e[0] != 'sleep' else ('sleep', e[1]) for e in self.fc.events]
+        i = ev.index('start')
+        self.assertEqual(ev[i - 1], 'probe')          # 直前に全体プローブ
+        self.assertEqual(ev[i - 2], ('sleep', 2.0))   # その前に settle
+        self.assertEqual(len(self.fc.events[i - 1][1]), 3)
+
+    def test_final_probe_relock_restarts_count(self):
+        # 7 回目 (起動直前のプローブ) で NHD が掴まれる
+        c = self.make(ops=FakeOps(self.fc, lock_seq={NHD: 'FFFFFFLF'}))
+        rc = self.run_main(c, ['start', '--ini', 'test.ini'])
+        self.assertEqual(rc, 0, self.err.getvalue())
+        self.assertIn('locked again 起動の直前', self.out.getvalue())
+        self.assertGreater(len(self.ops.probes), 7)
 
     def test_open_once_then_locked_again_restarts_the_count(self):
-        # nhd-pull の直後: 1 回開けてもすぐまた掴まれる (Defender の走査など)
-        nhd = WIN + '\\os32.nhd'
-        c = self.make(FakeOps(lock_seq={nhd: 'FLLF'}))
+        c = self.make(ops=FakeOps(self.fc, lock_seq={NHD: 'FLLF'}))
         rc = self.run_main(c, ['start', '--ini', 'test.ini'])
         self.assertEqual(rc, 0, self.err.getvalue())
         self.assertIn('locked again', self.out.getvalue())
-        # t=0 free → t=1,2 locked → t=3 から free。t=0 の 1 回では通さず、t=8 まで待つ
-        nhd_probes = [i for i, ps in enumerate(self.ops.probes) if nhd in ps]
-        self.assertEqual(nhd_probes, list(range(9)))
         self.assertEqual(len(self.ops.started), 1)
+        self.assertGreaterEqual(self.fc.now, 10)
 
     def test_flapping_lock_times_out_as_unsteady(self):
-        nhd = WIN + '\\os32.nhd'
-        c = self.make(FakeOps(lock_seq={nhd: 'FLFFFLFFFFLF' * 10}))
+        c = self.make(ops=FakeOps(self.fc, lock_seq={NHD: 'FLFFFLFFFFLF' * 10}))
         rc = self.run_main(c, ['start', '--ini', 'test.ini', '--timeout', '20'])
         self.assertEqual(rc, 1)
-        self.assertIn(nhd, self.err.getvalue())
+        self.assertIn(NHD, self.err.getvalue())
         self.assertEqual(self.ops.started, [])
-
-    def test_stable_zero_passes_on_first_free(self):
-        c = self.make(FakeOps())
-        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--stable', '0',
-                               '--alive', '0'])
-        self.assertEqual(rc, 0, self.err.getvalue())
-        self.assertEqual(len(self.ops.probes), 1)
 
     def test_timeout_names_locked_file_and_does_not_start(self):
-        iso = WIN + '\\os32_install.iso'
-        c = self.make(FakeOps(locks={iso: 10 ** 6}))
-        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--timeout', '5'])
+        c = self.make(ops=FakeOps(self.fc, locks={ISO: 10 ** 6}))
+        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--timeout', '8'])
         self.assertEqual(rc, 1)
-        self.assertIn('os32_install.iso', self.err.getvalue())
-        self.assertNotIn('os32.nhd', self.err.getvalue())
+        self.assertIn('locked: ' + ISO, self.err.getvalue())
+        self.assertNotIn('locked: ' + NHD, self.err.getvalue())
         self.assertEqual(self.ops.started, [])
-        self.assertGreaterEqual(self.fc.now, 5)
+
+    def test_probe_gets_remaining_time(self):
+        # 1 回のプローブに 3 秒かかる。期限 6 秒では 5 秒の安定を満たす前に切れる
+        c = self.make(ops=FakeOps(self.fc, probe_cost=3.0))
+        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--timeout', '6'])
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.ops.started, [])
+        self.assertLessEqual(self.ops.probe_timeouts[0], 6)
+        self.assertLess(self.ops.probe_timeouts[-1], self.ops.probe_timeouts[0])
+        for t in self.ops.probe_timeouts:
+            self.assertGreater(t, 0)
+
+    def test_result_after_deadline_is_not_success(self):
+        # stable 0: 1 回目 (t=0→1) で安定、settle で t=3、起動直前のプローブは
+        # 残り 0.5 秒で始まり t=4 に返る — 期限 3.5 を過ぎた結果は成功にしない
+        c = self.make(ops=FakeOps(self.fc, probe_cost=1.0))
+        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--timeout', '3.5',
+                               '--stable', '0'])
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.ops.started, [])
+
+    def test_timeout_shorter_than_stable_is_argument_error(self):
+        c = self.make()
+        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--timeout', '3',
+                               '--stable', '5'])
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.ops.probes, [])
 
     def test_missing_fd_argument_fails(self):
-        c = self.make(FakeOps(missing={WIN + '\\nofd.d88'}))
-        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--fd', 'nofd.d88'])
+        c = self.make(ops=FakeOps(self.fc, missing={WIN + '\\other.d88'}))
+        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--fd', 'other.d88'])
         self.assertEqual(rc, 2)
-        self.assertIn('nofd.d88', self.err.getvalue())
         self.assertEqual(self.ops.started, [])
 
     def test_missing_ini_media_is_warned_not_waited(self):
-        iso = WIN + '\\os32_install.iso'
-        c = self.make(FakeOps(missing={iso}))
+        c = self.make(ops=FakeOps(self.fc, missing={ISO}))
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 0)
+        self.assertIn(ISO, self.err.getvalue())
+        self.assertNotIn(ISO, self.ops.probes[-1])
+
+    def test_unreadable_ini_falls_back_to_default_three(self):
+        warned = []
+        targets, source = ctl.media_targets(ctl.Paths(self.dir, WIN), 'nope.ini',
+                                            None, warned.append)
+        self.assertEqual(source, 'default')
+        self.assertEqual([t[0] for t in targets],
+                         [WIN + '\\' + n for n in ctl.DEFAULT_MEDIA])
+        self.assertIn('読めない', warned[0])
+
+
+# ---------------------------------------------------------------------------
+class ProbeBroken(Base):
+    PATHS = [NHD, ISO]
+
+    def test_rc_nonzero_is_probe_error_with_stderr(self):
+        with self.assertRaises(ctl.ProbeError) as cm:
+            ctl.parse_probe(self.PATHS, 1, 'free\t0\nfree\t1\nend\n', 'boom here')
+        self.assertIn('boom here', str(cm.exception))
+
+    def test_error_line_names_exception_type(self):
+        with self.assertRaises(ctl.ProbeError) as cm:
+            ctl.parse_probe(self.PATHS, 0,
+                            'free\t0\nerror\t1\tSystem.UnauthorizedAccessException\nend\n', '')
+        self.assertIn('UnauthorizedAccessException', str(cm.exception))
+        self.assertIn(ISO, str(cm.exception))
+
+    def test_unreported_path_is_probe_error(self):
+        with self.assertRaises(ctl.ProbeError) as cm:
+            ctl.parse_probe(self.PATHS, 0, 'free\t0\nend\n', 'warn')
+        self.assertIn(ISO, str(cm.exception))
+        self.assertIn('warn', str(cm.exception))
+
+    def test_missing_end_is_probe_error(self):
+        with self.assertRaises(ctl.ProbeError):
+            ctl.parse_probe(self.PATHS, 0, 'free\t0\nfree\t1\n', '')
+
+    def test_good_output(self):
+        self.assertEqual(ctl.parse_probe(self.PATHS, 0,
+                                         'locked\t0\nmissing\t1\nfree\t9\nend\n', ''),
+                         {NHD: 'locked', ISO: 'missing'})
+
+    def test_start_fails_immediately_on_broken_probe(self):
+        c = self.make(ops=FakeOps(self.fc, probe_error=ctl.ProbeError('broken: x')))
         rc = self.run_main(c, ['start', '--ini', 'test.ini'])
-        self.assertEqual(rc, 0)
-        self.assertIn(iso, self.err.getvalue())
-        self.assertEqual(len(self.ops.started), 1)
+        self.assertEqual(rc, 1)
+        self.assertIn('broken: x', self.err.getvalue())
+        self.assertEqual(self.ops.started, [])
+        self.assertEqual(self.fc.now, 0)
 
 
-class ProcessRemains(Base):
-    def test_start_refuses_while_np21_process_remains(self):
-        c = self.make(FakeOps(procs=[[('np21x64w.exe', 77)]]))
-        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--timeout', '3'])
+# ---------------------------------------------------------------------------
+class Scripts(unittest.TestCase):
+    """合成した PowerShell を復号して照合する (日本語のディレクトリと "/i…")。"""
+
+    JP = 'C:\\Users\\\u5c71\u7530\\\u30c9\u30ad\u30e5\u30e1\u30f3\u30c8\\np21'
+
+    def ops(self, out, rc=0, err=''):
+        o = ctl.WinOps()
+        o.calls = []
+
+        def run(args, timeout=60):
+            o.calls.append((args, timeout))
+            return rc, out, err
+        o._run = run
+        return o
+
+    def decoded(self, o):
+        args = o.calls[0][0]
+        self.assertIn('-EncodedCommand', args)
+        return ctl.ps_decode(args[args.index('-EncodedCommand') + 1])
+
+    def test_lock_script_roundtrip(self):
+        paths = [self.JP + "\\it's.nhd", self.JP + '\\b.iso']
+        o = self.ops('free\t0\nlocked\t1\nend\n')
+        self.assertEqual(o.probe(paths, timeout=7.5), {paths[0]: 'free', paths[1]: 'locked'})
+        s = self.decoded(o)
+        self.assertIn("$paths = @('" + self.JP + "\\it''s.nhd', '" + self.JP + "\\b.iso')", s)
+        self.assertIn('catch [System.IO.IOException] { "locked`t$i" }', s)
+        self.assertIn('"error`t$i`t$($_.Exception.GetType().FullName)"', s)
+        self.assertIn("[IO.File]::Open($p, 'Open', 'ReadWrite', 'None')", s)
+        self.assertEqual(o.calls[0][1], 7.5)
+
+    def test_start_script_roundtrip(self):
+        o = self.ops('pid\t321\n')
+        ini = self.JP + '\\my test.ini'
+        pid = o.start(self.JP + '\\np21x64w.exe', ['/i' + ini, self.JP + '\\a.d88'], self.JP)
+        self.assertEqual(pid, 321)
+        s = self.decoded(o)
+        self.assertIn("-FilePath '%s\\np21x64w.exe'" % self.JP, s)
+        self.assertIn("-ArgumentList @('\"/i%s\"', '\"%s\\a.d88\"')" % (ini, self.JP), s)
+        self.assertIn("-WorkingDirectory '%s'" % self.JP, s)
+
+    def test_start_failure(self):
+        with self.assertRaises(ctl.CtlError):
+            self.ops('', rc=1, err='denied').start('C:\\e.exe', [], 'C:\\')
+
+    def test_process_list_decodes_base64_exe(self):
+        exe = self.JP + '\\np21x64w.exe'
+
+        def b(s):
+            return base64.b64encode(s.encode('utf-8')).decode()
+        o = self.ops('proc\t10\t%s\t%s\nproc\t11\t%s\t-\nend\n'
+                     % (b('np21x64w.exe'), b(exe), b('np21w.exe')))
+        procs = o.list_processes()
+        self.assertEqual([(p.pid, p.name, p.exe) for p in procs],
+                         [(10, 'np21x64w.exe', exe), (11, 'np21w.exe', None)])
+        self.assertIn('ExecutablePath', self.decoded(o))
+
+    def test_process_list_failure_is_error(self):
+        with self.assertRaises(ctl.CtlError):
+            self.ops('', rc=1, err='CIM broken').list_processes()
+
+
+# ---------------------------------------------------------------------------
+class Stop(Base):
+    def others(self):
+        return [ctl.Proc(90, 'np21x64w_helper.exe', WIN + '\\np21x64w_helper.exe'),
+                ctl.Proc(91, 'np21x64w.exe', 'D:\\Other\\np21x64w.exe'),
+                ctl.Proc(92, 'np21x64w.exe', None),
+                ctl.Proc(93, 'np21x64w.exe', WIN + '\\sub\\np21x64w.exe')]
+
+    def test_quit_via_api(self):
+        ops = FakeOps(self.fc, running=[self.ours(77)])
+        c = self.make(ops=ops)
+        self.assertEqual(self.run_main(c, ['stop']), 0, self.err.getvalue())
+        quit_calls = [x for x in self.http.calls if x[1] == '/api/quit']
+        self.assertEqual(len(quit_calls), 1)
+        self.assertEqual(quit_calls[0][0], 'POST')
+        self.assertEqual(quit_calls[0][2], 'save=0&instance_id=' + 'ab' * 16)
+        self.assertEqual(ops.killed, [])
+        self.assertIn('stopped (/api/quit)', self.out.getvalue())
+
+    def test_quit_accepted_but_pid_stays_then_force_kill_ours_only(self):
+        ops = FakeOps(self.fc, running=[self.ours(77)] + self.others())
+        c = self.make(ops=ops, quit_stops=False, inst_pid=77)
+        self.assertEqual(self.run_main(c, ['stop', '--timeout', '5']), 0, self.err.getvalue())
+        self.assertEqual(ops.killed, [77])
+        self.assertIn('強制終了に落とす', self.err.getvalue())
+
+    def test_api_down_force_kills_only_exact_exe(self):
+        ops = FakeOps(self.fc, running=[self.ours(77)] + self.others())
+        c = self.make('down', ops=ops)
+        self.assertEqual(self.run_main(c, ['stop']), 0, self.err.getvalue())
+        self.assertEqual(ops.killed, [77])
+        for pid in (90, 91, 92, 93):
+            self.assertIn('pid=%d' % pid, self.out.getvalue())
+            self.assertIn(pid, ops.running)
+
+    def test_old_fork_says_deploy_and_kills_exact_exe(self):
+        ops = FakeOps(self.fc, running=[self.ours(77)] + self.others())
+        c = self.make('old', ops=ops)
+        self.assertEqual(self.run_main(c, ['stop']), 0)
+        self.assertIn('フォークが古い', self.err.getvalue())
+        self.assertIn('make deploy', self.err.getvalue())
+        self.assertEqual(ops.killed, [77])
+
+    def test_api_answered_by_other_location_is_not_quit(self):
+        ops = FakeOps(self.fc, running=[ctl.Proc(91, 'np21x64w.exe', 'D:\\Other\\np21x64w.exe')])
+        c = self.make(ops=ops, inst_exe='D:\\Other\\np21x64w.exe')
+        self.assertEqual(self.run_main(c, ['stop']), 0)
+        self.assertEqual([x for x in self.http.calls if x[1] == '/api/quit'], [])
+        self.assertEqual(ops.killed, [])
+        self.assertIn('別の場所', self.err.getvalue())
+
+    def test_nothing_running(self):
+        c = self.make('down')
+        self.assertEqual(self.run_main(c, ['stop']), 0)
+        self.assertIn('プロセスは無い', self.out.getvalue())
+
+    def test_survivor_after_force_kill_fails(self):
+        ops = FakeOps(self.fc, running=[self.ours(77)], kill_works=False)
+        c = self.make('down', ops=ops)
+        self.assertEqual(self.run_main(c, ['stop', '--timeout', '4']), 1)
+        self.assertIn('pid=77', self.err.getvalue())
+
+
+# ---------------------------------------------------------------------------
+class StartProcesses(Base):
+    def test_waits_for_our_process_to_disappear(self):
+        ops = FakeOps(self.fc, running=[self.ours(77)], vanish={77: 3})
+        c = self.make(ops=ops)
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 0, self.err.getvalue())
+        self.assertEqual(len(ops.started), 1)
+
+    def test_refuses_while_our_process_remains(self):
+        ops = FakeOps(self.fc, running=[self.ours(77)])
+        c = self.make('down', ops=ops)
+        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--timeout', '5'])
         self.assertEqual(rc, 1)
         self.assertIn('pid=77', self.err.getvalue())
-        self.assertEqual(self.ops.probes, [])
-        self.assertEqual(self.ops.started, [])
+        self.assertEqual(ops.probes, [])
 
-    def test_start_waits_for_process_to_disappear(self):
-        c = self.make(FakeOps(procs=[[('np21x64w.exe', 77)], [('np21x64w.exe', 77)], []]))
-        rc = self.run_main(c, ['start', '--ini', 'test.ini'])
-        self.assertEqual(rc, 0, self.err.getvalue())
-        self.assertEqual(len(self.ops.started), 1)
-
-    def test_stop_kills_and_fails_when_process_survives(self):
-        c = self.make(FakeOps(procs=[[('np21x64w.exe', 5), ('np21w.exe', 6)]]))
-        rc = self.run_main(c, ['stop', '--timeout', '4'])
-        self.assertEqual(rc, 1)
-        self.assertEqual(self.ops.killed, [5, 6])
-        self.assertIn('残っている', self.err.getvalue())
-
-    def test_stop_succeeds_when_process_goes_away(self):
-        c = self.make(FakeOps(procs=[[('np21x64w.exe', 5)], [('np21x64w.exe', 5)], []]))
-        rc = self.run_main(c, ['stop'])
-        self.assertEqual(rc, 0)
-        self.assertEqual(self.ops.killed, [5])
-        self.assertIn('stopped', self.out.getvalue())
+    def test_other_location_does_not_block(self):
+        ops = FakeOps(self.fc, running=[ctl.Proc(91, 'np21x64w.exe', 'D:\\Other\\np21x64w.exe')])
+        c = self.make(ops=ops, inst_pid=PID)
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 0, self.err.getvalue())
+        self.assertIn('対象外', self.out.getvalue())
 
 
 class AfterStart(Base):
+    def test_success_checks_instance_pid_and_exe(self):
+        c = self.make()
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 0, self.err.getvalue())
+        self.assertIn('instance pid=%d' % PID, self.out.getvalue())
+        self.assertIn('alive 10s pid=%d, aidebug up' % PID, self.out.getvalue())
+        self.assertGreaterEqual(self.ops.after_start, 11)
+
+    def test_instance_pid_mismatch_fails(self):
+        c = self.make(inst_pid=999)
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 1)
+        self.assertIn('起動したプロセスではない', self.err.getvalue())
+
+    def test_instance_exe_mismatch_fails(self):
+        c = self.make(inst_exe='D:\\Other\\np21x64w.exe')
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 1)
+        self.assertIn('D:\\Other', self.err.getvalue())
+
     def test_process_exits_right_after_start(self):
-        c = self.make(FakeOps(dies_after=2))
+        c = self.make(ops=FakeOps(self.fc, dies_after=2))
         rc = self.run_main(c, ['start', '--ini', 'test.ini', '--wait-ready'])
         self.assertEqual(rc, 1)
         self.assertIn('起動直後に終了した', self.err.getvalue())
-        self.assertIn('pid=4242', self.err.getvalue())
-        self.assertEqual(len(self.ops.started), 1)
+        self.assertIn('pid=%d' % PID, self.err.getvalue())
 
-    def test_alive_for_the_whole_window_and_api_up(self):
-        c = self.make(FakeOps())
-        rc = self.run_main(c, ['start', '--ini', 'test.ini'])
-        self.assertEqual(rc, 0, self.err.getvalue())
-        self.assertIn('alive 10s pid=4242, aidebug up', self.out.getvalue())
-        # 起動後に少なくとも 10 回 (10 秒) プロセスを見た
-        self.assertGreaterEqual(self.ops.after_start, 11)
+    def test_pid_rechecked_right_before_success(self):
+        # 11 回目 (t=10 の先頭) までは生きていて、成功直前の確認で消えている
+        c = self.make(ops=FakeOps(self.fc, dies_after=11))
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 1)
+        self.assertIn('確認の最後に消えた', self.err.getvalue())
 
-    def test_process_lives_but_api_never_answers(self):
-        c = self.make(FakeOps(), status_fn=lambda: None)
+    def test_api_silent_with_dialog_reports_dialog(self):
+        dlg = {'hwnd': '0x1', 'modal': True, 'title': 'Neko Project 21/W',
+               'text': ['HDD image open failed'], 'buttons': [{'id': 1, 'text': 'OK'}]}
+        c = self.make(api_up_after=10 ** 6, dialog=dlg)
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 1)
+        # API の期限 (60 秒) を待たず、黙っていると分かった時点で見る
+        self.assertLess(self.fc.now - self.ops.start_time, 5)
+        self.assertIn('HDD image open failed', self.err.getvalue())
+        self.assertIn('ボタン: OK', self.err.getvalue())
+
+    def test_instance_reports_dialog(self):
+        dlg = {'modal': True, 'title': 'T', 'text': ['resume?'], 'buttons': []}
+        c = self.make(instance_dialog=True, dialog=dlg)
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 1)
+        self.assertIn('resume?', self.err.getvalue())
+
+    def test_api_never_answers_without_dialog(self):
+        c = self.make(api_up_after=10 ** 6)
         rc = self.run_main(c, ['start', '--ini', 'test.ini', '--api-timeout', '15'])
         self.assertEqual(rc, 1)
-        self.assertIn('/api/status', self.err.getvalue())
+        self.assertIn('15 秒応答しない', self.err.getvalue())
 
     def test_api_comes_up_late(self):
-        answers = [None] * 20 + ['{"phase":"p2"}']
-        c = self.make(FakeOps(), status_fn=lambda: answers.pop(0) if answers else 'x')
-        rc = self.run_main(c, ['start', '--ini', 'test.ini'])
+        c = self.make(api_up_after=20)
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 0, self.err.getvalue())
+
+    def test_api_timeout_zero_does_not_wait_for_api(self):
+        c = self.make('down')
+        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--api-timeout', '0'])
         self.assertEqual(rc, 0, self.err.getvalue())
+        self.assertEqual([x for x in self.http.calls if x[1] == '/api/instance'], [])
+        self.assertIn('API は待たない', self.out.getvalue())
+
+    def test_old_fork_after_start_uses_status(self):
+        c = self.make('old')
+        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 0, self.err.getvalue())
+        self.assertIn('フォークが古い', self.err.getvalue())
 
 
-class IniUnreadable(Base):
-    def test_falls_back_to_default_three_media(self):
-        os.chmod(os.path.join(self.dir, 'test.ini'), 0)
-        if os.access(os.path.join(self.dir, 'test.ini'), os.R_OK):
-            self.skipTest('running as a user that ignores file modes')
-        c = self.make(FakeOps())
-        rc = self.run_main(c, ['start', '--ini', 'test.ini'])
-        self.assertEqual(rc, 0, self.err.getvalue())
-        self.assertEqual(sorted(self.ops.probes[0]),
-                         sorted(WIN + '\\' + n for n in ctl.DEFAULT_MEDIA))
-        self.assertIn('読めない', self.err.getvalue())
+class WaitReady(Base):
+    def setUp(self):
+        Base.setUp(self)
+        self.ops0 = FakeOps(self.fc, running=[ctl.Proc(PID, 'np21x64w.exe', EXE)])
 
-    def test_status_without_ini_uses_defaults(self):
-        c = self.make(FakeOps(), status_fn=lambda: None)
+    def test_ready_when_text_appears(self):
+        screens = ['booting', 'booting', 'OS32\nWaiting for commands via serial...\n']
+        c = self.make(ops=self.ops0,
+                      tvram=lambda: screens.pop(0) if len(screens) > 1 else screens[0])
+        self.assertEqual(self.run_main(c, ['wait-ready']), 0)
+
+    def test_timeout_shows_last_screen(self):
+        c = self.make(ops=self.ops0, tvram='root panic\n')
+        self.assertEqual(self.run_main(c, ['wait-ready', '--timeout', '6']), 1)
+        self.assertIn('root panic', self.err.getvalue())
+
+    def test_timeout_when_api_never_answers(self):
+        c = self.make('down', ops=self.ops0)
+        self.assertEqual(self.run_main(c, ['wait-ready', '--timeout', '6']), 1)
+        self.assertIn('aidebug', self.err.getvalue())
+
+    def test_dialog_during_wait(self):
+        c = self.make(ops=self.ops0, dialog={'modal': True, 'title': 'X', 'text': ['stuck'],
+                                             'buttons': []})
+        self.assertEqual(self.run_main(c, ['wait-ready']), 1)
+        self.assertIn('stuck', self.err.getvalue())
+
+
+class Fdd(Base):
+    def setUp(self):
+        Base.setUp(self)
+        self.ops0 = FakeOps(self.fc, running=[ctl.Proc(PID, 'np21x64w.exe', EXE)])
+
+    def test_insert(self):
+        c = self.make(ops=self.ops0)
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '2', '--insert', 'other.d88']), 0,
+                         self.err.getvalue())
+        call = [x for x in self.http.calls if x[1] == '/api/fdd'][0]
+        self.assertEqual(parse_qs(call[2]), {'drive': ['2'], 'action': ['insert'],
+                                             'path': [WIN + '\\other.d88'],
+                                             'readonly': ['0']})
+
+    def test_eject(self):
+        c = self.make(ops=self.ops0)
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--eject']), 0)
+        call = [x for x in self.http.calls if x[1] == '/api/fdd'][0]
+        self.assertEqual(call[2], 'drive=1&action=eject')
+
+    def test_old_fork(self):
+        c = self.make('old', ops=self.ops0)
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--eject']), 1)
+        self.assertIn('make deploy', self.err.getvalue())
+
+    def test_missing_image_is_argument_error(self):
+        c = self.make(ops=self.ops0)
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--insert', 'none.d88']), 2)
+
+    def test_other_location_refused(self):
+        c = self.make(ops=self.ops0, inst_exe='D:\\Other\\np21x64w.exe')
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--eject']), 1)
+        self.assertEqual([x for x in self.http.calls if x[1] == '/api/fdd'], [])
+
+    def test_api_error_is_reported(self):
+        c = self.make(ops=self.ops0, fdd_status=409)
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '4', '--eject']), 1)
+        self.assertIn('409', self.err.getvalue())
+
+
+class Status(Base):
+    def test_ini_derived_media_listing(self):
+        c = self.make('down', ops=FakeOps(self.fc, locks={ISO: 5}))
+        self.assertEqual(self.run_main(c, ['status', '--ini', 'test.ini']), 0)
+        out = self.out.getvalue()
+        self.assertIn('媒体 (ini test.ini):', out)
+        self.assertIn('free:   ' + NHD, out)
+        self.assertIn('locked: ' + ISO, out)
+        self.assertIn('free:   ' + D88, out)
+        self.assertNotIn('WRONG', out)
+        self.assertIn('aidebug: down', out)
+
+    def test_default_media_and_instance_and_dialog(self):
+        ops = FakeOps(self.fc, running=[ctl.Proc(PID, 'np21x64w.exe', EXE)])
+        c = self.make(ops=ops, dialog={'modal': True, 'title': 'T', 'text': ['msg'],
+                                       'buttons': [{'id': 1, 'text': 'OK'}]})
         self.assertEqual(self.run_main(c, ['status']), 0)
-        self.assertEqual(sorted(self.ops.probes[0]),
-                         sorted(WIN + '\\' + n for n in ctl.DEFAULT_MEDIA))
-        self.assertIn('process: none', self.out.getvalue())
-        self.assertIn('aidebug: down', self.out.getvalue())
+        out = self.out.getvalue()
+        self.assertIn('媒体 (default):', out)
+        self.assertIn('aidebug: up pid=%d' % PID, out)
+        self.assertIn('dialog: open (modal)', out)
+        self.assertIn('msg', out)
+
+    def test_no_dialog_line(self):
+        ops = FakeOps(self.fc, running=[ctl.Proc(PID, 'np21x64w.exe', EXE)])
+        c = self.make(ops=ops)
+        self.assertEqual(self.run_main(c, ['status']), 0)
+        self.assertIn('dialog: none', self.out.getvalue())
+
+    def test_old_fork_line(self):
+        ops = FakeOps(self.fc, running=[ctl.Proc(PID, 'np21x64w.exe', EXE)])
+        c = self.make('old', ops=ops)
+        self.assertEqual(self.run_main(c, ['status']), 0)
+        self.assertIn('古いフォーク', self.out.getvalue())
 
 
 class Arguments(Base):
     def test_paths_are_rejected(self):
         for bad in ('../x.ini', 'C:\\x.ini', 'a/b.ini', '.hidden'):
-            c = self.make(FakeOps())
+            c = self.make()
             self.assertEqual(self.run_main(c, ['start', '--ini', bad]), 2, bad)
             self.assertEqual(self.ops.started, [])
 
     def test_missing_ini_file_is_argument_error(self):
-        c = self.make(FakeOps())
+        c = self.make()
         self.assertEqual(self.run_main(c, ['start', '--ini', 'none.ini']), 2)
-
-
-class WaitReady(Base):
-    def test_ready_when_text_appears(self):
-        screens = [None, 'booting', 'OS32\nWaiting for commands via serial...\n']
-        c = self.make(FakeOps(), tvram=lambda: screens.pop(0))
-        self.assertEqual(self.run_main(c, ['wait-ready']), 0)
-        self.assertIn('ready', self.out.getvalue())
-
-    def test_timeout_shows_last_screen(self):
-        c = self.make(FakeOps(), tvram=lambda: 'root panic\n')
-        self.assertEqual(self.run_main(c, ['wait-ready', '--timeout', '6']), 1)
-        self.assertIn('root panic', self.err.getvalue())
-
-    def test_timeout_when_api_never_answers(self):
-        c = self.make(FakeOps(), tvram=lambda: None)
-        self.assertEqual(self.run_main(c, ['wait-ready', '--timeout', '6']), 1)
-        self.assertIn('aidebug', self.err.getvalue())
-
-    def test_start_with_wait_ready(self):
-        c = self.make(FakeOps(), tvram=lambda: 'Waiting for commands')
-        self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini', '--wait-ready']), 0)
-
-
-class RealOpsParsing(unittest.TestCase):
-    """WinOps の出力解釈だけを見る (_run を差し替え、Windows は呼ばない)。"""
-
-    def ops(self, rc, out):
-        o = ctl.WinOps()
-        o.calls = []
-
-        def run(args, timeout=60):
-            o.calls.append(args)
-            return rc, out
-        o._run = run
-        return o
-
-    def test_tasklist_csv(self):
-        o = self.ops(0, '"np21x64w.exe","1234","Console","1","50,000 K"\n'
-                        '"explorer.exe","9","Console","1","1 K"\n'
-                        '"NP21W.EXE","55","Console","1","1 K"\n')
-        self.assertEqual(o.list_processes(), [('np21x64w.exe', 1234), ('NP21W.EXE', 55)])
-
-    def test_probe_parses_and_unreported_is_locked(self):
-        # 結果は添字で返る。範囲外の添字・知らない状態語は捨てる
-        o = self.ops(0, 'free\t0\nmissing\t1\nfree\t9\nweird\t2\n')
-        got = o.probe(['C:\\a.nhd', 'C:\\b.iso', 'C:\\c.d88'])
-        self.assertEqual(got, {'C:\\a.nhd': 'free', 'C:\\b.iso': 'missing',
-                               'C:\\c.d88': 'locked'})
-        self.assertIn('-EncodedCommand', o.calls[0])
-
-    def test_start_returns_pid_or_fails(self):
-        self.assertEqual(self.ops(0, 'pid\t321\n').start('C:\\e.exe', ['/iC:\\a.ini'], 'C:\\'), 321)
-        with self.assertRaises(ctl.CtlError):
-            self.ops(1, 'boom').start('C:\\e.exe', [], 'C:\\')
 
 
 class Resolve(unittest.TestCase):
@@ -365,15 +769,180 @@ class Resolve(unittest.TestCase):
             self.assertEqual(ctl.resolve_np21w_dir({}, d), '/mnt/c/np')
             self.assertEqual(ctl.resolve_np21w_dir({'NP21W_DIR': '/e'}, d), '/e')
 
-    def test_win_path(self):
-        self.assertEqual(ctl.to_win_path('/mnt/c/Users/a/np21w'), 'C:\\Users\\a\\np21w')
-        p = ctl.Paths('/mnt/c/np/', None)
-        self.assertEqual(p.win_of('a.ini'), 'C:\\np\\a.ini')
-        self.assertEqual(ctl.Paths('/mnt/c/np', 'D:\\x\\').win_of('a'), 'D:\\x\\a')
+    def test_win_np21w_dir_route(self):
+        p = ctl.paths_from_env({'NP21W_DIR': '/mnt/c/np', 'WIN_NP21W_DIR': 'D:\\Emu\\np21\\'})
+        self.assertEqual(p.win_of('a.ini'), 'D:\\Emu\\np21\\a.ini')
+        self.assertEqual(p.wsl_of('a.ini'), '/mnt/c/np/a.ini')
+        p = ctl.paths_from_env({'NP21W_DIR': '/mnt/c/Users/a/np21w'})
+        self.assertEqual(p.win_of('a.ini'), 'C:\\Users\\a\\np21w\\a.ini')
 
-    def test_powershell_quoting(self):
-        self.assertEqual(ctl._ps_quote("C:\\it's"), "'C:\\it''s'")
+    def test_win_norm(self):
+        self.assertEqual(ctl.win_norm('C:/NP21/NP21X64W.EXE'), 'c:\\np21\\np21x64w.exe')
+
+
+class HttpFallback(unittest.TestCase):
+    def test_curl_status_parsing(self):
+        h = ctl.Http('http://127.0.0.1:1')
+        res = mock.Mock(returncode=0, stdout=b'{"dialog":true}\n503')
+        with mock.patch.object(ctl.urllib.request, 'urlopen',
+                               side_effect=ctl.urllib.error.URLError('x')), \
+                mock.patch.object(ctl.subprocess, 'run', return_value=res):
+            self.assertEqual(h.request('GET', '/api/status'), (503, '{"dialog":true}'))
+        res = mock.Mock(returncode=0, stdout=b'\n000')
+        with mock.patch.object(ctl.urllib.request, 'urlopen',
+                               side_effect=ctl.urllib.error.URLError('x')), \
+                mock.patch.object(ctl.subprocess, 'run', return_value=res):
+            self.assertIsNone(h.request('GET', '/api/status'))
+
+
+# ---------------------------------------------------------------------------
+# 変異 (--mutate)。写しを変異させて全ケースを回し、1 件以上落ちれば RED。
+# 写しが import できない変異は数えない (NOT COUNTED)。恒等の対照は GREEN が正しい。
+# ---------------------------------------------------------------------------
+IDENTITY = ('# ---------------------------------------------------------------------------\n# パス\n',
+            '# ---------------------------------------------------------------------------\n# パス (identity)\n',
+            '恒等の対照 (コメントだけ変える — GREEN でなければ仕掛けが壊れている)')
+
+MUTATIONS = [
+    ("                    free_since.pop(p, None)\n                    last_free.pop(p, None)",
+     "                    pass",
+     "ロックされても数え直さない (Codex 1 / Fable M1)"),
+    ("        while True:\n            probe_list = [p for p in order if p not in missing]",
+     "        while True:\n            probe_list = [p for p in order if p not in missing and not settled(p)]",
+     "安定した媒体をプローブし直さない (Codex 1)"),
+    ("                if all(state.get(p) in ('free', 'missing') for p in order):",
+     "                if True:",
+     "起動直前の全体プローブの結果を見ない (Fable M1)"),
+    ("                if self.settle:\n                    self.sleep(self.settle)\n",
+     "",
+     "起動直前に settle を置かない"),
+    ("                if result is None or self.clock() > deadline:\n                    raise timeout_error()\n                apply(result, self.clock(), final=True)",
+     "                if result is None:\n                    raise timeout_error()\n                apply(result, self.clock(), final=True)",
+     "期限を過ぎてから得た起動直前の結果を成功に数える (Codex 4)。"
+     "待ちの途中の同じ検査は、この最後の検査が必ず後に来るので変異させても等価"),
+    ("        return self.ops.probe(paths, remaining)",
+     "        return self.ops.probe(paths, 60)",
+     "プローブに残り時間を渡さない (Codex 4)"),
+    ("    if rc != 0:\n        raise ProbeError(",
+     "    if False:\n        raise ProbeError(",
+     "PowerShell の失敗をロックと区別しない (Fable M2)"),
+    ("    if errors:\n        raise ProbeError(",
+     "    if False:\n        raise ProbeError(",
+     "error 行を無視する (Fable M2)"),
+    ("    if lacking or 'end' not in lines:",
+     "    if False:",
+     "報告されなかったパスを見逃す (Fable M2)"),
+    ("  catch [System.IO.IOException] { \"locked`t$i\" }\n",
+     "",
+     "PowerShell の例外を分けない (Fable M2)"),
+    ("    if len(value) >= 2 and value[0] == '\"' and value[-1] == '\"':",
+     "    if False:",
+     "ini の引用符を外さない (Codex 3)"),
+    ("            if k in wanted and k not in found:",
+     "            if k in wanted:",
+     "節内の 2 回目の値で上書きする (NP21/W は最初を採る)"),
+    ("            if in_section:\n                break\n",
+     "",
+     "2 つ目の節まで読む"),
+    ("                   ['SCSIHDD%d' % i for i in range(0, 4)])",
+     "                   [])",
+     "SCSIHDD を待たない (Fable L2)"),
+    ("            (ours if p.exe and win_norm(p.exe) == want else others).append(p)",
+     "            (ours if 'np21' in p.name.lower() else others).append(p)",
+     "名前の部分一致で強制終了の対象にする (Codex 2)"),
+    ("            body = urllib.parse.urlencode({'save': '0',",
+     "            body = urllib.parse.urlencode({'save': '1',",
+     "quit で ini を書き戻させる"),
+    ("                    if int(inst['pid']) != pid or win_norm(inst.get('exe')) != want_exe:",
+     "                    if False:",
+     "起動後に pid / exe を照合しない"),
+    ("                # 成功を返す直前にもう一度\n                if not alive_now():",
+     "                # 成功を返す直前にもう一度\n                if False:",
+     "成功の直前に pid を見直さない (Codex 5)"),
+    ("        if timeout < stable:\n            raise CtlError(",
+     "        if False:\n            raise CtlError(",
+     "--timeout < --stable を通す (Fable L1)"),
+    ("        confirmed = api_timeout <= 0\n",
+     "        confirmed = False\n",
+     "--api-timeout 0 でも API を待つ (Fable L3)"),
+    ("                    self.fail_if_dialog('起動の確認中 (aidebug が応答しない)')",
+     "                    pass",
+     "API が黙っているときダイアログを見ない"),
+    ("        if st == 200 and js and js.get('open') and js.get('modal', True):\n            return js",
+     "        if False:\n            return js",
+     "ダイアログを検出しない"),
+    ("        if state == 'ok' and win_norm(inst.get('exe')) != want:",
+     "        if False:",
+     "別の場所の NP21/W にも quit を送る"),
+    ("            args.append(self.paths.win_of(fd))",
+     "            pass",
+     "--fd を起動の引数に渡さない"),
+    ("def win_norm(path):",
+     "def win_norm(path)",
+     "構文を壊す — import できない写しは RED にも GREEN にも数えないことの確認"),
+]
+
+
+def _load(path):
+    spec = importlib.util.spec_from_file_location('np21w_ctl_mut', str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _suite_failures(mod):
+    global ctl
+    saved = ctl
+    ctl = mod
+    try:
+        suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+        res = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+        return len(res.failures) + len(res.errors)
+    finally:
+        ctl = saved
+
+
+def mutate():
+    original = SRC.read_text(encoding='utf-8')
+    bad = 0
+    red = green = uncounted = 0
+    with tempfile.TemporaryDirectory(prefix='np21w-ctl-mut-') as tmp:
+        for i, (old, new, why) in enumerate([IDENTITY] + MUTATIONS):
+            if original.count(old) != 1:
+                print('MUTATION %d NOT APPLICABLE (%d 箇所): %s' % (i, original.count(old), why))
+                bad += 1
+                continue
+            path = Path(tmp) / ('mut%d.py' % i)
+            path.write_text(original.replace(old, new), encoding='utf-8')
+            try:
+                mod = _load(path)
+            except Exception as exc:   # 写しが import できない = 数えない
+                print('MUTATION %d NOT COUNTED (import: %s): %s' % (i, type(exc).__name__, why))
+                uncounted += 1
+                continue
+            fails = _suite_failures(mod)
+            if i == 0:
+                ok = fails == 0
+                print('IDENTITY %s (%d 件落ちた): %s'
+                      % ('GREEN' if ok else '**RED (仕掛けが壊れている)**', fails, why))
+                bad += not ok
+                continue
+            if fails:
+                red += 1
+                print('MUTATION %d RED (%d 件): %s' % (i, fails, why))
+            else:
+                green += 1
+                bad += 1
+                print('MUTATION %d **GREEN (見逃し)**: %s' % (i, why))
+    print('MUTATION SUMMARY red=%d green=%d not_counted=%d identity=1' % (red, green, uncounted))
+    return bad
 
 
 if __name__ == '__main__':
-    unittest.main()
+    do_mutate = '--mutate' in sys.argv
+    argv = [a for a in sys.argv if a != '--mutate']
+    prog = unittest.main(argv=argv, exit=False)
+    rc = 0 if prog.result.wasSuccessful() else 1
+    if do_mutate and rc == 0:
+        rc = 1 if mutate() else 0
+    sys.exit(rc)
