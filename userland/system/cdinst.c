@@ -6,7 +6,8 @@
 /*                                                                          */
 /*  CD-ROM (ISO 9660) 上の .PKG ファイルからHDDにインストールする。           */
 /*  - インストールタイプ選択 (Minimal / Normal / Full)                       */
-/*    1 = BOOT + MINIMAL、2 = + NORMAL、3 = + DEBUG。中身は配備マニフェストの */
+/*    1 = BOOT + MINIMAL (CUI のみ、起動 FD と同じ集合)、2 = + GUI + NORMAL、 */
+/*    3 = + DEBUG。展開は依存の順 MINIMAL → GUI → NORMAL → DEBUG。中身は配備マニフェストの */
 /*    タグから tools/mkpkg.py --plan が作る (構成は build/packages.yaml)     */
 /*  - 128 項目を超えるパッケージは NAME.PKG, NAME2.PKG, … に分かれている。   */
 /*    連番を欠けるまで順に展開する                                          */
@@ -27,6 +28,7 @@
 /* 分割されうるパッケージのベース名 (build/packages.yaml と一致させる。
  * make check-packages-host が突き合わせる)。連番は 2..PKG_SERIES_MAX */
 #define PKG_BASE_MINIMAL "MINIMAL"
+#define PKG_BASE_GUI     "GUI"
 #define PKG_BASE_NORMAL  "NORMAL"
 #define PKG_BASE_DEBUG   "DEBUG"
 #define PKG_SERIES_MAX   9
@@ -355,7 +357,7 @@ static int install_package_hd(const char *path, const char *label)
 }
 
 /* ======================================================================== */
-/*  パッケージの展開 (MINIMAL → NORMAL → DEBUG) と同期                      */
+/*  パッケージの展開 (MINIMAL → GUI → NORMAL → DEBUG) と同期                */
 /*                                                                          */
 /*  **どのパッケージの失敗でも止める** (Codex / Opus 実装レビュー ラリー 1)。 */
 /*  以前は MINIMAL だけ戻り値を見ていたので、NORMAL 以降が PATH TOO LONG や  */
@@ -413,8 +415,13 @@ static int install_packages(int choice)
     ret = install_series(PKG_BASE_MINIMAL);
     if (ret != PKG_OK) return ret;
 
-    /* 3. NORMAL (タイプ2以上) */
+    /* 3. GUI → NORMAL (タイプ2以上)。GUI (gshell / libos32gui.shlib) を先に
+     * 置く — NORMAL は GUI に依存しないが、GUI の後に展開すれば途中で止まっても
+     * GUI 一式は揃っている。Minimal だけなら GUI は無く、system.cfg が GUI=1
+     * でもカーネルが "gshell load failed -> CUI shell" で CUI に落ちる */
     if (choice >= '2') {
+        ret = install_series(PKG_BASE_GUI);
+        if (ret != PKG_OK) return ret;
         ret = install_series(PKG_BASE_NORMAL);
         if (ret != PKG_OK) return ret;
     }
@@ -493,11 +500,11 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     println(COL_NORMAL, "Available packages on CD:");
     if (pkg_exists(PKG_BOOT))    println(COL_CYAN, "  [*] BOOT.PKG");
     {
-        static const char *const bases[3] = {
-            PKG_BASE_MINIMAL, PKG_BASE_NORMAL, PKG_BASE_DEBUG
+        static const char *const bases[4] = {
+            PKG_BASE_MINIMAL, PKG_BASE_GUI, PKG_BASE_NORMAL, PKG_BASE_DEBUG
         };
         int b, n, count;
-        for (b = 0; b < 3; b++) {
+        for (b = 0; b < 4; b++) {
             count = pkg_series_count(bases[b]);
             for (n = 1; n <= count; n++) {
                 char path[PKG_PATH_BUF];
@@ -510,8 +517,8 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     /* インストールタイプ選択 (中身は build/packages.yaml の振り分け) */
     print(COL_NORMAL, "\n");
     println(COL_NORMAL, "Install type:");
-    println(COL_NORMAL, "  1. Minimal  (shell + basic commands, GUI shell)");
-    println(COL_NORMAL, "  2. Normal   (+ commands, apps, manpages, IME dictionary, data)");
+    println(COL_NORMAL, "  1. Minimal  (CUI only: shell + basic commands, same as the boot FD)");
+    println(COL_NORMAL, "  2. Normal   (+ GUI shell, commands, apps, manpages, IME dictionary, data)");
     println(COL_NORMAL, "  3. Full     (+ test programs and test data)");
     println(COL_NORMAL, "  0. Cancel");
     print(COL_NORMAL, "\n");
@@ -529,6 +536,7 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
 
     /* 選んだ型に要るパッケージが媒体に揃っているか、HDD を消す前に見る */
     if (pkg_series_count(PKG_BASE_MINIMAL) == 0
+        || (choice >= '2' && pkg_series_count(PKG_BASE_GUI) == 0)
         || (choice >= '2' && pkg_series_count(PKG_BASE_NORMAL) == 0)
         || (choice >= '3' && pkg_series_count(PKG_BASE_DEBUG) == 0)) {
         println(COL_RED, "ERROR: the CD lacks a package for this install type.");

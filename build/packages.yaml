@@ -9,21 +9,29 @@
 #  いなかった。生成は tools/mkpkg.py --plan、検査は make check-packages-host。
 #
 #  振り分け (deploy マニフェストの各行の tags:):
-#    core      → MINIMAL  起動と GUI シェルに要るもの (カーネル、shell、gshell、
-#                         libos32gui、既定フォント、設定の初期値)
+#    core      → MINIMAL  起動に要るもの (カーネル、unicode、shell、既定フォント、
+#                         filetypes、設定の初期値)
 #    base      → MINIMAL  基本コマンド (more / less / grep / find / sort / head /
-#                         tail / wc / tee / touch / hexdump / sleep / sndctl) と
-#                         install / cdinst。Minimal =「シェル + 基本コマンド」
+#                         tail / wc / tee / touch / hexdump / sleep / diff / du /
+#                         cal / man / cfg / sndctl) と install / cdinst。
+#                         Minimal =「CUI のシェル + 基本コマンド」
+#    gui       → GUI      gshell、libos32gui.shlib、shlib を使うアプリ (filer /
+#                         edit_gui)。shlib を使う試験アプリは test (DEBUG) のまま
 #    programs  → NORMAL   コマンドとアプリ
 #    docs      → NORMAL   man ページ
 #    data      → NORMAL   FEP 辞書、TTF、MGX サンプル
 #    test      → DEBUG    試験バイナリと試験用データ (userland/tests/ 由来は必ずこれ)
 #  1 行のタグはちょうど 1 つのパッケージに当たること (検査が見る)。
 #
-#  cdinst の選択肢との対応 (userland/system/cdinst.c):
-#    1. Minimal = BOOT + MINIMAL
-#    2. Normal  = 1 + NORMAL
+#  cdinst の選択肢との対応 (userland/system/cdinst.c)。展開は依存の順
+#  BOOT → MINIMAL → GUI → NORMAL → DEBUG:
+#    1. Minimal = BOOT + MINIMAL                (CUI のみ。起動 FD と同じ集合)
+#    2. Normal  = 1 + GUI + NORMAL
 #    3. Full    = 2 + DEBUG
+#
+#  **起動 FD (build/image.mk) の中身は BOOT + MINIMAL そのもの** (下の fd:)。
+#  FD だけに要る物と FAT の 8.3 に合わせた置き場所の違いだけを fd: に書く。
+#  core / base に足した物は FD にも入るので、FD の空き (docs/08_build.md) を見ること。
 #
 #  項目数 (ファイル + ディレクトリ) が消費側の上限 128 (userland/lib/rt/pkg.h
 #  PKG_MAX_ENTRIES) を超えるパッケージは mkpkg が NAME.PKG, NAME2.PKG, … に
@@ -57,6 +65,11 @@ packages:
       - host: build/out/settings.db
         guest: /etc/settings.db
 
+  gui:
+    version: 1
+    lzss: false
+    tags: [gui]
+
   normal:
     version: 2
     lzss: false
@@ -70,3 +83,39 @@ packages:
 # 配備マニフェストにあってもパッケージに入れない物。**理由を必ず書く。**
 # guest はゲストパス (glob 不可)。今は無い。
 exclude: []
+
+# ---------------------------------------------------------------------------
+# 起動 FD (build/image.mk の images/os32_boot.d88 と images/os32_boot144.img)。
+# 中身は from のパッケージと同じ集合で、足しも引きもしない (make
+# check-packages-host が実物のイメージで等しいことを見る)。違うのは:
+#   rename  FAT (FatFs は LFN なし) の 8.3 に収まらない名前と、FD 上の置き場所が
+#           HDD と違う物。guest は配備マニフェストのゲストパス、fd は FD 上のパス
+#   only    FD だけが要る起動用の物。host の {loader} は make が渡す
+#           (2HD: boot/loader_fat_new.bin、1.44MB: boot/loader_fat144.bin)
+# どれも reason: を必ず書く。
+# ---------------------------------------------------------------------------
+fd:
+  from: [boot, minimal]
+  rename:
+    - guest: /boot/vmkernel.lz4
+      fd: /VMKRNL.LZ4
+      reason: FAT ローダ (boot/loader_fat*.asm) はルートの VMKRNL.LZ4 を読む。install.bin が /hd0/boot/vmkernel.lz4 へ写す
+    - guest: /boot/boot_hdd.bin
+      fd: /sys/boot_hdd.bin
+      reason: install.bin (SRC_BOOT_HDD) が HDD の LBA 0 へ書く元。CD では cdinst が BOOT.PKG から書く
+    - guest: /boot/loader_hdd.bin
+      fd: /sys/loader_h.bin
+      reason: 8.3 に収まらない。install.bin (SRC_LOADER_H) が HDD の LBA 2 以降へ書く元
+    - guest: /sys/font/default.kcgfont
+      fd: /sys/font/default.kcg
+      reason: 8.3 に収まらない。カーネルは SYS_FONT_DEFAULT が読めなければ SYS_FONT_DEFAULT_83 を読む (include/config.h)
+    - guest: /etc/filetypes
+      fd: /etc/filetype
+      reason: 8.3 に収まらない。シェルの filer は /etc/filetypes が開けなければ /etc/filetype を読む (userland/shell/cmd_filer.c)
+  only:
+    - fd: /LOADER.BIN
+      host: "{loader}"
+      reason: FAT の IPL (boot/boot_fat*.asm) が読む 2 段目。HDD の同等物は BOOT の loader_hdd.bin (ブート領域へ直接書く)
+    - fd: /etc/profile
+      host: assets/profile_fdd
+      reason: FD 用の PATH (/bin:/sbin、/usr/bin を含めない) と起動の表示。HDD の /etc/profile (assets/profile) は配備マニフェストに無い

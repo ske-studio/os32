@@ -1225,11 +1225,30 @@ static void case_cdinst(void)
     CHECK(exists("/n/a.txt"));
     CHECK(!g_complete_seen);
 
+    /* F: GUI (MINIMAL → GUI → NORMAL の 2 段目) の失敗 → NORMAL へ進まない */
+    cdinst_setup("F_");
+    EQ(install_packages('2'), PKG_ERR_TOOLONG);
+    CHECK(exists("/good/a.txt"));
+    CHECK(!exists("/n"));
+    CHECK(!g_complete_seen);
+
+    /* G: Normal を選んだのに GUI が媒体に無い → 飛ばさず失敗 */
+    cdinst_setup("G_");
+    EQ(install_packages('2'), PKG_ERR_IO);
+    CHECK(!exists("/n"));
+    CHECK(!g_complete_seen);
+
+    /* H: Minimal は GUI を展開しない (CUI のみ) */
+    cdinst_setup("C_");
+    EQ(install_packages('1'), PKG_OK);
+    CHECK(exists("/good/a.txt") && !exists("/g") && !exists("/n"));
+    CHECK(g_complete_seen);
+
     /* C: 全部通れば完了を表示する。NORMAL は 2 本に分かれていて両方展開する */
     cdinst_setup("C_");
     EQ(install_packages('3'), PKG_OK);
-    CHECK(exists("/good/a.txt") && exists("/n/a.txt") && exists("/n2/b.txt")
-          && exists("/full/f.txt"));
+    CHECK(exists("/good/a.txt") && exists("/g/a.txt") && exists("/n/a.txt")
+          && exists("/n2/b.txt") && exists("/full/f.txt"));
     CHECK(g_complete_seen);
     g_cd_set = (const char *)0;
 }

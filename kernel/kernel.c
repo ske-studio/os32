@@ -512,7 +512,11 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     tvram_print(0, 3, "FONT..", TATTR_GREEN);
     {
         int fret;
-        fret = kcg_load_font("/sys/font/default.kcgfont");
+        fret = kcg_load_font(SYS_FONT_DEFAULT);
+        if (fret != 0) {
+            /* FD は FAT (8.3) なので短い名前で置いてある */
+            fret = kcg_load_font(SYS_FONT_DEFAULT_83);
+        }
         if (fret == 0) {
             tvram_print(6, 3, "OK ", TATTR_WHITE);
         } else {

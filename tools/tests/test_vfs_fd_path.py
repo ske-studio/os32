@@ -178,6 +178,9 @@ MUTANTS = [
     ("cdinst が NORMAL の失敗で止まらない", "system/cdinst.c",
      '        ret = install_series(PKG_BASE_NORMAL);\n        if (ret != PKG_OK) return ret;',
      '        ret = install_series(PKG_BASE_NORMAL);'),
+    ("cdinst が GUI の失敗で止まらない", "system/cdinst.c",
+     '        ret = install_series(PKG_BASE_GUI);\n        if (ret != PKG_OK) return ret;',
+     '        ret = install_series(PKG_BASE_GUI);'),
     ("cdinst が分割の途中の失敗で止まらない", "system/cdinst.c",
      '        ret = install_step(path, label);\n        if (ret != PKG_OK) return ret;',
      '        ret = install_step(path, label);\n        (void)ret;'),
@@ -584,14 +587,19 @@ def make_pkgs(d):
     norm = raw_pkg([(b"/n", 0, D), (b"/n/a.txt", 1, F)], b"N")
     norm2 = raw_pkg([(b"/n2", 0, D), (b"/n2/b.txt", 1, F)], b"M")
     full = raw_pkg([(b"/full", 0, D), (b"/full/f.txt", 1, F)], b"F")
+    gui = raw_pkg([(b"/g", 0, D), (b"/g/a.txt", 1, F)], b"G")
     too_long = raw_pkg([(b"/l", 0, D), (b"/l/" + b"x" * 121, 1, F)], b"Z")  # 124
     for setname, files in (
-            ("A_", {"MINIMAL": good, "NORMAL": too_long, "DEBUG": full}),
-            ("B_", {"MINIMAL": good, "NORMAL": norm,
+            ("A_", {"MINIMAL": good, "GUI": gui, "NORMAL": too_long, "DEBUG": full}),
+            ("B_", {"MINIMAL": good, "GUI": gui, "NORMAL": norm,
                     "NORMAL2": raw_pkg([(b"/clash", 3, F)], b"abc"), "DEBUG": full}),
-            ("C_", {"MINIMAL": good, "NORMAL": norm, "NORMAL2": norm2, "DEBUG": full}),
-            ("D_", {"MINIMAL": too_long, "NORMAL": norm}),
-            ("E_", {"MINIMAL": good, "NORMAL": norm})):
+            ("C_", {"MINIMAL": good, "GUI": gui, "NORMAL": norm, "NORMAL2": norm2,
+                    "DEBUG": full}),
+            ("D_", {"MINIMAL": too_long, "GUI": gui, "NORMAL": norm}),
+            ("E_", {"MINIMAL": good, "GUI": gui, "NORMAL": norm}),
+            # GUI (MINIMAL の次、NORMAL の前) の失敗で止まる / GUI が媒体に無い
+            ("F_", {"MINIMAL": good, "GUI": too_long, "NORMAL": norm}),
+            ("G_", {"MINIMAL": good, "NORMAL": norm})):
         for n, b in files.items():
             w(f"{setname}{n}.PKG", b)
 

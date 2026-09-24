@@ -17,7 +17,13 @@ CD インストール (userland/system/cdinst.c) の .PKG は、配備の正典
      (除外以外) + 媒体だけの物が**同じバイト列で**ちょうど 1 回ずつ入っているか
   5. ISO (実物): images/os32_install.iso の中の PKG を取り出して 4 と同じ検査
      (isoinfo が無ければ SKIP と表示する)
-  6. cdinst.c のベース名が構成の名前と一致し、pkg.h の上限が mkpkg と一致するか
+  6. cdinst.c のベース名が構成の名前と一致し、展開の順が MINIMAL → GUI →
+     NORMAL → DEBUG で、pkg.h の上限が mkpkg と一致するか
+  7. 起動 FD: build/image.mk が一覧を手で持たず、FD の中身が BOOT + MINIMAL
+     (+ fd.only) と**等しい**か。構成 (fd_plan) と、実物のイメージ
+     (images/os32_boot.img = 2HD の D88 のもと、images/os32_boot144.img) を
+     FAT12 として読み戻してバイト列で見る。否定側 (8.3 違反・理由なし・古い
+     rename) も。空きを表示する
 
 先に make all を通してから実行すること (4 と 5 は成果物を読む)。
 """
@@ -42,9 +48,21 @@ PKG_H = os.path.join(ROOT, 'userland', 'lib', 'rt', 'pkg.h')
 
 fails = []
 
-# 以前の MINIMAL にあった外部コマンド (タグ base)。cdinst の「shell + basic commands」
+FD_IMAGES = [('2HD', os.path.join(ROOT, 'images', 'os32_boot.img'),
+              'boot/loader_fat_new.bin'),
+             ('1.44MB', os.path.join(ROOT, 'images', 'os32_boot144.img'),
+              'boot/loader_fat144.bin')]
+IMAGE_MK = os.path.join(ROOT, 'build', 'image.mk')
+
+# MINIMAL の外部コマンド (タグ base)。cdinst の「CUI only: shell + basic commands」。
+# 2026-09-24 までの FD の FDD_MIN_CMDS と同じ顔ぶれ (diff / du / cal / man / cfg は
+# そのとき FD にだけあった)
 MINIMAL_BASE_CMDS = ['more', 'less', 'grep', 'find', 'sort', 'head', 'tail', 'wc',
-                     'tee', 'touch', 'hexdump', 'sleep']
+                     'tee', 'touch', 'hexdump', 'sleep', 'diff', 'du', 'cal', 'man',
+                     'sndctl', 'cfg']
+# GUI.PKG (タグ gui) の中身。shlib を使う試験アプリは test (DEBUG) のまま
+GUI_FILES = ['/bin/gshell.bin', '/sys/lib/libos32gui.shlib',
+             '/usr/bin/filer.bin', '/usr/bin/edit_gui.bin']
 
 
 def check(cond, label):
@@ -68,21 +86,24 @@ def case_real_plan():
         check(nent <= mkpkg.PKG_MAX_ENTRIES,
               f"{name.upper()}.PKG: {len(files)} files, {nent} entries <= "
               f"{mkpkg.PKG_MAX_ENTRIES}")
-    # Minimal =「シェル + 基本コマンド」(cdinst の選択肢 1 の文言)
+    # Minimal =「CUI のシェル + 基本コマンド」(cdinst の選択肢 1 の文言)
     minimal = {g for n, _, _, fs in resolved if n == 'minimal' for g, _ in fs}
-    need = ['/sys/shell.bin', '/bin/gshell.bin', '/sbin/install.bin', '/sbin/cdinst.bin',
-            '/bin/sndctl.bin'] + ['/bin/%s.bin' % c for c in MINIMAL_BASE_CMDS]
+    need = ['/sys/shell.bin', '/sbin/install.bin', '/sbin/cdinst.bin',
+            '/sys/font/default.kcgfont', '/boot/vmkernel.lz4', '/sys/unicode.bin'] + \
+        ['/bin/%s.bin' % c for c in MINIMAL_BASE_CMDS]
     lack = [g for g in need if g not in minimal]
-    check(not lack, f"MINIMAL にシェルと基本コマンドが入っている (欠け {lack})")
-    # FD の最小コマンド集合 (build/image.mk FDD_MIN_CMDS) との違いは情報として出す
-    mk = open(os.path.join(ROOT, 'build', 'image.mk'), encoding='utf-8').read()
-    m = re.search(r'^FDD_MIN_CMDS\s*=\s*(.*)$', mk, re.M)
-    if m:
-        fdd = set(m.group(1).split())
-        mini = {os.path.basename(g)[:-4] for g in minimal
-                if g.startswith('/bin/') and g.endswith('.bin')}
-        print(f"  info FD にだけある: {sorted(fdd - mini)}")
-        print(f"  info CD MINIMAL にだけある (/bin): {sorted(mini - fdd)}")
+    check(not lack, f"MINIMAL にシェルと基本コマンドと既定フォントが入っている (欠け {lack})")
+    # GUI は MINIMAL に無く、GUI.PKG が gui タグの行とちょうど一致する
+    gui = sorted(g for n, _, _, fs in resolved if n.startswith('gui') for g, _ in fs)
+    check(not (set(GUI_FILES) & minimal), "MINIMAL に GUI (gshell / shlib / GUI アプリ) が無い")
+    man = dm.load_merged(dm.CORE_MANIFEST_RELPATHS)
+    tagged = sorted(g for e in man['filesystem']['files'] if 'gui' in (e.get('tags') or [])
+                    for _, g in dm.resolve_entry(e, ROOT))
+    check(gui == tagged, f"GUI.PKG の中身 = gui タグの行 ({len(gui)} 件)")
+    check(gui == sorted(GUI_FILES), f"GUI.PKG の顔ぶれ {gui}")
+    order = [n for n, _, _, _ in resolved]
+    check([n for n in order if not n[-1].isdigit()] == ['boot', 'minimal', 'gui', 'normal', 'debug'],
+          f"パッケージの並びが依存の順 {order}")
     return plan, resolved
 
 
@@ -347,6 +368,9 @@ def case_consumer(plan):
             if (p or {}).get('type') != 'boot'}
     check(bases == want, f"cdinst のベース名 {sorted(bases)} = 構成 {sorted(want)}")
     check('BOOT.PKG' in src, "cdinst は BOOT.PKG を読む")
+    seq = [m.group(1) for m in re.finditer(r'install_series\(PKG_BASE_(\w+)\)', src)]
+    check(seq == ['MINIMAL', 'GUI', 'NORMAL', 'DEBUG'],
+          f"cdinst の展開順 {seq} = MINIMAL → GUI → NORMAL → DEBUG")
     check('FULL.PKG' not in src and 'APPEND.PKG' not in src,
           "cdinst に古い FULL / APPEND が残っていない")
     m = re.search(r'#define\s+PKG_SERIES_MAX\s+(\d+)', src)
@@ -358,6 +382,143 @@ def case_consumer(plan):
     check(me and int(me.group(1)) == mkpkg.PKG_MAX_ENTRIES, "PKG_MAX_ENTRIES が一致")
 
 
+# ---------------------------------------------------------------- 7. 起動 FD
+
+def fat12_files(path):
+    """FAT12 イメージのファイルを {PATH (大文字): bytes} と空きバイトで返す
+
+    BPB (オフセット 0x0B) から配置を読む。mkfat12 が作る 2HD (1024B/セクタ) と
+    1.44MB (512B/セクタ) の両方。. / .. と削除済みは飛ばす。
+    """
+    img = open(path, 'rb').read()
+    import struct
+    bps, spc, rsv, nfat, nroot, tot, _media, fatsz = \
+        struct.unpack_from('<HBHBHHBH', img, 0x0B)
+    fat = img[rsv * bps:(rsv + fatsz) * bps]
+    root_off = (rsv + nfat * fatsz) * bps
+    root_secs = (nroot * 32 + bps - 1) // bps
+    data_sec = rsv + nfat * fatsz + root_secs
+    nclus = (tot - data_sec) // spc
+    csize = bps * spc
+
+    def nxt(c):
+        v = fat[c * 3 // 2] | (fat[c * 3 // 2 + 1] << 8)
+        return (v >> 4) if c & 1 else (v & 0xFFF)
+
+    def chain(c):
+        out = []
+        while 2 <= c < 0xFF8 and len(out) <= nclus:
+            out.append(c)
+            c = nxt(c)
+        return out
+
+    def read_chain(c):
+        return b''.join(img[(data_sec + (x - 2) * spc) * bps:][:csize] for x in chain(c))
+
+    files = {}
+
+    def walk(raw, prefix):
+        for i in range(0, len(raw) - 31, 32):
+            e = raw[i:i + 32]
+            if e[0] == 0:
+                break
+            if e[0] == 0xE5 or e[11] == 0x0F or e[0] == ord('.'):
+                continue
+            base = e[0:8].decode('ascii').rstrip()
+            ext = e[8:11].decode('ascii').rstrip()
+            name = base + ('.' + ext if ext else '')
+            clus = struct.unpack_from('<H', e, 26)[0]
+            size = struct.unpack_from('<I', e, 28)[0]
+            if e[11] & 0x10:
+                walk(read_chain(clus), prefix + '/' + name)
+            elif not e[11] & 0x08:
+                files[prefix + '/' + name] = read_chain(clus)[:size] if size else b''
+
+    walk(img[root_off:root_off + nroot * 32], '')
+    used = sum(1 for c in range(2, nclus + 2) if nxt(c) != 0)
+    return files, (nclus - used) * csize, nclus * csize
+
+
+def case_fd(plan, resolved):
+    print("case 7: 起動 FD = BOOT + MINIMAL (+ fd.only)")
+    mk = open(IMAGE_MK, encoding='utf-8').read()
+    check(not re.search(r'^FDD_MIN_CMDS\s*[:?]?=', mk, re.M) and '--fd-args' in mk
+          and '/bin/$$cmd.bin' not in mk,
+          "build/image.mk は FD の一覧を手で持たず mkpkg --fd-args から作る")
+    fd = plan.get('fd') or {}
+    rename = {r['guest']: r['fd'] for r in fd.get('rename') or []}
+    only = {o['fd'] for o in fd.get('only') or []}
+    check(fd.get('from') == ['boot', 'minimal'], f"FD の元は BOOT + MINIMAL ({fd.get('from')})")
+
+    # 構成: FD の中身 (rename を戻し、only を除いた集合) = BOOT + MINIMAL
+    src = {g: os.path.join(ROOT, h) for n, _, _, fs in resolved
+           if n == 'boot' or n.startswith('minimal') for g, h in fs}
+    plans = {}
+    for label, _, loader in FD_IMAGES:
+        files, probs = mkpkg.fd_plan(plan, ROOT, loader)
+        for p in probs:
+            print(f"       {p}")
+        check(probs == [], f"FD {label}: fd_plan に問題が無い")
+        back = {v: k for k, v in rename.items()}
+        core = {back.get(g, g) for g, _ in files if g not in only}
+        check(core == set(src),
+              f"FD {label}: 中身 = BOOT + MINIMAL (FD にだけ {sorted(core - set(src))}、"
+              f"MINIMAL にだけ {sorted(set(src) - core)})")
+        check(sorted(g for g, _ in files if g in only) == sorted(only),
+              f"FD {label}: FD だけの物は fd.only の {sorted(only)} だけ")
+        check(files and files[0][0] == '/LOADER.BIN' and files[0][1] == loader,
+              f"FD {label}: 先頭が LOADER.BIN ({loader})")
+        plans[label] = files
+    check(not any(g in ('/bin/timetest.bin', '/bin/pcmtest.bin') for g, _ in plans['2HD']),
+          "FD に試験用の timetest / pcmtest が無い (DEBUG にある)")
+
+    # 否定側
+    base = [{'host': 'userland/shell.bin', 'guest': '/sys/shell.bin', 'tags': ['core']}]
+    fp = fake_plan()
+    fp['fd'] = {'from': ['boot', 'minimal'], 'rename': [], 'only': []}
+    _, p = mkpkg.fd_plan(fp, ROOT, None, fake_manifest(base + [
+        {'host': 'assets/filetypes', 'guest': '/etc/filetypes', 'tags': ['core']}]))
+    check(any('8.3' in x for x in p), "否定: 8.3 に収まらない名前を報告する")
+    fp['fd'] = {'from': ['boot', 'minimal'],
+                'rename': [{'guest': '/nope', 'fd': '/NOPE', 'reason': 'x'}], 'only': []}
+    _, p = mkpkg.fd_plan(fp, ROOT, None, fake_manifest(base))
+    check(any('古い rename' in x for x in p), "否定: どれにも当たらない rename を報告する")
+    fp['fd'] = {'from': ['boot', 'minimal'],
+                'rename': [{'guest': '/sys/shell.bin', 'fd': '/sys/sh.bin'}], 'only': []}
+    _, p = mkpkg.fd_plan(fp, ROOT, None, fake_manifest(base))
+    check(any('理由' in x for x in p), "否定: 理由の無い rename を報告する")
+    fp['fd'] = {'from': ['boot', 'minimal'], 'rename': [],
+                'only': [{'fd': '/LOADER.BIN', 'host': '{loader}', 'reason': 'x'}]}
+    _, p = mkpkg.fd_plan(fp, ROOT, None, fake_manifest(base))
+    check(any('ローダ' in x for x in p), "否定: ローダの指定が無いのを報告する")
+    fp['fd'] = {'from': ['boot', 'minimal'], 'rename': [], 'only': [
+        {'fd': '/SYS/SHELL.BIN', 'host': 'x', 'reason': 'x'}]}
+    _, p = mkpkg.fd_plan(fp, ROOT, None, fake_manifest(base))
+    check(any('2 回' in x for x in p), "否定: FD のパスの重複 (大文字小文字を畳む) を報告する")
+
+    # 実物のイメージ
+    for label, img, _ in FD_IMAGES:
+        if not os.path.isfile(img):
+            check(False, f"{os.path.relpath(img, ROOT)} がある (先に make all)")
+            continue
+        got, free, total = fat12_files(img)
+        want = {g.upper(): h for g, h in plans[label]}
+        missing = sorted(set(want) - set(got))
+        extra = sorted(set(got) - set(want))
+        bad = sorted(g for g in set(want) & set(got)
+                     if open(want[g], 'rb').read() != got[g])
+        for g in missing[:10]:
+            print(f"       missing {g}")
+        for g in extra[:10]:
+            print(f"       extra   {g}")
+        for g in bad[:10]:
+            print(f"       bytes   {g}")
+        check(not missing and not extra and not bad,
+              f"FD {label} の実物 = 構成 ({len(got)} ファイル、欠け {len(missing)}、"
+              f"余分 {len(extra)}、違い {len(bad)})")
+        print(f"  info FD {label}: 空き {free // 1024}KB / {total // 1024}KB")
+
+
 def main():
     plan, resolved = case_real_plan()
     case_negative()
@@ -365,6 +526,7 @@ def main():
     fresh = case_media(plan, resolved)
     case_iso(plan, fresh)
     case_consumer(plan)
+    case_fd(plan, resolved)
     print()
     if fails:
         print(f"FAIL {len(fails)} 件")

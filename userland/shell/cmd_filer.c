@@ -20,6 +20,8 @@
 /* ======================================================================== */
 
 #define FL_FILETYPES_PATH   "/etc/filetypes"
+/* FD (FAT、LFN なし) では 8.3 の短い名前で置く (build/packages.yaml の fd.rename) */
+#define FL_FILETYPES_PATH_83 "/etc/filetype"
 #define FL_FILETYPES_MAXSZ  8192
 #define FL_MAX_ASSOC        128
 
@@ -65,6 +67,7 @@ static void ft_load(void)
     ft_count = 0;
 
     fd = g_api->sys_open(FL_FILETYPES_PATH, O_RDONLY);
+    if (fd < 0) fd = g_api->sys_open(FL_FILETYPES_PATH_83, O_RDONLY);
     if (fd < 0) return;
 
     ft_buf = (char *)g_api->mem_alloc(FL_FILETYPES_MAXSZ);

@@ -9,8 +9,9 @@
 #  永久スピンして rshell ごと沈黙する。make check-manifests で検査できる。
 #
 #  **tags: は CD のパッケージの振り分けも決める** (build/packages.yaml、
-#  tools/mkpkg.py --plan)。core / base → MINIMAL、programs / docs / data → NORMAL、
-#  test → DEBUG。userland/tests/ 由来の行は必ず [test] にする (make
+#  tools/mkpkg.py --plan)。core / base → MINIMAL、gui → GUI、
+#  programs / docs / data → NORMAL、test → DEBUG。MINIMAL は FD の中身と同じ
+#  集合 (FD も同じ構成から作る。core / base に足すと FD にも入る)。userland/tests/ 由来の行は必ず [test] にする (make
 #  check-packages-host が検査する)。行ごとにタグは 1 つ。
 # ============================================================================
 
@@ -25,13 +26,15 @@ filesystem:
       guest: /bin/
       tags: [programs]
     # --- GUI シェル (WM 常駐、config.h SYS_GSHELL_BIN、K4 の起動ループが読む) ---
+    #     GUI.PKG (タグ gui)。Minimal だけの導入では無く、system.cfg の GUI=1 でも
+    #     カーネルが "gshell load failed -> CUI shell" で CUI に落ちる
     - host: userland/gshell.bin
       guest: /bin/gshell.bin
-      tags: [core]
+      tags: [gui]
     # --- GUI 共有ライブラリ (0x400000 常駐、config.h SYS_SHLIB_GUI、K3 のローダが起動時に読む) ---
     - host: userland/libos32gui.shlib
       guest: /sys/lib/libos32gui.shlib
-      tags: [core]
+      tags: [gui]
     # --- システム管理プログラム → /sbin/ ---
     - host: userland/system/install.bin
       guest: /sbin/
@@ -231,7 +234,7 @@ filesystem:
     - host: userland/system/sndtest2.bin
       guest: /bin/sndtest2.bin
       tags: [programs]
-    # --- 基本コマンド (タグ base → CD の MINIMAL。「シェル + 基本コマンド」) ---
+    # --- 基本コマンド (タグ base → CD の MINIMAL = FD。「シェル + 基本コマンド」) ---
     # 下の glob から exclude: で外し、ここで 1 本ずつ挙げる。足すときは両方直す
     # (両方に残れば make check-packages-host がゲストパスの重複で、両方から
     # 消えれば make check-manifests の 3 が「配備に無いバイナリ」で知らせる)。
@@ -271,6 +274,21 @@ filesystem:
     - host: userland/cmds/sleep.bin
       guest: /bin/sleep.bin
       tags: [base]
+    - host: userland/cmds/diff.bin
+      guest: /bin/diff.bin
+      tags: [base]
+    - host: userland/cmds/du.bin
+      guest: /bin/du.bin
+      tags: [base]
+    - host: userland/cmds/cal.bin
+      guest: /bin/cal.bin
+      tags: [base]
+    - host: userland/cmds/man.bin
+      guest: /bin/man.bin
+      tags: [base]
+    - host: userland/cmds/cfg.bin
+      guest: /bin/cfg.bin
+      tags: [base]
     # --- 一般プログラム → /bin/ ---
     - host: "userland/cmds/*.bin"
       guest: /bin/
@@ -288,6 +306,11 @@ filesystem:
         - touch.bin  # base (上で個別)
         - hexdump.bin  # base (上で個別)
         - sleep.bin  # base (上で個別)
+        - diff.bin  # base (上で個別)
+        - du.bin  # base (上で個別)
+        - cal.bin  # base (上で個別)
+        - man.bin  # base (上で個別)
+        - cfg.bin  # base (上で個別)
         - shell.bin
         - install.bin
         - cdinst.bin
@@ -359,6 +382,8 @@ filesystem:
     # (kernel.c の kcg_load_font)。tools/gen_font16.py で生成する。
     # 起動に要るので core (MINIMAL)。data だったころ CD の MINIMAL に入らず、
     # CD インストール後の起動で `[KCG] kernel-init load failed` が出ていた。
+    # FD (FAT、LFN なし) には 8.3 の /sys/font/default.kcg として入る
+    # (build/packages.yaml の fd.rename)。カーネルは長い名前が無ければそれを読む。
     - host: assets/fonts/ipaexg16.kcgfont
       guest: /sys/font/default.kcgfont
       tags: [core]
@@ -385,11 +410,11 @@ filesystem:
     # --- GUI v1.2 File Manager (C5、Start → File Manager が起動する) ---
     - host: userland/system/filer.bin
       guest: /usr/bin/
-      tags: [programs]
+      tags: [gui]
     # --- GUI v1.4 テキストエディタ (票 TASK_EDIT_GUI)。CUI 版 edit とは別物 ---
     - host: userland/system/edit_gui.bin
       guest: /usr/bin/
-      tags: [programs]
+      tags: [gui]
     # --- GUI G1 ゲート描画テスト (libos32gui) ---
     - host: userland/tests/gdi_test.bin
       guest: /usr/bin/
