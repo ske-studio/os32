@@ -196,7 +196,7 @@ NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `F
 | 区切りと先読み | `drivers/fdc_track.c` (純粋な層) を `disk_read` (DRV_FDD) が呼ぶ。要求をトラックの境目で区切り、**要求したセクタから EOT までを読んで 1 トラック分持つ**。FatFs (`FF_FS_TINY=1`) の窓とフォントの 1024B ずつの読み (`kcg_read_chunked`、16B のヘッダの後なのでセクタに揃わない) は **count=1 で来る**ので、束ねるだけでは 1 セクタ 1 コマンドのまま変わらない。持っている中身は書き込みの前・`disk_initialize`・`diskio_set_fdd_drive` で捨て、ジオメトリが変われば当てない |
 | 失敗の扱い | まとめ読みが失敗したら、**要求した区間だけ**を従来の `fdc_read_sector_geom` で 1 セクタずつ読み直す (リトライ・`fdc_recover`・NR の早期終了・0439h・FRY はそのまま)。先読みの分は読み直さない。先読みが落ちたトラックは 1 本だけ覚え、以後そこでは要求の範囲だけを束ねて読む (要求の外の傷で毎回失敗を踏まない)。失敗行 `[fdc] multi-read n=… falls back to single` は最初の 4 回だけ出す (実機で毎回落ちて速度が戻っていないかを見るため)。回数は `fdc_get_stats()` (当初の名前 `fdc_get_multi_stats` は廃止) |
 | 時間上限 | `fdc_rw_timeout_ticks()` (`drivers/fdc_decide.c`): 2 × (2 回転 + ceil(count/spt) 回転 + HLT 10ms)、回転は 300rpm の 200ms。1 トラック全部で 1.22 秒、単発の 1 秒を下限。シークは別に 1.5 秒 |
-| DMA の受け皿 | `dma_buffer` を 1 セクタ (1KB) から **1 トラック分 9216B** (1.44MB の 18×512 が最大) に広げ、**16KB 境界に揃えた** (2 の冪の揃え ≧ 大きさ なので 64KB 境界をまたがない、`fdc.h` の STATIC_ASSERT)。DMA プール (0x2E8000) は使わない — `fdc_init()` が `dma_pool_init()` より前に走り、`kselftest_run()` がプールを作り直すため。カーネルの `__bss_end` は 0x179400 → 0x184800 (+45KB、揃えの詰め物を含む)、リンク時の上限 (`MEM_KERNEL_IMAGE_MAX`) の中 |
+| DMA の受け皿 | **9ed7c80 の当時の形。後に変更 (下表の「受け皿」: 1 本の静的な領域、DMA の窓は `fdc_buf_layout()` が実行時に決める。16KB 揃えは廃止)**。`dma_buffer` を 1 セクタ (1KB) から **1 トラック分 9216B** (1.44MB の 18×512 が最大) に広げ、**16KB 境界に揃えた** (2 の冪の揃え ≧ 大きさ なので 64KB 境界をまたがない、`fdc.h` の STATIC_ASSERT)。DMA プール (0x2E8000) は使わない — `fdc_init()` が `dma_pool_init()` より前に走り、`kselftest_run()` がプールを作り直すため。カーネルの `__bss_end` は 0x179400 → 0x184800 (+45KB、揃えの詰め物を含む)、リンク時の上限 (`MEM_KERNEL_IMAGE_MAX`) の中 |
 | MT | 使わない (Bible 2-9 は読みの MT を許すが書き込みの MT を禁じる、読みの MT を実機で確かめた記録が無い、得はシリンダごとに最悪 1 回転)。上の v3 の予定として残す |
 | ローダ | `boot/` の FAT 版ローダは触っていない。`boot/loader_fat.asm` / `loader_fat_new.asm` の `read_sect16` は **INT 1Bh (AH=76h = SEEK あり・MT なし) を 1 セクタ (BX = 1 セクタ長) ずつ**呼んでいるので、カーネルの読み込みも 1 セクタ 1 回転に近い形の可能性がある (未測定、見直しは別件) |
 | 試験 | `make check-fdc-track-host` (`tools/tests/test_fdc_track.py --target --mutate`、記録 `tools/tests/fdc_track_tdd.md`)。本物の `fdc.c` を µPD765A の模型の上で回す。変異 21 本: RED 20 / ERROR 0 / SURVIVED 1 (対照) |
@@ -241,3 +241,4 @@ NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `F
 | extern [Fable] | `fs/fatfs/diskio_os32.h` を新設 (diskio.h は ff.h の型が要る FatFs の配布物のため)。kernel.c と fatfs_vfs.c の extern を移した |
 | 試験の依存 [Fable] | `check-fdc-track-host` を `images/os32_boot.d88` に依存させ、`--require-image` で無ければ FAIL (SKIP にしない) |
 | 試験 | 27 ケース、変異 41 本: RED 40 / ERROR 0 / SURVIVED 1 (対照) |
+| WRITE の NR (後追い、Fable minor) | 単発の WRITE もリザルトの NR で回復・リトライより前に打ち切る (READ と同じ、DMA を閉じるだけ)。ケース `write_nr_no_recover` と変異 1 本を足して 28 ケース、変異 42 本: RED 41 / ERROR 0 / SURVIVED 1 (対照) |

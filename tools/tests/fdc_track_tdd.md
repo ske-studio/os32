@@ -123,6 +123,11 @@ tmo=0 で IRQ の取りこぼしは消えたが、**まとめ読み 767 回・�
 変異 41 本: **RED 40 / ERROR 0 / SURVIVED 1 (対照)**。途中の ERROR 1 本 (2 秒規則を消す変異で
 `now` が未使用になった) は閾値を上げる形に書き直して RED。
 
+後追い (Fable minor): 単発の WRITE もリザルトの NR で回復・リトライより前に打ち切るよう
+READ に揃えた。`write_nr_no_recover` (リセット・RECALIBRATE が増えず、WRITE は 1 回きり、
+DMA ch2 は閉じている) と変異「単発の WRITE の NR で回復とリトライを踏む」を足して
+28 ケース、変異 42 本: **RED 41 / ERROR 0 / SURVIVED 1 (対照)**。
+
 ## 1. ケース
 
 | ケース | 見るもの |
@@ -144,6 +149,7 @@ tmo=0 で IRQ の取りこぼしは消えたが、**まとめ読み 767 回・�
 | `idle_rule` | 2 秒規則の境目 (200 tick は当て、201 tick で両方捨てる) |
 | `track_nr_stop` | まとめ読みの NR (-3) で 1 セクタずつへ落ちない |
 | `single_nr_no_recover` | 単発の READ の NR で回復もリトライもしない |
+| `write_nr_no_recover` | 単発の WRITE の NR でも回復もリトライもしない (READ と同じ) |
 | `sis_edge_limit` | 上限ちょうどの別の通知の後ろの完了を期限切れにしない |
 | `font_replay` | 実物の FD イメージと実物の `ff.c` で、フォントの読み込みを VFS の読み方のまま再現する。multi ≦ 27、seek ≦ 14、single 0、期限切れ 0、中身がファイルと一致 |
 | `seek_edge_foreign` | SEEK の完了の前に別ドライブの通知 / 自ドライブの Ready 変化が積まれていても、1 本のエッジで全部読んで期限切れを待たない。Ready 変化で世代が進む |
