@@ -4,6 +4,13 @@
 `cp: No space left on device` が起きたのに `make deploy-nhd` は exit 0 で
 「完了」と出し、/boot/vmkernel.lz4 は 446,464 B に切り詰められていた。
 ゲストは古いカーネルで動き続けた。実ファイルシステムもエミュレータも使わない。
+
+**実物の build/nhd/os32.nhd に左右されない** (2026-09-24): nhd_deploy は import 時に
+NHD_LOCAL を決め、do_sync は旧配置の門 (legacy_pt_guard) でそれを読む。本体に
+旧配置の NHD が置いてあると test_success_still_returns_true が断られて落ち、
+無い worktree では通っていた。import の前に OS32_NHD_LOCAL を一時ディレクトリへ
+向け、各試験でも NHD_LOCAL を差し替えて門を贋物にする (門そのものの試験は
+tools/tests/test_hdd_stage1.py)。
 """
 import os
 import pathlib
@@ -14,7 +21,10 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
-import nhd_deploy as nd
+# import より前に: 実物の build/nhd/os32.nhd を NHD_LOCAL にしない
+_SESSION = tempfile.TemporaryDirectory(prefix='os32-nhd-sync-session-')
+os.environ['OS32_NHD_LOCAL'] = os.path.join(_SESSION.name, 'absent.nhd')
+import nhd_deploy as nd  # noqa: E402
 
 
 class FakeCompleted(object):
@@ -34,9 +44,14 @@ class SyncFailure(unittest.TestCase):
         (self.mount / 'boot').mkdir(parents=True)
         self.saved = {}
         for name in ('ensure_local_nhd', 'ensure_mounted', 'load_deploy_yaml',
-                     'do_write_boot', 'resolve_files_from_entry'):
+                     'do_write_boot', 'resolve_files_from_entry', 'legacy_pt_guard',
+                     'NHD_LOCAL'):
             self.saved[name] = getattr(nd, name)
         self.saved['MOUNT_POINT'] = nd.MOUNT_POINT
+        # 実物の NHD を読まない: NHD_LOCAL は試験ごとの一時の名前 (作らない)、
+        # 旧配置の門は通す贋物
+        nd.NHD_LOCAL = str(self.root / 'os32.nhd')
+        nd.legacy_pt_guard = lambda *a, **kw: True
         self.saved['run'] = subprocess.run
         nd.MOUNT_POINT = str(self.mount)
         nd.ensure_local_nhd = lambda: True
@@ -99,6 +114,12 @@ class SyncFailure(unittest.TestCase):
     def test_success_still_returns_true(self):
         self._patch_cp(0)
         self.assertIs(nd.do_sync(), True)
+
+    def test_sealed_from_real_nhd(self):
+        """試験の NHD_LOCAL はリポジトリの build/nhd を指さない。"""
+        real = str(ROOT / 'build' / 'nhd')
+        self.assertFalse(nd.NHD_LOCAL.startswith(real), nd.NHD_LOCAL)
+        self.assertFalse(self.saved['NHD_LOCAL'].startswith(real), self.saved['NHD_LOCAL'])
 
 
 if __name__ == '__main__':

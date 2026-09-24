@@ -300,13 +300,23 @@ def fsck_image(exe, start, size, tmp, quiet=False):
 # ======================================================================== #
 
 def load_tools(tools_dir):
-    """pc98pt と nhd_deploy を tools_dir から読み込む (NP21W_DIR は触らない値に)。"""
+    """pc98pt と nhd_deploy を tools_dir から読み込む (NP21W_DIR は触らない値に)。
+
+    OS32_NHD_LOCAL も一時の名前に向ける — 既定はリポジトリの build/nhd/os32.nhd で、
+    本体に旧配置の NHD が置いてあると legacy_pt_guard の結果が変わる (2026-09-24、
+    check-tools-host が本体だけで落ちた件)。NHD が要る試験は nhd.NHD_LOCAL を自分で
+    差し替える。"""
     os.environ["NP21W_DIR"] = "/nonexistent-np21w"
+    os.environ["OS32_NHD_LOCAL"] = os.path.join(tempfile.gettempdir(),
+                                                "os32-hdd1-absent-%d.nhd" % os.getpid())
     sys.path.insert(0, str(tools_dir))
     for name in ("pc98pt", "nhd_deploy", "deploy_protect", "deploy_manifests"):
         sys.modules.pop(name, None)
     import pc98pt  # noqa: E402
     import nhd_deploy  # noqa: E402
+    # 密閉の確認: 実物の build/nhd を NHD_LOCAL にしていない
+    if nhd_deploy.NHD_LOCAL.startswith(str(ROOT / "build" / "nhd")):
+        raise RuntimeError("NHD_LOCAL がリポジトリの build/nhd を指している: " + nhd_deploy.NHD_LOCAL)
     return pc98pt, nhd_deploy
 
 
