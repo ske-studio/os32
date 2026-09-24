@@ -599,8 +599,9 @@ def do_deploy(force=False):
 
     if not ensure_local_nhd():
         return False
-    # 旧配置の区画表へ v64 以降のカーネルを送らない (Opus M2)。--force でも通さない
-    if not legacy_pt_guard():
+    # 旧配置の区画表へ v64 以降のカーネルを送らない (Opus M2)。--force でも通さない。
+    # push なので NHD として読めない像 (0 バイト・壊れたヘッダ) も送らない (Opus ラリー 3)
+    if not legacy_pt_guard(push=True):
         return False
 
     ok, reason = verify_pull_stamp()
@@ -889,20 +890,24 @@ def migrate_preflight(nhd_path, loader_bin, kernel_file, push, stamp_check=None)
     for path, what in ((loader_bin, 'ローダ'), (kernel_file, 'カーネル')):
         if not os.path.isfile(path):
             raise MigrateError("{} {} が無い (make all を先に)".format(what, path))
-    with open(loader_bin, 'rb') as f:
-        loader_data = f.read()
+    try:
+        with open(loader_bin, 'rb') as f:
+            loader_data = f.read()
+        ksize = os.path.getsize(kernel_file)
+    except OSError as exc:
+        raise MigrateError("ローダ / カーネルを読めない ({}: {})".format(type(exc).__name__, exc))
     if not loader_data or len(loader_data) > LOADER_MAX_SECTORS * 512:
         raise MigrateError("ローダが空か {}B を超える ({} bytes)".format(
             LOADER_MAX_SECTORS * 512, len(loader_data)))
-    ksize = os.path.getsize(kernel_file)
     if ksize == 0 or ksize > KERNEL_MAX_BYTES:
         raise MigrateError("カーネルが空か {}B を超える ({} bytes)".format(
             KERNEL_MAX_BYTES, ksize))
     try:
         with open(nhd_path, 'rb') as img:
             plan = plan_migrate_pt(img)
-    except pc98pt.PtError as exc:
-        raise MigrateError(str(exc))
+    except (pc98pt.PtError, OSError) as exc:
+        # 読めない NHD も「断る」側へ (例外で落ちずに、何も書かずに止まる)
+        raise MigrateError("{}: {}".format(type(exc).__name__, exc))
     if plan['state'] == 'legacy' and plan['start'] != HDD_PARTITION_LBA:
         # ホスト側のマウントは PARTITION_OFFSET (LBA 1632) 固定。違う位置の
         # ext2 にカーネルを置く手段が無いので断る。
@@ -987,15 +992,18 @@ def classify_pt_layout(img):
       'none'     … OS32 の項目が無い (v64 のカーネルは hd0 を ext2 としてマウントしない)
       'not_nhd'  … NHD のヘッダが無い・読めない (区画の位置を決められない)
     """
+    # 'not_nhd' は**ヘッダが NHD でない**ときだけ。読み取りの失敗 (OSError) は
+    # ここで握らず呼び手へ投げる — 門は「読めない」を通さない (Codex ラリー 3)
+    img.seek(0)
     try:
-        img.seek(0)
         geom = pc98pt.nhd_geometry(img.read(512))
-    except (pc98pt.PtError, OSError, struct.error) as exc:
+    except (pc98pt.PtError, struct.error) as exc:
         return 'not_nhd', str(exc)
     img.seek(geom['header_size'] + pc98pt.PT_LBA * 512)
     sector = img.read(512)
     if len(sector) != 512:
-        return 'not_nhd', "LBA 1 を読めない"
+        # ヘッダは NHD なのに LBA 1 が無い (切り詰められた像) — 「NHD でない」ではない
+        return 'broken', "LBA 1 を読めない (像が短い)"
     heads, spt, total = geom['heads'], geom['spt'], geom['total']
     for i in range(pc98pt.MAX_ENTRIES):
         ent = pc98pt.entry_at(sector, i)
@@ -1014,7 +1022,7 @@ def classify_pt_layout(img):
     return 'none', "sid 0xE2 (OS32) の項目が無い"
 
 
-def legacy_pt_guard(nhd_path=None, kapi=None):
+def legacy_pt_guard(nhd_path=None, kapi=None, push=False):
     """v64 以降のカーネルを、そのカーネルが区画を見つけられない NHD へ配らない (Opus M2)。
 
     戻り値 True = 配ってよい。v64 のカーネルとローダは標準配置しか読まないので、
@@ -1025,31 +1033,40 @@ def legacy_pt_guard(nhd_path=None, kapi=None):
       'not_nhd' / ファイルが無い … 通す (警告を出す)。区画の位置を決められない
                   = ホストの NHD として扱えない物で、呼び手は NHD が要る処理
                   (マウント・写し) の手前でもう一度この門を通る (取り込みの後)
+    push=True (do_deploy: NP21/W の NHD を丸ごと上書きする経路) は 'not_nhd' も断る
+    — 0 バイトやヘッダの壊れた NHD_LOCAL で NP21/W の NHD を潰さない (Opus ラリー 3 の 1)。
+    **通すのはこの 2 つだけ**。開けない・読めない (OSError ほか) は断る。分類が
+    legacy と決まった後の移行の可否の調べで出た例外は、種類を問わず「移行できない
+    理由」として出して断る (Codex ラリー 3)。
     """
     path = nhd_path or NHD_LOCAL
     kapi = tree_kapi_version() if kapi is None else kapi
-    if kapi is None or kapi < PT_STANDARD_KAPI:
-        return True
     if not os.path.isfile(path):
         return True
+    auto = None
     try:
         with open(path, 'rb') as img:
             state, why = classify_pt_layout(img)
             if state == 'legacy':
                 try:
                     plan_migrate_pt(img)
-                    auto = None
-                except (MigrateError, pc98pt.PtError) as exc:
-                    auto = str(exc)
-    except OSError as exc:
-        print("Warning: {} の区画表を読めない ({})。旧配置の検査を飛ばす".format(path, exc),
-              file=sys.stderr)
-        return True
-    if state == 'standard':
-        return True
+                except Exception as exc:  # noqa: BLE001 — 移行できない理由として出す
+                    auto = "{}: {}".format(type(exc).__name__, exc)
+    except Exception as exc:  # noqa: BLE001 — 開けない・読めないは通さない (版を問わず)
+        print("Error: {} の区画表を読めない ({}: {})。配置を確かめられないので配らない"
+              .format(path, type(exc).__name__, exc), file=sys.stderr)
+        return False
     if state == 'not_nhd':
+        if push:
+            print("Error: {} は NHD として読めない ({})。NP21/W の NHD を上書きしない"
+                  .format(path, why), file=sys.stderr)
+            return False
         print("Warning: {} は NHD として読めない ({})。区画表の配置は検査していない"
               .format(path, why), file=sys.stderr)
+        return True
+    if kapi is None or kapi < PT_STANDARD_KAPI:
+        return True
+    if state == 'standard':
         return True
     if state == 'legacy':
         print("Error: {} の区画表は旧配置 (v63 まで、{})。KAPI v{} のカーネルは標準配置しか"

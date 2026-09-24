@@ -179,18 +179,43 @@ PY_MUTATIONS = [
      "カーネルの大きさを見ない (C1)"),
     ("tools/nhd_deploy.py", "        ok, reason = (stamp_check or verify_pull_stamp)()\n",
      "        ok, reason = True, ''\n", "push の来歴を書き込みの後で見る (C1)"),
-    ("tools/nhd_deploy.py", "    if state == 'standard':\n        return True\n    if state == 'not_nhd':",
-     "    if True:\n        return True\n    if state == 'not_nhd':",
+    ("tools/nhd_deploy.py", "    if state == 'standard':\n        return True\n    if state == 'legacy':",
+     "    if True:\n        return True\n    if state == 'legacy':",
      "旧配置の NHD へ v64 のカーネルを配る (M2)"),
-    ("tools/nhd_deploy.py", "    if state == 'standard':\n        return True\n    if state == 'not_nhd':",
-     "    if state == 'standard' or (state == 'legacy' and auto is not None):\n        return True\n    if state == 'not_nhd':",
+    ("tools/nhd_deploy.py", "    if state == 'standard':\n        return True\n    if state == 'legacy':",
+     "    if state == 'standard' or (state == 'legacy' and auto is not None):\n        return True\n    if state == 'legacy':",
      "自動で移行できない旧配置を通す (ラリー 2 の 1)"),
-    ("tools/nhd_deploy.py", "    if state == 'standard':\n        return True\n    if state == 'not_nhd':",
-     "    if state in ('standard', 'broken', 'none'):\n        return True\n    if state == 'not_nhd':",
+    ("tools/nhd_deploy.py", "    if state == 'standard':\n        return True\n    if state == 'legacy':",
+     "    if state in ('standard', 'broken', 'none'):\n        return True\n    if state == 'legacy':",
      "OS32 の項目が無い・壊れている NHD へ配る"),
     ("tools/nhd_deploy.py", "    if _GUARD_NEXT_MOUNT and not legacy_pt_guard():",
      "    if False and not legacy_pt_guard():",
      "取り込みの後の門を掛けない (ラリー 2 の 2)"),
+    ("tools/nhd_deploy.py",
+     "              .format(path, type(exc).__name__, exc), file=sys.stderr)\n        return False",
+     "              .format(path, type(exc).__name__, exc), file=sys.stderr)\n        return True",
+     "読めない・例外を通す (Codex ラリー 3、旧動作)"),
+    ("tools/nhd_deploy.py", "    except (pc98pt.PtError, struct.error) as exc:\n        return 'not_nhd', str(exc)",
+     "    except (pc98pt.PtError, struct.error, OSError) as exc:\n        return 'not_nhd', str(exc)",
+     "読み取りの OSError を「NHD でない」扱いにして通す"),
+    ("tools/nhd_deploy.py", "                except Exception as exc:  # noqa: BLE001 — 移行できない理由として出す",
+     "                except (MigrateError, pc98pt.PtError) as exc:",
+     "移行の可否の調べの例外を「移行できない理由」にしない (外へ投げる)"),
+    ("tools/nhd_deploy.py", "        return 'broken', \"LBA 1 を読めない (像が短い)\"",
+     "        return 'not_nhd', \"LBA 1 を読めない (像が短い)\"",
+     "切り詰められた NHD を「NHD でない」扱いにして通す"),
+    ("tools/nhd_deploy.py", "        if push:\n            print(\"Error: {} は NHD として読めない",
+     "        if False:\n            print(\"Error: {} は NHD として読めない",
+     "push で NHD として読めない像を送る (Opus ラリー 3 の 1)"),
+    ("tools/nhd_deploy.py", "    if not legacy_pt_guard(push=True):", "    if not legacy_pt_guard():",
+     "do_deploy が push の門を使わない"),
+    ("tools/nhd_deploy.py", "    if not os.path.isfile(path):\n        return True\n    auto = None",
+     "    if kapi is None or kapi < PT_STANDARD_KAPI:\n        return True\n"
+     "    if not os.path.isfile(path):\n        return True\n    auto = None",
+     "版が古ければ読まずに通す (OSError・not_nhd の push を見ない)"),
+    ("tools/nhd_deploy.py", "    except (pc98pt.PtError, OSError) as exc:\n        # 読めない NHD も",
+     "    except (pc98pt.PtError,) as exc:\n        # 読めない NHD も",
+     "migrate-pt の検査が NHD の OSError で例外のまま落ちる"),
     ("tools/nhd_deploy.py", "        return legacy_pt_guard() and ensure_mounted()",
      "        return ensure_mounted()", "マウント済みの NHD を門に通さない"),
 ]
@@ -538,6 +563,115 @@ def py_migrate_cases(pc98pt, nhd, tmp, quiet=False):
     make_legacy_nhd(pc98pt, q5, sid=0xA1)
     checks.append(("OS32 の項目が無い → 断る",
                    _silent_err(nhd.legacy_pt_guard, str(q5), 64) is False))
+    # --- 例外は通さない (Codex ラリー 3)。通してよいのは not_nhd とファイルが無いときだけ ---
+    real_plan, real_open = nhd.plan_migrate_pt, getattr(nhd, "open", None)
+    try:
+        # 旧配置と決まった後、移行の可否の調べが OSError / その他で落ちる → 断り、
+        # **移行できない理由**としてその例外を出す
+        qe = tmp / "guard_exc.nhd"
+        make_legacy_nhd(pc98pt, qe)
+        for exc in (OSError(5, "EIO (試験)"), RuntimeError("想定外 (試験)")):
+            def boom(img, _e=exc):
+                raise _e
+            nhd.plan_migrate_pt = boom
+            rc, err = _capture_err(nhd.legacy_pt_guard, str(qe), 64)
+            checks.append(("旧配置 + 移行の調べが {} → 断り、移行できない理由に出す"
+                           .format(type(exc).__name__),
+                           rc is False and "自動の移行" in err and type(exc).__name__ in err))
+        nhd.plan_migrate_pt = real_plan
+
+        class _EIOFile:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def seek(self, *a):
+                return 0
+
+            def read(self, *a):
+                raise OSError(5, "EIO (試験)")
+        import builtins
+        eio_target = {str(q)}
+
+        def eio_open(path, *a, **k):
+            # ローカルの NHD だけが EIO。ヘッダ (版の読み取り) やローダは本物で読む
+            if str(path) in eio_target:
+                return _EIOFile()
+            return builtins.open(path, *a, **k)
+        nhd.open = eio_open
+        checks.append(("ヘッダの読み取りが OSError → 断る (NHD でない扱いにしない)",
+                       _silent_err(nhd.legacy_pt_guard, str(q), 64) is False))
+        # ローカルの NHD の読み取りが OSError なら**どの経路でも**断る (Opus ラリー 3 の 2)
+        checks.append(("OSError は版に関係なく断る (v63 のツリーでも)",
+                       _silent_err(nhd.legacy_pt_guard, str(q), 63) is False))
+        nhd.NHD_LOCAL = str(q)
+        pushed, runs2 = [], []
+        real_copy2b, real_run2 = nhd.shutil.copy2, nhd.subprocess.run
+        nhd.shutil.copy2 = lambda *a, **k: pushed.append(a)
+        nhd.subprocess.run = lambda *a, **k: runs2.append(a) or subprocess.CompletedProcess(a, 1, "", "")
+        try:
+            checks.append(("OSError: do_deploy (push) は NP21/W へ写さない",
+                           _silent_err(real_deploy, False) is False and not pushed))
+            checks.append(("OSError: sync 系のマウント (ensure_mounted_for_kernel) は losetup へ進まない",
+                           _silent_err(nhd.ensure_mounted_for_kernel) is False and not runs2))
+            try:
+                nhd.migrate_preflight(str(q), str(good_loader), str(good_kernel), False)
+                mig = "通った"
+            except nhd.MigrateError:
+                mig = "MigrateError"
+            except Exception as exc:  # noqa: BLE001
+                mig = type(exc).__name__
+            checks.append(("OSError: migrate-pt の検査は MigrateError で断る (例外で落ちない)",
+                           mig == "MigrateError"))
+        finally:
+            nhd.shutil.copy2, nhd.subprocess.run = real_copy2b, real_run2
+    finally:
+        nhd.plan_migrate_pt = real_plan
+        if real_open is None:
+            nhd.__dict__.pop("open", None)
+        else:
+            nhd.open = real_open
+    # 開けない (権限) → 断る
+    q6 = tmp / "guard6.nhd"
+    make_legacy_nhd(pc98pt, q6)
+    os.chmod(q6, 0)
+    try:
+        if os.access(q6, os.R_OK):
+            checks.append(("開けない NHD → 断る (root なので権限で試せない: 省略)", True))
+        else:
+            checks.append(("開けない NHD (権限) → 断る",
+                           _silent_err(nhd.legacy_pt_guard, str(q6), 64) is False))
+    finally:
+        os.chmod(q6, 0o644)
+    # push (do_deploy) は NHD として読めない像を送らない。mount / sync は警告して通す
+    # (Opus ラリー 3 の 1)
+    zero = tmp / "zero.nhd"
+    zero.write_bytes(b"")
+    pushed = []
+    real_copy2c = nhd.shutil.copy2
+    nhd.shutil.copy2 = lambda *a, **k: pushed.append(a)
+    try:
+        for name, pth in (("0 バイト", zero), ("ヘッダが壊れている", junk)):
+            nhd.NHD_LOCAL = str(pth)
+            checks.append(("push は {} の NHD を送らない".format(name),
+                           _silent_err(real_deploy, False) is False and not pushed))
+            checks.append(("push の門は {} を版に関係なく断る (v63)".format(name),
+                           _silent_err(nhd.legacy_pt_guard, str(pth), 63, True) is False))
+            checks.append(("mount / sync の門は {} を警告して通す".format(name),
+                           _silent_err(nhd.legacy_pt_guard, str(pth), 64) is True))
+    finally:
+        nhd.shutil.copy2 = real_copy2c
+    # ヘッダは NHD なのに LBA 1 が無い (切り詰め) → 断る
+    q7 = tmp / "guard7.nhd"
+    q7.write_bytes(pc98pt.make_nhd_header(300, 8, 17) + bytes(100))
+    checks.append(("切り詰められた NHD → 断る",
+                   _silent_err(nhd.legacy_pt_guard, str(q7), 64) is False))
+
     # 取り込みの後・マウントの前にも門が掛かる (ラリー 2 の 2)。NHD_LOCAL が無い
     # 状態から ensure_local_nhd が旧配置の NHD を「取り込む」。losetup は呼ばれないこと
     pulled = tmp / "pulled.nhd"
@@ -593,6 +727,15 @@ def _silent_err(fn, *a):
     import io
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         return fn(*a)
+
+
+def _capture_err(fn, *a):
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(buf):
+        rc = fn(*a)
+    return rc, buf.getvalue()
 
 
 def _silent(fn, *a):

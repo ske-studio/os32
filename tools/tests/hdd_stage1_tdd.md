@@ -85,6 +85,28 @@ MUTATIONS 52/52 RED (ERROR 0, SURVIVED 0, NOT_APPLIED 0); CONTROLS 9/9 SURVIVED 
   壊れているので失敗にする (ラリー 1 で見つかった「写しに ide.h が無く全部コンパイル失敗」の型を
   ここで捕まえる)。
 
+### 3-4. ラリー 3 の修正後 (2026-09-24)
+
+```
+SUMMARY 25/25 PASS
+MUTATIONS 60/60 RED (ERROR 0, SURVIVED 0, NOT_APPLIED 0); CONTROLS 9/9 SURVIVED (期待どおり)
+```
+
+(Codex の修正の時点では 56/56。Opus ラリー 3 の minor 2 件で下の 4 本を足して 60/60。C 38 本 + Python 22 本)
+
+C 38 本 + Python 18 本。`legacy_pt_guard` が通すのは NHD のヘッダが無いファイルとファイルが無いときだけに
+した (Codex ラリー 3)。足した試験: 旧配置と決まった後の移行の調べが OSError / RuntimeError で落ちる
+(断り、「移行できない理由」に例外を出す)、ヘッダの読み取りが OSError、権限で開けない、切り詰められた NHD。
+足した変異 4 本: 読めない・例外を通す (旧動作)、読み取りの OSError を「NHD でない」扱い、移行の調べの例外を
+外へ投げる (理由に出さない)、切り詰めを「NHD でない」扱い。
+
+Opus ラリー 3: push (`do_deploy`) は NHD として読めない像 (0 バイト・壊れたヘッダ) を送らない
+(`legacy_pt_guard(push=True)`、版に関係なく。mount / sync は警告して通す)。ローカルの NHD の読み取りの
+OSError は版に関係なく、deploy・sync 系のマウント・migrate-pt の検査のどれでも断る (migrate-pt は例外で
+落ちずに MigrateError)。試験は NHD のパスだけ EIO を返す `open` の贋物で回す。足した変異 4 本: push の門の
+not_nhd を通す、do_deploy が push の門を使わない、版が古いと読まずに通す、migrate-pt の検査が OSError で
+例外のまま落ちる。`test_deploy_protect.py` の来歴の試験の像は、本物の NHD の形 (標準配置の OS32 区画) にした。
+
 ## 4. 見ていないこと
 
 - 実機・NP21/W での I/O (LBA28 のレジスタが実際に正しい物理セクタを指すか、`hdprep` の対話)。
