@@ -41,7 +41,7 @@ INS = ROOT / "tools/tests/install_fresh_host.c"
 MINI = ROOT / "tools/tests/ext2_mini_host.c"
 
 PURE_CASES = ["classify817", "classify1663", "paths", "bootfiles", "blocks", "space", "iplpt"]
-CDI_CASES = ["ok817", "ok1663", "modes", "preflight", "incomplete", "paths"]
+CDI_CASES = ["ok817", "ok1663", "modes", "preflight", "incomplete", "paths", "final"]
 INS_CASES = ["nokernel", "precheck", "boot_fail", "sync_fail", "geom817", "geom1663",
              "modes", "preflight", "incomplete", "rerun"]
 MAX_IMAGE = 508 * 1024
@@ -245,16 +245,17 @@ def real_pkg_paths(pure_exe):
 # CPL=3 が読んでよい文字列の返り先 (カーネル帯の static を返さない実体)。
 # 2026-09-24、NP21/W で cdinst が vfs_devname の返り値 (カーネルのマウント表) を
 # 読んで fault kill された — ホスト試験の贋物は利用者の文字列を返すので見えない。
-USER_SAFE_STR_TARGETS = {"vfs_cwd_user", "vfs_devname_user", "kapi_db_last_error",
-                         "kapi_db_column_text"}
-INSTALLER_SRCS = ["userland/system/cdinst.c", "userland/system/install.c",
-                  "userland/system/inst_hdd.c", "userland/system/inst_disk.c",
-                  "userland/lib/rt/pkg.c", "userland/system/install_recover.inc"]
+# 往復 2 (Fable) で path_get_drive / path_get_cwd も同じ手で直した。
+USER_SAFE_STR_TARGETS = {"vfs_cwd_user", "vfs_devname_user", "path_get_drive_user",
+                         "path_get_cwd_user", "kapi_db_last_error", "kapi_db_column_text"}
+# トランポリンの写しを返す実体 (exec/exec.c)
+TRAMP_TARGETS = {"vfs_cwd_user", "vfs_devname_user", "path_get_drive_user", "path_get_cwd_user"}
 
 
 def str_return_guard():
-    """インストーラ (CPL=3) が呼ぶ `const char *` を返す KAPI は、どれも CPL=3 に
-    写しを返す実体につながっている。vfs_devname は vfs_devname_user を通る。"""
+    """`const char *` を返す KAPI は**全部**、CPL=3 に読める場所を返す実体につながる
+    (kapi.json の target → 生成物の wrap → exec.c の写し)。あわせて userland/ の
+    全 C ソースのうち、それ以外の実体を呼ぶ箇所が無いことを見る。"""
     import json
 
     def walk(o):
@@ -271,22 +272,33 @@ def str_return_guard():
     strfn = {f["name"]: f.get("target", f["name"]) for f in walk(k)
              if "char" in f["ret"] and "*" in f["ret"]}
     bad = []
-    for rel in INSTALLER_SRCS:
-        src = (ROOT / rel).read_text(encoding="utf-8")
-        for name in re.findall(r"(?:api|g_api|ops)\s*->\s*(\w+)\s*\(", src):
-            if name in strfn and strfn[name] not in USER_SAFE_STR_TARGETS:
-                bad.append(f"{rel}: {name} -> {strfn[name]}")
+    for name, tgt in sorted(strfn.items()):
+        if tgt not in USER_SAFE_STR_TARGETS:
+            bad.append(f"sdk/kapi.json: {name} -> {tgt} (カーネル帯を返し得る)")
     gen = (ROOT / "kapi/kapi_generated.c").read_text(encoding="utf-8")
-    if "return vfs_devname_user(prefix);" not in gen:
-        bad.append("kapi/kapi_generated.c: wrap_vfs_devname が vfs_devname_user を通らない (make all の前?)")
+    for name, tgt in strfn.items():
+        m = re.search(r"wrap_%s\([^)]*\)\n\{(.*?)\n\}" % name, gen, re.S)
+        if not m or f"return {tgt}(" not in m.group(1):
+            bad.append(f"kapi/kapi_generated.c: wrap_{name} が {tgt} を通らない (make all の前?)")
     exe = (ROOT / "exec/exec.c").read_text(encoding="utf-8")
-    m = re.search(r"const char \*vfs_devname_user\(const char \*prefix\)\n\{(.*?)\n\}", exe, re.S)
-    if not m or "ring3_user_str(ring3_in_syscall" not in m.group(1):
-        bad.append("exec/exec.c: vfs_devname_user がトランポリンの写しを返さない")
+    for tgt in sorted(TRAMP_TARGETS):
+        m = re.search(r"const char \*%s\([^)]*\)\s*\{(.*?)\}" % tgt, exe, re.S)
+        if not m or ("ring3_user_str(ring3_in_syscall" not in m.group(1) and "tramp_copy(" not in m.group(1)):
+            bad.append(f"exec/exec.c: {tgt} がトランポリンの写しを返さない")
+    calls = 0
+    for f in sorted((ROOT / "userland").rglob("*")):
+        if f.suffix not in (".c", ".inc", ".h") or "target" in f.parts:
+            continue
+        src = f.read_text(encoding="utf-8", errors="replace")
+        for name in re.findall(r"->\s*(\w+)\s*\(", src):
+            if name in strfn:
+                calls += 1
+                if strfn[name] not in USER_SAFE_STR_TARGETS:
+                    bad.append(f"{f.relative_to(ROOT)}: {name} -> {strfn[name]}")
     for b in bad:
         print("  str-return: " + b)
     print(f"  str-return guard: {'ok' if not bad else 'NG'} "
-          f"({len(strfn)} string KAPIs, installer sources {len(INSTALLER_SRCS)})", flush=True)
+          f"({len(strfn)} string KAPIs, {calls} call sites under userland/)", flush=True)
     return 1 if bad else 0
 
 
@@ -378,8 +390,8 @@ MUTATIONS = [
      "作り直しでデータが消えることを表示しない"),
     ("userland/system/inst_hdd.c", "    t->mounts = api->dev_mount_count(INST_DRIVE);",
      "    t->mounts = 0;", "検査でマウントを数えない (外さずに書きに行く)"),
-    ("userland/system/cdinst.c", "    if (*kernel_len == 0 || !have_shell) {",
-     "    if (0 && (*kernel_len == 0 || !have_shell)) {",
+    ("userland/system/cdinst.c", "    if (g_final_kernel == 0 || g_final_shell == 0) {",
+     "    if (0 && (g_final_kernel == 0 || g_final_shell == 0)) {",
      "MINIMAL の必須の中身を見ない"),
     ("userland/system/cdinst.c",
      "            i = pkg_first_overflow(&info, 4);   /* strlen(\"/hd0\") */\n            if (i >= 0) {",
@@ -414,8 +426,8 @@ MUTATIONS = [
      "P1-1 追加パッケージのデータ部を書く前に見ない"),
     ("userland/system/cdinst.c", "    if (!pkg_data_ok(PKG_BOOT, &info)) return PKG_ERR_CORRUPT;\n", "",
      "P1-1 BOOT.PKG のデータ部を見ない"),
-    ("userland/system/cdinst.c", "PKG_NEED_SHELL) && ent->size > 0) have_shell = 1;",
-     "PKG_NEED_SHELL)) have_shell = 1;", "P1-1 空の shell.bin を必須として通す"),
+    ("userland/system/cdinst.c", "    if (g_final_kernel == 0 || g_final_shell == 0) {",
+     "    if (g_final_kernel == 0) {", "P1-1 空の shell.bin を必須として通す"),
     ("userland/system/cdinst.c",
      "            if (pkg_paths_ok(path, &info) != 0) return PKG_ERR_CORRUPT;\n            if (!pkg_data_ok",
      "            if (!pkg_data_ok", "P1-2 パスを書く前に見ない (展開の途中で気付く)"),
@@ -440,7 +452,8 @@ MUTATIONS = [
      "P2-4 1 ファイルの上限で断らない"),
     ("userland/system/inst_hdd.c", "REBOOT, then run the installer again", "Run the installer again",
      "P2-6 再起動を案内しない"),
-    ("userland/system/inst_hdd.c", "        ih_refuse(api, rc);\n        ih_host_hint(api);\n", "        ih_refuse(api, rc);\n",
+    ("userland/system/inst_hdd.c", "            ih_host_hint(api);           /* OS32 の項目が中途半端",
+     "            (void)0;           /* OS32 の項目が中途半端",
      "P2-6 直せない表にホスト側の手当てを案内しない"),
     ("userland/system/inst_hdd.c", "        if (t->mounts == 1 && dev && ih_streq(dev, INST_DEV)) {",
      "        if (dev && ih_streq(dev, INST_DEV)) {", "Fable 別の prefix にもマウントされた hd0 を承認後に外しに行く"),
@@ -450,6 +463,27 @@ MUTATIONS = [
      "    need_inodes = n->files + n->dirs;", "Fable 自動で作る親ディレクトリの inode の余白を持たない"),
     ("userland/system/inst_disk.c", "        out->free_blocks = 0;\n", "",
      "Fable 失敗のとき room を埋めない"),
+    # ---- 実装レビュー往復 2 (Codex P1-1・P1-2 / Fable minor) ----
+    ("userland/system/cdinst.c",
+     "                if (ent->type != PKG_TYPE_FILE) {\n                    api->kprintf(COL_RED, \"  %s: unknown entry type",
+     "                if (0) {\n                    api->kprintf(COL_RED, \"  %s: unknown entry type",
+     "R2 P1-1 未知の型の項目をファイルとして数える (型 2 の shell が検査を通る)"),
+    ("userland/system/cdinst.c",
+     "                if (path_eq(ent->path, PKG_NEED_SHELL)) g_final_shell = ent->size;",
+     "                if (path_eq(ent->path, PKG_NEED_SHELL) && g_final_shell == 0) g_final_shell = ent->size;",
+     "R2 P1-2 最初の shell で判定する (後の大きさ 0 の上書きを見ない)"),
+    ("userland/system/cdinst.c",
+     "                if (path_eq(ent->path, PKG_NEED_KERNEL)) g_final_kernel = ent->size;",
+     "                if (path_eq(ent->path, PKG_NEED_KERNEL) && b == 0) g_final_kernel = ent->size;",
+     "R2 P1-2 vmkernel を MINIMAL だけで判定する (後の PKG の上書きを見ない)"),
+    ("userland/system/cdinst.c", "    if (g_final_kernel != 0 && !required_on_hd0()) {", "    if (0) {",
+     "R2 P1-2 展開の後に必須の実物を見ない"),
+    ("userland/system/install.c",
+     "        if (api->sys_stat(DST_SHELL, &st) != 0 || (st.st_mode & OS_S_IFMT) != OS_S_IFREG ||\n            st.st_size != sizes[MEDIA_SHELL]) {",
+     "        if (api->sys_stat(DST_SHELL, &st) != 0 && 0) {", "R2 P1-2 install が写した shell の実物を見ない"),
+    ("userland/system/inst_hdd.c",
+     "        if (rc == INST_E_FOREIGN || rc == INST_E_MULTI || rc == HDPREP_E_MBR_SIG)",
+     "        if (0)", "R2 Fable 他の OS の区画にも「表を消せ」と案内する"),
     ("boot/ext2_mini.c", "    if (file_size > max_size) return EXT2M_ERR_TOO_BIG;",
      "    if (file_size > max_size) file_size = max_size;", "上限で切り詰める (旧動作)"),
     ("boot/ext2_mini.c", "    if (file_size > max_size) return EXT2M_ERR_TOO_BIG;\n", "",

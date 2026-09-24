@@ -359,7 +359,7 @@ static int fake_ide_write_sector(int drv, u32 lba, const void *buf)
     CHECK(lba < DISK_MODEL_SECTS);            /* 区画の中へは ext2_format_at だけ */
     memcpy(disk[lba], buf, 512);
     if (inj_write_corrupt_lba >= 0 && (u32)inj_write_corrupt_lba == lba)
-        disk[lba][16] ^= 0x20;                  /* 区画表なら名前 'O' → 'o' */
+        disk[lba][10] ^= 0x01;                  /* 区画表なら開始シリンダが 1 ずれる */
     sprintf(e, "W%u", (unsigned)lba);
     ev_add(e);
     return 0;
@@ -441,8 +441,8 @@ static int fake_dev_mount_count(int drv) { CHECK(drv == 0); return hd0_mounts; }
 static const char *fake_vfs_devname(const char *pre)
 {
     if (!strcmp(pre, "/")) return inj_root_hd0 ? "hd0" : "fd0";
-    if (!strcmp(pre, "/hd0")) return hd0_at_hd0 ? "hd0" : NULL;
-    return NULL;
+    if (!strcmp(pre, "/hd0") && hd0_at_hd0) return "hd0";
+    return "";                              /* 実物 (fs/vfs.c) と同じく未マウントは "" */
 }
 
 static int fake_sys_mkdir(const char *path)
@@ -1164,6 +1164,8 @@ static void case_modes(void)
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("OS32 did not create");
+    CHECK_STR("This disk is not a");        /* 他の OS: 対象外。表を消せとは言わない */
+    CHECK_NOSTR("nhd-init");
 
     /* sid は OS32 だが名前が違う */
     setup();
@@ -1180,6 +1182,8 @@ static void case_modes(void)
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("two or more partitions");
+    CHECK_STR("This disk is not a");
+    CHECK_NOSTR("nhd-init");
 
     /* OS32 の項目だが開始が期待値でない (シリンダ 13) */
     setup();
@@ -1203,6 +1207,7 @@ static void case_modes(void)
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("entry is broken");
+    CHECK_STR("nhd-init");
 }
 
 /* 事前検査の各失敗: 1 セクタも書かない (段 2-11、N6、N8) */
@@ -1405,6 +1410,14 @@ static void case_incomplete(void)
     CHECK_STR("INCOMPLETE");
     CHECK_NOSTR("Installation complete");
 
+    /* 写し終えた shell が事前検査の大きさでない (最終の状態、往復 2 P1-2) */
+    setup();
+    inj_stat_big = "/hd0/sys/shell.bin";
+    inj_stat_big_extra = 1;
+    CHECK(run() == 1);
+    CHECK_STR("INCOMPLETE: the shell was not installed");
+    CHECK_NOSTR("Installation complete");
+
     setup();
     inj_sync_fail = 1;
     CHECK(run() == 1);
@@ -1461,7 +1474,7 @@ static void case_rerun(void)
     memcpy(disk, keep, sizeof(keep));
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
-    CHECK_STR("OS32 did not create");
+    CHECK_STR("does not start where");      /* 中途半端な OS32 の項目 → ホスト側の手当て */
     CHECK_STR("nhd-init");
 
     /* 完了した hd0 をもう一度入れ直す (再作成) */

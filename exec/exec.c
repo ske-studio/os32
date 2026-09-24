@@ -28,6 +28,7 @@
 #include "kapi_host.h"   /* N1: Host Services のハンドル回収 (host_owner_exit) */
 #include "ring3_str.h"   /* T9 §12 R1: KAPI が CPL=3 へ返す文字列の置き場 */
 #include "kapi_db.h"
+#include "path.h"        /* path_get_drive / path_get_cwd (CPL=3 向けの写し) */
 #include "gdt.h"
 #include "tss.h"
 
@@ -334,15 +335,18 @@ volatile int ring3_in_syscall = 0;
 /*  写しは呼ばれるたびに上書きする — 呼び手は次の KAPI 呼び出しより前に      */
 /*  読み切ること (docs/KAPI_SPEC.md の sys_getcwd の行に注記)。              */
 /* ======================================================================== */
-const char *vfs_cwd_user(void)
+/* CPL=3 の呼び手 (ring3_in_syscall) にはトランポリンページの写しを、CPL=0 には
+ * src をそのまま返す (vfs_cwd_user / vfs_devname_user / path_get_*_user 共通)。 */
+static const char *tramp_copy(const char *src)
 {
     char *scratch = 0;
     if (ring3_tramp_page != 0) {
         scratch = (char *)(ring3_tramp_page + RING3_USTR_OFF);
     }
-    return ring3_user_str(ring3_in_syscall, scratch, RING3_USTR_CAP,
-                          vfs_cwd());
+    return ring3_user_str(ring3_in_syscall, scratch, RING3_USTR_CAP, src);
 }
+
+const char *vfs_cwd_user(void) { return tramp_copy(vfs_cwd()); }
 
 /* ======================================================================== */
 /*  vfs_devname_user — vfs_devname の実体 (票 TASK_HDD_INSTALL 段 2、        */
@@ -357,15 +361,19 @@ const char *vfs_cwd_user(void)
 /*  出しより前に読み切ること) を返す。スロット・引数・戻り型は不変で、版も  */
 /*  上げない。CPL=0 の呼び手 (常駐シェル) には従来どおりの番地が返る。       */
 /* ======================================================================== */
-const char *vfs_devname_user(const char *prefix)
-{
-    char *scratch = 0;
-    if (ring3_tramp_page != 0) {
-        scratch = (char *)(ring3_tramp_page + RING3_USTR_OFF);
-    }
-    return ring3_user_str(ring3_in_syscall, scratch, RING3_USTR_CAP,
-                          vfs_devname(prefix));
-}
+const char *vfs_devname_user(const char *prefix) { return tramp_copy(vfs_devname(prefix)); }
+
+/* ======================================================================== */
+/*  path_get_drive_user / path_get_cwd_user — lib/path.c の 2 本の実体      */
+/*  (票 TASK_HDD_INSTALL 段 2 のレビュー往復 2、KAPI の追加はしない)         */
+/*                                                                          */
+/*  lib/path.c の cur_drive / cur_cwd もカーネル帯の static で、そのまま      */
+/*  返すと CPL=3 の呼び手は読んだ瞬間に fault kill になる (vfs_devname と     */
+/*  同じ種類)。target を差し替え、CPL=3 には同じ 1 本の写しを返す。スロット・*/
+/*  引数・戻り型・版は不変。                                                 */
+/* ======================================================================== */
+const char *path_get_drive_user(void) { return tramp_copy(path_get_drive()); }
+const char *path_get_cwd_user(void)   { return tramp_copy(path_get_cwd()); }
 
 /* ======================================================================== */
 /*  exec_tramp_user_selftest — 写し場の番地とページ属性 (票 T9 §12 R1)       */
@@ -475,6 +483,27 @@ u32 exec_tramp_user_selftest(void)
     before = vfs_cwd_user();
     if (before != (const char *)addr) bad |= 1u << 2;
     if (kstrcmp(before, vfs_cwd()) != 0) bad |= 1u << 2;
+
+    /* (3) vfs_devname("/") も CPL=3 には写しの番地を返す (TASK_HDD_INSTALL
+     * 段 2: cdinst がカーネルのマウント表を読んで落ちた)。CPL=0 には元の番地 */
+    before = vfs_devname_user("/");
+    if (before != (const char *)addr || kstrcmp(before, vfs_devname("/")) != 0)
+        bad |= 1u << 3;
+    ring3_in_syscall = 0;
+    if (vfs_devname_user("/") != vfs_devname("/")) bad |= 1u << 3;
+
+    /* (4) path_get_drive / path_get_cwd も同じ */
+    ring3_in_syscall = 1;
+    before = path_get_drive_user();
+    if (before != (const char *)addr || kstrcmp(before, path_get_drive()) != 0)
+        bad |= 1u << 4;
+    before = path_get_cwd_user();
+    if (before != (const char *)addr || kstrcmp(before, path_get_cwd()) != 0)
+        bad |= 1u << 4;
+    ring3_in_syscall = 0;
+    if (path_get_drive_user() != path_get_drive() ||
+        path_get_cwd_user() != path_get_cwd())
+        bad |= 1u << 4;
     ring3_in_syscall = saved;
 
     return bad;

@@ -54,6 +54,7 @@ typedef struct {
 #define SRC_BOOT_HDD    "/sys/boot_hdd.bin"
 #define SRC_LOADER_H    "/sys/loader_h.bin"
 #define SRC_SHELL       "/sys/shell.bin"    /* HDD 起動の常駐シェル (cdinst の MINIMAL と同じ必須) */
+#define DST_SHELL       "/hd0/sys/shell.bin"
 #define DST_BOOT_DIR    "/hd0/boot"
 #define DST_KERNEL_LZ4  "/hd0/boot/vmkernel.lz4"
 
@@ -643,6 +644,21 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
         api->kprintf(0x4F, "  %d file(s) failed to copy.\n", ret);
         inst_hdd_incomplete(api, "files failed to copy", ret);
         goto end;
+    }
+
+    /* 必須の shell が HDD に事前検査のとおりの大きさで在る (最終の状態、
+     * Codex 往復 2 P1-2 — cdinst と同じ守り。FD の名前は FAT で一意なので
+     * 後から上書きされる経路は今は無いが、写し先の表 (fd_renames) を足したとき
+     * の保険) */
+    {
+        OS32_Stat st;
+        if (api->sys_stat(DST_SHELL, &st) != 0 || (st.st_mode & OS_S_IFMT) != OS_S_IFREG ||
+            st.st_size != sizes[MEDIA_SHELL]) {
+            api->kprintf(0x4F, "  %s is missing or has the wrong size (want %u)\n",
+                         DST_SHELL, sizes[MEDIA_SHELL]);
+            inst_hdd_incomplete(api, "the shell was not installed", -1);
+            goto end;
+        }
     }
 
     /* ファイルシステム同期 */

@@ -922,13 +922,13 @@ int __cdecl wrap_ide_read_sector(int drv, u32 lba, void *buf)
 const char * __cdecl wrap_path_get_drive(void)
 {
     KAPI_HIT(53);
-    return path_get_drive();
+    return path_get_drive_user();
 }
 
 const char * __cdecl wrap_path_get_cwd(void)
 {
     KAPI_HIT(54);
-    return path_get_cwd();
+    return path_get_cwd_user();
 }
 
 int __cdecl wrap_path_set_drive(const char *d)

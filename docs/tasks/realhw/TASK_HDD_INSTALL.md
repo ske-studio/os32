@@ -193,6 +193,24 @@
   `sh.bin` の hdprep / filer も同じ経路で直る。あわせて `build/app.conf` の cdinst / install の版を 64 にした
   (v63 以前のカーネルで予約スロットを呼ばない)。`path_get_drive` / `path_get_cwd` も target が素のままで、
   同じ種類の潜在不具合の疑いがある (インストーラは呼ばない。未確認・未修正)。
+  → 往復 2 で直した (下)。
+- **NP21/W の確認 (c76da0b、PM、2026-09-24)**: 空の NHD → CD から Normal → HDD 起動 → kselftest 212/0 →
+  ホストで `e2fsck -fn` clean。
+- **実装レビュー往復 2 (Codex P1-1・P1-2 / Fable minor) で足したもの**:
+  - cdinst の事前検査は項目の型を見る: ファイル・ディレクトリ以外の型は断る (`pkg_extract` は黙って飛ばす
+    ので、型 2 の `/sys/shell.bin` が必須として通って展開されなかった)。展開の直前にも同じ検査。
+  - 必須 (vmkernel.lz4・shell.bin) は**展開順にたどった最終の大きさ**で判定する (MINIMAL → GUI → NORMAL →
+    DEBUG、PKG の中は項目の順。後の同じパスの項目が O_TRUNC で置き換える — NORMAL の大きさ 0 の shell や
+    同じ PKG の中の重複が「完了」になっていた)。展開の後にも `/hd0` の実物をその大きさと突き合わせ、違えば
+    INCOMPLETE。install (FD) は FAT の名前が一意で後からの上書きは無いが、写した `/hd0/sys/shell.bin` を
+    同じく突き合わせる。
+  - `path_get_drive` / `path_get_cwd` も `vfs_devname` と同じ形で直した (`exec/exec.c` の `*_user`、target の
+    差し替え、版は据え置き)。kselftest `test_tramp_user_str` に `vfs_devname("/")` と `path_get_*` の返り番地が
+    トランポリンの写しであることの 2 項を足した (**kselftest は 212 → 214 項**)。str-return guard は
+    `const char *` を返す KAPI の全部と userland/ の全 C ソースを見る。
+  - 他の OS の区画 (未知の sid・2 項目以上・空の表で 55AA) には「このディスクは対象外」と出し、表を消せとは
+    言わない。ホスト側の手当て (`make nhd-init`) は OS32 の項目が中途半端なとき (開始違い・壊れ) と区画表の
+    読み戻しが違ったときだけ出す。
 
 ### 段 3 — CD インストール → HDD 起動
 

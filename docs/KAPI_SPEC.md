@@ -231,6 +231,16 @@ v62 以前にコンパイルしたオブジェクトは `kapi` を参照した�
 > された。target を `vfs_devname` → `vfs_devname_user` に差し替え、CPL=3 には
 > **`sys_getcwd` と同じ 1 本の写し**を返す (どちらを呼んでももう一方の返り値は
 > 上書きされる — 次の KAPI 呼び出しより前に読み切る)。スロット・引数・戻り型・版は不変。
+>
+> **`path_get_drive` / `path_get_cwd` も同じ** (同票のレビュー往復 2): `lib/path.c` の
+> `cur_drive` / `cur_cwd` はカーネル帯の static。target を `path_get_drive_user` /
+> `path_get_cwd_user` に差し替え、CPL=3 には**同じ 1 本の写し**を返す。これで
+> `const char *` を返す KAPI 6 本はすべて CPL=3 が読める場所を返す (`sys_getcwd` /
+> `vfs_devname` / `path_get_drive` / `path_get_cwd` = トランポリンの写し、`db_last_error` /
+> `db_column_text` = 共有メモリ)。**4 本の写しは共用**なので、どれかを呼べば他の 3 本の
+> 返り値は上書きされる。`make check-hdd-stage2-host` の str-return guard が
+> kapi.json の target・生成物・exec.c の写しを突き合わせ、kselftest の
+> `test_tramp_user_str` が実機で返り番地を見る。
 
 | Offset | フィールド | プロトタイプ |
 |--------|-----------|------|

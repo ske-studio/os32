@@ -34,6 +34,15 @@ static void ih_refuse(KernelAPI *api, int code)
                  inst_reason(code), code);
 }
 
+/* 他の OS の区画・起動域がある: このディスクは対象外 (表を消せとは言わない) */
+static void ih_foreign_hint(KernelAPI *api)
+{
+    api->kprintf(ATTR_YELLOW, "%s",
+                 "  hd0 holds another system's partitions or boot code. This disk is not a\n"
+                 "  target for the OS32 installer; install onto a disk that is empty or has\n"
+                 "  only the OS32 area.\n");
+}
+
 /* 区画表を自分では直せないときの案内 (ゲストからは戻せない) */
 static void ih_host_hint(KernelAPI *api)
 {
@@ -106,7 +115,10 @@ int inst_hdd_check(KernelAPI *api, InstTarget *t)
                        t->g.ata_total, t->plan.start, &t->mode);
     if (rc != 0) {
         ih_refuse(api, rc);
-        ih_host_hint(api);
+        if (rc == INST_E_FOREIGN || rc == INST_E_MULTI || rc == HDPREP_E_MBR_SIG)
+            ih_foreign_hint(api);
+        else
+            ih_host_hint(api);           /* OS32 の項目が中途半端 (開始違い・壊れ) */
         return rc;
     }
 

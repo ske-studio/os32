@@ -529,6 +529,9 @@ static void test_tramp_user_str(void)
     check((bad & (1u << 0)) == 0, "getcwd scratch fits after the KAPI stubs");
     check((bad & (1u << 1)) == 0, "getcwd scratch page is present and USER");
     check((bad & (1u << 2)) == 0, "sys_getcwd copies only for CPL=3 callers");
+    /* TASK_HDD_INSTALL 段 2: vfs_devname / path_get_* もカーネル帯を返していた */
+    check((bad & (1u << 3)) == 0, "vfs_devname copies into the scratch for CPL=3");
+    check((bad & (1u << 4)) == 0, "path_get_drive/cwd copy into the scratch for CPL=3");
 }
 
 /* ------------------------------------------------------------------------ */

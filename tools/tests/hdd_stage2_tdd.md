@@ -67,3 +67,20 @@ RED、ビルドが通らないものは ERROR (何も確かめていない) と�
 データ部を見ない」が SURVIVED だった (切れた BOOT.PKG は comp_size 分の読みで別に断れるので同じ結果になる)。
 orig_size が表と食い違う BOOT.PKG のケースを足して RED にした。展開の直前のパスの検査 (事前検査と同じ規則の
 2 回目) だけを外す変異は、事前検査が先に断るので区別できない — 変異の表には入れていない。
+
+## 5. 実装レビュー往復 2 (2026-09-24、Codex P1-1・P1-2 / Fable minor)
+
+足したケース (`cdinst_host.c` `final`): 型 2 の `/sys/shell.bin`・型 7 の `/etc/odd` は断る、NORMAL の大きさ 0 の
+shell (Normal は断り、Minimal は通って 1000 B のまま)、同じ MINIMAL の中の重複 (後の 0 B が勝つ → 断る)、NORMAL が
+vmkernel を 508KiB + 1 で置き換える → 断る、NORMAL の 500 B の shell は最終の大きさで入る、展開の後に shell の
+大きさが違う → INCOMPLETE。`install_fresh_host.c`: 写した shell の大きさが違う → INCOMPLETE、他の OS の区画は
+「対象外」の文言で `nhd-init` を出さない、中途半端な OS32 の項目 (開始違い・壊れ) は `nhd-init` を出す。
+偽の `vfs_devname` は実物と同じく未マウントで `""` を返す。
+
+str-return guard は `const char *` を返す KAPI の全部 (6 本) の target が CPL=3 に読める実体であること、生成物の
+wrap がそれを呼ぶこと、`exec/exec.c` の 4 本の `*_user` がトランポリンの写しを返すこと、userland/ の全 C ソース
+(16 か所) がそれ以外を呼ばないことを見る。target を 1 本外した写しで NG になることを手で確かめた。
+カーネルの写しそのもの (返り番地がトランポリンページの中) は kselftest の `test_tramp_user_str` で実機が見る
+(ホストでは見られない)。
+
+変異は 7 本を足して **68/68 RED (ERROR 0、SURVIVED 0)、対照 5/5 SURVIVED**。

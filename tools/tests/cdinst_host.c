@@ -212,6 +212,7 @@ static int fx_new(const char *p)
 static struct { int used; int fi; u32 pos; int wr; } fds[FD_MAX];
 
 static const char *inj_open_fail;     /* この /hd0 の名前は作れない */
+static const char *inj_stat_wrong;    /* この名前の stat は 1 バイト違う長さを名乗る */
 static int inj_sync_fail, inj_mount_fail, inj_format_fail, inj_readback_bad = -1;
 static int hd0_mounts, hd0_at_hd0, inj_root_hd0, inj_umount_fail;
 static const char *keys;
@@ -267,12 +268,14 @@ static int __cdecl f_sys_lseek(int fd, int off, int whence)
     else fds[fd - 3].pos += (u32)off;
     return (int)fds[fd - 3].pos;
 }
+static int __cdecl f_sys_stat(const char *path, OS32_Stat *st);
 static int __cdecl f_sys_stat(const char *path, OS32_Stat *st)
 {
     int fi = fx_find(path);
     if (fi < 0) return -2;
     memset(st, 0, sizeof(*st));
     st->st_size = fx[fi].vsize ? fx[fi].vsize : fx[fi].size;
+    if (inj_stat_wrong && h_strcmp(inj_stat_wrong, path) == 0) st->st_size++;
     st->st_mode = (u16)(fx[fi].is_dir ? OS_S_IFDIR : OS_S_IFREG);
     return 0;
 }
@@ -366,8 +369,8 @@ static int __cdecl f_dev_mount_count(int drv) { CHECK(drv == 0); return hd0_moun
 static const char *__cdecl f_vfs_devname(const char *pre)
 {
     if (h_strcmp(pre, "/") == 0) return inj_root_hd0 ? "hd0" : "fd0";
-    if (h_strcmp(pre, "/hd0") == 0) return hd0_at_hd0 ? "hd0" : (const char *)0;
-    return (const char *)0;
+    if (h_strcmp(pre, "/hd0") == 0 && hd0_at_hd0) return "hd0";
+    return "";                              /* 実物 (fs/vfs.c) と同じく未マウントは "" */
 }
 static int __cdecl f_vfs_sync(void) { return inj_sync_fail ? -5 : 0; }
 static int __cdecl f_kbd_trygetchar(void)
@@ -433,7 +436,8 @@ static void pkg_put(const char *cdpath, const PE *e, int n, int lzss, int nodata
         off += pl;
         b[off++] = (u8)e[i].size; b[off++] = (u8)(e[i].size >> 8);
         b[off++] = (u8)(e[i].size >> 16); b[off++] = (u8)(e[i].size >> 24);
-        b[off++] = (u8)(e[i].dir ? PKG_TYPE_DIR : PKG_TYPE_FILE);
+        /* dir: 0 = ファイル、1 = ディレクトリ、2 以上 = その値を型としてそのまま */
+        b[off++] = (u8)(e[i].dir == 0 ? PKG_TYPE_FILE : e[i].dir == 1 ? PKG_TYPE_DIR : e[i].dir);
     }
     b[off++] = 0;
     if (!nodata) {
@@ -533,6 +537,7 @@ static void setup(void)
     writes = fmt_calls = 0;
     fmt_start = fmt_len = 0;
     inj_open_fail = 0;
+    inj_stat_wrong = 0;
     inj_sync_fail = inj_mount_fail = inj_format_fail = 0;
     inj_readback_bad = -1;
     hd0_mounts = hd0_at_hd0 = 0;
@@ -678,6 +683,8 @@ static void case_modes(void)
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("OS32 did not create");
+    CHECK_STR("This disk is not a");
+    CHECK_NOSTR("nhd-init");
 
     /* 2 項目 */
     setup();
@@ -730,13 +737,13 @@ static void case_preflight(void)
     minimal_pkg(KERNEL_LEN, 0, 1, 0);
     run();
     CHECK_NOTHING_WRITTEN();
-    CHECK_STR("MINIMAL.PKG lacks /boot/vmkernel.lz4");
+    CHECK_STR("leave /boot/vmkernel.lz4 missing or empty");
 
     setup();                                        /* shell が無い */
     minimal_pkg(KERNEL_LEN, 1, 0, 0);
     run();
     CHECK_NOTHING_WRITTEN();
-    CHECK_STR("MINIMAL.PKG lacks /sys/shell.bin");
+    CHECK_STR("leave /sys/shell.bin missing or empty");
 
     setup();                                        /* 容量: 13MB の区画に NORMAL が 30MB */
     geom.ata_total = 1632u + 136u * 200u;
@@ -797,7 +804,7 @@ static void case_preflight(void)
     }
     run();
     CHECK_NOTHING_WRITTEN();
-    CHECK_STR("lacks /sys/shell.bin (missing or empty)");
+    CHECK_STR("leave /sys/shell.bin missing or empty");
 
     setup();                                        /* 前置で溢れる項目 (展開の途中ではなく書く前に) */
     {
@@ -962,6 +969,88 @@ static void case_incomplete(void)
     CHECK_NOSTR("Installation Complete");
 }
 
+/* ---- 必須のファイルは最終の状態で判定する (往復 2 P1-1 / P1-2) ---- */
+static void minimal_with(const PE *extra, int n_extra)
+{
+    PE e[8];
+    int n = 0, k;
+    e[n].path = "/boot/vmkernel.lz4"; e[n].size = KERNEL_LEN; e[n].dir = 0; n++;
+    e[n].path = "/sys/shell.bin"; e[n].size = 1000; e[n].dir = 0; n++;
+    for (k = 0; k < n_extra; k++) e[n++] = extra[k];
+    pkg_put("/cd0/MINIMAL.PKG", e, n, 0, 0, 200u);
+}
+
+static void case_final(void)
+{
+    PE x[2];
+
+    /* 型 2 の /sys/shell.bin: 以前は必須として通り、展開では無視された */
+    setup();
+    {
+        PE e[2];
+        e[0].path = "/boot/vmkernel.lz4"; e[0].size = KERNEL_LEN; e[0].dir = 0;
+        e[1].path = "/sys/shell.bin"; e[1].size = 1000; e[1].dir = 2;
+        pkg_put("/cd0/MINIMAL.PKG", e, 2, 0, 0, 200u);
+    }
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("unknown entry type 2");
+
+    setup();                                        /* 必須でない項目の未知の型も断る */
+    x[0].path = "/etc/odd"; x[0].size = 0; x[0].dir = 7;
+    small_pkg("/cd0/NORMAL.PKG", "/usr/bin/edit.bin", 3000, 0);
+    minimal_with(x, 1);
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("unknown entry type 7");
+
+    /* 後の NORMAL の大きさ 0 の shell が MINIMAL の shell を空にする */
+    setup();
+    small_pkg("/cd0/NORMAL.PKG", "/sys/shell.bin", 0, 0);
+    keys = "2y";
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("leave /sys/shell.bin missing or empty");
+    /* Minimal なら NORMAL は展開しないので通る */
+    setup();
+    small_pkg("/cd0/NORMAL.PKG", "/sys/shell.bin", 0, 0);
+    run();
+    CHECK_STR("Installation Complete");
+    CHECK(hd0_size("/hd0/sys/shell.bin") == 1000);
+
+    /* 同じ PKG の中の重複 (後の方が勝つ) */
+    setup();
+    x[0].path = "/sys/shell.bin"; x[0].size = 0; x[0].dir = 0;
+    minimal_with(x, 1);
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("leave /sys/shell.bin missing or empty");
+
+    /* 後の PKG が vmkernel を上限を超える大きさで置き換える → 断る */
+    setup();
+    small_pkg("/cd0/NORMAL.PKG", "/boot/vmkernel.lz4", 508u * 1024u + 1u, 1);
+    keys = "2y";
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("larger than 508 KiB");
+
+    /* 正しい上書き (NORMAL の 500 バイトの shell) は最終の大きさで入る */
+    setup();
+    small_pkg("/cd0/NORMAL.PKG", "/sys/shell.bin", 500, 0);
+    keys = "2y";
+    run();
+    CHECK_STR("Installation Complete");
+    CHECK(hd0_size("/hd0/sys/shell.bin") == 500);
+
+    /* 展開の後に shell が事前検査の大きさでない → 完了と言わない */
+    setup();
+    inj_stat_wrong = "/hd0/sys/shell.bin";
+    run();
+    CHECK_STR("/hd0/sys/shell.bin is missing or has the wrong size");
+    CHECK_STR("INCOMPLETE");
+    CHECK_NOSTR("Installation Complete");
+}
+
 int os32_main(int argc, char **argv)
 {
     const char *c = argc > 1 ? argv[1] : "";
@@ -971,6 +1060,7 @@ int os32_main(int argc, char **argv)
     else if (h_strcmp(c, "preflight") == 0) case_preflight();
     else if (h_strcmp(c, "incomplete") == 0) case_incomplete();
     else if (h_strcmp(c, "paths") == 0) case_paths();
+    else if (h_strcmp(c, "final") == 0) case_final();
     else { report("unknown case\n"); return 2; }
     report("cdinst: PASS (");
     report(c);

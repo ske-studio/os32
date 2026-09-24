@@ -446,12 +446,14 @@
     {
       "name": "path_get_drive",
       "ret": "const char *",
-      "args": []
+      "args": [],
+      "target": "path_get_drive_user"
     },
     {
       "name": "path_get_cwd",
       "ret": "const char *",
-      "args": []
+      "args": [],
+      "target": "path_get_cwd_user"
     },
     {
       "name": "path_set_drive",

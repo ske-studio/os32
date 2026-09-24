@@ -332,6 +332,12 @@ static int pkg_paths_ok(const char *path, const PkgInfo *info)
     return 0;
 }
 
+/* 必須のファイルの**最終の**大きさ (Codex 往復 2 P1-2)。展開は MINIMAL → GUI →
+ * NORMAL → DEBUG、各 PKG の中は項目の順に O_TRUNC で書くので、後から来た同じ
+ * パスの項目 (大きさ 0 を含む) が前のものを置き換える。事前検査も同じ順に
+ * たどって、最後に書かれる大きさで判定する。 */
+static u32 g_final_kernel, g_final_shell;
+
 static int measure_packages(int choice, InstNeed *need, u32 *kernel_len)
 {
     static const char *const bases[4] = {
@@ -340,9 +346,11 @@ static int measure_packages(int choice, InstNeed *need, u32 *kernel_len)
     static const char need_from[4] = { '1', '2', '2', '3' };
     static PkgInfo info;
     char path[PKG_PATH_BUF];
-    int b, n, count, i, ret, have_shell = 0;
+    int b, n, count, i, ret;
 
     *kernel_len = 0;
+    g_final_kernel = 0;
+    g_final_shell = 0;
     for (b = 0; b < 4; b++) {
         if (choice < need_from[b]) continue;
         count = pkg_series_count(bases[b]);
@@ -367,16 +375,23 @@ static int measure_packages(int choice, InstNeed *need, u32 *kernel_len)
                     inst_need_dir(need);
                     continue;
                 }
+                /* pkg_extract はファイルとディレクトリしか書かない。それ以外の型は
+                 * 黙って飛ばされる (必須が検査を通って展開されない) ので断る */
+                if (ent->type != PKG_TYPE_FILE) {
+                    api->kprintf(COL_RED, "  %s: unknown entry type %u: %s\n",
+                                 path, (u32)ent->type, ent->path);
+                    return PKG_ERR_CORRUPT;
+                }
                 inst_need_file(need, ent->size);
-                if (b != 0) continue;
-                if (path_eq(ent->path, PKG_NEED_KERNEL)) *kernel_len = ent->size;
-                if (path_eq(ent->path, PKG_NEED_SHELL) && ent->size > 0) have_shell = 1;
+                if (path_eq(ent->path, PKG_NEED_KERNEL)) g_final_kernel = ent->size;
+                if (path_eq(ent->path, PKG_NEED_SHELL)) g_final_shell = ent->size;
             }
         }
     }
-    if (*kernel_len == 0 || !have_shell) {
-        api->kprintf(COL_RED, "  MINIMAL.PKG lacks %s (missing or empty)\n",
-                     *kernel_len == 0 ? PKG_NEED_KERNEL : PKG_NEED_SHELL);
+    *kernel_len = g_final_kernel;
+    if (g_final_kernel == 0 || g_final_shell == 0) {
+        api->kprintf(COL_RED, "  the packages leave %s missing or empty\n",
+                     g_final_kernel == 0 ? PKG_NEED_KERNEL : PKG_NEED_SHELL);
         return PKG_ERR_CORRUPT;
     }
     return PKG_OK;
@@ -411,8 +426,14 @@ static int install_package_hd(const char *path, const char *label)
         return PKG_ERR_TOOLONG;
     }
 
-    /* /hd0 の外へ出るパスは展開の前に断る (事前検査と同じ規則をもう一度) */
+    /* /hd0 の外へ出るパスと未知の型は展開の前に断る (事前検査と同じ規則をもう一度) */
     if (pkg_paths_ok(path, &info) != 0) return PKG_ERR_CORRUPT;
+    for (i = 0; i < info.entry_count; i++) {
+        if (info.entries[i].type != PKG_TYPE_FILE && info.entries[i].type != PKG_TYPE_DIR) {
+            api->kprintf(COL_RED, " unknown entry type: %s\n", info.entries[i].path);
+            return PKG_ERR_CORRUPT;
+        }
+    }
 
     /* パスに /hd0 プレフィックスを追加 */
     for (i = 0; i < info.entry_count; i++) {
@@ -494,6 +515,26 @@ static int install_series(const char *base)
     return PKG_OK;
 }
 
+static int required_on_hd0(void)
+{
+    static const char *const path[2] = { "/hd0" PKG_NEED_KERNEL, "/hd0" PKG_NEED_SHELL };
+    u32 want[2];
+    OS32_Stat st;
+    int i;
+
+    want[0] = g_final_kernel;
+    want[1] = g_final_shell;
+    for (i = 0; i < 2; i++) {
+        if (api->sys_stat(path[i], &st) != 0 || (st.st_mode & OS_S_IFMT) != OS_S_IFREG ||
+            st.st_size == 0 || st.st_size != want[i]) {
+            api->kprintf(COL_RED, "\n  %s is missing or has the wrong size (want %u)\n",
+                         path[i], want[i]);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int install_packages(int choice)
 {
     int ret;
@@ -517,6 +558,15 @@ static int install_packages(int choice)
     if (choice >= '3') {
         ret = install_series(PKG_BASE_DEBUG);
         if (ret != PKG_OK) return ret;
+    }
+
+    /* 必須のファイルが /hd0 に事前検査のとおりの大きさで在る (最終の状態、
+     * Codex 往復 2 P1-2 の二重の守り) */
+    /* g_final_kernel = 0 は事前検査 (measure_packages) を通っていない呼び出し
+     * (tools/tests/vfs_fd_path_host.c が install_packages だけを回す) */
+    if (g_final_kernel != 0 && !required_on_hd0()) {
+        println(COL_RED, "Installation aborted. The HDD is incomplete.");
+        return PKG_ERR_CORRUPT;
     }
 
     /* ファイルシステムをディスクに同期 */
@@ -712,7 +762,8 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     }
     println(COL_GREEN, " OK");
 
-    /* パッケージの展開・同期・完了表示 */
+    /* パッケージの展開・同期・完了表示。展開の後の必須の実物は install_packages が
+     * 完了を出す前に見る (required_on_hd0) */
     ret = install_packages(choice);
     if (ret != PKG_OK) inst_hdd_incomplete(api, "package installation failed", ret);
 }
