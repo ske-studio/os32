@@ -57,3 +57,8 @@ KAPI を上げたら `make clean` → `make all` → `make external` → **カ�
 「既存アプリケーションはすべて自作なので再ビルドで解決する問題は確認は入りますが、基本的に再ビルド方向」。→ ラリー 3 の残件 (刻印の無い v62 以前のオブジェクトの混入、Codex B-R3-1 / Opus B-1) は**全再ビルド (`make clean && make clean-external` → 全ビルド → 全配備) を前提に閉じる** (選択肢 a)。確認として、**v63 で crt の大域変数 `kapi` を `os32_kapi_v63` に改名** (生成ヘッダに `#define kapi os32_kapi_v63`) し、作り直し忘れのオブジェクトをリンクで落とす (選択肢 b)。翻訳単位ごとの刻印と全一致検査 (v3) は**取りやめ**、刻印は crt0 の 1 か所 + ヘッダ v3 の照合だけにする。**v64 以降の配備順 (Opus B-2) → 決裁 (a)**: v64 以降の HostDrv 移行は「**カーネルを先、ユーザーランドを後**」と書き直し、hsync の「host の版 > カーネルの版」の拒否は残す (v63 以降は配置が固定なので新カーネルで旧ユーザーランドは動く)。**方針確定、実装中**。
 
 実装で守ること (Opus ラリー 3 の実装メモ): 刻印のセクションは非 alloc (app.ld で KEEP、平らなバイナリに入れない)、カーネル側には刻印を入れない (`__OS32_USERLAND__`)、`os32gui_shlib_init` は断るとき `os32_init(api)` の前に返し旧 KAPI を保存しない + 全エクスポートが初期化成功フラグで失敗を返す (旧 `bind()` は init の戻り値を捨てる)、予約スロット 230〜299 は「未実装」スタブ (CPL=3 は kill、CPL=0 は NOSYS) で埋める (NULL にしない)、asm の試験バイナリ (`--api 39`) の扱いを決める。
+
+## NP21/W 受入 (2026-09-24、c7f1ba2 のビルド)
+
+v63 への移行を CD の新規インストールで実施 (NHD を空に → FD 起動 (API v63) → `cdinst` Normal → `e2fsck -fn` clean、入ったカーネルはビルドとバイト一致 → HDD 起動)。**`ver` API v63、kselftest 210/210 (fail 0)**。`cal` (malloc) と HostDrv からの `cfg list` (SQLite + 固定配置の shm_base) が動く。**v62 の `cal.bin` は `old header (no KAPI layout) (bin=0 kernel=4b8)` → `rebuild required (KAPI data layout)` で断られた**。
+記録: CD の Normal パッケージに `cfg` が入っていない (FD には入る) — 既存のパッケージ定義の漏れか意図か未確認。

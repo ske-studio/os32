@@ -86,3 +86,5 @@
 - **FAT は直す** (ユーザー): (1) FD 起動で FAT が `/` のとき `ff_make_path` が `0:` を前に付けて末尾を切り詰める (Codex / Opus 一致) → 収まらなければ NAMETOOLONG。(2) FAT の `rmdir` (実体は `f_unlink`) がファイルも消し pinned を通らない (Opus) → 種別を見て NOTDIR。
 - **HostDrv** (ユーザー: 「ホストドライブはホストサービス実装後に使える経路にしたい」): 名前の厳密化を今入れる — `VFS_NAME_RULE_WIN32` で最短形の正しい BMP の UTF-8 以外と Win32 の禁止文字 `: * ? " < > |` を断る (`kutf8_to_utf16le` の途中終了・冗長符号化・U+FFFD 置換による別名を塞ぐ、`:` の代替データストリームもここで閉じる)。**将来: HostDrv を Host Services (ネットワーク越し) の経路でも使えるようにする** (v3 PLAN の候補へ)。
 - **8.3 短名 (`DISK-I~1.IMG`)・予約名 (CON)・ASCII 以外の大文字小文字 → 既知の制限** (ユーザー決裁 = 推奨): HostDrv 上のファイルを別名で指したときの BUSY / pinned の保護は保証しない。影響は開発者のホスト上のファイルとそれを載せた loop に限られる。docs/06_filesystem.md にも書く。
+
+**2026-09-24 状態: 実装済み (c7f1ba2)。実装レビュー 3 ラリー + ユーザー決裁で閉じた。NP21/W で CD 新規インストール → e2fsck clean → HDD 起動 kselftest 210/210。FAT 媒体上の BUSY・IME 辞書の rm → 作り直し → 変換は NP21/W / 実機で未確認。**
