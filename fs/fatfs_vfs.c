@@ -74,10 +74,28 @@ static int ff_stat_to_vfs(FRESULT fr)
 }
 
 
-/* ======== パスにボリューム接頭辞を付加 ======== */
-static void ff_make_path(const FatFsCtx *fc, const char *path, char *out, int max)
+/* ======== 名前の入口検査 (実装レビュー ラリー 2 の blocker) ========
+ * FatFs は '\' を区切りと読み、0x20 以下のバイトで名前を打ち切り、"DISK." を
+ * "DISK" と同じ SFN にする。VFS の BUSY / pinned は 1 バイトの fold で名前を
+ * 比べるので、この綴りを素通しすると使用中の実体を別の綴りで消せた
+ * (vfs_rm("/fd0/disk.img ") など)。意味の変わる綴りはここで INVAL で断る。
+ * 規則と Win32 (HostDrv) との差は fs/vfs_name_rules.inc。
+ * FAT は**途中の空白も**断る — FatFs はそこで名前を打ち切るので、
+ * "DISK.IMG ignored" も "DISK.IMG" になる (Win32 では途中の空白は正当)。 */
+#include "vfs_name_rules.inc"
+
+
+/* ======== パスにボリューム接頭辞を付加 ========
+ * 戻り値: VFS_OK / VFS_ERR_INVAL (FatFs が意味を変える名前)。
+ * 名前を受け取る入口は**必ず**ここを通るので、検査もここに置く。 */
+static int ff_make_path(const FatFsCtx *fc, const char *path, char *out, int max)
 {
     int len;
+    int rc;
+
+    out[0] = '\0';
+    rc = vfs_name_rule_check(path, VFS_NAME_RULE_FAT);
+    if (rc != VFS_OK) return rc;
     /* "0:/path..." のような FatFs パスを構築 */
     out[0] = fc->vol[0];
     out[1] = ':';
@@ -97,6 +115,7 @@ static void ff_make_path(const FatFsCtx *fc, const char *path, char *out, int ma
         out[len++] = '/';
         out[len] = '\0';
     }
+    return VFS_OK;
 }
 
 
@@ -104,6 +123,7 @@ static void ff_make_path(const FatFsCtx *fc, const char *path, char *out, int ma
 static int fatfs_vfs_list(void *ctx, const char *path, vfs_dir_cb cb, void *user_ctx)
 {
     FatFsCtx *fc = (FatFsCtx *)ctx;
+    int rc_path;
     char fpath[VFS_MAX_PATH];
     DIR dir;
     FILINFO fno;
@@ -111,7 +131,8 @@ static int fatfs_vfs_list(void *ctx, const char *path, vfs_dir_cb cb, void *user
     VfsDirEntry ve;
     int rc;
 
-    ff_make_path(fc, path, fpath, sizeof(fpath));
+    rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
+    if (rc_path != VFS_OK) return rc_path;
 
     fr = f_opendir(&dir, fpath);
     if (fr != FR_OK) return ff_to_vfs(fr);
@@ -145,12 +166,14 @@ static int fatfs_vfs_list(void *ctx, const char *path, vfs_dir_cb cb, void *user
 static int fatfs_vfs_read(void *ctx, const char *path, void *buf, u32 max_size)
 {
     FatFsCtx *fc = (FatFsCtx *)ctx;
+    int rc_path;
     char fpath[VFS_MAX_PATH];
     FIL fil;
     FRESULT fr;
     UINT br;
 
-    ff_make_path(fc, path, fpath, sizeof(fpath));
+    rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
+    if (rc_path != VFS_OK) return rc_path;
 
     fr = f_open(&fil, fpath, FA_READ);
     if (fr != FR_OK) return ff_to_vfs(fr);
@@ -167,12 +190,14 @@ static int fatfs_vfs_read(void *ctx, const char *path, void *buf, u32 max_size)
 static int fatfs_vfs_write(void *ctx, const char *path, const void *data, u32 size)
 {
     FatFsCtx *fc = (FatFsCtx *)ctx;
+    int rc_path;
     char fpath[VFS_MAX_PATH];
     FIL fil;
     FRESULT fr;
     UINT bw;
 
-    ff_make_path(fc, path, fpath, sizeof(fpath));
+    rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
+    if (rc_path != VFS_OK) return rc_path;
 
     fr = f_open(&fil, fpath, FA_WRITE | FA_CREATE_ALWAYS);
     if (fr != FR_OK) return ff_to_vfs(fr);
@@ -189,9 +214,11 @@ static int fatfs_vfs_write(void *ctx, const char *path, const void *data, u32 si
 static int fatfs_vfs_unlink(void *ctx, const char *path)
 {
     FatFsCtx *fc = (FatFsCtx *)ctx;
+    int rc_path;
     char fpath[VFS_MAX_PATH];
 
-    ff_make_path(fc, path, fpath, sizeof(fpath));
+    rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
+    if (rc_path != VFS_OK) return rc_path;
     return ff_to_vfs(f_unlink(fpath));
 }
 
@@ -200,9 +227,11 @@ static int fatfs_vfs_unlink(void *ctx, const char *path)
 static int fatfs_vfs_mkdir(void *ctx, const char *path)
 {
     FatFsCtx *fc = (FatFsCtx *)ctx;
+    int rc_path;
     char fpath[VFS_MAX_PATH];
 
-    ff_make_path(fc, path, fpath, sizeof(fpath));
+    rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
+    if (rc_path != VFS_OK) return rc_path;
     return ff_to_vfs(f_mkdir(fpath));
 }
 
@@ -211,10 +240,12 @@ static int fatfs_vfs_mkdir(void *ctx, const char *path)
 static int fatfs_vfs_rmdir(void *ctx, const char *path)
 {
     FatFsCtx *fc = (FatFsCtx *)ctx;
+    int rc_path;
     char fpath[VFS_MAX_PATH];
 
     /* FatFsでは f_unlink でディレクトリ削除も可能 (空の場合) */
-    ff_make_path(fc, path, fpath, sizeof(fpath));
+    rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
+    if (rc_path != VFS_OK) return rc_path;
     return ff_to_vfs(f_unlink(fpath));
 }
 
@@ -223,11 +254,14 @@ static int fatfs_vfs_rmdir(void *ctx, const char *path)
 static int fatfs_vfs_rename(void *ctx, const char *old_path, const char *new_path)
 {
     FatFsCtx *fc = (FatFsCtx *)ctx;
+    int rc_path;
     char fpath_old[VFS_MAX_PATH];
     char fpath_new[VFS_MAX_PATH];
 
-    ff_make_path(fc, old_path, fpath_old, sizeof(fpath_old));
-    ff_make_path(fc, new_path, fpath_new, sizeof(fpath_new));
+    rc_path = ff_make_path(fc, old_path, fpath_old, sizeof(fpath_old));
+    if (rc_path != VFS_OK) return rc_path;
+    rc_path = ff_make_path(fc, new_path, fpath_new, sizeof(fpath_new));
+    if (rc_path != VFS_OK) return rc_path;
     return ff_to_vfs(f_rename(fpath_old, fpath_new));
 }
 
@@ -236,11 +270,13 @@ static int fatfs_vfs_rename(void *ctx, const char *old_path, const char *new_pat
 static int fatfs_vfs_get_size(void *ctx, const char *path, u32 *size)
 {
     FatFsCtx *fc = (FatFsCtx *)ctx;
+    int rc_path;
     char fpath[VFS_MAX_PATH];
     FILINFO fno;
     FRESULT fr;
 
-    ff_make_path(fc, path, fpath, sizeof(fpath));
+    rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
+    if (rc_path != VFS_OK) return rc_path;
     fr = f_stat(fpath, &fno);
     if (fr != FR_OK) return ff_stat_to_vfs(fr);
     *size = fno.fsize;
@@ -252,12 +288,14 @@ static int fatfs_vfs_get_size(void *ctx, const char *path, u32 *size)
 static int fatfs_vfs_read_stream(void *ctx, const char *path, void *buf, u32 size, u32 offset)
 {
     FatFsCtx *fc = (FatFsCtx *)ctx;
+    int rc_path;
     char fpath[VFS_MAX_PATH];
     FIL fil;
     FRESULT fr;
     UINT br;
 
-    ff_make_path(fc, path, fpath, sizeof(fpath));
+    rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
+    if (rc_path != VFS_OK) return rc_path;
 
     fr = f_open(&fil, fpath, FA_READ);
     if (fr != FR_OK) return ff_to_vfs(fr);
@@ -277,12 +315,14 @@ static int fatfs_vfs_read_stream(void *ctx, const char *path, void *buf, u32 siz
 static int fatfs_vfs_write_stream(void *ctx, const char *path, const void *data, u32 size, u32 offset)
 {
     FatFsCtx *fc = (FatFsCtx *)ctx;
+    int rc_path;
     char fpath[VFS_MAX_PATH];
     FIL fil;
     FRESULT fr;
     UINT bw;
 
-    ff_make_path(fc, path, fpath, sizeof(fpath));
+    rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
+    if (rc_path != VFS_OK) return rc_path;
 
     fr = f_open(&fil, fpath, FA_WRITE | FA_OPEN_ALWAYS);
     if (fr != FR_OK) return ff_to_vfs(fr);
@@ -302,13 +342,15 @@ static int fatfs_vfs_write_stream(void *ctx, const char *path, const void *data,
 static int fatfs_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
 {
     FatFsCtx *fc = (FatFsCtx *)ctx;
+    int rc_path;
     char fpath[VFS_MAX_PATH];
     FILINFO fno;
     FRESULT fr;
 
     if (!buf) return VFS_ERR_INVAL;
 
-    ff_make_path(fc, path, fpath, sizeof(fpath));
+    rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
+    if (rc_path != VFS_OK) return rc_path;
     fr = f_stat(fpath, &fno);
     if (fr != FR_OK) return ff_stat_to_vfs(fr);
 

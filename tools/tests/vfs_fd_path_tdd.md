@@ -137,3 +137,28 @@ SQLITE MUTANTS all 7 killed (入出力が失効を見ない、truncate / size / 
 検証していないこと (追加): 実機・NP21/W の FAT 媒体での BUSY (ホストでは ext2 の口を
 「ASCII で畳む種別」として見ただけ。FAT の表は ff.c と文字列で突き合わせた)。
 HostDrv の非 ASCII 名の畳み方 (ホスト側の変換に依る) は区別したまま。
+
+## 実装レビュー ラリー 2 (2026-09-24): FatFs / Win32 が意味を変える名前
+
+FatFs (非 LFN) は `\` を区切り、0x20 以下で名前を打ち切り、`DISK.` を `DISK` と読む。
+Win32 は `\` を区切り、末尾の空白と `.` を落とす。BUSY / pinned は 1 バイトの fold で
+比べるので、`vfs_rm("/fd0/disk.img ")` が使用中の実体を消せた。規則は
+`fs/vfs_name_rules.inc` (FAT は途中の空白も断る、Win32 は末尾だけ) で、
+`fs/fatfs_vfs.c` は `ff_make_path` (全入口が通る)、`fs/hostdrvfs.c` は `hostdrv_create`
+と `hdrv_rename` の宛先で INVAL を返す。
+
+| 項目 | 試験 | RED (bf0dc31 の fs/ + 規則ファイルだけ置いた写し) |
+|---|---|---|
+| FAT の入口 | 段 `fatname`: **実物の `fs/fatfs_vfs.c` + `fs/fatfs/ff.c`** を RAM の FAT12 (f_mkfs) で。pinned の `DISK.IMG` / `D/IMG.DAT` / `DISK` と開いている SQLite `DB` に `disk.img ` / `disk.img ignored` / `disk.img\x01` / `\disk.img` / `d\img.dat` / `disk.` / `db.` / `DB ` / `db\t` を rm / rename (両引数) → INVAL、open / stat / read / write / mkdir / rmdir / ls も INVAL、実体と中身は不変。正当な 8.3 名 (`/bin/ls.bin`、`/etc/system.cfg`、`.x`、大文字小文字違い)・根の ls・`settings.db-journal` の stat = NOTFOUND は従来どおり | 32 件落ちる。`fat_slurp("0:/DISK.IMG") == 9` 等 = **pinned の実体が消えた・動いた** |
+| HostDrv の規則 | 段 `hostname` (合成ドライバ: ext2 の口の前に Win32 の規則): 末尾の空白・`.`・`\`・制御文字が INVAL、`my file.txt` は通る | 合成ドライバなので RED は無い。配線は `hostwire` (本文の検査) と変異で見る |
+| 規則の表 | 段 `namerule`: 21 行 × 2 規則 | — |
+| hostdrvfs.c の配線 | `hostwire`: 名前をホストへ渡す口は setup_create → session_set_path だけ、hostdrv_create がその前に断る、rename の宛先は元を開く前、パスを受ける 10 口は全部 hostdrv_create(path) を通る | 検査を外した本文 3 通りで FAIL を確認 |
+| ime の list (非 blocker) | `ime` 段 `admin_list_prepare_error`: dict_user を DROP → list は -4 (0 件でない)、開き直さない | 変異「list の prepare の失敗を 0 件にする」 |
+
+変異: fs 側 +8 本 (FAT の入口が名前を見ない、`\` / 制御文字 / FAT の途中の空白 /
+末尾の空白 / 末尾の `.` を通す、Win32 でも途中の空白を断る、`.` / `..` の要素まで断る)
+で計 43 本、ime_dict.c +1 本で 12 本。全部落ちる。
+
+検証していないこと: 実機・NP21/W の FAT 媒体と HostDrv (Windows) の上での動作。
+Win32 の他の別名 (8.3 の短い名前 `DISK~1.IMG`、`:` の代替データストリーム、
+`CON` などの予約名) は規則に入れていない。

@@ -48,9 +48,11 @@ static u32 g_text_end = MEM_SHLIB_BASE;   /* .text/.rodata の終端 (exclusive)
 static u32 g_data_vaddr = 0;
 static u32 g_data_pages = 0;
 static u32 g_data_master = 0;  /* .data/.bss の原本 (帯域末尾、複製元) */
-/* KAPI データ欄の配置違いで断った (票 TASK_KAPI_DATA_FIELDS)。kernel.c が
- * GUI を CUI へ落とすときの案内に使う。 */
-static int g_layout_reject = 0;
+/* 載せずに断った理由 (SHLIB_REJECT_*)。kernel.c が GUI を CUI へ落とすときの
+ * 案内を分ける — 配置違いは「/sys を作り直す」、要求版はその逆で「カーネルを
+ * 先に更新する」(票 TASK_KAPI_DATA_FIELDS、実装レビュー ラリー 2 の B1)。 */
+static int g_reject = SHLIB_REJECT_NONE;
+static u32 g_reject_min_api = 0;
 
 /* attach したアドレス空間ごとの .data 複製ページ。
  * 現状 exec は CPL=3 アプリを 1 つしか同時に持たない (exec.c の g_ring3_as)
@@ -115,6 +117,8 @@ int shlib_init(void)
      * (予約スロット = OS32_ERR_NOSYS / CPL=3 は kill) を呼び得るので載せない
      * (実装レビュー R1、Codex 非 blocker)。 */
     if (oh->min_api_ver > KAPI_VERSION) {
+        g_reject = SHLIB_REJECT_MIN_API;
+        g_reject_min_api = oh->min_api_ver;
         kprintf(0xC1, "[shlib] %s: needs KAPI v%u > kernel v%u - "
                 "update the kernel first (GUI shlib disabled)\n",
                 SYS_SHLIB_GUI, oh->min_api_ver, (u32)KAPI_VERSION);
@@ -128,7 +132,7 @@ int shlib_init(void)
     {
         int lrc = os32x_layout_check(oh, (u32)sz, (u32)KAPI_DATA_FIELDS_OFF);
         if (lrc != OS32X_LAYOUT_OK) {
-            g_layout_reject = 1;
+            g_reject = SHLIB_REJECT_LAYOUT;
             kprintf(0xC1, "[shlib] %s: %s - rebuild required (GUI shlib disabled)\n",
                     SYS_SHLIB_GUI, os32x_layout_reason(lrc));
             pgalloc_free_n(MEM_SHLIB_BASE, band_pages);
@@ -236,7 +240,8 @@ int shlib_init(void)
 }
 
 int shlib_loaded(void) { return g_loaded; }
-int shlib_layout_rejected(void) { return g_layout_reject; }
+int shlib_reject_reason(void) { return g_reject; }
+u32 shlib_reject_min_api(void) { return g_reject_min_api; }
 u32 shlib_version(void) { return g_loaded ? g_version : 0; }
 u32 shlib_text_end(void) { return g_text_end; }
 u32 shlib_data_pages(void) { return g_loaded ? g_data_pages : 0; }

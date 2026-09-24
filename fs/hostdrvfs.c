@@ -34,6 +34,15 @@
 STATIC_ASSERT(HDRV_STAT_ATTR_DIRECTORY == NP2_FILE_ATTRIBUTE_DIRECTORY,
               hdrv_stat_attr_dir);
 
+/* 名前の入口検査 (TASK_VFS_FD_PATH 実装レビュー ラリー 2)。Win32 は '\' を
+ * 区切りと読み、名前の**末尾の**空白と '.' を落とす ("disk.img " も
+ * "disk.img." も "disk.img")。VFS の BUSY / pinned は 1 バイトの fold で名前を
+ * 比べるので、この綴りは使用中の実体を別の綴りで消せる。INVAL で断る。
+ * **途中の空白は Windows の名前として正当なので通す** — FAT (fs/fatfs_vfs.c)
+ * は FatFs が途中の空白で名前を打ち切るので途中も断る。この差が規則の
+ * 引数 (VFS_NAME_RULE_WIN32 / _FAT)。規則は fs/vfs_name_rules.inc。 */
+#include "vfs_name_rules.inc"
+
 /* ===================================================================== */
 /*  内部定数                                                              */
 /* ===================================================================== */
@@ -322,6 +331,11 @@ static void setup_close(void)
 static int hostdrv_create(const char *path, u32 disposition,
                           u32 options_flags, u32 desired_access)
 {
+    /* 名前を受け取る入口は rename の宛先を除いて全部ここを通る。
+     * ホストへ何も送らないうちに断る (上の vfs_name_rules.inc の説明) */
+    int rc = vfs_name_rule_check(path, VFS_NAME_RULE_WIN32);
+    if (rc != VFS_OK) return rc;
+
     setup_create(path, disposition, options_flags, desired_access);
     hostdrv_hypercall();
 
@@ -834,6 +848,10 @@ static int hdrv_rename(void *ctx, const char *old_path, const char *new_path)
     char ntpath[260];
     int i, words;
     (void)ctx;
+
+    /* 宛先は hostdrv_create を通らないので、元を開く**前に**ここで見る */
+    rc = vfs_name_rule_check(new_path, VFS_NAME_RULE_WIN32);
+    if (rc != VFS_OK) return rc;
 
     session_begin();
     rc = hostdrv_create(old_path, NP2_FILE_OPEN,
