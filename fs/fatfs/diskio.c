@@ -22,6 +22,7 @@
 #include "rtc.h"
 #include "fdc.h"
 #include "fdc_track.h"  /* FD の読みをトラック単位に束ねる (純粋な層) */
+#include "diskio_os32.h"
 #include "kstring.h"
 #include "kprintf.h"
 
@@ -86,9 +87,10 @@ static void fdd_track_setup(void)
 void diskio_print_fdd_cache(const char *tag)
 {
     if (fdd_track.sec_hits + fdd_track.trk_hits + fdd_track.fills == 0) return;
-    kprintf(0x07, "[fdc] %s: cache sec_hit=%u trk_hit=%u fill=%u\n", tag,
-            (unsigned int)fdd_track.sec_hits, (unsigned int)fdd_track.trk_hits,
-            (unsigned int)fdd_track.fills);
+    kprintf(0x07, "[fdc] %s: cache sec_hit=%u trk_hit=%u fill=%u idle=%u\n",
+            tag, (unsigned int)fdd_track.sec_hits,
+            (unsigned int)fdd_track.trk_hits, (unsigned int)fdd_track.fills,
+            (unsigned int)fdd_track.idle_drops);
 }
 
 static int fdd_ops_read_multi(void *ctx, int drv, int cyl, int head, int sect,
@@ -116,8 +118,17 @@ static u32 fdd_ops_gen(void *ctx, int drv)
     return fdc_media_gen(drv);
 }
 
+/* 2 秒規則の時計 (drivers/fdc_track.h の FDC_TRACK_IDLE_TICKS)。 */
+extern volatile u32 tick_count;
+static u32 fdd_ops_now(void *ctx)
+{
+    (void)ctx;
+    return tick_count;
+}
+
 static const struct fdc_track_ops fdd_track_ops = {
-    fdd_ops_read_multi, fdd_ops_read_one, fdd_ops_copy, fdd_ops_gen, 0
+    fdd_ops_read_multi, fdd_ops_read_one, fdd_ops_copy, fdd_ops_gen,
+    fdd_ops_now, 0
 };
 
 /* ドライブ番号設定 API (fatfs_vfs.c から呼ばれる)

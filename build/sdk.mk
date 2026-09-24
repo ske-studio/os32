@@ -224,8 +224,10 @@ check-fdc-seek-host:
 # 本物の fdc.c を µPD765A の模型 (tools/tests/fdc_hostshim/io.h) の上で回す。
 # 変異は一時の木の写しに当てるのでソースは書き換えない。
 # 記録は tools/tests/fdc_track_tdd.md。
-check-fdc-track-host:
-	python3 -B tools/tests/test_fdc_track.py --target --mutate
+# font_replay (実物のフォントの読み方の再現) は FD イメージを読むので、
+# イメージに依存させる — 無いまま SKIP で通らないように (ラリー 2 の Fable)。
+check-fdc-track-host: images/os32_boot.d88
+	python3 -B tools/tests/test_fdc_track.py --target --mutate --require-image
 
 # PCI コンフィギュレーションの復号 (drivers/pci_decode.c)。実機 PC-9821Ra266 の
 # 内蔵 LAN (Intel 82557) を `lspci` で見つけるための土台 (票 TASK_LAN_82557 L-A)。

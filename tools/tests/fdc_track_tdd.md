@@ -104,6 +104,25 @@ tmo=0 で IRQ の取りこぼしは消えたが、**まとめ読み 767 回・�
   `[fdc] font: multi=ok/fail nr= single= retry= write=` /
   `[fdc] font: cache sec_hit= trk_hit= fill=`
 
+## 0-3. ラリー 2 (Codex / Fable、2026-09-24 夜) で直したもの
+
+6fa2ec7 の実測: フォント 3 秒、seek=15、multi=28。指摘と直しは票
+(TASK_FDC_REALHW.md の「6fa2ec7 の結果とラリー 2」) の表のとおり。試験で見るもの:
+
+- `recal_settle`: C=0 の読みを 1 回落とし、回復 (リセット + RECALIBRATE) の直後の C=0 の
+  READ が整定前に出ないこと。模型は SE 付きの SIS を CPU が読んだ時刻から 2 tick 経たない
+  うちの READ / WRITE を数える
+- `idle_rule`: 最後の読みからちょうど 200 tick なら当て、201 tick なら両方捨てる。捨てた後は
+  差し替えた媒体の中身を返す
+- `track_nr_stop` / `single_nr_no_recover`: NR は単発へ落ちず、回復もリトライもしない
+- `sis_edge_limit`: 1 本のエッジの前に件数の上限 (4) ちょうどの別の通知が積まれていても
+  期限切れにならない
+- `fdc_forget_rules` の (a) (e) (e2) (f) を新しい振る舞いに合わせた (リザルトまで読めた失敗は
+  リセットしない、期限切れは回復まで、シークの失敗も回復を通す)
+
+変異 41 本: **RED 40 / ERROR 0 / SURVIVED 1 (対照)**。途中の ERROR 1 本 (2 秒規則を消す変異で
+`now` が未使用になった) は閾値を上げる形に書き直して RED。
+
 ## 1. ケース
 
 | ケース | 見るもの |
@@ -121,6 +140,11 @@ tmo=0 で IRQ の取りこぼしは消えたが、**まとめ読み 767 回・�
 | `fdc_forget_rules` | まとめ読みの失敗 (DMA を閉じ、リセット + RECALIBRATE でヘッドを 0 に戻して 0 を覚え直す)・その RECALIBRATE も落ちたとき・メディアの変更・ドライブの切り替え・単発の最終失敗・IRQ 無し・シークの失敗で覚えた値を捨てる |
 | `fat_data_interleave` | FatFs の読み方 (FAT のセクタとデータのセクタが交互) で、FAT はセクタキャッシュから返り、FAT のトラックは 1 回だけ読む。本物の `fdc.c` で SEEK 4 回・READ 6 回・期限切れ 0。セクタキャッシュ無しの 1 本は毎回読む (9ed7c80 の姿) |
 | `gen_and_lru` | 世代が進んだトラックもセクタも当てない。4 本のトラックを巡回するメタデータ (VFS の開き直しの形) を 40 巡しても、2 巡目からメタデータは全部セクタキャッシュで返る (LRU) |
+| `recal_settle` | 回復の RECALIBRATE の直後の C=0 の READ が整定前に出ない |
+| `idle_rule` | 2 秒規則の境目 (200 tick は当て、201 tick で両方捨てる) |
+| `track_nr_stop` | まとめ読みの NR (-3) で 1 セクタずつへ落ちない |
+| `single_nr_no_recover` | 単発の READ の NR で回復もリトライもしない |
+| `sis_edge_limit` | 上限ちょうどの別の通知の後ろの完了を期限切れにしない |
 | `font_replay` | 実物の FD イメージと実物の `ff.c` で、フォントの読み込みを VFS の読み方のまま再現する。multi ≦ 27、seek ≦ 14、single 0、期限切れ 0、中身がファイルと一致 |
 | `seek_edge_foreign` | SEEK の完了の前に別ドライブの通知 / 自ドライブの Ready 変化が積まれていても、1 本のエッジで全部読んで期限切れを待たない。Ready 変化で世代が進む |
 | `drain_before_skip` | 取り残しの通知で INT 線が上がったままでも、省略の前の排水で下ろし、READ の完了のエッジが来る |

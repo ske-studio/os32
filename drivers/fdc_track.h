@@ -55,6 +55,20 @@
  * 0 にすると count=1 の読み (FatFs の窓) は速くならない (上の注記)。 */
 #define FDC_TRACK_READ_AHEAD  1
 
+/* **2 秒規則** (MS-DOS と同じ考え方。2026-09-24 ラリー 2 の Fable 案)。
+ * 最後に読んでから FDC_TRACK_IDLE_TICKS を超えていたら、トラックとセクタの
+ * 両方を捨ててから読む。
+ *   - FRY=1 (fdc.h の CTRL_FRY) だと Ready 線の変化が FDC に届かず、同じ
+ *     形式の媒体の差し替えは Ready 変化の割り込みにならない
+ *     (docs/hw/undocumented/io_fdd.md の 0094h: FRY は RDY と OR される)。
+ *     NP21/W も交換で IRQ を出さない
+ *   - pending の Ready 通知を SIS で読む前にキャッシュが当たる件 (Codex)
+ *     も、ここで上限が付く
+ * 人が媒体を入れ替えるのに 2 秒はかかる、という前提。**それより速い差し
+ * 替えは保証しない** — 媒体を替えたら umount / mount する契約
+ * (docs/06_filesystem.md §6-1 の FD の節)。 */
+#define FDC_TRACK_IDLE_TICKS  200   /* 2 秒 (PIT 100Hz) */
+
 /* 1 回の要求を 1 トラックの中に切った区間。 */
 struct fdc_run {
     int cyl;
@@ -93,6 +107,9 @@ struct fdc_track_cache {
     struct fdc_track_slot slot[FDC_TRACK_SLOTS];
     struct fdc_sector_ent sec[FDC_SECTOR_SLOTS];
     u32 clock;      /* LRU の時計 (スロットとセクタで共通) */
+    int touched;    /* last_tick が有効か */
+    u32 last_tick;  /* 最後に読んだ時刻 (ops->now、2 秒規則) */
+    u32 idle_drops; /* 2 秒規則で捨てた回数 */
     /* 数 (試験と起動時の 1 行が読む) */
     u32 sec_hits;   /* セクタキャッシュで返した */
     u32 trk_hits;   /* トラックの先読みで返した (区間の数) */
@@ -114,7 +131,8 @@ struct fdc_track_cache {
  *                失敗したら下で 1 セクタずつ読み直す)。
  *   read_one   : 1 セクタを読む (リトライと回復は fdc 側が持つ)。
  *   copy       : dst へ n バイト写す (カーネルは kmemcpy)。
- *   gen        : ドライブの中身の世代 (カーネルは fdc_media_gen)。 */
+ *   gen        : ドライブの中身の世代 (カーネルは fdc_media_gen)。
+ *   now        : いまの時刻 (tick。カーネルは tick_count。2 秒規則)。 */
 struct fdc_track_ops {
     int  (*read_multi)(void *ctx, int drv, int cyl, int head, int sect,
                        int count, const struct fdc_geom *g, void *buf);
@@ -122,6 +140,7 @@ struct fdc_track_ops {
                      const struct fdc_geom *g, void *buf);
     void (*copy)(void *dst, const void *src, u32 n);
     u32  (*gen)(void *ctx, int drv);
+    u32  (*now)(void *ctx);
     void *ctx;
 };
 
@@ -158,7 +177,11 @@ int fdc_track_hit(const struct fdc_track_cache *c, int drv,
  *   - 持っている中身で満たせる区間はそこから写す
  *   - そうでなければ sect から EOT までを read_multi で c->buf へ読み、
  *     要求分を写して中身として持つ
+ *   - **入口で 2 秒規則**: 最後の読みから FDC_TRACK_IDLE_TICKS を超えて
+ *     いたら両方のキャッシュを捨てる
  *   - **count == 1 の要求はまずセクタキャッシュを見て、返した後に覚える**
+ *   - read_multi が -3 (NR = 媒体無し) を返したら、1 セクタずつへ落とさずに
+ *     打ち切る (-1)
  *   - read_multi が失敗したら中身を捨て、**要求した区間だけ**を read_one で
  *     1 セクタずつ buff へ読み直す (先読みの分は読み直さない)。先読みの
  *     読みが落ちたトラックは印を付け、以後そこでは要求の範囲だけを読む

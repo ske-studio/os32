@@ -182,9 +182,10 @@ static int fdc_track_read_singly(const struct fdc_track_ops *ops, int drv,
 /* ======================================================================== */
 /*  読み出し本体                                                            */
 /* ======================================================================== */
-int fdc_track_read(struct fdc_track_cache *c, const struct fdc_track_ops *ops,
-                   int drv, const struct fdc_geom *g,
-                   u32 lba, u32 count, u8 *buff)
+static int fdc_track_read_inner(struct fdc_track_cache *c,
+                                const struct fdc_track_ops *ops,
+                                int drv, const struct fdc_geom *g,
+                                u32 lba, u32 count, u8 *buff)
 {
     struct fdc_run run;
     u8 *dst = buff;
@@ -229,6 +230,7 @@ int fdc_track_read(struct fdc_track_cache *c, const struct fdc_track_ops *ops,
         } else {
             int eot = fdc_track_eot(g, &run);
             int want_last = run.sect + run.count - 1;
+            int mrc;
             struct fdc_track_slot *t = &c->slot[fdc_track_victim(c)];
 
             /* 先読みが落ちたトラックでは要求の範囲だけを読む。 */
@@ -239,9 +241,11 @@ int fdc_track_read(struct fdc_track_cache *c, const struct fdc_track_ops *ops,
             /* 先に捨てる — read_multi が途中まで t->buf を書き換えて
              * 失敗しても、半端な中身を当てない (印は残す)。 */
             t->valid = 0;
-            if (eot > 0 &&
-                ops->read_multi(ops->ctx, drv, run.cyl, run.head, run.sect,
-                                eot - run.sect + 1, g, t->buf) == 0) {
+            mrc = (eot > 0)
+                ? ops->read_multi(ops->ctx, drv, run.cyl, run.head, run.sect,
+                                  eot - run.sect + 1, g, t->buf)
+                : -2;
+            if (mrc == 0) {
                 t->drv = drv;
                 t->cyl = run.cyl;
                 t->head = run.head;
@@ -255,6 +259,10 @@ int fdc_track_read(struct fdc_track_cache *c, const struct fdc_track_ops *ops,
                 t->valid = 1;
                 c->fills++;
                 ops->copy(dst, t->buf, bytes);
+            } else if (mrc == -3) {
+                /* NR (媒体無し)。1 セクタずつ読んでも同じなので打ち切る
+                 * (ラリー 2 の Codex)。 */
+                return -1;
             } else {
                 /* 先読みの分まで読もうとして落ちたなら、このトラックに印を
                  * 付ける (次からは要求の範囲だけ)。 */
@@ -284,4 +292,28 @@ int fdc_track_read(struct fdc_track_cache *c, const struct fdc_track_ops *ops,
      * Ready 変化を見て進んでいれば、次から当たらない)。 */
     if (single) fdc_sec_put(c, ops, drv, g, gen0, lba - 1u, buff);
     return 0;
+}
+
+/* ======================================================================== */
+/*  入口: 2 秒規則を当ててから読む                                          */
+/* ======================================================================== */
+int fdc_track_read(struct fdc_track_cache *c, const struct fdc_track_ops *ops,
+                   int drv, const struct fdc_geom *g,
+                   u32 lba, u32 count, u8 *buff)
+{
+    u32 now = ops->now(ops->ctx);
+    int rc;
+
+    /* 最後の読みから FDC_TRACK_IDLE_TICKS を超えていたら両方捨てる
+     * (fdc_track.h の注記)。差は符号無しで取る (tick_count の一周も可)。 */
+    if (c->touched && (u32)(now - c->last_tick) > (u32)FDC_TRACK_IDLE_TICKS) {
+        fdc_track_invalidate(c);
+        c->idle_drops++;
+    }
+    rc = fdc_track_read_inner(c, ops, drv, g, lba, count, buff);
+    /* 読み終えた時刻を残す (長い読みの途中で 2 秒が過ぎても、直後の読みで
+     * 捨てないように)。 */
+    c->touched = 1;
+    c->last_tick = ops->now(ops->ctx);
+    return rc;
 }

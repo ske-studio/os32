@@ -10,6 +10,7 @@
   python3 -B tools/tests/test_fdc_track.py            # ホストで全ケース
   python3 -B tools/tests/test_fdc_track.py --target   # + i386-elf で通す
   python3 -B tools/tests/test_fdc_track.py --mutate   # 否定側 (変異が RED になるか)
+  --require-image  images/os32_boot.d88 が無ければ SKIP でなく FAIL (make check)
 
 変異の判定: RED = どれかのケースが落ちた / ERROR = コンパイルできなかった
 (**RED に数えない**) / SURVIVED = 全ケースが通った (見逃し)。対照 (何も変え
@@ -34,7 +35,9 @@ CASES = ["split_2hd", "split_144", "readahead_count1", "cross_boundary",
          "timeout_math", "fdc_multi_cmd", "fdc_seek_skip", "fdc_forget_rules",
          "fdc_end_to_end", "fat_data_interleave", "gen_and_lru",
          "seek_edge_foreign", "drain_before_skip", "readychange_invalidates",
-         "multi_nr_quiet", "diskio_rw", "buf_layout", "font_replay"]
+         "multi_nr_quiet", "diskio_rw", "buf_layout", "font_replay",
+         "recal_settle", "idle_rule", "track_nr_stop", "single_nr_no_recover",
+         "sis_edge_limit"]
 
 # font_replay の材料 (実物の FD イメージ)。make all が作る。
 D88 = ROOT / "images/os32_boot.d88"
@@ -178,8 +181,8 @@ MUTATIONS = [
      "",
      "世代 (書き込み / Ready 変化) が進んでも中身を当てる"),
     ("drivers/fdc_track.c",
-     r"            t->valid = 0;\n            if \(eot > 0 &&",
-     "            if (eot > 0 &&",
+     r"            t->valid = 0;\n            mrc = \(eot > 0\)",
+     "            mrc = (eot > 0)",
      "まとめ読みの前に捨てない (失敗しても古い中身が残る)"),
     ("drivers/fdc_track.c",
      r"if \(fdc_track_read_singly\(ops, drv, g, &run, dst\) != 0\) \{\n                    return -1;",
@@ -249,13 +252,6 @@ MUTATIONS = [
      None,
      "リセットと RECALIBRATE で覚えた値を捨てない (RECALIBRATE が落ちても古い値を信じる)"),
     ("drivers/fdc.c",
-     [(r"    fdc_forget_cyl\(drv\);\n\n    fdc_irq_fired = 0;\n    s_stats\.seek_issued\+\+;",
-       "\n    fdc_irq_fired = 0;\n    s_stats.seek_issued++;"),
-      (r"    \} else \{\n        fdc_forget_cyl\(drv\);\n    \}\n    /\* リザルトの NR",
-       "    }\n    /* リザルトの NR")],
-     None,
-     "シークの失敗の後も古い値を信じる"),
-    ("drivers/fdc.c",
      r"        fdc_abort_transfer\(\);\n        \(void\)fdc_recalibrate\(drv\);",
      "        fdc_abort_transfer();",
      "まとめ読みの失敗の後に RECALIBRATE しない"),
@@ -284,9 +280,38 @@ MUTATIONS = [
      "",
      "SEEK の NR をまとめ読みの失敗に数える (行も出す)"),
     ("drivers/fdc.c",
-     r"    if \(have_results && \(results\[0\] & FDC_ST0_NR\) != 0\) \{",
-     "    if (0) {",
+     r"        if \(\(results\[0\] & FDC_ST0_NR\) != 0\) \{\n            fdc_forget_cyl\(drv\);",
+     "        if (0) {\n            fdc_forget_cyl(drv);",
      "READ の NR をまとめ読みの失敗に数える (行も出す)"),
+    # --- ラリー 2 (Codex / Fable)
+    ("drivers/fdc.c",
+     r"            fdc_head_settle\(\);\n            fdc_note_cyl\(drv, 0\);",
+     "            fdc_note_cyl(drv, 0);",
+     "RECALIBRATE の後に整定しない (回復直後の C=0 の READ が整定前に出る)"),
+    ("drivers/fdc.c",
+     r"        if \(\(results\[0\] & FDC_ST0_NR\) != 0\) \{\n            dma_chan_mask\(FDC_DMA_CHANNEL\);\n            dma_armed = 0;\n            phase = \"nr\";\n            break;\n        \}",
+     "",
+     "単発の READ の NR で回復とリトライを踏む"),
+    ("drivers/fdc.c",
+     r"        \(void\)fdc_recover\(drv\);\n    \} else \{\n        fdc_forget_cyl\(drv\);",
+     "        fdc_forget_cyl(drv);\n    } else {\n        fdc_forget_cyl(drv);",
+     "まとめ読みのシークの失敗で回復を通さない"),
+    ("drivers/fdc.c",
+     r"        if \(i == FDC_SIS_DRAIN_MAX\) more = 1;",
+     "",
+     "SIS を件数の上限で止めたら次のエッジを待つ (上限ちょうどの通知で期限切れ)"),
+    ("drivers/fdc_track.c",
+     r"            \} else if \(mrc == -3\) \{",
+     "            } else if (0) {",
+     "まとめ読みの NR で 1 セクタずつへ落ちる"),
+    ("drivers/fdc_track.c",
+     r"    if \(c->touched && \(u32\)\(now - c->last_tick\) > \(u32\)FDC_TRACK_IDLE_TICKS\) \{",
+     "    if (c->touched && (u32)(now - c->last_tick) > (u32)FDC_TRACK_IDLE_TICKS * 1000000UL) {",
+     "2 秒規則を当てない (差し替えた媒体に古い中身を返し続ける)"),
+    ("drivers/fdc_track.c",
+     r"\(u32\)\(now - c->last_tick\) > \(u32\)FDC_TRACK_IDLE_TICKS",
+     "(u32)(now - c->last_tick) >= (u32)FDC_TRACK_IDLE_TICKS",
+     "2 秒規則の境目を 1 tick 早める"),
     # --- diskio.c の結線
     ("fs/fatfs/diskio.c",
      r"        fdc_track_invalidate\(&fdd_track\);\n        fdd_status = 0;",
@@ -428,7 +453,12 @@ if __name__ == "__main__":
                   "(font_replay の写しを直す)", flush=True)
             rc += 1
         env = prepare_font(tmp)
-        if env is None:
+        if env is None and "--require-image" in args:
+            # make check-fdc-track-host はイメージに依存させてある。
+            print(f"FAIL font_replay ({D88.relative_to(ROOT)} が無い)", flush=True)
+            rc += 1
+            CASES.remove("font_replay")
+        elif env is None:
             # [V4] 飛ばしたことをそのまま言う。
             print(f"SKIP font_replay ({D88.relative_to(ROOT)} が無い — "
                   "make all の後で回す)", flush=True)

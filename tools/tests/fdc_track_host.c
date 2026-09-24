@@ -184,7 +184,14 @@ static struct {
     int rw_int;
     int np21_irq;                   /* 1 = NP21/W の形 (事象ごとに IRQ) */
     int nr_on_seek;                 /* 媒体の無いドライブへの SEEK を NR で返す */
-    int foreign_on_seek;            /* SEEK 完了の前に別の通知を積む: 1=drv1 SE, 2=自 Ready 変化 */
+    /* ヘッドの整定: SE 付きの SIS 結果を CPU が読んだ時刻から 2 tick 経たない
+     * うちに READ / WRITE が来たら数える (RECALIBRATE の後の整定漏れ)。 */
+    int move_pending;
+    u32 move_seen;
+    int unsettled;
+    int foreign_on_seek;            /* SEEK 完了の前に別の通知を積む: 1=drv1 SE, 2=自 Ready 変化, 3=4 件 */
+    int fail_reads;                 /* 次の READ を n 回 DE で落とす */
+    int force_err;
 } M;
 
 static void model_line(void)
@@ -245,6 +252,11 @@ static void model_rw(int is_write)
 
     memcpy(M.last_rw, M.cmd, 9);
     if (is_write) M.writes++; else M.reads++;
+    if (M.move_pending) {
+        if (s_now - M.move_seen < 2) M.unsettled++;
+        M.move_pending = 0;
+    }
+    if (M.fail_reads > 0 && !is_write) { M.fail_reads--; M.force_err = 1; }
     if (!is_write && nsec > 1) M.multi_reads++;
     if (M.cmd[0] & 0x80) M.mt_used++;
     if (D.masked) M.cmd_while_masked++;
@@ -256,8 +268,10 @@ static void model_rw(int is_write)
     else if (!M.present[drv]) { err = 1; nr = 1; }
     else if (M.pcn[drv] != C) { err = 1; st1 = 0x04; st2 = 0x10; } /* ND / WC */
     else if (!is_write && M.fail_multi && nsec > 1) { err = 1; st1 = 0x20; }
+    else if (M.force_err) { err = 1; st1 = 0x20; }
     else if (!is_write && M.bad_r && M.bad_c == C && M.bad_h == H
              && M.bad_r >= R && M.bad_r <= EOT) { err = 1; st1 = 0x20; st2 = 0x20; }
+    M.force_err = 0;
 
     if (!err) {
         u8 *mem = (u8 *)(unsigned long)D.phys;
@@ -292,6 +306,7 @@ static void model_exec(void)
             M.pend_n--;
             model_result(r, 2);
             model_line();
+            if (r[0] & 0x20) { M.move_pending = 1; M.move_seen = s_now; }
         } else {
             r[0] = 0x80;
             model_result(r, 1);
@@ -321,6 +336,11 @@ static void model_exec(void)
         M.pcn[drv] = M.cmd[2];
         if (M.foreign_on_seek == 1) model_pend(0x21, 0);            /* drv1 */
         if (M.foreign_on_seek == 2) model_pend((u8)(0xC0 | drv), (u8)M.pcn[drv]);
+        if (M.foreign_on_seek == 3) {
+            /* 件数の上限 (FDC_SIS_DRAIN_MAX = 4) ちょうどの通知を先に積む */
+            model_pend(0x21, 0); model_pend(0x22, 0); model_pend(0x23, 0);
+            model_pend((u8)(0xC0 | drv), (u8)M.pcn[drv]);
+        }
         model_pend((u8)(0x20 | (hd << 2) | drv), (u8)M.pcn[drv]);
         model_irq();
         break;
@@ -416,6 +436,7 @@ static struct {
     int fail_multi_all;
     int bad_cyl, bad_head, bad_sect;    /* bad_sect = 0 で無し */
     int single_fail_all;
+    int nr;
 } F;
 
 static void fake_reset(void) { memset(&F, 0, sizeof(F)); }
@@ -436,6 +457,7 @@ static int fake_multi(void *ctx, int drv, int cyl, int head, int sect,
     (void)ctx;
     fake_log(1, drv, cyl, head, sect, count);
     if (sect + count - 1 > (int)g->spt) return -2;      /* トラックをまたいだ */
+    if (F.nr) return -3;                                 /* 媒体無し */
     /* 失敗するときは受け皿を途中まで壊してから返す (実行フェーズの途中で
      * 落ちた DMA の姿)。呼び手は半端な中身を当ててはいけない。 */
     if (F.fail_multi_all
@@ -467,9 +489,11 @@ static void fake_copy(void *d, const void *s, u32 n) { memcpy(d, s, n); }
 
 static u32 s_fake_gen;
 static u32 fake_gen(void *ctx, int drv) { (void)ctx; (void)drv; return s_fake_gen; }
+static u32 s_fake_now;
+static u32 fake_now(void *ctx) { (void)ctx; return s_fake_now; }
 
 static const struct fdc_track_ops FAKE_OPS = {
-    fake_multi, fake_one, fake_copy, fake_gen, 0
+    fake_multi, fake_one, fake_copy, fake_gen, fake_now, 0
 };
 
 static u8 s_cache_buf[FDC_TRACK_SLOTS][FDC_TRACK_MAX_BYTES];
@@ -489,6 +513,7 @@ static void cache_setup2(int ntrk, int nsec)
         fdc_track_init_sector(&s_cache, i, i < nsec ? s_sec_buf[i] : (u8 *)0);
     }
     s_fake_gen = 0;
+    s_fake_now = 0;
 }
 
 static void cache_setup(int nslots) { cache_setup2(nslots, 0); }
@@ -864,14 +889,16 @@ static void fdc_forget_rules(void)
     static u8 buf[8 * 1024];
     int s0;
 
-    /* (a) まとめ読みの失敗 */
+    /* (a) まとめ読みの失敗 (リザルトまで読めた異常終了)。コマンドは終わって
+     *     いるので DMA を閉じるだけでリセットはしない。覚えた値は捨てる。 */
     model_boot(0);
     CHECK(fdc_read_sectors(0, 3, 0, 1, 8, &fdc_geom_2hd, buf) == 0);
     M.fail_multi = 1;
+    s0 = M.resets;
     CHECK(fdc_read_sectors(0, 3, 0, 1, 8, &fdc_geom_2hd, buf) == -1);
     CHECK(D.masked == 1);                       /* DMA は閉じて戻る */
-    CHECK(M.pcn[0] == 0);                       /* RECALIBRATE まで済ませる */
-    CHECK(fdc_get_known_cyl(0) == 0);           /* 3 は捨て、0 を覚え直す */
+    CHECK(M.resets == s0);
+    CHECK(fdc_get_known_cyl(0) == -1);
     CHECK(s_kprintf_lines > 0);                 /* 黙らない */
     M.fail_multi = 0;
     s0 = M.seeks;
@@ -905,27 +932,34 @@ static void fdc_forget_rules(void)
     CHECK(fdc_read_sectors(0, 3, 0, 1, 8, &fdc_geom_2hd, buf) == -1);
     CHECK(fdc_get_known_cyl(0) != 3);
     CHECK(D.masked == 1);
+    CHECK(M.pcn[0] == 0);                       /* リセット + RECALIBRATE まで済ませる */
+    CHECK(fdc_get_known_cyl(0) == 0);
 
-    /* (e2) まとめ読みの失敗の後の RECALIBRATE も落ちる (ドライブが外れた) —
-     * 覚えた値は残さない */
+    /* (e2) まとめ読みが期限切れで落ち、回復の RECALIBRATE も落ちる (ドライブ
+     * が外れた) — 覚えた値は残さない */
     model_boot(0);
     CHECK(fdc_read_sectors(0, 3, 0, 1, 8, &fdc_geom_2hd, buf) == 0);
     CHECK(fdc_get_known_cyl(0) == 3);
-    M.fail_multi = 1;
+    M.drop_irq_reads = 1;
     M.present[0] = 0;
     CHECK(fdc_read_sectors(0, 3, 0, 1, 8, &fdc_geom_2hd, buf) != 0);
     CHECK(fdc_get_known_cyl(0) == -1);
     M.present[0] = 1;
-    M.fail_multi = 0;
 
     /* (f) シークの失敗 — READ を出さずに失敗し、覚えた値は残さない */
     model_boot(0);
     CHECK(fdc_read_sectors(0, 3, 0, 1, 8, &fdc_geom_2hd, buf) == 0);
     s0 = M.reads;
     M.fail_seeks = 1;
-    CHECK(fdc_read_sectors(0, 20, 0, 1, 8, &fdc_geom_2hd, buf) == -1);
-    CHECK(M.reads == s0);
-    CHECK(fdc_get_known_cyl(0) == -1);
+    {
+        int r0 = M.resets;
+        CHECK(fdc_read_sectors(0, 20, 0, 1, 8, &fdc_geom_2hd, buf) == -1);
+        CHECK(M.reads == s0);
+        CHECK(fdc_get_known_cyl(0) != 20);
+        /* シークの失敗も回復 (リセット + RECALIBRATE) を通す (ラリー 2) */
+        CHECK(M.resets == r0 + 1);
+        CHECK(M.pcn[0] == 0 && fdc_get_known_cyl(0) == 0);
+    }
     /* 次はシークし直して読める */
     CHECK(fdc_read_sectors(0, 20, 0, 1, 8, &fdc_geom_2hd, buf) == 0);
     CHECK(check_bytes(buf, 0, 20, 0, 1, 1024));
@@ -950,8 +984,9 @@ static int real_one(void *ctx, int drv, int cyl, int head, int sect,
     return fdc_read_sector_geom(drv, cyl, head, sect, g, buf);
 }
 static u32 real_gen(void *ctx, int drv) { (void)ctx; return fdc_media_gen(drv); }
+static u32 real_now(void *ctx) { (void)ctx; return s_now; }
 static const struct fdc_track_ops REAL_OPS = {
-    real_multi, real_one, fake_copy, real_gen, 0
+    real_multi, real_one, fake_copy, real_gen, real_now, 0
 };
 
 static void fdc_end_to_end(void)
@@ -1247,6 +1282,94 @@ static void buf_layout(void)
 }
 
 
+
+/* ======================================================================== */
+/*  (5) ラリー 2 (Codex / Fable) の指摘                                     */
+/* ======================================================================== */
+
+/* RECALIBRATE の後も整定してから READ を出す: C=0 の読みが 1 回落ちると
+ * 回復 (リセット + RECALIBRATE) → 0 を覚える → C=0 の SEEK は省かれる。 */
+static void recal_settle(void)
+{
+    static u8 buf[1024];
+
+    model_boot(0);
+    CHECK(fdc_read_sector_geom(0, 0, 0, 1, &fdc_geom_2hd, buf) == 0);
+    M.unsettled = 0;
+    M.fail_reads = 1;                           /* 1 回だけ落ちる */
+    CHECK(fdc_read_sector_geom(0, 0, 0, 2, &fdc_geom_2hd, buf) == 0);
+    CHECK(M.recals >= 1);
+    CHECK(M.unsettled == 0);
+    CHECK(check_bytes(buf, 0, 0, 0, 2, 1024));
+}
+
+/* 2 秒規則: 最後の読みから FDC_TRACK_IDLE_TICKS を超えたら両方捨てる。
+ * ちょうどの間隔までは当てる。 */
+static void idle_rule(void)
+{
+    const struct fdc_geom *g = &fdc_geom_2hd;
+
+    fake_reset(); cache_setup2(1, FDC_SECTOR_SLOTS);
+    CHECK(read_and_verify(0, g, 5, 1) == 0);    /* トラック C0H0 + セクタ 5 */
+    CHECK(F.n == 1);
+    s_fake_now += FDC_TRACK_IDLE_TICKS;         /* ちょうど → まだ当てる */
+    CHECK(read_and_verify(0, g, 5, 1) == 0);
+    CHECK(read_and_verify(0, g, 6, 1) == 0);
+    CHECK(F.n == 1);
+    s_fake_now += FDC_TRACK_IDLE_TICKS + 1;     /* 超えた → 両方捨てる */
+    s_media_seed = 7;                           /* その間に差し替えられた */
+    CHECK(read_and_verify(0, g, 5, 1) == 0);    /* 新しい中身 (セクタも捨てた) */
+    CHECK(F.n == 2);
+    CHECK(read_and_verify(0, g, 7, 1) == 0);    /* 新しいトラックは当たる */
+    CHECK(F.n == 2);
+    CHECK(s_cache.idle_drops == 1);
+    s_media_seed = 0;
+}
+
+/* NR (-3) は 1 セクタずつへ落とさずに打ち切る。 */
+static void track_nr_stop(void)
+{
+    const struct fdc_geom *g = &fdc_geom_2hd;
+    static u8 buf[1024];
+
+    fake_reset(); cache_setup2(1, FDC_SECTOR_SLOTS);
+    F.nr = 1;
+    CHECK(fdc_track_read(&s_cache, &FAKE_OPS, 0, g, 3, 1, buf) != 0);
+    CHECK(F.n == 1 && F.c[0].multi);            /* 単発は出ない */
+}
+
+/* 単発の READ の NR も回復 (リセット / RECALIBRATE) を通さない。 */
+static void single_nr_no_recover(void)
+{
+    static u8 buf[1024];
+    int r0, c0;
+
+    model_boot(0);
+    CHECK(fdc_read_sector_geom(0, 5, 0, 1, &fdc_geom_2hd, buf) == 0);
+    M.present[0] = 0;
+    r0 = M.resets; c0 = M.recals;
+    CHECK(fdc_read_sector_geom(0, 5, 0, 2, &fdc_geom_2hd, buf) == -1);
+    CHECK(M.resets == r0 && M.recals == c0);
+    CHECK(M.reads == 2);                        /* リトライもしない */
+    CHECK(D.masked == 1);
+    M.present[0] = 1;
+}
+
+/* 1 本のエッジで件数の上限 (4) ちょうどの別の通知が先に積まれていても、
+ * エッジを待たずに読み続けて期限切れにならない。 */
+static void sis_edge_limit(void)
+{
+    static u8 buf[8 * 1024];
+    struct fdc_stats st;
+
+    model_boot(1);
+    M.foreign_on_seek = 3;
+    CHECK(fdc_read_sectors(0, 9, 0, 1, 8, &fdc_geom_2hd, buf) == 0);
+    fdc_get_stats(&st);
+    CHECK(st.seek_timeout == 0);
+    CHECK(st.sis_foreign == 4);
+}
+
 /* ======================================================================== */
 /*  (4) 実物のフォントの読み方の再現 (2026-09-24 夕、6541ef1 の実測を受けて)*/
 /*                                                                          */
@@ -1386,6 +1509,11 @@ int main(int argc, char **argv)
         { "diskio_rw", diskio_rw },
         { "buf_layout", buf_layout },
         { "font_replay", font_replay },
+        { "recal_settle", recal_settle },
+        { "idle_rule", idle_rule },
+        { "track_nr_stop", track_nr_stop },
+        { "single_nr_no_recover", single_nr_no_recover },
+        { "sis_edge_limit", sis_edge_limit },
     };
     if (argc != 2) { fprintf(stderr, "usage: %s CASE\n", argv[0]); return 2; }
     if (strcmp(argv[1], "font_replay") == 0) {

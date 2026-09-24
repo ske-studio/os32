@@ -16,11 +16,7 @@
 #include "dev.h"
 #include "os_time.h"
 
-extern void diskio_set_fdd_drive(int drv);
-extern void diskio_set_hdd_drive(int drv);
-extern void diskio_set_hdd_partition(u32 offset);
-extern void diskio_set_hdd_sector_size(u16 sz);
-extern void diskio_set_hdd_ide_phys_size(u16 sz);
+#include "fatfs/diskio_os32.h"   /* diskio_set_* */
 
 /* ======== FatFs VFSコンテキスト ======== */
 typedef struct {

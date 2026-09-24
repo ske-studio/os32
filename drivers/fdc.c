@@ -436,6 +436,7 @@ static int fdc_wait_seek_end(int drv, u8 *st0, u8 *cyl, int want_cyl)
     u32 start = tick_count;
     u8 want_ds = (u8)(drv & FDC_ST0_DS_MASK);
     int i;
+    int more = 0;   /* 前の周で 80h を見ずに打ち切った = まだ pending が有り得る */
 
     *st0 = 0;
     *cyl = 0;
@@ -444,8 +445,16 @@ static int fdc_wait_seek_end(int drv, u8 *st0, u8 *cyl, int want_cyl)
         u32 elapsed = tick_count - start;
 
         if (elapsed >= FDC_SEEK_TIMEOUT_TICKS) break;   /* 期限切れ */
-        /* 残り時間だけ待つ。来なければ期限切れとして下の救済へ。 */
-        if (fdc_wait_irq(FDC_SEEK_TIMEOUT_TICKS - elapsed) != 0) break;
+        /* 残り時間だけ待つ。来なければ期限切れとして下の救済へ。
+         * **前の周が 80h を見ないまま件数の上限で止まっていたら、エッジを
+         * 待たずに読み続ける** — INT 線は上がったままで次のエッジは来ない
+         * (ラリー 2 の Fable)。µPD765A が溜める通知はドライブごとに 1 件
+         * (4 件) なので実際には 1 周で尽きるが、上限を件数に頼らず時間
+         * (FDC_SEEK_TIMEOUT_TICKS) で縛る。 */
+        if (!more) {
+            if (fdc_wait_irq(FDC_SEEK_TIMEOUT_TICKS - elapsed) != 0) break;
+        }
+        more = 0;
 
         /* **1 本のエッジで積まれている分を全部読む** (2026-09-24)。
          * µPD765A の INT 線は pending が尽きるまで上がったままで、エッジ
@@ -464,6 +473,7 @@ static int fdc_wait_seek_end(int drv, u8 *st0, u8 *cyl, int want_cyl)
             }
             return fdc_classify_seek_end(*st0, *cyl, want_cyl);
         }
+        if (i == FDC_SIS_DRAIN_MAX) more = 1;
     }
 
     /* 期限切れ。エッジの取りこぼしだけなら救う。 */
@@ -564,6 +574,18 @@ static void fdc_abort_transfer(void)
  *         -3 = EC が取れなかった / -4 = その他の失敗
  *         FDC_RC_NOT_READY (-5) = NR (媒体もドライブも無い。回復しない)
  * 最後に見た ST0 を *out_st0 に返す (診断用。NULL 可)。 */
+/* ヘッドの整定待ち (SEEK / RECALIBRATE の後、READ / WRITE の前)。
+ * **RECALIBRATE の後にも要る** (2026-09-24 ラリー 2、Codex と Fable):
+ * RECALIBRATE が通ると 0 を覚えるので、続く C=0 の読みは SEEK を省く。
+ * 整定を SEEK にだけ任せていると、回復 (リセット + RECALIBRATE) の直後の
+ * C=0 の READ が整定前に出る。 */
+#define FDC_HEAD_SETTLE_TICKS  2    /* 約 15ms を tick (10ms) に切り上げ */
+static void fdc_head_settle(void)
+{
+    u32 start = tick_count;
+    while ((tick_count - start) < FDC_HEAD_SETTLE_TICKS) { /* 何もしない */ }
+}
+
 static int fdc_recalibrate_st0(int drv, u8 *out_st0)
 {
     u8 st0, cyl;
@@ -594,6 +616,8 @@ static int fdc_recalibrate_st0(int drv, u8 *out_st0)
         rc = fdc_wait_seek_end(drv, &st0, &cyl, -1);
         if (rc == FDC_SEEK_OK) {
             if (out_st0) *out_st0 = st0;
+            /* 整定してから 0 を覚える (上の fdc_head_settle の注記)。 */
+            fdc_head_settle();
             fdc_note_cyl(drv, 0);
             return 0;
         }
@@ -675,10 +699,7 @@ static int fdc_seek(int drv, int cyl, int head)
     if (rc != FDC_SEEK_OK) return -4;
 
     /* ヘッド安定待ち: 約15ms */
-    {
-        u32 start = tick_count;
-        while ((tick_count - start) < 2) { /* 何もしない */ }
-    }
+    fdc_head_settle();
 
     fdc_note_cyl(drv, cyl);
     return 0;
@@ -794,6 +815,16 @@ int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
             /* DMAバッファからユーザーバッファにコピー */
             kmemcpy((u8 *)buf, dma_buffer, (u32)bps);
             return 0;
+        }
+
+        /* NR (媒体無し) は**回復 (リセット・RECALIBRATE) より前に**打ち切る
+         * (ラリー 2 の Codex)。リザルトを読み終えたコマンドは実行フェーズを
+         * 抜けているので、DMA を閉じるだけでよい (リセットは要らない)。 */
+        if ((results[0] & FDC_ST0_NR) != 0) {
+            dma_chan_mask(FDC_DMA_CHANNEL);
+            dma_armed = 0;
+            phase = "nr";
+            break;
         }
     }
 
@@ -931,6 +962,7 @@ int fdc_read_sectors(int drv, int cyl, int head, int sect, int count,
     const char *phase = "seek";
     int have_results = 0;
     int dma_armed = 0;
+    int seek_failed = 0;
 
     if (g == 0 || count < 1 || sect < 1) return -2;
     eot = sect + count - 1;
@@ -952,7 +984,7 @@ int fdc_read_sectors(int drv, int cyl, int head, int sect, int count,
             s_stats.multi_nr++;
             return -3;
         }
-        if (seek_rc != 0) goto fail;
+        if (seek_rc != 0) { seek_failed = 1; goto fail; }
     }
 
     /* 2. DMA (FDC→メモリ)。長さはちょうど count セクタ = EOT と揃える。
@@ -982,7 +1014,18 @@ int fdc_read_sectors(int drv, int cyl, int head, int sect, int count,
     n = fdc_read_results(results, 7);
     have_results = (n > 0);
     if (n < 7) goto fail;
-    if ((results[0] & FDC_ST0_IC_MASK) != FDC_ST0_IC_NORMAL) goto fail;
+    /* リザルトを読み終えた = 実行フェーズは終わっている。DMA を閉じる。 */
+    dma_chan_mask(FDC_DMA_CHANNEL);
+    dma_armed = 0;
+    if ((results[0] & FDC_ST0_IC_MASK) != FDC_ST0_IC_NORMAL) {
+        /* NR は回復より前に打ち切る (単発と同じ。ラリー 2 の Codex)。 */
+        if ((results[0] & FDC_ST0_NR) != 0) {
+            fdc_forget_cyl(drv);
+            s_stats.multi_nr++;
+            return -3;
+        }
+        goto fail;
+    }
 
     kmemcpy((u8 *)buf, dma_buffer, bytes);
     s_stats.multi_ok++;
@@ -1000,13 +1043,12 @@ fail:
     if (dma_armed) {
         fdc_abort_transfer();
         (void)fdc_recalibrate(drv);
+    } else if (seek_failed) {
+        /* シークの失敗 (-2 未完了 / -4 異常) も回復を通す (ラリー 2 の
+         * Fable)。INT 線やヘッドの位置が分からないまま単発へ渡さない。 */
+        (void)fdc_recover(drv);
     } else {
         fdc_forget_cyl(drv);
-    }
-    /* リザルトの NR も媒体無し — 数えず、行も出さない。 */
-    if (have_results && (results[0] & FDC_ST0_NR) != 0) {
-        s_stats.multi_nr++;
-        return -3;
     }
     s_stats.multi_fail++;
     if (s_stats.multi_fail <= FDC_MULTI_FAIL_REPORT_MAX) {
