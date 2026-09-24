@@ -916,6 +916,15 @@ int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
         if ((results[0] & FDC_ST0_IC_MASK) == FDC_ST0_IC_NORMAL) {
             return 0;
         }
+
+        /* NR (媒体無し) は回復より前に打ち切る (read 側と同じ)。リザルトを
+         * 読み終えているので DMA を閉じるだけでよい (リセットは要らない)。 */
+        if ((results[0] & FDC_ST0_NR) != 0) {
+            dma_chan_mask(FDC_DMA_CHANNEL);
+            dma_armed = 0;
+            phase = "nr";
+            break;
+        }
     }
 
     if (dma_armed) fdc_abort_transfer();

@@ -83,4 +83,4 @@ wrap がそれを呼ぶこと、`exec/exec.c` の 4 本の `*_user` がトラン
 カーネルの写しそのもの (返り番地がトランポリンページの中) は kselftest の `test_tramp_user_str` で実機が見る
 (ホストでは見られない)。
 
-変異は 7 本を足して **68/68 RED (ERROR 0、SURVIVED 0)、対照 5/5 SURVIVED**。
+変異は 6 本を足して (別に 3 本を書き換え、62 + 6 = 68) **68/68 RED (ERROR 0、SURVIVED 0)、対照 5/5 SURVIVED**。

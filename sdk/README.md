@@ -76,6 +76,23 @@ api->gfx_present_dirty();   /* ここで初めて転送される */
 描けば転送量が減る。16MHz 級の実機では全画面転送のコストが支配的なので、
 これが効く。
 
+### 文字列を返す KAPI の寿命
+
+`sys_getcwd` / `vfs_devname` / `path_get_drive` / `path_get_cwd` の返り値は、
+アプリ (CPL=3) では**トランポリンページ内の写し**で、**次の KAPI 呼び出しで
+上書きされる**。4 本は同じ 1 本の写しを共用するので、どれかを呼べば他の 3 本の
+返り値も変わる。使う前に自分のバッファへ写しを取ること。
+
+```c
+char cwd[256];
+const char *p = api->sys_getcwd();
+strncpy(cwd, p, sizeof(cwd) - 1);   /* 次の api-> 呼び出しより前に写す */
+cwd[sizeof(cwd) - 1] = '\0';
+```
+
+(`db_last_error` / `db_column_text` は共有メモリを返すので対象外。詳細は
+OS 側の `docs/KAPI_SPEC.md` の「API関数」の注記。)
+
 ## 互換性
 
 `KAPI_VERSION` は KernelAPI のテーブルレイアウトの版数。カーネルが

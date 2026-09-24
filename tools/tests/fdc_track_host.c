@@ -1355,6 +1355,24 @@ static void single_nr_no_recover(void)
     M.present[0] = 1;
 }
 
+/* 単発の WRITE の NR も読みと同じく回復とリトライを通さない。 */
+static void write_nr_no_recover(void)
+{
+    static u8 buf[1024];
+    int r0, c0, w0;
+
+    memset(buf, 0x5A, sizeof(buf));
+    model_boot(0);
+    CHECK(fdc_write_sector_geom(0, 5, 0, 1, &fdc_geom_2hd, buf) == 0);
+    M.present[0] = 0;
+    r0 = M.resets; c0 = M.recals; w0 = M.writes;
+    CHECK(fdc_write_sector_geom(0, 5, 0, 2, &fdc_geom_2hd, buf) == -1);
+    CHECK(M.resets == r0 && M.recals == c0);
+    CHECK(M.writes == w0 + 1);                  /* リトライもしない */
+    CHECK(D.masked == 1);
+    M.present[0] = 1;
+}
+
 /* 1 本のエッジで件数の上限 (4) ちょうどの別の通知が先に積まれていても、
  * エッジを待たずに読み続けて期限切れにならない。 */
 static void sis_edge_limit(void)
@@ -1513,6 +1531,7 @@ int main(int argc, char **argv)
         { "idle_rule", idle_rule },
         { "track_nr_stop", track_nr_stop },
         { "single_nr_no_recover", single_nr_no_recover },
+        { "write_nr_no_recover", write_nr_no_recover },
         { "sis_edge_limit", sis_edge_limit },
     };
     if (argc != 2) { fprintf(stderr, "usage: %s CASE\n", argv[0]); return 2; }

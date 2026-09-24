@@ -66,7 +66,7 @@
  *     も、ここで上限が付く
  * 人が媒体を入れ替えるのに 2 秒はかかる、という前提。**それより速い差し
  * 替えは保証しない** — 媒体を替えたら umount / mount する契約
- * (docs/06_filesystem.md §6-1 の FD の節)。 */
+ * (docs/06_filesystem.md §6-8 の FD の節)。 */
 #define FDC_TRACK_IDLE_TICKS  200   /* 2 秒 (PIT 100Hz) */
 
 /* 1 回の要求を 1 トラックの中に切った区間。 */
