@@ -144,18 +144,30 @@ int ime_dict_open(IME_Dict *dict, const char *path)
 /* ======================================================================== */
 /*  常駐接続の開き直し (票 TASK_VFS_FD_PATH 方針 v3 の 6 / ラリー 3)          */
 /*                                                                          */
-/*  辞書の実体が置き換えられる (unlink・置き換え rename、hsync の差し替え) と  */
-/*  VFS は開いていた FD に失効の印を付け、以後の読みは OS32_ERR_STALE になる   */
-/*  (SQLite には SQLITE_IOERR として届く)。そのときは **SQLite 接続ごと**     */
-/*  開き直す — ステートメント 3 本の finalize → sqlite3_close → open →     */
-/*  prepare → dict_fd_protect (ime_dict_close + ime_dict_open)。              */
+/*  辞書の実体が消える・作り直される (`rm` → 作り直し、別の実体への置き換え   */
+/*  rename、umount) と、VFS は開いていた FD に失効の印を付け、以後の読みは    */
+/*  OS32_ERR_STALE になる (SQLite には SQLITE_IOERR として届く)。そのときは   */
+/*  **SQLite 接続ごと**開き直す — ステートメント 3 本の finalize →          */
+/*  sqlite3_close → open → prepare → dict_fd_protect                       */
+/*  (ime_dict_close + ime_dict_open)。                                      */
 /*                                                                          */
-/*  - 失効 1 回につき 1 回。新しい FD はまた失効しうる (次の置き換え) ので、   */
+/*  hsync の差し替え (置き換え rename) は**ここへ来ない**: 辞書を開いている   */
+/*  間は /db/fep.db の置き換えを VFS が BUSY で断る (開いている SQLite DB の  */
+/*  rename は BUSY、票のユーザー決裁 ①)。hsync は「使用中で置き換えられ      */
+/*  なかった」と表示する。失効して開き直すのは rm と作り直しの経路だけ。      */
+/*                                                                          */
+/*  - **旧接続に SQL を流す前に**失効を確かめる (dict_ready、Codex 実装      */
+/*    レビュー ラリー 1 の B1)。失効した接続で sqlite3_step をすると、SQLite  */
+/*    は本体を読む前に hot journal を判定し、ジャーナルを再生・削除しうる。   */
+/*    失効していたら step をせずに閉じ、ジャーナルを stat してから開き直す。  */
+/*  - 失効 1 回につき 1 回。新しい FD はまた失効しうる (次の作り直し) ので、  */
 /*    印の付いた FD を見たら開き直す。失効を伴わない I/O エラーは 1 回だけ   */
-/*    (io_retried、成功した検索で戻す)。                                     */
+/*    (io_retried、成功した操作で戻す)。                                     */
 /*  - `<名前>-journal` が中身を持って残っていたら (hot journal) **開かない**。 */
 /*    辞書無しで動き、画面に出す。前の接続の途中の書き込みを、新しい実体に    */
 /*    巻き戻させない。                                                       */
+/*  - 検索・学習だけでなく、ユーザー辞書の一覧・削除・書き出し・全消去も同じ  */
+/*    経路を通る (Codex 実装レビュー ラリー 1 の B5)。                        */
 /*  戻り値: 1 = 開き直した (呼び手は 1 回だけやり直してよい) / 0 = しない     */
 /* ======================================================================== */
 static int dict_recover(IME_Dict *dict)
@@ -196,6 +208,20 @@ static int dict_recover(IME_Dict *dict)
     return 1;
 }
 
+/* 旧接続に SQL を流す**前**に呼ぶ (B1)。FD が失効していたら、その接続では
+ * 何も実行せずに閉じて開き直す (hot journal なら辞書無し)。
+ * 戻り値: 1 = 使える接続がある / 0 = 辞書無し */
+static int dict_ready(IME_Dict *dict)
+{
+    int fd;
+    if (!dict || !dict->db) return 0;
+    fd = os32_sqlite_db_fd(dict->db);
+    if (fd >= 0 && vfs_fd_is_stale(fd)) (void)dict_recover(dict);
+    return dict->db != (void *)0;
+}
+
+static int is_ioerr(int rc) { return (rc & 0xFF) == SQLITE_IOERR; }
+
 static int ime_dict_search_once(IME_Dict *dict, const char *yomi,
                                 IME_Result *results, int max_results,
                                 int *io_error);
@@ -204,7 +230,9 @@ int ime_dict_search(IME_Dict *dict, const char *yomi,
                     IME_Result *results, int max_results)
 {
     int io_error = 0;
-    int n = ime_dict_search_once(dict, yomi, results, max_results, &io_error);
+    int n;
+    if (!dict_ready(dict)) return 0;
+    n = ime_dict_search_once(dict, yomi, results, max_results, &io_error);
     if (io_error && dict_recover(dict)) {
         n = ime_dict_search_once(dict, yomi, results, max_results, &io_error);
     }
@@ -303,8 +331,8 @@ void ime_dict_learn(IME_Dict *dict, const char *yomi, const char *kanji)
     sqlite3_stmt *stmt;
     int rc;
 
-    if (!dict || !dict->db || !dict->learn_stmt || !yomi || !kanji)
-        return;
+    if (!dict || !yomi || !kanji) return;
+    if (!dict_ready(dict) || !dict->learn_stmt) return;
 
     stmt = (sqlite3_stmt *)dict->learn_stmt;
     sqlite3_reset(stmt);
@@ -314,7 +342,7 @@ void ime_dict_learn(IME_Dict *dict, const char *yomi, const char *kanji)
     sqlite3_bind_int(stmt, 3, 0 /* sys_time() is not easily available here, use 0 for now */);
 
     rc = sqlite3_step(stmt);
-    if (rc != SQLITE_DONE && (rc & 0xFF) == SQLITE_IOERR && dict_recover(dict) &&
+    if (rc != SQLITE_DONE && is_ioerr(rc) && dict_recover(dict) &&
         dict->learn_stmt) {
         /* 開き直した接続で 1 回だけやり直す */
         stmt = (sqlite3_stmt *)dict->learn_stmt;
@@ -326,6 +354,8 @@ void ime_dict_learn(IME_Dict *dict, const char *yomi, const char *kanji)
     }
     if (rc != SQLITE_DONE) {
         kprintf(ATTR_RED, "IME: Learn failed (rc=%d)\r\n", rc);
+    } else {
+        dict->io_retried = 0;
     }
 }
 
@@ -358,19 +388,26 @@ int ime_dict_reopen(IME_Dict *dict, const char *path)
     return ime_dict_open(dict, path);
 }
 
-/* ユーザー学習辞書列挙 */
-int ime_user_list(IME_Dict *dict, const char *yomi_prefix,
-                  IME_UserEntry *out, int max)
+/* ======================================================================== */
+/*  ユーザー学習辞書の管理 (ime コマンドの user list / delete / export /      */
+/*  clear)。どれも検索・学習と同じ回復経路を通る (Codex 実装レビュー         */
+/*  ラリー 1 の B5): 旧接続に SQL を流す前に失効を確かめ (dict_ready)、       */
+/*  I/O エラーなら 1 回だけ開き直してやり直す (dict_recover)。                */
+/*  *_once の戻り値は各 API の戻り値そのもの、*io_error = 1 は「I/O エラーで  */
+/*  失敗した」(開き直して 1 回やり直す)。                                   */
+/* ======================================================================== */
+
+/* 一覧: 件数 / -4 = 途中で読めなかった (部分的な一覧を成功にしない) */
+static int user_list_once(IME_Dict *dict, const char *yomi_prefix,
+                          IME_UserEntry *out, int max, int *io_error)
 {
-    sqlite3 *db;
+    sqlite3 *db = (sqlite3 *)dict->db;
     sqlite3_stmt *stmt = NULL;
     int rc;
     int count = 0;
     const char *sql;
 
-    if (!dict || !dict->db || !out || max <= 0) return 0;
-    db = (sqlite3 *)dict->db;
-
+    *io_error = 0;
     if (yomi_prefix && yomi_prefix[0] != '\0') {
         sql = "SELECT yomi, kanji, freq FROM dict_user WHERE yomi >= ?1 AND yomi < ?1 || X'EFBFBF' ORDER BY freq DESC, yomi ASC LIMIT ?2";
     } else {
@@ -379,18 +416,17 @@ int ime_user_list(IME_Dict *dict, const char *yomi_prefix,
 
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
+        *io_error = is_ioerr(sqlite3_extended_errcode(db));
         kprintf(ATTR_RED, "IME: user_list prepare failed (rc=%d)\r\n", rc);
         return 0;
     }
 
     if (yomi_prefix && yomi_prefix[0] != '\0') {
         sqlite3_bind_text(stmt, 1, yomi_prefix, -1, SQLITE_STATIC);
-        sqlite3_bind_int(stmt, 2, max);
-    } else {
-        sqlite3_bind_int(stmt, 2, max);
     }
+    sqlite3_bind_int(stmt, 2, max);
 
-    while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
+    while (count < max && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         IME_UserEntry *e = &out[count];
         const char *y_text = (const char *)sqlite3_column_text(stmt, 0);
         const char *k_text = (const char *)sqlite3_column_text(stmt, 1);
@@ -413,20 +449,38 @@ int ime_user_list(IME_Dict *dict, const char *yomi_prefix,
     }
 
     sqlite3_finalize(stmt);
+    if (count < max && rc != SQLITE_DONE) {
+        *io_error = is_ioerr(rc);
+        kprintf(ATTR_RED, "IME: user_list step failed (rc=%d)\r\n", rc);
+        return -4;
+    }
     return count;
 }
 
-/* ユーザー学習辞書エントリ削除 */
-int ime_user_delete(IME_Dict *dict, const char *yomi, const char *kanji)
+/* ユーザー学習辞書列挙 */
+int ime_user_list(IME_Dict *dict, const char *yomi_prefix,
+                  IME_UserEntry *out, int max)
 {
-    sqlite3 *db;
+    int io_error = 0, n;
+
+    if (!dict || !out || max <= 0) return 0;
+    if (!dict_ready(dict)) return 0;
+    n = user_list_once(dict, yomi_prefix, out, max, &io_error);
+    if (io_error && dict_recover(dict))
+        n = user_list_once(dict, yomi_prefix, out, max, &io_error);
+    if (n >= 0 && !io_error) dict->io_retried = 0;
+    return n;
+}
+
+static int user_delete_once(IME_Dict *dict, const char *yomi,
+                            const char *kanji, int *io_error)
+{
+    sqlite3 *db = (sqlite3 *)dict->db;
     sqlite3_stmt *stmt = NULL;
     int rc;
     const char *sql;
 
-    if (!dict || !dict->db || !yomi || yomi[0] == '\0') return -1;
-    db = (sqlite3 *)dict->db;
-
+    *io_error = 0;
     if (kanji && kanji[0] != '\0') {
         sql = "DELETE FROM dict_user WHERE yomi = ?1 AND kanji = ?2";
     } else {
@@ -435,6 +489,7 @@ int ime_user_delete(IME_Dict *dict, const char *yomi, const char *kanji)
 
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
+        *io_error = is_ioerr(sqlite3_extended_errcode(db));
         kprintf(ATTR_RED, "IME: user_delete prepare failed (rc=%d)\r\n", rc);
         return -2;
     }
@@ -448,6 +503,7 @@ int ime_user_delete(IME_Dict *dict, const char *yomi, const char *kanji)
     sqlite3_finalize(stmt);
 
     if (rc != SQLITE_DONE) {
+        *io_error = is_ioerr(rc);
         kprintf(ATTR_RED, "IME: user_delete execute failed (rc=%d)\r\n", rc);
         return -3;
     }
@@ -455,19 +511,33 @@ int ime_user_delete(IME_Dict *dict, const char *yomi, const char *kanji)
     return 0;
 }
 
-/* ユーザー学習辞書CSVエクスポート */
-int ime_user_export(IME_Dict *dict, const char *path)
+/* ユーザー学習辞書エントリ削除 */
+int ime_user_delete(IME_Dict *dict, const char *yomi, const char *kanji)
 {
-    sqlite3 *db;
+    int io_error = 0, rc;
+
+    if (!dict || !yomi || yomi[0] == '\0') return -1;
+    if (!dict_ready(dict)) return -1;
+    rc = user_delete_once(dict, yomi, kanji, &io_error);
+    if (io_error && dict_recover(dict))
+        rc = user_delete_once(dict, yomi, kanji, &io_error);
+    if (rc == 0) dict->io_retried = 0;
+    return rc;
+}
+
+/* 書き出し: 0 = 成功 / -2 = 書き出し先を開けない / -3 = prepare 失敗 /
+ * -4 = 途中で読めなかった (sqlite3_step の異常終了を EOF と区別する) /
+ * -5 = 書き出し先へ書けなかった */
+static int user_export_once(IME_Dict *dict, const char *path, int *io_error)
+{
+    sqlite3 *db = (sqlite3 *)dict->db;
     sqlite3_stmt *stmt = NULL;
-    int rc;
-    int fd;
+    int rc, step_rc, fd, result = 0;
+    u32 len;
     const char *sql;
     char line[128];
 
-    if (!dict || !dict->db || !path || path[0] == '\0') return -1;
-    db = (sqlite3 *)dict->db;
-
+    *io_error = 0;
     fd = vfs_open(path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
     if (fd < 0) {
         kprintf(ATTR_RED, "IME: export open failed: %s (fd=%d)\r\n", path, fd);
@@ -477,12 +547,13 @@ int ime_user_export(IME_Dict *dict, const char *path)
     sql = "SELECT yomi, kanji, freq FROM dict_user ORDER BY freq DESC, yomi ASC";
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
+        *io_error = is_ioerr(sqlite3_extended_errcode(db));
         kprintf(ATTR_RED, "IME: export prepare failed (rc=%d)\r\n", rc);
         vfs_close(fd);
         return -3;
     }
 
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    while ((step_rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         const char *y_text = (const char *)sqlite3_column_text(stmt, 0);
         const char *k_text = (const char *)sqlite3_column_text(stmt, 1);
         int freq = sqlite3_column_int(stmt, 2);
@@ -490,28 +561,56 @@ int ime_user_export(IME_Dict *dict, const char *path)
         if (!y_text || !k_text) continue;
 
         sqlite3_snprintf(sizeof(line), line, "%s,%s,%d\n", y_text, k_text, freq);
-        vfs_write_fd(fd, line, (u32)kstrlen(line));
+        len = (u32)kstrlen(line);
+        if (vfs_write_fd(fd, line, len) != (int)len) {
+            kprintf(ATTR_RED, "IME: export write failed: %s\r\n", path);
+            result = -5;
+            break;
+        }
+    }
+    if (result == 0 && step_rc != SQLITE_DONE) {
+        *io_error = is_ioerr(step_rc);
+        kprintf(ATTR_RED, "IME: export step failed (rc=%d)\r\n", step_rc);
+        result = -4;
     }
 
     sqlite3_finalize(stmt);
     vfs_close(fd);
-    return 0;
+    return result;
+}
+
+/* ユーザー学習辞書CSVエクスポート */
+int ime_user_export(IME_Dict *dict, const char *path)
+{
+    int io_error = 0, rc;
+
+    if (!dict || !path || path[0] == '\0') return -1;
+    if (!dict_ready(dict)) return -1;
+    rc = user_export_once(dict, path, &io_error);
+    if (io_error && dict_recover(dict))
+        rc = user_export_once(dict, path, &io_error);   /* 書き出し先は O_TRUNC で作り直す */
+    if (rc == 0) dict->io_retried = 0;
+    return rc;
 }
 
 /* ユーザー学習辞書全消去 */
 int ime_user_clear(IME_Dict *dict)
 {
-    sqlite3 *db;
     int rc;
 
-    if (!dict || !dict->db) return -1;
-    db = (sqlite3 *)dict->db;
-
-    rc = sqlite3_exec(db, "DELETE FROM dict_user;", NULL, NULL, NULL);
+    if (!dict) return -1;
+    if (!dict_ready(dict)) return -1;
+    rc = sqlite3_exec((sqlite3 *)dict->db, "DELETE FROM dict_user;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK &&
+        is_ioerr(sqlite3_extended_errcode((sqlite3 *)dict->db)) &&
+        dict_recover(dict)) {
+        rc = sqlite3_exec((sqlite3 *)dict->db, "DELETE FROM dict_user;",
+                          NULL, NULL, NULL);
+    }
     if (rc != SQLITE_OK) {
         kprintf(ATTR_RED, "IME: user_clear execute failed (rc=%d)\r\n", rc);
         return -2;
     }
-
+    dict->io_retried = 0;
     return 0;
 }

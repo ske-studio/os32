@@ -68,3 +68,15 @@
 
 - **A-R3-1 (Codex、SQLite のジャーナルは開いた時の名前を覚える) → 決裁 ①**: **開いている SQLite DB (`vfs_open_sqlite` の FD) と、そのジャーナル (`<名前>-journal`)、およびそれらの祖先ディレクトリの rename を `OS32_ERR_BUSY` 相当で断る** (既存のコードが無ければ新設、-16 の NAMETOOLONG の次)。
 - 実装で守ること (Opus / Codex の実装メモ): 利用中による拒否・INVAL・NAMETOOLONG は**印を付ける前**に判定し、印は FS の操作に入った場合だけ / `rename(f,f)` と同じ inode のハードリンク間は印を付けない / 失効の判定は read・write・fstat・truncate・seek の全部、umount 後の fstat が解放済み ctx を触らない / 常駐 SQLite の開き直しで hot journal が見つかったら**開かない** (辞書無し / cfg 無効、画面に出す)、開き直しは失効 1 回につき 1 回 / O_CREAT で作った後に inode が取れなければ作ったファイルを消して失敗 / `_close` は int のまま (void なのは KAPI の sys_close) / `sys_switch_shell` (`kernel/gui.c:130`) の切り詰めも長さ検査の入口に入れる / cwd が長いときは大きい一時バッファで正規化してから結果を判定。
+
+## 実装レビュー ラリー 1 の修正 (2026-09-24、Codex / Opus の Request changes)
+
+- **cdinst**: MINIMAL 以外 (NORMAL / FULL / DEBUG / APPEND) の展開の失敗でも止め、`Installation Complete` を出さない。同期 (`vfs_sync`) の失敗も完了にしない (`install_packages`)。
+- **SQLite のファイルメソッドの失効検査** (Codex B2): read / write / truncate / sync / サイズ / lock / unlock / CheckReservedLock / FileControl / SectorSize は失効した FD で SQLITE_IOERR 系 (`file_live`)。close だけは失効後も通り、FD を解放できる。失効は group の sticky エラーに数えない。
+- **失効後も BUSY** (Codex B3): 開いている SQLite の FD は失効 (unlink) しても**接続が閉じるまで** DB・ジャーナル・祖先の rename を BUSY で断る (umount の失効は fs_ctx を外すので対象外)。
+- **名前比較は FS の規則** (Codex B4): `VfsOps.name_fold` (任意、NULL = バイトで区別) を追記。FAT は FatFs と同じ規則 (英小文字 → 大文字、0x80 以上は CP437 の大文字化表 — ff.c の `TBL_CT437` の写しで、ホスト試験が本文と突き合わせる)、HostDrv / ISO9660 は ASCII の英字だけ、ext2 は区別する。BUSY と pinned の名前比較がこれに従う。
+- **IME の hot journal の順序** (Codex B1): 旧接続に SQL を流す**前**に失効を確かめ (`dict_ready`)、失効していたら step をせずに閉じ、journal を stat してから開き直す (中身のある journal があれば開かずに辞書無し)。
+- **IME の管理 API** (Codex B5): ユーザー辞書の一覧・削除・書き出し・全消去も検索・学習と同じ回復経路 (失効の事前確認 + I/O エラーで 1 回だけ開き直し)。書き出しは `sqlite3_step` の異常終了を EOF と区別して失敗 (-4)、書き込みの失敗も -5。一覧の途中の失敗は -4 (部分的な一覧を成功にしない)。
+- **長すぎる DB 名** (Opus nb2): `<名前>-journal` が 255 バイトを超える名前は、解決前・解決後のどちらで超えても**開く時点で**断る (`kapi_db_open` は CANTOPEN + `path too long (NAMETOOLONG)`、SQLite VFS の xOpen も MAIN_DB で CANTOPEN)。
+- **hsync と開いている辞書** (Opus nb1): FEP を有効にした後の `/db/fep.db` の置き換えは BUSY になる (決裁 ① どおり)。hsync は `reason=replace_failed err=-17 (BUSY)` に「使用中で置き換えられなかった: 旧内容のまま」と次の手 (再起動して FEP を有効にする前に hsync) を出す。
+- **受入の読み替え**: 「IME 辞書の置き換え後に FEP が動く」は、**`rm /db/fep.db` → 作り直し (コピー) → FEP で変換**の手順で見る。hsync の差し替え (置き換え rename) は辞書を開いている間は BUSY で断られるので、失効 → 開き直しの経路には入らない。

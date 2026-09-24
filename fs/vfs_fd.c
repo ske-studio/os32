@@ -629,25 +629,33 @@ int vfs_fd_set_sqlite_db(int fd)
     return VFS_OK;
 }
 
+/* 名前の 1 バイトを、その FS の比較規則で畳む (Codex 実装レビュー ラリー 1 の
+ * B4)。name_fold を持たない FS (ext2) はバイトのまま = 区別する */
+static u8 name_key(const VfsOps *ops, char c)
+{
+    return (ops && ops->name_fold) ? ops->name_fold((u8)c) : (u8)c;
+}
+
 /* a が b そのもの、または b の祖先ディレクトリなら 1 (どちらも同じマウントの
- * 正規化済み相対名) */
-static int rel_covers(const char *a, const char *b)
+ * 正規化済み相対名、比較は ops の名前規則) */
+static int rel_covers(const VfsOps *ops, const char *a, const char *b)
 {
     int i = 0;
-    while (a[i] && a[i] == b[i]) i++;
+    while (a[i] && b[i] && name_key(ops, a[i]) == name_key(ops, b[i])) i++;
     if (a[i] != '\0') return 0;
     return b[i] == '\0' || b[i] == '/';
 }
 
 /* rel が「DB 名 + "-journal"」そのものなら 1。ジャーナルは DB と同じ
  * ディレクトリに置かれるので、祖先は rel_covers(rel, DB) で判定済み */
-static int rel_is_journal(const char *rel, const char *db)
+static int rel_is_journal(const VfsOps *ops, const char *rel, const char *db)
 {
     static const char sfx[] = "-journal";
     int i = 0, j;
-    while (db[i] && rel[i] == db[i]) i++;
+    while (db[i] && rel[i] && name_key(ops, rel[i]) == name_key(ops, db[i])) i++;
     if (db[i] != '\0') return 0;
-    for (j = 0; sfx[j] && rel[i + j] == sfx[j]; j++) { }
+    for (j = 0; sfx[j] && rel[i + j] &&
+                name_key(ops, rel[i + j]) == name_key(ops, sfx[j]); j++) { }
     return sfx[j] == '\0' && rel[i + j] == '\0';
 }
 
@@ -657,12 +665,17 @@ int vfs_fd_rename_busy(void *fs_ctx, const char *rel_old, const char *rel_new)
     if (!fs_ctx) return 0;
     for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
         const VfsFile *f = &open_files[fd];
-        if (!f->in_use || !f->sqlite_db || f->stale || f->fs_ctx != fs_ctx)
-            continue;
-        if (rel_covers(rel_old, f->path) || rel_is_journal(rel_old, f->path))
+        /* **失効 (stale) した FD も見る** (Codex 実装レビュー ラリー 1 の B3)。
+         * unlink で FD が失効しても SQLite 接続は開いたままで、ジャーナルを
+         * 開いた時の名前で作り・消す。接続が閉じる (FD が解放される) まで
+         * DB・ジャーナル・祖先の付け替えを断る。umount の失効は fs_ctx を
+         * 外すので、ここで一致しない (別のマウントの話になる)。 */
+        if (!f->in_use || !f->sqlite_db || f->fs_ctx != fs_ctx) continue;
+        if (rel_covers(f->ops, rel_old, f->path) ||
+            rel_is_journal(f->ops, rel_old, f->path))
             return 1;
-        if (rel_new && (rel_covers(rel_new, f->path) ||
-                        rel_is_journal(rel_new, f->path)))
+        if (rel_new && (rel_covers(f->ops, rel_new, f->path) ||
+                        rel_is_journal(f->ops, rel_new, f->path)))
             return 1;
     }
     return 0;
@@ -677,8 +690,9 @@ int vfs_fd_pinned_busy(void *fs_ctx, int has_ino, u32 ino, const char *rel)
         if (!f->in_use || !f->pinned || f->stale || f->fs_ctx != fs_ctx) continue;
         if (f->has_ino) {
             if (has_ino && f->ino == ino) return 1;
-        } else if (rel && rel_covers(rel, f->path)) {
-            return 1;   /* パスで動く FS: 名前か祖先が動けば見失う */
+        } else if (rel && rel_covers(f->ops, rel, f->path)) {
+            return 1;   /* パスで動く FS: 名前か祖先が動けば見失う
+                         * (比較は FS の名前規則、FAT は大文字小文字を区別しない) */
         }
     }
     return 0;

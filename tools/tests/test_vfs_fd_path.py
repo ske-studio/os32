@@ -9,7 +9,11 @@ userland/lib/rt/pkg.c を取り込み、RAM 上の 8MB の ext2 で
 
   fd    … 欠陥 1 の反例・inode の再利用・親の rename・置き換え rename (注入)・
           ハードリンク・inode 取得の失敗注入・umount・ISDIR・O_EXCL
-  busy  … 開いている SQLite DB / ジャーナル / 祖先の rename、loop イメージ
+  busy  … 開いている SQLite DB / ジャーナル / 祖先の rename、loop イメージ、
+          失効 (unlink) しても接続が閉じるまでは BUSY (レビュー ラリー 1 の B3)
+  nocase … 大文字小文字を区別しない FS (name_fold) の BUSY / pinned (B4)
+  cdinst … 実物の userland/system/cdinst.c の install_packages が、どの
+          パッケージの失敗でも止まり完了を出さない
   dot   … 最終要素の "." / ".."
   path  … 255/256 バイト、32/33 要素、相対パス + 長い cwd、mount prefix
   pkg   … pkg_parse / pkg_first_overflow / pkg_extract (PKG はここで作る)
@@ -22,7 +26,10 @@ userland/lib/rt/pkg.c を取り込み、RAM 上の 8MB の ext2 で
           OS32 の負値が -1 + errno になる (tools/tests/newlib_errno_host.c)
   ime   … 実物の kernel/ime_dict.c + SQLite + os32_sqlite_vfs.c + vfs_fd.c で、
           辞書の FD が失効したら接続ごと開き直す・1 回だけ・hot journal なら
-          開かない (tools/tests/ime_dict_host.c)
+          開かない・旧接続で SQL を流す前に失効を見る (B1)・管理 API も同じ
+          (B5)・SQLite のファイルメソッドは失効で成功しない (B2)・長すぎる
+          DB 名は開く時点で断る (tools/tests/ime_dict_host.c)
+  fatfold … fs/fatfs_vfs.c の大文字化表が ff.c の TBL_CT437 と一致する
 
   python3 -B tools/tests/test_vfs_fd_path.py [--target] [--mutants] [case]
 
@@ -156,6 +163,21 @@ MUTANTS = [
     ("pkg_extract が開けない失敗を飲む", "lib/rt/pkg.c",
      "            if (wfd < 0) { api->sys_close(fd); return PKG_ERR_IO; }",
      "            if (wfd < 0) continue;"),
+    ("失効した SQLite FD を BUSY から外す", "fs/vfs_fd.c",
+     "        if (!f->in_use || !f->sqlite_db || f->fs_ctx != fs_ctx) continue;",
+     "        if (!f->in_use || !f->sqlite_db || f->stale || f->fs_ctx != fs_ctx) continue;"),
+    ("名前比較が FS の規則を見ない", "fs/vfs_fd.c",
+     "    return (ops && ops->name_fold) ? ops->name_fold((u8)c) : (u8)c;",
+     "    return (u8)c;"),
+    ("cdinst が NORMAL の失敗で止まらない", "system/cdinst.c",
+     '        ret = install_step(PKG_NORMAL, "NORMAL");\n        if (ret != PKG_OK) return ret;',
+     '        ret = install_step(PKG_NORMAL, "NORMAL");'),
+    ("cdinst が APPEND の失敗で止まらない", "system/cdinst.c",
+     '        ret = install_step(PKG_APPEND, "APPEND");\n        if (ret != PKG_OK) return ret;',
+     '        ret = install_step(PKG_APPEND, "APPEND");'),
+    ("cdinst が失敗しても完了を出す", "system/cdinst.c",
+     "    ret = install_step(PKG_MINIMAL, \"MINIMAL\");\n    if (ret != PKG_OK) return ret;",
+     "    ret = install_step(PKG_MINIMAL, \"MINIMAL\");\n    if (ret != PKG_OK) ret = PKG_OK;"),
     ("pkg_extract (LZSS) が開けない失敗を飲む", "lib/rt/pkg.c",
      "            if (wfd < 0) {\n                api->mem_free(data_buf);\n                return PKG_ERR_IO;\n            }",
      "            if (wfd < 0) continue;"),
@@ -186,12 +208,60 @@ IME_MUTANTS = [
     ("失効しても開き直さない",
      "    if (io_error && dict_recover(dict)) {",
      "    if (0 && io_error && dict_recover(dict)) {"),
+    ("旧接続に SQL を流す前に失効を見ない",
+     "    if (fd >= 0 && vfs_fd_is_stale(fd)) (void)dict_recover(dict);",
+     "    if (fd >= 0 && 0) (void)dict_recover(dict);"),
+    ("export が step の異常終了を EOF にする",
+     "    if (result == 0 && step_rc != SQLITE_DONE) {", "    if (0) {"),
+    ("clear が旧接続で先に SQL を流す",
+     "    if (!dict_ready(dict)) return -1;\n    rc = sqlite3_exec",
+     "    if (!dict->db) return -1;\n    rc = sqlite3_exec"),
+    ("list が I/O エラーで開き直さない",
+     "    if (io_error && dict_recover(dict))\n        n = user_list_once",
+     "    if (0)\n        n = user_list_once"),
+    ("export が I/O エラーで開き直さない",
+     "    if (io_error && dict_recover(dict))\n        rc = user_export_once",
+     "    if (0)\n        rc = user_export_once"),
+    ("delete が I/O エラーで開き直さない",
+     "    if (io_error && dict_recover(dict))\n        rc = user_delete_once",
+     "    if (0)\n        rc = user_delete_once"),
+    ("clear が I/O エラーで開き直さない",
+     "        dict_recover(dict)) {\n        rc = sqlite3_exec",
+     "        0) {\n        rc = sqlite3_exec"),
+    ("学習が旧接続で先に SQL を流す",
+     "    if (!dict_ready(dict) || !dict->learn_stmt) return;",
+     "    if (!dict->db || !dict->learn_stmt) return;"),
+]
+
+# lib/sqlite3/os32_sqlite_vfs.c と fs/vfs_fd.c の変異 (ime の段で落ちること)
+SQLITE_MUTANTS = [
+    ("SQLite の入出力が失効を見ない", "lib/sqlite3/os32_sqlite_vfs.c",
+     "    return p->fd >= 0 && !vfs_fd_is_stale(p->fd);", "    return p->fd >= 0;"),
+    ("xTruncate が失効を見ない", "lib/sqlite3/os32_sqlite_vfs.c",
+     "    if (!file_live(pFile)) return SQLITE_IOERR_TRUNCATE;",
+     "    if (!file_valid(pFile)) return SQLITE_IOERR_TRUNCATE;"),
+    ("xFileSize が失効を見ない", "lib/sqlite3/os32_sqlite_vfs.c",
+     "    if (!file_live(pFile)) return SQLITE_IOERR_FSTAT;",
+     "    if (!file_valid(pFile)) return SQLITE_IOERR_FSTAT;"),
+    ("xCheckReservedLock が失効を見ない", "lib/sqlite3/os32_sqlite_vfs.c",
+     "    if (!file_live(f)) return SQLITE_IOERR_CHECKRESERVEDLOCK;",
+     "    if (!file_valid(f)) return SQLITE_IOERR_CHECKRESERVEDLOCK;"),
+    ("close も失効で断る (FD を解放できない)", "fs/vfs_fd.c",
+     "    if (vfs_validate_sqlite(lease) != VFS_OK) return VFS_ERR_INVAL;\n    f = &open_files[lease->fd];",
+     "    if (vfs_validate_sqlite(lease) != VFS_OK) return VFS_ERR_INVAL;\n    f = &open_files[lease->fd];\n    if (f->stale) return VFS_ERR_STALE;"),
+    ("journal 名の長さを見ない", "lib/sqlite3/os32_sqlite_vfs.c",
+     "    if ((flags & SQLITE_OPEN_MAIN_DB) && !journal_name_fits(zName))",
+     "    if ((flags & 0) && !journal_name_fits(zName))"),
+    ("失効した SQLite FD を BUSY から外す (ime)", "fs/vfs_fd.c",
+     "        if (!f->in_use || !f->sqlite_db || f->fs_ctx != fs_ctx) continue;",
+     "        if (!f->in_use || !f->sqlite_db || f->stale || f->fs_ctx != fs_ctx) continue;"),
 ]
 IME_SRC = ROOT / "tools/tests/ime_dict_host.c"
 
 
-def build_ime(tmp, ime_c=None, exe_name="ime"):
-    """sqlite.o は 1 回だけ作る。ime_c を渡すとその kernel/ime_dict.c を使う"""
+def build_ime(tmp, ime_c=None, exe_name="ime", overrides=None):
+    """sqlite.o は 1 回だけ作る。ime_c を渡すとその kernel/ime_dict.c を使う。
+    overrides = {"lib/sqlite3/os32_sqlite_vfs.c" / "fs/vfs_fd.c": 写しのパス}"""
     shim = tmp / "ime_shim"
     shim.mkdir(exist_ok=True)
     (shim / "memmap.h").write_text(
@@ -203,12 +273,28 @@ def build_ime(tmp, ime_c=None, exe_name="ime"):
                         str(ROOT / "lib/sqlite3/sqlite3.c"), "-o", str(obj)],
                        check=True)
     src = IME_SRC
-    if ime_c is not None:
+    overrides = overrides or {}
+    if ime_c is not None or overrides:
         src = tmp / f"{exe_name}_host.c"
-        text = IME_SRC.read_text(encoding="utf-8").replace(
-            '#include "../../kernel/ime_dict.c"', f'#include "{ime_c}"')
+        text = IME_SRC.read_text(encoding="utf-8")
+        if ime_c is not None:
+            text = text.replace('#include "../../kernel/ime_dict.c"',
+                                f'#include "{ime_c}"')
+        else:
+            text = text.replace('#include "../../kernel/ime_dict.c"',
+                                f'#include "{ROOT}/kernel/ime_dict.c"')
+        fdhost = f"{ROOT}/tools/tests/vfs_fd_sqlite_host.c"
+        if "fs/vfs_fd.c" in overrides:
+            fdhost = tmp / f"{exe_name}_fdhost.c"
+            fdhost.write_text((ROOT / "tools/tests/vfs_fd_sqlite_host.c").read_text(
+                encoding="utf-8").replace('#include "../../fs/vfs_fd.c"',
+                                          f'#include "{overrides["fs/vfs_fd.c"]}"'),
+                encoding="utf-8")
         text = text.replace('#include "vfs_fd_sqlite_host.c"',
-                            f'#include "{ROOT}/tools/tests/vfs_fd_sqlite_host.c"')
+                            f'#include "{fdhost}"')
+        if "lib/sqlite3/os32_sqlite_vfs.c" in overrides:
+            text = text.replace('#include "../../lib/sqlite3/os32_sqlite_vfs.c"',
+                                f'#include "{overrides["lib/sqlite3/os32_sqlite_vfs.c"]}"')
         text = text.replace('#include "../../lib/sqlite3/', f'#include "{ROOT}/lib/sqlite3/')
         text = text.replace('#include "sqlite_groups_backend.h"',
                             f'#include "{ROOT}/tools/tests/sqlite_groups_backend.h"')
@@ -270,6 +356,50 @@ def ime_mutants(tmp):
     return surv
 
 
+def sqlite_mutants(tmp):
+    surv = []
+    for i, (name, fname, before, after) in enumerate(SQLITE_MUTANTS):
+        src = (ROOT / fname).read_text(encoding="utf-8")
+        if src.count(before) != 1:
+            print(f"SQLITE MUTANT {i} ({name}): 置き換え元が {src.count(before)} 件")
+            surv.append(name)
+            continue
+        mp = tmp / f"sqm{i}_{pathlib.Path(fname).name}"
+        mp.write_text(src.replace(before, after), encoding="utf-8")
+        exe, err = build_ime(tmp, None, f"ime_sqm{i}", {fname: mp})
+        if exe is None:
+            print(f"SQLITE MUTANT {i} ({name}): build failed\n{err}")
+            surv.append(name)
+            continue
+        try:
+            r = subprocess.run([str(exe)], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, timeout=120)
+            ok = r.returncode == 0
+        except subprocess.TimeoutExpired:
+            ok = False
+        print(f"SQLITE MUTANT {i} ({name}): {'SURVIVED' if ok else 'killed'}")
+        if ok:
+            surv.append(name)
+    return surv
+
+
+def check_fatfold():
+    """fs/fatfs_vfs.c の fat_upper_ext が ff.c の TBL_CT437 と一致するか
+    (FatFs が名前を畳む規則と VFS の BUSY / pinned の比較を揃える、B4)"""
+    import re
+    ff = (ROOT / "fs/fatfs/ff.c").read_text(encoding="utf-8", errors="replace")
+    fv = (ROOT / "fs/fatfs_vfs.c").read_text(encoding="utf-8")
+    conf = (ROOT / "fs/fatfs/ffconf.h").read_text(encoding="utf-8", errors="replace")
+    cp = re.search(r"#define\s+FF_CODE_PAGE\s+(\d+)", conf).group(1)
+    m = re.search(r"#define\s+TBL_CT%s\s*\{(.*?)\}" % cp, ff, re.S)
+    want = [int(v.strip(), 16) for v in m.group(1).replace("\\", "").split(",")]
+    m = re.search(r"fat_upper_ext\[128\]\s*=\s*\{(.*?)\}", fv, re.S)
+    got = [int(v.strip(), 16) for v in m.group(1).split(",") if v.strip()]
+    ok = len(want) == 128 and want == got
+    print(f"case fatfold (fat_upper_ext == ff.c TBL_CT{cp}): {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def find_e2fsck():
     for cand in ("/usr/sbin/e2fsck", "/sbin/e2fsck"):
         if os.access(cand, os.X_OK):
@@ -328,6 +458,19 @@ def make_pkgs(d):
     w("CLASHZ.PKG", raw_pkg([(b"/clash", 3, F)], b"abc", lzss=True))
     w("GOOD.PKG", raw_pkg([(b"/good", 0, D), (b"/good/a.txt", 5, F)],
                           b"hello", lzss=True))
+    # 段 cdinst: cdinst.c の固定名 (/cd0/NORMAL.PKG 等) を組の接頭辞で差し替える
+    good = raw_pkg([(b"/good", 0, D), (b"/good/a.txt", 5, F)], b"hello", lzss=True)
+    norm = raw_pkg([(b"/n", 0, D), (b"/n/a.txt", 1, F)], b"N")
+    full = raw_pkg([(b"/full", 0, D), (b"/full/f.txt", 1, F)], b"F")
+    too_long = raw_pkg([(b"/l", 0, D), (b"/l/" + b"x" * 121, 1, F)], b"Z")  # 124
+    for setname, files in (
+            ("A_", {"MINIMAL": good, "NORMAL": too_long, "FULL": full}),
+            ("B_", {"MINIMAL": good, "NORMAL": norm, "FULL": full,
+                    "APPEND": raw_pkg([(b"/clash", 3, F)], b"abc")}),
+            ("C_", {"MINIMAL": good, "NORMAL": norm, "FULL": full}),
+            ("D_", {"MINIMAL": too_long, "NORMAL": norm})):
+        for n, b in files.items():
+            w(f"{setname}{n}.PKG", b)
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +629,8 @@ def mutants(tmp, pkgdir, e2fsck):
         mdir = tmp / f"mut{i}"
         shutil.copytree(ROOT / "fs", mdir / "fs")
         shutil.copytree(ROOT / "userland/lib/rt", mdir / "lib/rt")
+        (mdir / "system").mkdir()
+        shutil.copy(ROOT / "userland/system/cdinst.c", mdir / "system/cdinst.c")
         path = mdir / fname
         text = path.read_text(encoding="utf-8")
         if text.count(before) != 1:
@@ -564,7 +709,9 @@ def main():
             ok = check_mkpkg(tmp) and ok
         if case in (None, "ime"):
             ok = run_ime(tmp) and ok
-        if case not in ("errno", "mkpkg", "ime"):
+        if case in (None, "fatfold"):
+            ok = check_fatfold() and ok
+        if case not in ("errno", "mkpkg", "ime", "fatfold"):
             exe, err = build(tmp, ROOT / "fs", ROOT / "userland/lib")
             if exe is None:
                 print(err)
@@ -611,6 +758,11 @@ def main():
                 print("IME MUTANTS SURVIVED: " + "; ".join(isurv))
                 return 1
             print(f"IME MUTANTS all {len(IME_MUTANTS)} killed")
+            ssurv = sqlite_mutants(tmp)
+            if ssurv:
+                print("SQLITE MUTANTS SURVIVED: " + "; ".join(ssurv))
+                return 1
+            print(f"SQLITE MUTANTS all {len(SQLITE_MUTANTS)} killed")
         print("vfs_fd_path: PASS")
         return 0
 

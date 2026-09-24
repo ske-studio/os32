@@ -320,6 +320,77 @@ static int install_package_hd(const char *path, const char *label)
 }
 
 /* ======================================================================== */
+/*  パッケージの展開 (MINIMAL → NORMAL → FULL → DEBUG / APPEND) と同期       */
+/*                                                                          */
+/*  **どのパッケージの失敗でも止める** (Codex / Opus 実装レビュー ラリー 1)。 */
+/*  以前は MINIMAL だけ戻り値を見ていたので、NORMAL 以降が PATH TOO LONG や  */
+/*  容量不足で失敗しても後続へ進み、最後に "Installation Complete" を出して   */
+/*  いた。失敗したら失敗したパッケージ名を出し、完了表示は出さない。         */
+/*  同期 (vfs_sync) の失敗も完了扱いにしない。                               */
+/*  戻り値: PKG_OK = 完了 / それ以外 = 失敗した段の値                        */
+/* ======================================================================== */
+
+static int install_step(const char *path, const char *label)
+{
+    int ret = install_package_hd(path, label);
+    if (ret != PKG_OK) {
+        api->kprintf(COL_RED, "\n%s installation failed (rc=%d)!\n", label, ret);
+        println(COL_RED, "Installation aborted. The HDD is incomplete.");
+    }
+    return ret;
+}
+
+static int install_packages(int choice, int install_debug, int install_append)
+{
+    int ret;
+
+    /* 2. MINIMAL.PKG → /hd0 配下に展開 */
+    ret = install_step(PKG_MINIMAL, "MINIMAL");
+    if (ret != PKG_OK) return ret;
+
+    /* 3. NORMAL.PKG (タイプ2以上) */
+    if (choice >= '2' && pkg_exists(PKG_NORMAL)) {
+        ret = install_step(PKG_NORMAL, "NORMAL");
+        if (ret != PKG_OK) return ret;
+    }
+
+    /* 4. FULL.PKG (タイプ3) */
+    if (choice >= '3' && pkg_exists(PKG_FULL)) {
+        ret = install_step(PKG_FULL, "FULL");
+        if (ret != PKG_OK) return ret;
+    }
+
+    /* 5. オプション */
+    if (install_debug && pkg_exists(PKG_DEBUG)) {
+        ret = install_step(PKG_DEBUG, "DEBUG");
+        if (ret != PKG_OK) return ret;
+    }
+    if (install_append && pkg_exists(PKG_APPEND)) {
+        ret = install_step(PKG_APPEND, "APPEND");
+        if (ret != PKG_OK) return ret;
+    }
+
+    /* ファイルシステムをディスクに同期 */
+    print(COL_CYAN, "\n  Syncing filesystem...");
+    {
+        int sret = api->vfs_sync();
+        DBGF("[cdinst] vfs_sync=%d", sret);
+        if (sret != 0) {
+            api->kprintf(COL_RED, " FAILED (rc=%d)\n", sret);
+            println(COL_RED, "Installation aborted. The HDD is incomplete.");
+            return sret;
+        }
+        println(COL_GREEN, " OK");
+    }
+
+    /* 完了 */
+    print(COL_NORMAL, "\n");
+    println(COL_GREEN, "=== Installation Complete ===");
+    println(COL_NORMAL, "Remove the floppy disk and reboot from HDD.");
+    return PKG_OK;
+}
+
+/* ======================================================================== */
 /*  メイン                                                                   */
 /* ======================================================================== */
 
@@ -537,43 +608,6 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
         return;
     }
 
-    /* 2. MINIMAL.PKG → /hd0 配下に展開 */
-    if (install_package_hd(PKG_MINIMAL, "MINIMAL") != PKG_OK) {
-        println(COL_RED, "Minimal installation failed!");
-        return;
-    }
-
-    /* 3. NORMAL.PKG (タイプ2以上) */
-    if (choice >= '2' && pkg_exists(PKG_NORMAL)) {
-        install_package_hd(PKG_NORMAL, "NORMAL");
-    }
-
-    /* 4. FULL.PKG (タイプ3) */
-    if (choice >= '3' && pkg_exists(PKG_FULL)) {
-        install_package_hd(PKG_FULL, "FULL");
-    }
-
-    /* 5. オプション */
-    if (install_debug && pkg_exists(PKG_DEBUG)) {
-        install_package_hd(PKG_DEBUG, "DEBUG");
-    }
-    if (install_append && pkg_exists(PKG_APPEND)) {
-        install_package_hd(PKG_APPEND, "APPEND");
-    }
-
-    /* ファイルシステムをディスクに同期 */
-    print(COL_CYAN, "\n  Syncing filesystem...");
-    {
-        int sret = api->vfs_sync();
-        DBGF("[cdinst] vfs_sync=%d", sret);
-        if (sret != 0)
-            api->kprintf(COL_RED, " FAILED (rc=%d)\n", sret);
-        else
-            println(COL_GREEN, " OK");
-    }
-
-    /* 完了 */
-    print(COL_NORMAL, "\n");
-    println(COL_GREEN, "=== Installation Complete ===");
-    println(COL_NORMAL, "Remove the floppy disk and reboot from HDD.");
+    /* 2〜5. パッケージの展開・同期・完了表示 */
+    (void)install_packages(choice, install_debug, install_append);
 }

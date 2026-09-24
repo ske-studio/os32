@@ -491,6 +491,8 @@ static int shm_write_row(DbSlot *slot)
 /* ======================================================================== */
 
 static void slot_save_error(DbSlot *slot, int rc);
+static int db_journal_fits(const char *path);
+static int db_ieq(const char *a, const char *b);
 
 int __cdecl kapi_db_open(const char *path)
 {
@@ -510,6 +512,18 @@ int __cdecl kapi_db_open(const char *path)
     if (!db_user_str_copy(path, path_copy_buf, PATH_COPY_BUF_SIZE)) {
         open_fail_set(SQLITE_CANTOPEN);
         shm_write_error_text("path too long or unreadable");
+        return -1;
+    }
+    /* `<名前>-journal` が 255 バイトに収まらない名前は**開く時点で**断る
+     * (Opus 実装レビュー ラリー 1 の nb2)。開けてしまうと、読めるのに最初の
+     * 書き込みでジャーナルを開けない接続を返す。下の SQLite VFS (xOpen) も
+     * 同じ検査で断るが、ここで断ると理由を db_last_error() に残せる。
+     * ":memory:" と "" (一時 DB) はファイルを持たないので見ない。 */
+    if (path_copy_buf[0] != '\0' && !db_ieq(path_copy_buf, ":memory:") &&
+        !db_journal_fits(path_copy_buf)) {
+        open_fail_set(SQLITE_CANTOPEN);
+        shm_write_error_text("path too long (NAMETOOLONG): "
+                             "<name>-journal exceeds 255 bytes");
         return -1;
     }
 
@@ -927,6 +941,19 @@ static int db_journal_name(const char *path)
     journal_buf[sizeof(journal_buf) - 1] = '\0';
     kstrncat(journal_buf, DB_JOURNAL_SUFFIX, (u32)sizeof(journal_buf));
     return kstrlen(journal_buf) == want;
+}
+
+/* `<path>-journal` が下位層の名前の上限 (NUL 抜き 255 バイト) に、解決前の
+ * 名前 (SQLite は開いた名前に "-journal" を足す) と解決後の絶対名の両方で
+ * 収まるか。1 = 収まる / 0 = 収まらない (か、解決できない)。abs_path_buf を使う */
+static int db_journal_fits(const char *path)
+{
+    u32 sfx = (u32)sizeof(DB_JOURNAL_SUFFIX) - 1u;
+    if (kstrlen(path) + sfx + 1u > (u32)VFS_MAX_PATH) return 0;
+    abs_path_buf[0] = '\0';
+    if (vfs_resolve_path(path, abs_path_buf, (int)sizeof(abs_path_buf)) != VFS_OK)
+        return 0;
+    return kstrlen(abs_path_buf) + sfx + 1u <= (u32)VFS_MAX_PATH;
 }
 
 int __cdecl kapi_db_open_existing(const char *path, int writable)

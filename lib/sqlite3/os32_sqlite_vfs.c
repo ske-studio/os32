@@ -183,6 +183,20 @@ static int file_valid(sqlite3_file *file)
     return 0;
 }
 
+/* 入出力に使ってよいか: file_valid に加えて、FD が**失効していない**こと
+ * (Codex 実装レビュー ラリー 1 の B2)。unlink・置き換え rename・umount の後の
+ * FD は、read / write だけでなく truncate・サイズ・sync・lock も成功扱いに
+ * しない — hot journal の判定 (CheckReservedLock) や FileSize が古い値で
+ * 通ると、失効した接続がジャーナルを再生・削除してしまう。
+ * 失効は接続の誤用ではないので group の sticky エラーには数えない。
+ * **close は file_valid だけを見る** (失効後も FD を解放できる)。 */
+static int file_live(sqlite3_file *file)
+{
+    Os32File *p = (Os32File *)file;
+    if (!file_valid(file)) return 0;
+    return p->fd >= 0 && !vfs_fd_is_stale(p->fd);
+}
+
 /* ======================================================================== */
 /*  VFS ファイルメソッド                                                     */
 /* ======================================================================== */
@@ -215,7 +229,7 @@ static int os32Read(sqlite3_file *pFile, void *buf, int iAmt,
     Os32File *p = (Os32File *)pFile;
     int n;
 
-    if (!file_valid(pFile)) return SQLITE_IOERR_READ;
+    if (!file_live(pFile)) return SQLITE_IOERR_READ;
     vfs_seek(p->fd, (int)iOfst, 0);  /* SEEK_SET */
     n = vfs_read_fd(p->fd, buf, (u32)iAmt);
     if (n < 0) return SQLITE_IOERR_READ;
@@ -233,7 +247,7 @@ static int os32Write(sqlite3_file *pFile, const void *buf, int iAmt,
     Os32File *p = (Os32File *)pFile;
     int n;
 
-    if (!file_valid(pFile)) return SQLITE_IOERR_WRITE;
+    if (!file_live(pFile)) return SQLITE_IOERR_WRITE;
     vfs_seek(p->fd, (int)iOfst, 0);  /* SEEK_SET */
     n = vfs_write_fd(p->fd, buf, (u32)iAmt);
     if (n < iAmt) return SQLITE_IOERR_WRITE;
@@ -242,8 +256,8 @@ static int os32Write(sqlite3_file *pFile, const void *buf, int iAmt,
 
 static int os32Truncate(sqlite3_file *pFile, sqlite3_int64 size)
 {
-    (void)pFile; (void)size;
-    if (!file_valid(pFile)) return SQLITE_IOERR_TRUNCATE;
+    (void)size;
+    if (!file_live(pFile)) return SQLITE_IOERR_TRUNCATE;
     /* ext2 truncate 未実装 — no-op */
     /* 影響: VACUUM はファイルサイズを縮小できない。 */
     /*       journal_mode=DELETE ではジャーナル truncate が発生するが、 */
@@ -256,7 +270,7 @@ static int os32Sync(sqlite3_file *pFile, int flags)
     Os32File *p = (Os32File *)pFile;
     (void)flags;
     (void)p;
-    if (!file_valid(pFile)) return SQLITE_IOERR_FSYNC;
+    if (!file_live(pFile)) return SQLITE_IOERR_FSYNC;
     vfs_sync();
     return SQLITE_OK;
 }
@@ -264,19 +278,19 @@ static int os32Sync(sqlite3_file *pFile, int flags)
 static int os32FileSize(sqlite3_file *pFile, sqlite3_int64 *pSize)
 {
     Os32File *p = (Os32File *)pFile;
-    if (!file_valid(pFile)) return SQLITE_IOERR_FSTAT;
+    if (!file_live(pFile)) return SQLITE_IOERR_FSTAT;
     *pSize = (sqlite3_int64)vfs_get_size(p->fd);
     return SQLITE_OK;
 }
 
 /* ロック系: シングルタスクのため全て no-op */
 static int os32Lock(sqlite3_file *f, int l)
-    { (void)l; return file_valid(f) ? SQLITE_OK : SQLITE_IOERR_LOCK; }
+    { (void)l; return file_live(f) ? SQLITE_OK : SQLITE_IOERR_LOCK; }
 static int os32Unlock(sqlite3_file *f, int l)
-    { (void)l; return file_valid(f) ? SQLITE_OK : SQLITE_IOERR_UNLOCK; }
+    { (void)l; return file_live(f) ? SQLITE_OK : SQLITE_IOERR_UNLOCK; }
 static int os32CheckReservedLock(sqlite3_file *f, int *pOut)
 {
-    if (!file_valid(f)) return SQLITE_IOERR_CHECKRESERVEDLOCK;
+    if (!file_live(f)) return SQLITE_IOERR_CHECKRESERVEDLOCK;
     *pOut = 0;
     return SQLITE_OK;
 }
@@ -284,14 +298,14 @@ static int os32CheckReservedLock(sqlite3_file *f, int *pOut)
 static int os32FileControl(sqlite3_file *f, int op, void *pArg)
 {
     (void)f; (void)op; (void)pArg;
-    if (!file_valid(f)) return SQLITE_IOERR;
+    if (!file_live(f)) return SQLITE_IOERR;
     return SQLITE_NOTFOUND;
 }
 
 static int os32SectorSize(sqlite3_file *f)
-    { return file_valid(f) ? 512 : 0; }
+    { return file_live(f) ? 512 : 0; }
 static int os32DeviceCharacteristics(sqlite3_file *f)
-    { (void)file_valid(f); return 0; }
+    { (void)file_live(f); return 0; }
 
 /* ファイルメソッドテーブル */
 static const sqlite3_io_methods os32_io_methods = {
@@ -331,6 +345,29 @@ int os32_sqlite_db_fd(void *db)
 /*  VFS メソッド                                                             */
 /* ======================================================================== */
 
+/* DB 本体を開く前に、`<名前>-journal` が下位層の名前の上限 (NUL 抜き
+ * VFS_MAX_PATH - 1 = 255 バイト) に収まるかを見る (Opus 実装レビュー ラリー 1
+ * の nb2)。SQLite はジャーナルを**開いた名前のまま** "-journal" を足して開く
+ * ので、解決前の名前と解決後の絶対名の両方で数える。収まらない名前を通すと
+ * 「読めるが最初の書き込みでジャーナルを開けない」接続を返してしまう。
+ * 1 = 収まる / 0 = 収まらない (か、名前を解決できない) */
+static u32 name_len(const char *s)
+{
+    u32 n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+static int journal_name_fits(const char *name)
+{
+    static char abs_name[VFS_MAX_PATH];
+    const u32 sfx = 8u;                     /* strlen("-journal") */
+    if (!name) return 0;
+    if (name_len(name) + sfx + 1u > (u32)VFS_MAX_PATH) return 0;
+    if (vfs_resolve_path(name, abs_name, VFS_MAX_PATH) != VFS_OK) return 0;
+    return name_len(abs_name) + sfx + 1u <= (u32)VFS_MAX_PATH;
+}
+
 static int os32VfsOpen(sqlite3_vfs *pVfs, const char *zName,
                        sqlite3_file *pFile, int flags, int *pOutFlags)
 {
@@ -344,6 +381,8 @@ static int os32VfsOpen(sqlite3_vfs *pVfs, const char *zName,
 
     /* 一時ファイル (zName==NULL) はメモリストアで処理されるはず */
     if (zName == (const char *)0) return SQLITE_CANTOPEN;
+    if ((flags & SQLITE_OPEN_MAIN_DB) && !journal_name_fits(zName))
+        return SQLITE_CANTOPEN;             /* 名前が長すぎる (NAMETOOLONG) */
 
     if (flags & SQLITE_OPEN_CREATE)   oflags |= 0x0100; /* KAPI_O_CREAT */
     if (flags & SQLITE_OPEN_READWRITE) oflags |= 0x0002; /* KAPI_O_RDWR */

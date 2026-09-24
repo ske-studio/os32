@@ -161,6 +161,14 @@ typedef struct {
     /* inode で動く口 (上の VfsInoOps)。**任意実装** — NULL の FS は FD が
      * パスで動く。実装済みは ext2 だけ。 */
     const VfsInoOps *ino;
+
+    /* 名前の比較規則 (Codex 実装レビュー ラリー 1 の B4)。**任意実装** —
+     * NULL は「バイトごとに区別する」(ext2)。大文字小文字を区別しない FS
+     * (FAT / HostDrv / ISO9660) は、名前の 1 バイトをその FS が比較に使う形へ
+     * 畳む関数を置く。VFS は開いている SQLite DB の rename (BUSY) と使用中の
+     * loop イメージ (pinned) の名前比較をこれに従わせる — バイト比較のままだと
+     * FAT で `DB` と `db` が別名に見え、同じ実体の付け替え・削除をすり抜ける。 */
+    u8 (*name_fold)(u8 c);
 } VfsOps;
 
 /* ---- VFS API ---- */

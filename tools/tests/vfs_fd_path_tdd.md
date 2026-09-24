@@ -102,3 +102,38 @@ IME MUTANTS all 3 killed       (hot journal を見ない、I/O で何度でも�
 - **NP21/W 上で IME 辞書を置き換えた後に FEP が動くこと** (票 v2 の 12 の最後)。ホストの `ime` 段は
   実物の ime_dict.c + SQLite で開き直しの判断を見ているが、ゲストの画面・キー入力は通していない。
 - FAT / HostDrv の FD は従来どおりパスで動く (票の範囲外)。
+
+## 実装レビュー ラリー 1 の修正 (2026-09-24)
+
+Codex (B1〜B6) と Opus (nb1・nb2) の Request changes。試験を先に足し、修正前の
+ソースで落ちることを確かめてから直した (RED は該当ファイルだけを HEAD 47435ae に
+戻して回した)。
+
+| 項目 | 試験 | RED (修正前) |
+|---|---|---|
+| cdinst (6) | 段 `cdinst`: 実物の `install_packages` に NORMAL の PATH TOO LONG / APPEND の IO / MINIMAL の失敗 / 全部成功の 4 組 | 修正前は `main` の中に直書きで戻り値を捨てていた (関数が無いので組めない)。変異 3 本 (NORMAL / APPEND / MINIMAL で止まらない) で代える |
+| SQLite の失効 (B2) | `ime` 段 `sqlite_stale_legacy` / `sqlite_stale_group`: 旧来と group の両経路で truncate / sync / size / lock / unlock / CheckReservedLock / FileControl / read / write が IOERR、close は通り FD が空く | `FAIL expect_methods_fail: m->xTruncate(pf, 0) == SQLITE_IOERR_TRUNCATE` |
+| 失効後の BUSY (B3) | 段 `busy` (ext2、group と旧来の経路) と `ime` 段 `sqlite_stale_group` | `busy`: rename が 0 / NOTFOUND で通る。`ime`: `vfs_fd_rename_busy(... "/db/m.db" ...) == 1` で落ちる |
+| FAT の名前比較 (B4) | 段 `nocase` (パスで動き ASCII で畳む種別を 2 つ目にマウント): `CDB` / `X.DB` / `X.DB-JOURNAL` の rename、`DISK.IMG` の unlink が BUSY。`fatfold`: 表が ff.c と一致 | BUSY のはずが NOTFOUND (-2)、`x.db-Journal` への rename は 0 (実際に置いた) |
+| hot journal の順序 (B1) | `ime` 段 `hot_journal_before_sql`: 失効 + journal を**検索の前に**置く → 辞書無し、journal は `JJJJ` のまま、旧接続で検索していない (0hit の行が出ない) | 3 ファイル (ime_dict.c / os32_sqlite_vfs.c / vfs_fd.c) を戻すと `first_kanji(...) == ""` で落ちる (= 開き直してしまう、Codex の反例どおり)。ime_dict.c だけ戻すと B2 の防御で journal は残るが `n_0hit == 0` で落ちる |
+| IME の管理 API (B5) | `ime` 段 `admin_*`: 失効で clear / list / delete / export が開き直す、失効 + journal で辞書無し、失効を伴わない I/O 1 回で 1 回だけやり直す、export の途中の読み失敗は -4 | ime_dict.c を戻して (4a) を抜いた写しで `FAIL admin_apis: ime_user_clear(d) == 0` |
+| 長い DB 名 (nb2) | `kapi_db_v50` の `path_len`: 248 バイトの名前は `kapi_db_open` も `sqlite3_open_v2` も CANTOPEN、247 は開けて書ける。`ime` 段 `journal_name_len` も同じ | `FAIL path_len: kapi_db_open(longp) == -1` (kapi だけ直すと `sqlite3_open_v2(...) == SQLITE_CANTOPEN` で落ちる) |
+| hsync の BUSY 表示 (nb1) | `hsync_h2` の (5): rename が BUSY → `replace_failed` + `(BUSY)` + 「使用中で置き換えられなかった」、旧宛先不変、一時ファイルを片づける | 文言が無い |
+
+変異 (`--mutants`): fs / rt / cdinst 35 本、syscalls.c 4 本、ime_dict.c 11 本、
+os32_sqlite_vfs.c / vfs_fd.c (ime 段で見る) 7 本。全部落ちる。
+
+```
+MUTANTS all 35 killed    (+ 失効した SQLite FD を BUSY から外す、名前比較が FS の規則を見ない、
+                            cdinst が NORMAL / APPEND / MINIMAL の失敗で止まらない)
+ERRNO MUTANTS all 4 killed
+IME MUTANTS all 11 killed (+ 旧接続に SQL を流す前に失効を見ない、export が step の異常終了を EOF に、
+                            clear / 学習が旧接続で先に SQL を流す、list / export / delete / clear が
+                            I/O エラーで開き直さない)
+SQLITE MUTANTS all 7 killed (入出力が失効を見ない、truncate / size / CheckReservedLock が失効を見ない、
+                            close も失効で断る、journal 名の長さを見ない、失効 FD を BUSY から外す)
+```
+
+検証していないこと (追加): 実機・NP21/W の FAT 媒体での BUSY (ホストでは ext2 の口を
+「ASCII で畳む種別」として見ただけ。FAT の表は ff.c と文字列で突き合わせた)。
+HostDrv の非 ASCII 名の畳み方 (ホスト側の変換に依る) は区別したまま。
