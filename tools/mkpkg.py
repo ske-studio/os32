@@ -576,6 +576,8 @@ def fd_plan(plan, base_dir, loader=None, manifest=None):
     for r in fd.get('rename') or []:
         if not (r.get('reason') or '').strip():
             problems.append(f"fd.rename {r.get('guest')!r} に理由 (reason:) が無い")
+        if r['guest'] in rename:
+            problems.append(f"fd.rename {r['guest']!r} が 2 回 ({rename[r['guest']]} と {r['fd']})")
         rename[r['guest']] = r['fd']
     used = set()
 

@@ -31,9 +31,20 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+def fd_root_dev():
+    """kernel/kernel.c が FD 起動でルートに使うデバイス名 (試験で決め打ちしない)"""
+    src = (ROOT / "kernel/kernel.c").read_text(encoding="utf-8")
+    m = re.search(r'BOOT_DRIVE_FDD[^{]*\{\s*root_dev\s*=\s*"(\w+)";', src)
+    if not m:
+        sys.exit("kernel.c から FD ルートのデバイス名を読めない")
+    return m.group(1)
+
+
 BASE_NOAPP = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
               "-fno-stack-protector", "-Wall", "-Wdeclaration-after-statement",
-              "-D__OS32_USERLAND__"]
+              "-D__OS32_USERLAND__", '-DFD_ROOT_DEV="%s"' % fd_root_dev()]
 BASE = BASE_NOAPP + ["-DSHELL_AS_APP"]
 INCLUDES = ["-I" + str(ROOT / "sdk/include"), "-I" + str(ROOT / "sdk/include/os32"),
             "-I" + str(ROOT / "include"), "-I" + str(ROOT / "userland/shell"),
@@ -491,8 +502,12 @@ MUTATIONS = [
      "    }"),
     # 8.3 の /etc/filetype を FD 以外 (HDD) でも読む (Codex 実装レビュー、25n)
     ("fd83_any_root", "userland/shell/cmd_filer.c",
-     "    if (fd < 0 && ft_root_is_fd()) fd = g_api->sys_open(FL_FILETYPES_PATH_83, O_RDONLY);",
-     "    if (fd < 0 && (ft_root_is_fd() || 1)) fd = g_api->sys_open(FL_FILETYPES_PATH_83, O_RDONLY);"),
+     "    if (fd < 0 && ft_etc_on_fd_root()) fd = g_api->sys_open(FL_FILETYPES_PATH_83, O_RDONLY);",
+     "    if (fd < 0 && (ft_etc_on_fd_root() || 1)) fd = g_api->sys_open(FL_FILETYPES_PATH_83, O_RDONLY);"),
+    # /etc のマウントを見ずにルートのデバイスだけで決める (往復 2、25q)
+    ("fd83_root_only", "userland/shell/cmd_filer.c",
+     "    if (st_root.st_dev != st_etc.st_dev) return 0;\n",
+     "    if (st_root.st_dev != st_etc.st_dev) (void)0;\n"),
 
     # T18-a: ask が 255 文字目以降を黙って捨てる
     ("t18_ask_input_silent", "userland/shell/cmd_script.c",

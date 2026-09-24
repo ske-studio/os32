@@ -118,6 +118,27 @@ static int pkg_series_count(const char *base)
     return n - 1;
 }
 
+/* 型 choice ('1'〜'3') に要るパッケージのうち媒体に 1 本も無いものの名前を
+ * 出し、その数を返す (0 = 揃っている)。要る順は展開の順と同じ */
+static int report_missing_packages(int choice)
+{
+    static const char *const need[4] = {
+        PKG_BASE_MINIMAL, PKG_BASE_GUI, PKG_BASE_NORMAL, PKG_BASE_DEBUG
+    };
+    /* need[i] が要る最小の型 */
+    static const char need_from[4] = { '1', '2', '2', '3' };
+    int i, missing = 0;
+
+    for (i = 0; i < 4; i++) {
+        if (choice < need_from[i]) continue;
+        if (pkg_series_count(need[i]) == 0) {
+            api->kprintf(COL_RED, "  missing on CD: %s.PKG\n", need[i]);
+            missing++;
+        }
+    }
+    return missing;
+}
+
 /* 大文字小文字を無視してサフィックス一致判定 */
 static int str_endswith(const char *s, const char *suffix)
 {
@@ -534,11 +555,9 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
         return;
     }
 
-    /* 選んだ型に要るパッケージが媒体に揃っているか、HDD を消す前に見る */
-    if (pkg_series_count(PKG_BASE_MINIMAL) == 0
-        || (choice >= '2' && pkg_series_count(PKG_BASE_GUI) == 0)
-        || (choice >= '2' && pkg_series_count(PKG_BASE_NORMAL) == 0)
-        || (choice >= '3' && pkg_series_count(PKG_BASE_DEBUG) == 0)) {
+    /* 選んだ型に要るパッケージが媒体に揃っているか、HDD を消す前に見る。
+     * 欠けたものは名前を全部出す (古い CD / 焼き損じの切り分け用) */
+    if (report_missing_packages(choice) != 0) {
         println(COL_RED, "ERROR: the CD lacks a package for this install type.");
         return;
     }

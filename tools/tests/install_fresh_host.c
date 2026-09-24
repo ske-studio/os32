@@ -835,9 +835,53 @@ static void case_idetype(void)
     CHECK_STR("200 MB");
 }
 
+/* 段 fdset (tools/tests/test_packages.py case 9): argv[2] の一覧 (1 行
+ * "<FD 上のパス> <大きさ>") を FAT の媒体として並べて install を通し、
+ * /hd0 に出来たファイルを "<パス> <大きさ>" で argv[3] へ書く。
+ * 中身の一致は大きさと fx_content_ok で見る (贋の中身は位置で決まる)。 */
+static void case_fdset(const char *list, const char *out)
+{
+    FILE *f;
+    char line[160];
+    int i;
+
+    api_init();
+    rec_reset();
+    for (i = 0; i < FD_MAX; i++) fds[i].used = 0;
+    fx_reset();
+    fx_dir("/");
+    f = fopen(list, "r");
+    CHECK(f != NULL);
+    while (fgets(line, sizeof(line), f)) {
+        char path[96];
+        int size, k;
+        if (sscanf(line, "%95s %d", path, &size) != 2) continue;
+        for (k = 0; path[k]; k++)             /* FAT は大文字で返す */
+            if (path[k] >= 'a' && path[k] <= 'z') path[k] = (char)(path[k] - 32);
+        for (k = 1; path[k]; k++) {           /* 親ディレクトリを作る */
+            if (path[k] == '/') {
+                path[k] = '\0';
+                if (!fx_exists(path)) fx_dir(path);
+                path[k] = '/';
+            }
+        }
+        fx_put(path, size);
+    }
+    fclose(f);
+    CHECK(run() == 0);
+    f = fopen(out, "w");
+    CHECK(f != NULL);
+    for (i = 0; i < FX_MAX; i++) {
+        if (!fx[i].used || fx[i].is_dir || !fx_is_hdd(fx[i].path)) continue;
+        CHECK(fx_content_ok(fx[i].path, fx[i].size));
+        fprintf(f, "%s %d\n", fx[i].path + 4, fx[i].size);
+    }
+    fclose(f);
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 2) return 2;
+    if (argc != 2 && !(argc == 4 && !strcmp(argv[1], "fdset"))) return 2;
     if (!strcmp(argv[1], "nokernel")) case_nokernel();
     else if (!strcmp(argv[1], "vmkernel")) case_vmkernel();
     else if (!strcmp(argv[1], "lower")) case_lower();
@@ -850,6 +894,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "srcname")) case_srcname();
     else if (!strcmp(argv[1], "sync_fail")) case_sync_fail();
     else if (!strcmp(argv[1], "idetype")) case_idetype();
+    else if (!strcmp(argv[1], "fdset") && argc >= 4) case_fdset(argv[2], argv[3]);
     else return 2;
     printf("PASS %s\n", argv[1]);
     return 0;

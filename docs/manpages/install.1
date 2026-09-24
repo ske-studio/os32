@@ -11,6 +11,11 @@
 FDDからHDD (ext2) へOS32のシステムファイルをインストールする。
 カーネル、シェル、外部プログラム等をコピーする。
 
+起動 FD の中身は CD の Minimal (CUI のみ) と同じで、HDD にも同じ集合ができる。
+FD の FAT (8.3) に合わせて短くした名前 (`/sys/font/default.kcg`、`/etc/filetype`)
+は正規名 (`default.kcgfont`、`filetypes`) に戻して写す。ブートセクタとローダは
+HDD のブート領域へ書き、FD 用の `/etc/profile` は写さない。
+
 ## SEE ALSO
 
 format, mount
