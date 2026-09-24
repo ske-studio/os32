@@ -78,4 +78,25 @@ int serial_watchdog_leave(struct serial_watchdog *w);
  * 受けていたら LINKED (遅れて届いた ack を「無音」と読み替えない)。 */
 int serial_watchdog_decide(unsigned long elapsed_ticks, int acked);
 
+/* ======================================================================== */
+/*  rshell の ESC (票 TASK_SERIAL_HOSTFS §1-v3 / 決裁 1B)                   */
+/*                                                                          */
+/*  シリアルから来た ESC で rshell を閉じるのは**行の先頭の単独の ESC**      */
+/*  (後ろに続くバイトが RSH_ESC_ALONE_TICKS のあいだ来ない) のときだけ。     */
+/*  SerialFS のフレームの中の 0x1B や、遅れて届いた応答の断片で閉じない。    */
+/*  それ以外の位置の ESC を含む行は**実行せずに断る** (EOT は返す)。         */
+/*  本体キーボードの ESC は従来どおりどこでも閉じる。                       */
+/* ======================================================================== */
+#define RSH_ESC_ALONE_TICKS 3     /* 30ms: 115200 でも 9600 でも続きは 2ms 以内 */
+#define RSH_ESC_NONE  0           /* ESC ではない */
+#define RSH_ESC_EXIT  1           /* rshell を閉じる */
+#define RSH_ESC_JUNK  2           /* この行は実行しない */
+int rsh_esc_classify(int ch, int from_serial, int at_line_start, int followed);
+
+/* `sfs run <コマンド行>` の行から子のコマンド行を取り出す。行全体が
+ * 空白* "sfs" 空白+ "run" 空白+ <1 文字以上> の形でなければ NULL。
+ * (`a && sfs run b` のような入れ子は受けない — 決裁 3A「ホストから送った
+ * 1 行だけ」) */
+const char *rsh_sfs_child(const char *line);
+
 #endif /* __SERIAL_WATCHDOG_H */

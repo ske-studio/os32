@@ -308,6 +308,17 @@ int vfs_dev_parse(const char *name, int *dev_type, int *dev_id)
 
 /* ======== VFS 公開API ======== */
 
+/* prefix が同じ場所か (末尾の `/` を除いて比べる。"/" 自身はそのまま) */
+static int vfs_prefix_same(const char *a, const char *b)
+{
+    int la = (int)kstrlen(a), lb = (int)kstrlen(b), i;
+    while (la > 1 && a[la - 1] == '/') la--;
+    while (lb > 1 && b[lb - 1] == '/') lb--;
+    if (la != lb) return 0;
+    for (i = 0; i < la; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
 int vfs_mount(const char *prefix, const char *dev_name, const char *fstype)
 {
     int dev_type, dev_id, rc, i, slot;
@@ -338,6 +349,15 @@ int vfs_mount(const char *prefix, const char *dev_name, const char *fstype)
     for (i = 0; i < VFS_MAX_FS; i++) {
         if (mounts[i].in_use && mounts[i].ops == ops &&
             mounts[i].dev_type == dev_type && mounts[i].dev_id == dev_id)
+            return VFS_ERR_EXIST;
+    }
+
+    /* 同じ prefix の二重登録も断る (票 TASK_SERIAL_HOSTFS §1-v2 B-4')。
+     * 以前は (ops, dev) しか見ていなかったので、`/host` に HostDrv が居る
+     * ところへ別の FS を重ねられ、どちらが引かれるかは表の順で決まっていた。
+     * 末尾の `/` の有無は同じ場所として比べる。 */
+    for (i = 0; i < VFS_MAX_FS; i++) {
+        if (mounts[i].in_use && vfs_prefix_same(mounts[i].prefix, prefix))
             return VFS_ERR_EXIST;
     }
 

@@ -51,6 +51,7 @@
 extern void fatfs_init(void);
 
 #include "hostdrvfs.h"
+#include "serialfs.h"
 #include "tvram.h"
 #include "pc98.h"
 #include "memmap.h"
@@ -350,6 +351,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     vfs_register_fs(&iso9660_ops);
 
     hostdrvfs_init();
+    serialfs_init();   /* /host をシリアル越しに (sfs run の中だけ、票 TASK_SERIAL_HOSTFS B) */
     path_set_device_validator(dev_find_validator);
     tvram_print(64, 1, "OK", TATTR_WHITE);
 

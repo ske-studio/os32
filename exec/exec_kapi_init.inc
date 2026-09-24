@@ -233,10 +233,13 @@ extern int __cdecl wrap_dev_mount_count(int drv);
 extern int __cdecl wrap_sys_umount_checked(const char *prefix);
 extern int __cdecl wrap_hdd_geom_info(int drv, HddGeom *out);
 extern int __cdecl wrap_boot_image_info(BootImageInfo *out);
+extern int __cdecl wrap_sfs_begin(void);
+extern int __cdecl wrap_sfs_end(int exit_code);
+extern int __cdecl wrap_serial_diag(SerialDiag *out);
 extern i32 __cdecl kapi_reserved_nosys(void);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 65;
+kapi->version = 66;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -473,6 +476,9 @@ kapi->version = 65;
     kapi->sys_umount_checked = wrap_sys_umount_checked;
     kapi->hdd_geom_info = wrap_hdd_geom_info;
     kapi->boot_image_info = wrap_boot_image_info;
+    kapi->sfs_begin = wrap_sfs_begin;
+    kapi->sfs_end = wrap_sfs_end;
+    kapi->serial_diag = wrap_serial_diag;
     {
         u32 _kr;
         for (_kr = 0; _kr < (u32)KAPI_FUNC_RESERVED; _kr++)

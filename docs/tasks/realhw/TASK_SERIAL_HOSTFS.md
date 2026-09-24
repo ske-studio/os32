@@ -60,6 +60,8 @@
 
 ## 1-v3. ラリー 2 による改訂 — §1-v2 の該当項をこの節で置き換える
 
+- **部品 B は実装済み (2026-09-25、wt/serialfs、手元ビルドとホスト試験のみ、KAPI v66)**: `sfs_begin` / `sfs_end` / `serial_diag`。形式の正典は `fs/sfs_proto.h` (ホストの写しは `tools/serialfs_host.py`)、VFS は `fs/serialfs.c`、要求 / 応答は `fs/sfs_client.c`、セッションは `fs/serialfs_session.c`、ゲートは `drivers/serial.c`、`sfs run` は `userland/shell/rshell.c`、ホストは `tools/rshell_serial.py --serve-host` (NP21/W は `--port aidebug:http://…:8025`)。**票からの 1 点の入れ替え**: 溜めた出力の LOG / EXIT フレームは (9) ゲートを下ろす**前に**送る (下ろした後は console の複写が同じ線に出てフレームの間に文字が挟まりうる)。試験は `make check-serialfs-host` ([記録](../../../tools/tests/serialfs_tdd.md)) と `check-hsync-h2-host` の `case_boot_old`。NP21/W (T2)・実機 (T3/T4) は残件。
+
 **セッションは 1 つのコマンドの中で閉じる** (両者 N1/N2)
 - 新しい組込み **`sfs run <コマンド行>`** (常駐シェル。`sh` には入れない)。これだけが SerialFS のセッションを開ける。流れ: (1) `/host` が空いていることを確かめる (HostDrv や既存のマウントがあれば断る) → (2) 送受信のゲートを上げる → (3) **HELLO** (ホストが 32 ビットの乱数のセッション ID を返す) → (4) `/host` に SerialFS をマウント → (5) 子のコマンドを exec で走らせる → (6) 子がどう終わっても (通常 / 非ゼロ / fault kill) `sfs run` に戻る → (7) **BYE** → アンマウント (線が死んでいてもローカルの ctx は解放する) → (8) 受信の隔離 (下) → (9) ゲートを下ろす → (10) 溜めた出力を流す → (11) `sfs: exit=N` を 1 行 → rshell の行末 EOT。**exec_exit / ring3_fault_kill はゲートに触らない** (持ち主は `sfs run` だけ)。`mount /host COM1 serialfs` の単独実行は断る。`cmd_mount` は余分な引数を断るよう直す。
 - rshell の外 (手元の CUI) で `sfs run` を打った場合も同じ流れ (rshell の EOT が無いだけ)。

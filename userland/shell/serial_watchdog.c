@@ -73,3 +73,34 @@ int serial_watchdog_leave(struct serial_watchdog *w)
     }
     return SER_WD_REVERT;
 }
+
+int rsh_esc_classify(int ch, int from_serial, int at_line_start, int followed)
+{
+    if (ch != 0x1B) return RSH_ESC_NONE;
+    if (!from_serial) return RSH_ESC_EXIT;          /* 本体の ESC */
+    if (at_line_start && !followed) return RSH_ESC_EXIT;
+    return RSH_ESC_JUNK;
+}
+
+static int rsh_is_space(char c)
+{
+    return c == ' ' || c == '\t';
+}
+
+const char *rsh_sfs_child(const char *line)
+{
+    const char *p = line;
+
+    if (!p) return (const char *)0;
+    while (rsh_is_space(*p)) p++;
+    if (p[0] != 's' || p[1] != 'f' || p[2] != 's' || !rsh_is_space(p[3]))
+        return (const char *)0;
+    p += 3;
+    while (rsh_is_space(*p)) p++;
+    if (p[0] != 'r' || p[1] != 'u' || p[2] != 'n' || !rsh_is_space(p[3]))
+        return (const char *)0;
+    p += 3;
+    while (rsh_is_space(*p)) p++;
+    if (*p == '\0') return (const char *)0;
+    return p;
+}

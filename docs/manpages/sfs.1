@@ -1,0 +1,42 @@
+# sfs
+
+シリアル越しの /host (SerialFS) で 1 コマンドを走らせる
+
+## SYNOPSIS
+
+`sfs run COMMAND...`
+
+## DESCRIPTION
+
+実機でファイルを入れる口 (票 TASK_SERIAL_HOSTFS 部品 B)。**常駐シェルだけ**が持ち、
+**ホストが rshell へ送った 1 行が丸ごと `sfs run ...` のときだけ**動く (本体の
+キーボードから打った行・`a && sfs run b` のような入れ子は断る)。
+
+ホスト (ノート) で:
+
+    rshell_serial.py --port /dev/ttyUSB0 --fast 115200 --serve-host ./hostdrv cmd sfs run hsync boot
+
+ゲストの流れ: `/host` が空いているか確かめる → 送受信のゲートを上げる → HELLO
+(ホストがセッション ID を返す) → `/host` に SerialFS をマウント → COMMAND →
+(どう終わっても) BYE → アンマウント → 受信を捨てて線が 500ms 静まるのを待つ
+(上限 5 秒。越えたら警告して進む) → 溜めた出力と `sfs: exit=N` を長さ付きの
+フレームで送る → ゲートを下ろす → rshell の EOT。
+
+- セッション中の出力は画面に出るが、シリアルへは直接出ない (カーネルに 8KB 溜めて
+  最後に送る。溢れたら古い方を捨てて `sfs: log dropped N bytes` と出す)
+- `/host` に HostDrv など別の FS が付いていれば断る (NP21/W では先に `umount /host`)
+- 時間切れは今の速度から決める (1 試行 = 2 秒 + 最大フレームの 2 倍 + 0.5 秒)。
+  同じ番号で 3 回まで再送し、要求が 3 つ続けて届かなければ線を死んだと見なして
+  以後の要求を即座に失敗させる
+- シリアル越しの読み書きは遅い。`hsync` の全体同期ではなく `hsync boot` /
+  `hsync bin` と範囲を絞って使う
+
+## EXAMPLES
+
+- `sfs run hsync boot` — カーネルを更新 (起動した版なら `/boot/vmkernel.old` を残す)
+- `sfs run ls /host` — ホストのディレクトリを見る
+- `sfs run push /tmp/log.txt host:/log.txt` — ゲストのファイルをホストへ
+
+## SEE ALSO
+
+rshell, serial, hsync, mount
