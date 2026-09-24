@@ -68,9 +68,12 @@ typedef struct GfxBackend {
      * 従来どおり init() → shutdown() で済ませる。
      * **表示のモードも同期も変えない** のが約束: 予約 (sys_reserve_top)・
      * 窓の写像・起動時の状態の記録だけを行う。init/shutdown で済ませると、
-     * CUI しか使わない起動でも 09A8h とテキスト GDC の SYNC を送り直すことに
-     * なり、実機 (Ra266 + 液晶) でテキストが 1 行 1 文字ずつ右へずれた
-     * (TASK_FDC_REALHW §9-1)。終わって probe() が 0 を返したら 9801 へ落ちる。 */
+     * CUI しか使わない起動でも 09A8h とテキスト GDC の SYNC を送り直す。
+     * 実機 (Ra266 + 液晶) でテキストが 1 行 1 文字ずつ右へずれたのは、この
+     * 送り直しが原因だという **仮説** (GFX=pc98 で消えたことからの推定。
+     * この変更での実機確認はまだ。TASK_FDC_REALHW §9-1。候補と限界は
+     * backend_pegc.c の pegc_prepare の注記)。終わって probe() が 0 を返したら
+     * 9801 へ落ちる。 */
     void (*prepare)(void);
 } GfxBackend;
 

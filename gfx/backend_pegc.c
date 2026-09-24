@@ -192,9 +192,9 @@ static void pegc_tvram_clear(int row0, int row1)
 /*  起動時の同期状態の記録 (実機 Ra266 + 液晶の桁ズレ、TASK_FDC_REALHW §9-1)  */
 /*                                                                          */
 /*  読めるものだけ読む:                                                      */
-/*    09A8h bit1,0  水平走査周波数 ([U] io_disp.md「I/O 09A8h」READ/WRITE、  */
-/*                  [B] §3-2 表3-1)。10b/11b と未使用 bit7〜2 の 1 は        */
-/*                  「読めていない」とみなす (open bus の FFh を弾く)。       */
+/*    09A8h D0      水平走査周波数 ([U] io_disp.md「I/O 09A8h」READ/WRITE、  */
+/*                  [B] §3-2 表3-1 は読み出しの D0=HF だけを定義し、D7〜D1   */
+/*                  は不定)。FFh (open bus) だけを「読めていない」とする。   */
 /*    054Ch bit5    BIOS の記録する水平走査周波数 ([US] memsys.md PRXCRT)。  */
 /*                  9821 初代は 31kHz でも 0 なので補助にだけ使う。          */
 /*    0459h bit0    BIOS の 480 ラインフラグ ([US] memsys.md CRT_EXT_STS)。   */
@@ -216,9 +216,9 @@ static void pegc_boot_sync_record(void)
     crtext = bios_flag(PEGC_BIOS_CRT_EXT_STS);
     gfx_counters.io_accesses++;
 
-    if (!(raw & PEGC_HSYNC_UNUSED_MASK)) {
-        u8 v = (u8)(raw & PEGC_HSYNC_MASK);
-        if (v == PEGC_HSYNC_24KHZ || v == PEGC_HSYNC_31KHZ) hs_port = v;
+    if (raw != PEGC_HSYNC_OPEN_BUS) {
+        hs_port = (raw & PEGC_HSYNC_READ_HF) ? PEGC_HSYNC_31KHZ
+                                             : PEGC_HSYNC_24KHZ;
     }
     hs_bios = (prxcrt & PEGC_BIOS_PRXCRT_31KHZ) ? 1 : 0;
 
@@ -233,11 +233,15 @@ static void pegc_boot_sync_record(void)
         s_boot_hsync = -1;
     }
 
-    kprintf(0x07, "[pegc] hsync=%s 09a8=%02x%s bios054c.b5=%d bios0459.b0=%d\n",
+    /* 09A8h と 054Ch bit5 の食い違いは行に出す (採るのは 09A8h)。
+     * 054Ch bit5=0 は 9821 初代では 31kHz でも起きる ([US] memsys.md)。 */
+    kprintf(0x07, "[pegc] hsync=%s 09a8=%02x%s bios054c.b5=%d bios0459.b0=%d%s\n",
             s_boot_hsync == PEGC_HSYNC_31KHZ ? "31k" :
             s_boot_hsync == PEGC_HSYNC_24KHZ ? "24k" : "?",
             (unsigned int)raw, hs_port >= 0 ? "" : "(unreadable)",
-            hs_bios, (crtext & PEGC_BIOS_CRT_480LINE) ? 1 : 0);
+            hs_bios, (crtext & PEGC_BIOS_CRT_480LINE) ? 1 : 0,
+            (hs_port >= 0 && (hs_port == PEGC_HSYNC_31KHZ) != hs_bios)
+                ? " MISMATCH(09a8 vs 054c)" : "");
 }
 
 /* 480 ラインから戻るときの周波数。起動時に記録した値。分からなかったとき
@@ -446,6 +450,12 @@ static int pegc_reserve_backbuffer(void)
     /* pgalloc の管理域の末尾でもあるので、動的確保に配られないよう押さえる。
      * (sys_usable_mem_end() は下がったが pgalloc_init は既に済んでいる) */
     pgalloc_mark_used(s_bb_phys, (int)((u32)MEM_GFX_BB8_SIZE / PAGE_SIZE));
+    /* **予約した直後に 0 で埋める**。この面は exec が CPL=3 のアプリへ USER
+     * で写す (exec/exec.c、gfx_bb_phys_range)。prepare は init と違って画面を
+     * クリアしないので、ここで埋めないと最初の gfx_init までの間、予約前の
+     * 物理ページの残り (カーネルのデータを含みうる) がアプリから見える
+     * (レビュー往復 1)。 */
+    kmemset((u8 *)s_bb_phys, 0, (u32)MEM_GFX_BB8_SIZE);
     gfx_backend_pegc.bb_base = (u8 *)s_bb_phys;
     gfx_backend_pegc.bb_size = (u32)MEM_GFX_BB8_SIZE;
     return 1;
@@ -478,9 +488,23 @@ static void pegc_map_linear(void)
 /*    3. リニア窓の写像 (master PD。以後に作るアプリ PD へ PDE が写る)       */
 /*  だけ。かつては init → shutdown で済ませていたため、CUI しか使わない      */
 /*  起動でも 31kHz/480 ラインへ入って 24kHz/400 ラインの標準 SYNC で戻して   */
-/*  いた。実機 (PC-9821Ra266 + 液晶 LCD172VXM) ではその送り直しの後、        */
-/*  テキストが 1 行ごとに 1 文字ずつ右へずれた (GFX=pc98 で消える。          */
-/*  TASK_FDC_REALHW §9-1)。NP21/W は同期を模擬しないので再現しない。         */
+/*  いた。実機 (PC-9821Ra266 + 液晶 LCD172VXM) ではテキストが 1 行ごとに     */
+/*  1 文字ずつ右へずれ、GFX=pc98 (PEGC を選ばない) で消えた                  */
+/*  (TASK_FDC_REALHW §9-1)。NP21/W は同期を模擬しないので再現しない。         */
+/*                                                                          */
+/*  ⚠ **原因は仮説のまま** (この変更での実機確認はまだ):                     */
+/*   - 見立て: 起動時の送り直し (09A8h + GDC SYNC) が BIOS の作った同期と    */
+/*     合わず、液晶の自動調整が合わなくなった。                              */
+/*   - ただし **24kHz で起動していた場合、旧経路でも最終状態は同じ**         */
+/*     (24kHz + 資料の標準 SYNC = BIOS の値)。違いは途中で 31kHz/480 を      */
+/*     一瞬通ることと、同じ値の SYNC を入れ直すことだけ。起動行の          */
+/*     `[pegc] hsync=` が 24k なら、最終値の食い違いでは説明できない。       */
+/*   - それでも直らなければ次に疑う候補 (GFX=pc98 では両方とも走らない):     */
+/*       a. PEGC probe (pegc_linear_selftest) の 6Ah 21h → 20h の出入り      */
+/*          (拡張グラフィックモードへ入って戻る)。prepare でも走る。          */
+/*       b. gdc_send が GDC の FIFO (ステータスの FIFO FULL/EMPTY) を待たずに  */
+/*          コマンドとパラメータを流すこと。実機の GDC で SYNC の 8 バイトが   */
+/*          取りこぼされうる (今回は注記のみ、直していない)。              */
 /* ------------------------------------------------------------------------ */
 static void pegc_prepare(void)
 {
@@ -681,8 +705,9 @@ static void pegc_leave(void) { }
 /*  戻るのは拡張モードを抜けた瞬間なので、MMIO への最後の書き込みは          */
 /*  そのに済ませておく。                                                     */
 /*  ※ 周波数は **起動時に BIOS が作っていた値** へ戻す (pegc_boot_sync_record */
-/*  の記録)。以前は 24kHz 決め打ちで、31kHz で起動する 9821 + 液晶の組では   */
-/*  戻った後のテキストが桁ずれした (TASK_FDC_REALHW §9-1)。s_active が 0 の  */
+/*  の記録)。以前は 24kHz 決め打ちで、31kHz で起動する機種では戻った後の     */
+/*  同期が起動時と変わっていた (桁ずれとの関係は仮説、TASK_FDC_REALHW §9-1)。 */
+/*  s_active が 0 の                                                         */
 /*  とき (480 ラインへ入っていない) は何もしない = 同期に一切触らない。      */
 /*  ※ 480 ライン化で GDC の SYNC を書き換えているので、周波数だけでなく      */
 /*  同期パラメータと表示区間も 400 ライン用へ確実に戻す (票 H2c)。           */

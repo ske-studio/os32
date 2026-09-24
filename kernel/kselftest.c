@@ -1042,7 +1042,17 @@ static void ksel_irq_snap_take(struct ksel_irq_snap *s)
     s->ln_s        = irq_lines[idx].storm_masked;
 }
 
-static void test_irq_dynamic_body(void);
+static void test_irq_dynamic_body(int skip_unmask);
+
+/* マスタ PIC の IRR (要求が来ているか) を OCW3 で読む。IMR に関係なく立つ。
+ * 読んだ後は既定の IRR 読み出しのまま (irq_finish と同じ流儀)。 */
+static int ksel_irq_pending(unsigned int irq)
+{
+    u8 irr;
+    outp(PIC1_CMD, OCW3_IRR);
+    irr = (u8)inp(PIC1_CMD);
+    return (int)((irr >> (irq & 7)) & 1);
+}
 
 /* ------------------------------------------------------------------------ */
 /*  IRQ3 は **本物の線** (実機 Ra266 では内蔵 LAN の 82557 が PCI Line 3 で   */
@@ -1070,6 +1080,7 @@ static void test_irq_dynamic(void)
     struct ksel_irq_snap before, after;
     u32 unexpected_before;
     unsigned int saved;
+    int pending;
 
     ksel_irq_snap_take(&before);
     if (before.count != 0 || before.quarantined || before.storm ||
@@ -1083,13 +1094,25 @@ static void test_irq_dynamic(void)
     }
 
     saved = irq_save();
+    /* **本物の要求が IRR に来ていたら IMR を開けない** (レビュー往復 1)。
+     * IF=0 でも、要求の立った線の IMR を開けて閉じると 8259 が INT を上げて
+     * 下ろすことになり、偽の割り込み (IR7 / IRQ15 のスプリアス) を招きうる。
+     * それが 1 回きりの unclaimed 表示を食うのを避ける。この場合は IMR を
+     * 開けない拒否規則だけを見て、残りは飛ばしたことをログに残す
+     * (FAIL にはしない — 装置が線を上げているのは試験の失敗ではない)。
+     * 実機 Ra266 では内蔵 LAN の 82557 が IRQ3 を上げたままのはず (未確認)。 */
+    pending = ksel_irq_pending(KSEL_IRQ_LINE);
     unexpected_before = irq_unexpected;
     irq_test_quiet = 1;
-    test_irq_dynamic_body();
+    test_irq_dynamic_body(pending);
     irq_test_quiet = 0;
     irq_unexpected = unexpected_before;
     ksel_irq_snap_take(&after);
     irq_restore(saved);
+
+    if (pending)
+        kprintf(0x07, "[selftest] irq: IRQ%d pending in IRR -> unmask part "
+                "skipped (not a failure)\n", KSEL_IRQ_LINE);
 
     check(after.masked == before.masked &&
           after.quarantined == before.quarantined &&
@@ -1099,8 +1122,9 @@ static void test_irq_dynamic(void)
           "irq:line restored");
 }
 
-/* 本体は **IF=0 で** 呼ぶこと (上の注記)。 */
-static void test_irq_dynamic_body(void)
+/* 本体は **IF=0 で** 呼ぶこと (上の注記)。skip_unmask が 1 なら、IMR を
+ * 開けない拒否規則だけを見て戻る。 */
+static void test_irq_dynamic_body(int skip_unmask)
 {
     u32 ctx_before = irq_ctx_violations;
     u32 deferred_before;
@@ -1119,6 +1143,8 @@ static void test_irq_dynamic_body(void)
           "irq:regNULL=INVAL");
     check(irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[0], 0x80)
           == IRQ_ERR_INVAL, "irq:regflag=INVAL");
+
+    if (skip_unmask) return;   /* ここから先は IRQ3 の IMR を開ける */
 
     /* --- 登録数で PIC のマスクを持つ --- */
     check(ksel_irq_masked(KSEL_IRQ_LINE) == 1, "irq:masked b4 reg");

@@ -330,9 +330,10 @@ static int gfx_select_and_init_backend(void)
 /*                                                                          */
 /*  どちらも「アプリが 1 つも走っていないカーネル文脈」でなければ成立しない。  */
 /*  バックエンドが prepare() を持てば (PEGC) それだけを呼ぶ — 予約・写像・    */
-/*  起動時の同期の記録だけで、表示のモードも同期も変えない (実機 Ra266 +     */
-/*  液晶で、CUI 起動でも 480 ライン化 → 24kHz 戻しを通していたせいでテキスト */
-/*  が桁ずれした。TASK_FDC_REALHW §9-1)。持たなければ (Cirrus) 従来どおり     */
+/*  起動時の同期の記録だけで、表示のモードも同期も変えない。実機 Ra266 +      */
+/*  液晶の桁ずれは、CUI 起動でも 480 ライン化 → 24kHz 戻しを通していたこと  */
+/*  が原因だという **仮説** (未確認。候補は backend_pegc.c の pegc_prepare   */
+/*  の注記、TASK_FDC_REALHW §9-1)。持たなければ (Cirrus) 従来どおり           */
 /*  init まで済ませて shutdown で表示をテキストへ戻す。予約とリニア窓は        */
 /*  shutdown をまたいで保持されるので、以後のアプリの gfx_init は再利用する。  */
 /*  9801 (init == NULL) は予約も窓も要らないので何もしない。                 */
@@ -343,7 +344,7 @@ void gfx_prepare_backend(void)
     if (!g_backend) return;
     /* 下ごしらえを別に持つバックエンド (PEGC) は表示に触らずに済ませる。
      * init → shutdown で済ませると CUI しか使わない起動でも同期を送り直す
-     * (実機 Ra266 + 液晶の桁ズレ、TASK_FDC_REALHW §9-1)。 */
+     * (実機 Ra266 + 液晶の桁ズレの原因という仮説、TASK_FDC_REALHW §9-1)。 */
     if (g_backend->prepare) {
         g_backend->prepare();
         if (g_backend->probe && !g_backend->probe())
