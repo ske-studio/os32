@@ -26,6 +26,15 @@
 /*  トラックが交互に追い出し合い、1KB ごとにシークが 2 回出た (9ed7c80 を   */
 /*  NP21/W で起動して速くならなかった理由、2026-09-24)。                    */
 /*                                                                          */
+/*  **セクタキャッシュ (2026-09-24 夕)**: 6541ef1 の実測で multi=767 /      */
+/*  seek=751 — 先読みがほぼ当たらなかった。VFS (fs/fatfs_vfs.c の           */
+/*  fatfs_vfs_read_stream) が 1 回の読みごとに f_open → f_lseek → f_read   */
+/*  を回すので、1KB ごとにルートディレクトリ・/sys・/sys/font・FAT・       */
+/*  データの 4〜5 本のトラックを巡回し、2 本の LRU は 1 回も当たらない。    */
+/*  **count=1 の読み (FatFs の窓の出し入れ) だけを FDC_SECTOR_SLOTS 個の    */
+/*  LRU で覚える**。毎回使うディレクトリと FAT のセクタが居続け、データは  */
+/*  トラックの先読みから出る。                                              */
+/*                                                                          */
 /*  **中身の世代**: スロットは埋めたときの fdc_media_gen() を覚え、違えば   */
 /*  当てない。書き込みは FatFs 以外 (dev.c の fd0/fd1、KAPI の              */
 /*  dev_blk_write) からも fdc_write_sector_geom に来るので、diskio.c の     */
@@ -69,9 +78,25 @@ struct fdc_track_slot {
     u8 *buf;        /* first のセクタが buf[0] から並ぶ */
 };
 
+/* 覚えている 1 セクタ。buf は呼び手が用意する (FDC_SECTOR_SLOT_BYTES)。 */
+struct fdc_sector_ent {
+    int valid;
+    int drv;
+    u32 lba;
+    const struct fdc_geom *geom;
+    u32 gen;
+    u32 used;
+    u8 *buf;
+};
+
 struct fdc_track_cache {
     struct fdc_track_slot slot[FDC_TRACK_SLOTS];
-    u32 clock;      /* LRU の時計 */
+    struct fdc_sector_ent sec[FDC_SECTOR_SLOTS];
+    u32 clock;      /* LRU の時計 (スロットとセクタで共通) */
+    /* 数 (試験と起動時の 1 行が読む) */
+    u32 sec_hits;   /* セクタキャッシュで返した */
+    u32 trk_hits;   /* トラックの先読みで返した (区間の数) */
+    u32 fills;      /* 先読みを埋めた (まとめ読みを出した) */
     /* 先読みが失敗したトラック (1 本だけ覚える)。ここでは先読みをやめ、
      * 要求した範囲だけを束ねて読む — 要求の外に傷んだセクタがあるだけで
      * そのトラックの要求が毎回「まとめ読みの失敗 + 回復 + 1 セクタずつ」を
@@ -103,6 +128,10 @@ struct fdc_track_ops {
 /* スロット i の受け皿を渡す (FDC_TRACK_MAX_BYTES)。中身は捨てる。 */
 void fdc_track_init(struct fdc_track_cache *c, int i, u8 *buf);
 
+/* セクタキャッシュのスロット j の受け皿を渡す (FDC_SECTOR_SLOT_BYTES)。
+ * NULL ならそのスロットは使わない。 */
+void fdc_track_init_sector(struct fdc_track_cache *c, int j, u8 *buf);
+
 /* lba から count セクタの要求のうち、最初の 1 トラック分を *run に返す。
  * 戻り値はその区間のセクタ数 (= run->count)。count == 0 か、ジオメトリが
  * 壊れている (spt / heads が 0) ときは 0。 */
@@ -129,6 +158,7 @@ int fdc_track_hit(const struct fdc_track_cache *c, int drv,
  *   - 持っている中身で満たせる区間はそこから写す
  *   - そうでなければ sect から EOT までを read_multi で c->buf へ読み、
  *     要求分を写して中身として持つ
+ *   - **count == 1 の要求はまずセクタキャッシュを見て、返した後に覚える**
  *   - read_multi が失敗したら中身を捨て、**要求した区間だけ**を read_one で
  *     1 セクタずつ buff へ読み直す (先読みの分は読み直さない)。先読みの
  *     読みが落ちたトラックは印を付け、以後そこでは要求の範囲だけを読む

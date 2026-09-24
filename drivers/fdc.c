@@ -53,7 +53,7 @@ static u8  s_init_0439_after = 0;
  * 詰め物が .bss に出ていた。 */
 static u8 s_fdbuf[FDC_BUF_BYTES];
 static u8 *s_dma = 0;       /* DMA の窓 (FDC_DMA_BUF_SIZE) */
-static u8 *s_slots = 0;     /* 先読みのスロット (FDC_TRACK_SLOTS 本、連続) */
+static u8 *s_slots = 0;     /* 先読みのスロット + セクタキャッシュ (連続) */
 
 static void fdc_buf_setup(void)
 {
@@ -85,6 +85,14 @@ u8 *fdc_track_slot(int i)
     if (i < 0 || i >= FDC_TRACK_SLOTS) return (u8 *)0;
     fdc_buf_setup();
     return s_slots + (u32)i * FDC_TRACK_MAX_BYTES;
+}
+
+u8 *fdc_sector_slot(int j)
+{
+    if (j < 0 || j >= FDC_SECTOR_SLOTS) return (u8 *)0;
+    fdc_buf_setup();
+    return s_slots + (u32)FDC_TRACK_SLOTS * FDC_TRACK_MAX_BYTES
+         + (u32)j * FDC_SECTOR_SLOT_BYTES;
 }
 
 /* ======================================================================== */
@@ -1017,13 +1025,13 @@ void fdc_print_stats(const char *tag)
         + t->multi_fail + t->writes == 0) {
         return;
     }
-    kprintf(0x07,
-            "[fdc] %s: seek=%u skip=%u recal=%u tmo=%u foreign=%u rdy=%u"
-            " multi=%u/%u nr=%u single=%u retry=%u write=%u\n",
+    /* 80 桁に収めるため 2 行に分ける (1 行だと画面の幅で切れた)。 */
+    kprintf(0x07, "[fdc] %s: seek=%u skip=%u recal=%u tmo=%u foreign=%u rdy=%u\n",
             tag, (unsigned int)t->seek_issued, (unsigned int)t->seek_skipped,
             (unsigned int)t->recal_issued, (unsigned int)t->seek_timeout,
-            (unsigned int)t->sis_foreign, (unsigned int)t->ready_change,
-            (unsigned int)t->multi_ok, (unsigned int)t->multi_fail,
+            (unsigned int)t->sis_foreign, (unsigned int)t->ready_change);
+    kprintf(0x07, "[fdc] %s: multi=%u/%u nr=%u single=%u retry=%u write=%u\n",
+            tag, (unsigned int)t->multi_ok, (unsigned int)t->multi_fail,
             (unsigned int)t->multi_nr, (unsigned int)t->single_reads,
             (unsigned int)t->single_retries, (unsigned int)t->writes);
 }

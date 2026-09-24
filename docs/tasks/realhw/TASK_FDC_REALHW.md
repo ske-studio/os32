@@ -215,3 +215,14 @@ NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `F
 | 診断 | 起動時に `[fdc] font: seek= skip= recal= tmo= foreign= rdy= multi=ok/fail nr= single= retry= write=` を 1 行。`time:1ms` の FAIL には測った値を出す行を足した (原因は未特定、下) |
 | time:1ms | `cpu_delay_us(1000)` を `sys_time_now` で挟む試験。校正 (`cpu_calibrate`) は FDC より前に 1 回だけで、FD の新しいコードは割り込みを禁止しない。NP21/W の CPU 速度はホストの負荷で揺れるので校正と実測がずれた可能性があるが**未確認**。次の起動で `[selftest] time: 1ms delay measured` の値を見る |
 | 試験 | 21 ケース、変異 33 本: RED 32 / ERROR 0 / SURVIVED 1 (対照) |
+
+**6541ef1 の NP21/W での結果と直し (2026-09-24 夜)**: フォントの読み込み約 92 秒 (半分に)、kselftest 212/0、`[fdc] font: seek=751 skip=16 recal=2 tmo=0 foreign=0 rdy=0 multi=767/0`。
+
+| 件 | 内容 |
+|---|---|
+| 原因 | **VFS が 1 回の読みごとにファイルを開き直す** (`fatfs_vfs_read_stream` が毎回 `f_open` → `f_lseek` → `f_read` → `f_close`)。1KB ごとにルート (C0H0)・`/SYS` (C0H1)・`/SYS/FONT` (C62H0)・FAT (C0H0)・データの 4 本のトラックを巡回し、2 本の LRU は 1 回も当たらない。世代・ポインタ・範囲は無実 |
+| 直し | count=1 の読み (FatFs の窓) を覚える 8 セクタの LRU を足し、トラックのスロットは 1 本に。受け皿は 26KB (窓 9KB + トラック 9KB + セクタ 8KB)。VFS の開き直し自体は触っていない (別件にするなら、チャンクごとに FAT の鎖を先頭からたどる CPU の無駄もある) |
+| 再現 | `font_replay`: `images/os32_boot.d88` と実物の `ff.c` で、`kcg_load_font` と VFS の読み方のまま回す。6541ef1 の形では seek=752 / multi=769 (実測 751 / 767 と一致)、直した後は **seek=14 / multi=27 / single=0 / tmo=0**。試験で multi ≦ 27、seek ≦ 14 に固定 |
+| 見込み | NP21/W のシーク 1 回約 100ms なら、フォントのシーク待ちは 75 秒 → 1.4 秒程度 (机上。実測は PM) |
+| 表示 | `[fdc] font:` を 3 行に (シーク系 / 読み系 / キャッシュ)。どれも 80 桁以内 |
+| 試験 | 22 ケース、変異 35 本: RED 34 / ERROR 0 / SURVIVED 1 (対照) |

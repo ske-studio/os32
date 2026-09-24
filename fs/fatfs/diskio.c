@@ -23,6 +23,7 @@
 #include "fdc.h"
 #include "fdc_track.h"  /* FD の読みをトラック単位に束ねる (純粋な層) */
 #include "kstring.h"
+#include "kprintf.h"
 
 /* 物理ドライブ番号 */
 #define DRV_FDD   0
@@ -75,7 +76,19 @@ static void fdd_track_setup(void)
     for (i = 0; i < FDC_TRACK_SLOTS; i++) {
         fdc_track_init(&fdd_track, i, fdc_track_slot(i));
     }
+    for (i = 0; i < FDC_SECTOR_SLOTS; i++) {
+        fdc_track_init_sector(&fdd_track, i, fdc_sector_slot(i));
+    }
     fdd_track_ready = 1;
+}
+
+/* 先読みとセクタキャッシュの数を 1 行で出す (起動時、kernel/kernel.c)。 */
+void diskio_print_fdd_cache(const char *tag)
+{
+    if (fdd_track.sec_hits + fdd_track.trk_hits + fdd_track.fills == 0) return;
+    kprintf(0x07, "[fdc] %s: cache sec_hit=%u trk_hit=%u fill=%u\n", tag,
+            (unsigned int)fdd_track.sec_hits, (unsigned int)fdd_track.trk_hits,
+            (unsigned int)fdd_track.fills);
 }
 
 static int fdd_ops_read_multi(void *ctx, int drv, int cyl, int head, int sect,

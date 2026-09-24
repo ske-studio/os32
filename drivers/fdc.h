@@ -244,17 +244,33 @@
  * 走り、kselftest_run() がプールを作り直す (kernel/kernel.c の注記)。 */
 #define FDC_TRACK_MAX_BYTES  (18 * 512)  /* 1.44MB の 1 トラック = 9216B */
 #define FDC_DMA_BUF_SIZE     FDC_TRACK_MAX_BYTES
-/* 先読みのスロット数。**2 は FAT のトラックとデータのトラックの分**:
- * FatFs は FF_FS_TINY=1 で FAT とデータが 1 つの窓を取り合い、クラスタ
- * (2HD は 1 セクタ) を越えるたびに FAT のセクタ (シリンダ 0) を読み直す。
- * 1 本しか持たないと FAT のトラックとデータのトラックが交互に追い出し
- * 合い、1KB ごとにシークが 2 回出る (2026-09-24 の NP21/W で速くならな
- * かった理由)。 */
-#define FDC_TRACK_SLOTS      2
-#define FDC_BUF_BYTES        ((FDC_TRACK_SLOTS + 1) * FDC_TRACK_MAX_BYTES)
+/* 先読みのスロット数と、1 セクタの読みを覚えるセクタキャッシュの数。
+ *
+ * 2026-09-24 夕の NP21/W の実測 (6541ef1、`[fdc] font:` の行) は
+ * multi=767 / seek=751 で、先読みがほとんど当たっていなかった。原因は
+ * **VFS が 1 回の読みごとにファイルを開き直す**こと —
+ * fs/fatfs_vfs.c の fatfs_vfs_read_stream は f_open → f_lseek → f_read →
+ * f_close を毎回回すので、1KB のチャンクごとにルートディレクトリ
+ * (シリンダ 0)、/sys と /sys/font のディレクトリ (データ域のどこか)、
+ * FAT (シリンダ 0)、データの 4〜5 本のトラックを巡回する。巡回の長さが
+ * スロットの数を超えると LRU は 1 回も当たらない。
+ *
+ * トラックのスロットを増やす (1 本 9KB) 代わりに、**1 セクタの読み
+ * (FatFs の窓の出し入れ) だけを覚える小さな LRU** を足した。毎回使う
+ * ディレクトリと FAT のセクタはここに居続け、データはトラックの先読みから
+ * 出る。FatFs は FF_FS_TINY=1 なので、窓の出し入れは全部 count=1 で来る。 */
+#define FDC_TRACK_SLOTS      1
+#define FDC_SECTOR_SLOTS     8
+#define FDC_SECTOR_SLOT_BYTES 1024       /* 既知のジオメトリで最大の bps */
+#define FDC_CACHE_BYTES      (FDC_TRACK_SLOTS * FDC_TRACK_MAX_BYTES + \
+                              FDC_SECTOR_SLOTS * FDC_SECTOR_SLOT_BYTES)
+#define FDC_BUF_BYTES        (FDC_DMA_BUF_SIZE + FDC_CACHE_BYTES)
 #define FDC_DMA_BANK_SIZE    0x10000     /* DMA バンク = 64KB */
 #define FDC_DMA_BANK_MASK    0xFFFF      /* バンク内オフセットの取り出し */
 STATIC_ASSERT(FDC_BUF_BYTES < FDC_DMA_BANK_SIZE, fdc_buf_shorter_than_bank);
+/* fdc_buf_layout は「境界が先頭の窓の中なら末尾の窓はまたがない」に頼る。
+ * それには領域が窓の 2 倍以上であること。 */
+STATIC_ASSERT(FDC_BUF_BYTES >= 2 * FDC_DMA_BUF_SIZE, fdc_buf_twice_window);
 STATIC_ASSERT(FDC_SECTOR_SIZE <= FDC_DMA_BUF_SIZE, fdc_dma_buf_holds_sector);
 
 /* ======================================================================== */
@@ -421,6 +437,10 @@ u32 fdc_media_gen(int drv);
  * FDC_TRACK_MAX_BYTES バイト。DMA の窓とは重ならない (同じ静的領域の中)。
  * 範囲外は NULL。 */
 u8 *fdc_track_slot(int i);
+
+/* セクタキャッシュのスロット j (0 ≦ j < FDC_SECTOR_SLOTS) の先頭。各
+ * FDC_SECTOR_SLOT_BYTES バイト。範囲外は NULL。 */
+u8 *fdc_sector_slot(int j);
 
 /* 覚えている現在のシリンダ (診断と試験用)。-1 = 知らない (次はシークする)。 */
 int fdc_get_known_cyl(int drv);

@@ -18,6 +18,7 @@
 import os
 import pathlib
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -33,7 +34,104 @@ CASES = ["split_2hd", "split_144", "readahead_count1", "cross_boundary",
          "timeout_math", "fdc_multi_cmd", "fdc_seek_skip", "fdc_forget_rules",
          "fdc_end_to_end", "fat_data_interleave", "gen_and_lru",
          "seek_edge_foreign", "drain_before_skip", "readychange_invalidates",
-         "multi_nr_quiet", "diskio_rw", "buf_layout"]
+         "multi_nr_quiet", "diskio_rw", "buf_layout", "font_replay"]
+
+# font_replay の材料 (実物の FD イメージ)。make all が作る。
+D88 = ROOT / "images/os32_boot.d88"
+FONT_GUEST = ("SYS", "FONT", "DEFAULT.KCG")
+_ENV = {}
+
+
+def d88_to_raw(data, spt=8, heads=2, bps=1024, cyls=77):
+    """D88 を LBA 順の生イメージに直す (セクタの見出しの C/H/R/N で置く)。"""
+    raw = bytearray(cyls * heads * spt * bps)
+    offs = struct.unpack_from("<164I", data, 0x20)
+    seen = 0
+    for toff in offs:
+        if toff == 0:
+            continue
+        pos = toff
+        nsec = struct.unpack_from("<H", data, pos + 4)[0]
+        for _ in range(nsec):
+            c, h, r, n = data[pos:pos + 4]
+            size = struct.unpack_from("<H", data, pos + 14)[0]
+            body = data[pos + 16:pos + 16 + size]
+            if (128 << n) == bps and c < cyls and h < heads and 1 <= r <= spt:
+                lba = (c * heads + h) * spt + (r - 1)
+                raw[lba * bps:(lba + 1) * bps] = body[:bps]
+                seen += 1
+            pos += 16 + size
+    if seen != cyls * heads * spt:
+        raise ValueError(f"D88 のセクタ数が合わない: {seen}")
+    return bytes(raw)
+
+
+def fat12_extract(img, names):
+    """FAT12 をたどって names (ディレクトリ..., ファイル) の中身を返す。"""
+    bps, spc, rsv, nfat, nroot, _tot, _m, spf = struct.unpack_from("<HBHBHHBH", img, 11)
+    fat = img[rsv * bps:(rsv + spf) * bps]
+    root = rsv + nfat * spf
+    data0 = root + (nroot * 32 + bps - 1) // bps
+
+    def nxt(c):
+        o = c * 3 // 2
+        v = fat[o] | fat[o + 1] << 8
+        return v >> 4 if c & 1 else v & 0xFFF
+
+    def chain_bytes(c):
+        out = b""
+        while 2 <= c < 0xFF8:
+            lba = data0 + (c - 2) * spc
+            out += img[lba * bps:(lba + spc) * bps]
+            c = nxt(c)
+        return out
+
+    def find(dirbytes, name):
+        for i in range(0, len(dirbytes), 32):
+            e = dirbytes[i:i + 32]
+            if e[0] == 0:
+                break
+            if e[0] == 0xE5 or e[11] == 0x0F:
+                continue
+            base = e[0:8].decode("latin1").strip()
+            ext = e[8:11].decode("latin1").strip()
+            if (base + ("." + ext if ext else "")) == name:
+                return struct.unpack_from("<H", e, 26)[0], struct.unpack_from("<I", e, 28)[0]
+        raise KeyError(name)
+
+    cur = img[root * bps:data0 * bps]
+    for d in names[:-1]:
+        clst, _ = find(cur, d)
+        cur = chain_bytes(clst)
+    clst, size = find(cur, names[-1])
+    return chain_bytes(clst)[:size]
+
+
+def check_read_stream_shape():
+    """fatfs_vfs_read_stream が今も「開いて、動いて、読んで、閉じる」か。
+    font_replay はこの形を写して回すので、形が変われば試験を直す合図。"""
+    src = (ROOT / "fs/fatfs_vfs.c").read_text(encoding="utf-8")
+    m = re.search(r"static int fatfs_vfs_read_stream\(.*?\n\}", src, re.S)
+    if not m:
+        return False
+    body = m.group(0)
+    # f_close は f_lseek の失敗の枝にも出るので、最後のものを見る。
+    order = [body.find("f_open("), body.find("f_lseek("), body.find("f_read("),
+             body.rfind("f_close(")]
+    return all(x >= 0 for x in order) and order == sorted(order)
+
+
+def prepare_font(tmp):
+    """font_replay の材料を tmp に置いて env を返す。無ければ None (SKIP)。"""
+    if not D88.exists():
+        return None
+    raw = d88_to_raw(D88.read_bytes())
+    font = fat12_extract(raw, FONT_GUEST)
+    img = pathlib.Path(tmp) / "fd.raw"
+    fnt = pathlib.Path(tmp) / "font.kcg"
+    img.write_bytes(raw)
+    fnt.write_bytes(font)
+    return {"FDC_TRACK_IMAGE": str(img), "FDC_TRACK_FONT": str(fnt)}
 
 # fdc.c の fdc_motor_off() は元から未使用の static (test_fdc_seek.py と同じ)。
 # tick_count の差し替えは「volatile u32 * を返す関数」の宣言になるので
@@ -95,14 +193,23 @@ MUTATIONS = [
      r"if \(eot > want_last && fdc_track_is_bad\(c, drv, g, &run\)\) \{",
      "if (0) {",
      "先読みが落ちたトラックでも先読みを続ける (毎回失敗 + 1 セクタずつ)"),
+    # --- セクタキャッシュ (2026-09-24 夕: VFS の開き直しで 4〜5 本を巡回)
     ("drivers/fdc_track.c",
-     r"if \(v < 0 \|\| c->slot\[i\]\.used < c->slot\[v\]\.used\) v = i;",
-     "if (v < 0) v = i;",
-     "LRU でなく常に先頭のスロットを追い出す (FAT のトラックが追い出される)"),
-    ("drivers/fdc.h",
-     r"#define FDC_TRACK_SLOTS      2",
-     "#define FDC_TRACK_SLOTS      1",
-     "スロットを 1 本にする (FAT とデータが取り合う — 9ed7c80 の姿)"),
+     r"int single = \(count == 1\);",
+     "int single = 0;",
+     "セクタキャッシュを使わない (6541ef1 の姿: 実物のフォントで multi 769)"),
+    ("drivers/fdc_track.c",
+     r"if \(v < 0 \|\| c->sec\[j\]\.used < c->sec\[v\]\.used\) v = j;",
+     "if (v < 0) v = j;",
+     "セクタキャッシュが LRU でない (毎回使うディレクトリを追い出す)"),
+    ("drivers/fdc_track.c",
+     r"if \(e->gen != gen \|\| e->geom != g\) continue;",
+     "if (e->geom != g) continue;",
+     "セクタキャッシュが世代を見ない (書いた後に古い中身)"),
+    ("drivers/fdc_track.c",
+     r"if \(e->drv != drv \|\| e->lba != lba\) continue;",
+     "if (e->drv != drv) continue;",
+     "セクタキャッシュが LBA を見ない (別のセクタを返す)"),
     # --- シークの省略・完了待ち (drivers/fdc.c)
     ("drivers/fdc.c",
      r"if \(drv >= 0 && drv < FDC_MAX_DRIVES && s_known_cyl\[drv\] == cyl\) \{\n        s_stats\.seek_skipped\+\+;\n        return 0;\n    \}",
@@ -235,7 +342,10 @@ def host_build(tmp, mutated=None):
 def run_cases(exe, cases, quiet=False):
     failed = 0
     for case in cases:
-        rc = subprocess.run([str(exe), case], cwd=ROOT, timeout=60,
+        env = dict(os.environ)
+        env.update(_ENV)
+        rc = subprocess.run([str(exe), case], cwd=ROOT, timeout=120, env=env,
+                            stdout=subprocess.DEVNULL if quiet else None,
                             stderr=subprocess.DEVNULL if quiet else None).returncode
         if not quiet:
             print(f"EXIT {case}={rc}", flush=True)
@@ -312,7 +422,20 @@ if __name__ == "__main__":
               flush=True)
         if "--target" in args:
             build_target(tmp)
-        rc = run_cases(exe, [a for a in args if not a.startswith("--")] or CASES)
+        rc = 0
+        if not check_read_stream_shape():
+            print("FAIL fs/fatfs_vfs.c の read_stream の形が変わった "
+                  "(font_replay の写しを直す)", flush=True)
+            rc += 1
+        env = prepare_font(tmp)
+        if env is None:
+            # [V4] 飛ばしたことをそのまま言う。
+            print(f"SKIP font_replay ({D88.relative_to(ROOT)} が無い — "
+                  "make all の後で回す)", flush=True)
+            CASES.remove("font_replay")
+        else:
+            _ENV.update(env)
+        rc += run_cases(exe, [a for a in args if not a.startswith("--")] or CASES)
         if "--mutate" in args:
             rc += mutate(tmp)
         sys.exit(bool(rc))

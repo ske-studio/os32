@@ -68,6 +68,42 @@ PM の実測: フォントの読み込みは 4a8fad4 とほぼ同じ約 3 分。
 - 起動時に `[fdc] font: seek= skip= recal= tmo= foreign= rdy= multi=ok/fail nr= single= retry= write=`
   を 1 行出す (`kernel/kernel.c`、FD に触っていなければ出ない)
 
+## 0-2. 6541ef1 の実測 (2026-09-24 夜) — まだ当たっていなかった理由と直したもの
+
+PM の実測 (NP21/W、FD 起動): フォントの読み込み約 92 秒 (187 秒から半分)、
+`[fdc] font: seek=751 skip=16 recal=2 tmo=0 foreign=0 rdy=0 multi=767/0 ...`。
+tmo=0 で IRQ の取りこぼしは消えたが、**まとめ読み 767 回・シーク 751 回**で先読みが
+ほぼ当たっていない。
+
+- **原因**: VFS が 1 回の読みごとにファイルを開き直す。`fs/vfs_fd.c` の `vfs_read_fd` →
+  `fs/fatfs_vfs.c` の `fatfs_vfs_read_stream` が毎回 `f_open` → `f_lseek` → `f_read` →
+  `f_close` を回すので、1KB のチャンクごとにパスをたどり直す。実物のイメージでは
+  ルートディレクトリ (LBA 5 = C0H0)、`/SYS` (LBA 15 = C0H1)、`/SYS/FONT` (LBA 997 = C62H0)、
+  FAT (LBA 2 = C0H0)、データ (LBA 998〜1181 = C62〜C73 の 24 トラック) の
+  **4 本のトラックを毎チャンク巡回**する。巡回の長さがスロットの数 (2) を超えると LRU は
+  1 回も当たらない。候補に挙がった世代 / ポインタの比較 / スロットの範囲はどれも無実
+  (世代は rdy=0・write 無しで進まず、font_replay で ptr と範囲も通る)
+- **直し**: count=1 の読み (FatFs の窓の出し入れ) だけを覚える **8 セクタの LRU
+  (セクタキャッシュ)** を足した。毎チャンク使うディレクトリと FAT のセクタが居続け、
+  データはトラックの先読みから出る。トラックのスロットは 1 本に戻した (受け皿の合計は
+  9KB + 9KB + 8KB = 26KB、6541ef1 の 27KB より小さい)。VFS の開き直しそのもの
+  (チャンクごとに FAT の鎖を先頭からたどる CPU の無駄) は触っていない
+- **再現 (`font_replay`)**: `images/os32_boot.d88` を LBA 順に直し、Python が FAT12 を
+  たどって `/SYS/FONT/DEFAULT.KCG` を取り出す。ハーネスは**実物の `ff.c`** を通し、
+  `kcg_load_font` と VFS の読み方 (`f_stat` × 2 → 16B → `f_stat` → 1024B ずつ、各読みは
+  `f_open` → `f_lseek` → `f_read` → `f_close`) をそのまま回す。読み方の形が変わったら
+  気づくよう、Python が `fatfs_vfs_read_stream` の呼び出し順を静的に見る
+  - 6541ef1 の形 (トラック 2 本・セクタキャッシュ無し) で回すと **seek=752 / multi=769**
+    — 実測の 751 / 767 とほぼ一致 (模型が実物の読み方を写している証拠)
+  - 直した後: **seek=14 / multi=27 / single=0 / tmo=0** (sec_hit=1110、trk_hit=161)。
+    試験は multi ≦ 27 (データ 24 トラック + メタデータ 3)、seek ≦ 14 (データ 12 シリンダ
+    + 2) で固定
+  - `images/os32_boot.d88` が無ければ `SKIP font_replay` と出して飛ばす ([V4]、make all の後で回す)
+- 起動時の行は 80 桁で切れないよう 2 行に分け、キャッシュの行を足した:
+  `[fdc] font: seek= skip= recal= tmo= foreign= rdy=` /
+  `[fdc] font: multi=ok/fail nr= single= retry= write=` /
+  `[fdc] font: cache sec_hit= trk_hit= fill=`
+
 ## 1. ケース
 
 | ケース | 見るもの |
@@ -83,8 +119,9 @@ PM の実測: フォントの読み込みは 4a8fad4 とほぼ同じ約 3 分。
 | `fdc_multi_cmd` | 本物の `fdc.c`: READ DATA が MT=0、R=sect、EOT=sect+count-1、DMA 長 = count×bps、受け皿が 64KB 境界をまたがない ([HW2])、トラックをまたぐ引数は I/O の前に断る |
 | `fdc_seek_skip` | 同じシリンダならシークを省く (ヘッドが違っても、単発でも、書き込みでも)。違えばシークし、覚えた値を更新する |
 | `fdc_forget_rules` | まとめ読みの失敗 (DMA を閉じ、リセット + RECALIBRATE でヘッドを 0 に戻して 0 を覚え直す)・その RECALIBRATE も落ちたとき・メディアの変更・ドライブの切り替え・単発の最終失敗・IRQ 無し・シークの失敗で覚えた値を捨てる |
-| `fat_data_interleave` | FatFs の読み方 (FAT のセクタとデータのセクタが交互) で、2 本なら FAT のトラックは 1 回だけ読む。本物の `fdc.c` で SEEK 4 回・READ 6 回・期限切れ 0 |
-| `gen_and_lru` | 世代が進んだスロットは当てない。LRU で使ったばかりのスロットを残す |
+| `fat_data_interleave` | FatFs の読み方 (FAT のセクタとデータのセクタが交互) で、FAT はセクタキャッシュから返り、FAT のトラックは 1 回だけ読む。本物の `fdc.c` で SEEK 4 回・READ 6 回・期限切れ 0。セクタキャッシュ無しの 1 本は毎回読む (9ed7c80 の姿) |
+| `gen_and_lru` | 世代が進んだトラックもセクタも当てない。4 本のトラックを巡回するメタデータ (VFS の開き直しの形) を 40 巡しても、2 巡目からメタデータは全部セクタキャッシュで返る (LRU) |
+| `font_replay` | 実物の FD イメージと実物の `ff.c` で、フォントの読み込みを VFS の読み方のまま再現する。multi ≦ 27、seek ≦ 14、single 0、期限切れ 0、中身がファイルと一致 |
 | `seek_edge_foreign` | SEEK の完了の前に別ドライブの通知 / 自ドライブの Ready 変化が積まれていても、1 本のエッジで全部読んで期限切れを待たない。Ready 変化で世代が進む |
 | `drain_before_skip` | 取り残しの通知で INT 線が上がったままでも、省略の前の排水で下ろし、READ の完了のエッジが来る |
 | `readychange_invalidates` | SIS で Ready 変化を見たら、持っている先読みを入れ替え後の媒体に当てない |
@@ -120,6 +157,10 @@ SURVIVED = 見逃し。最後の 1 本は何も変えない対照で、SURVIVED 
 2026-09-24 の結果: **RED 20 / ERROR 0 / SURVIVED 1 (対照)** (変異 21 本)。
 
 2026-09-24 夕 (上の §0 を直した後): **RED 32 / ERROR 0 / SURVIVED 1 (対照)** (変異 33 本)。
+
+2026-09-24 夜 (§0-2 のセクタキャッシュの後): **RED 34 / ERROR 0 / SURVIVED 1 (対照)** (変異 35 本)。
+トラックの LRU の変異はスロットが 1 本になって等価になったので外し、セクタキャッシュの
+4 本 (使わない / LRU でない / 世代を見ない / LBA を見ない) を足した。
 途中で SURVIVED が 2 本出た: (a) 覚えたシリンダの破棄はリセット・RECALIBRATE に加えて
 Ready 変化の SIS でも行うので三重 (3 つとも消す形にして RED)、(b) `disk_initialize` の変異が
 スロットの貸し出しごと消していて先読み自体が止まり、古い中身を返しようがなかった
@@ -142,6 +183,7 @@ Ready 変化の SIS でも行うので三重 (3 つとも消す形にして RED)
 
 ## 4. ホストで見ていないもの
 
-- diskio.c はホストでも回す (`diskio_rw`)。FatFs 本体 (ff.c) は通していない
+- diskio.c と FatFs 本体 (ff.c) はホストでも回す (`diskio_rw`、`font_replay`)。VFS (vfs_fd.c /
+  fatfs_vfs.c) は通さず、読み方を写して回す (形は静的に照合)
 - 実機の速度、エミュレータでの起動、実機での MT なしのまとめ読みの挙動 (TC と EOT が
   同時に来て正常終了すること) は未確認

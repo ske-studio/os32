@@ -23,6 +23,17 @@
 #include "../../drivers/fdc_track.c"
 #include "../../drivers/fdc.c"
 #include "../../fs/fatfs/diskio.c"
+/* FatFs 本体も実物を通す (font_replay)。ff.c は外部のコードなので、試験側の
+ * 厳しい警告だけ外す (カーネルのビルドでは元の警告のまま)。 */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wextra"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+#include "../../fs/fatfs/ff.c"
+#pragma GCC diagnostic pop
 
 #define CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #x); failed++; \
@@ -105,6 +116,10 @@ static u8 disk_byte(int drv, int c, int h, int r, int off)
 #define WR_MAX 16
 static struct { int used, drv, c, h, r; u8 data[1024]; } s_written[WR_MAX];
 
+/* 実物の FD イメージ (LBA 順の生データ)。font_replay だけが読む。 */
+static u8 *s_image;
+static long s_image_len;
+
 static void disk_sector(int drv, int c, int h, int r, int bps, u8 *out)
 {
     int i;
@@ -112,6 +127,14 @@ static void disk_sector(int drv, int c, int h, int r, int bps, u8 *out)
         if (s_written[i].used && s_written[i].drv == drv && s_written[i].c == c
             && s_written[i].h == h && s_written[i].r == r) {
             memcpy(out, s_written[i].data, (size_t)bps);
+            return;
+        }
+    }
+    if (s_image) {
+        const struct fdc_geom *g = fdc_get_geom(drv);
+        long lba = ((long)c * g->heads + h) * g->spt + (r - 1);
+        if ((lba + 1) * bps <= s_image_len) {
+            memcpy(out, s_image + lba * bps, (size_t)bps);
             return;
         }
     }
@@ -450,20 +473,25 @@ static const struct fdc_track_ops FAKE_OPS = {
 };
 
 static u8 s_cache_buf[FDC_TRACK_SLOTS][FDC_TRACK_MAX_BYTES];
+static u8 s_sec_buf[FDC_SECTOR_SLOTS][FDC_SECTOR_SLOT_BYTES];
 static struct fdc_track_cache s_cache;
 
-/* nslots 本だけ受け皿を渡す (残りは NULL = 使わない)。区切りと読み直しの
- * 試験は 1 本で、FAT とデータの取り合いの試験は 2 本で回す。 */
-static void cache_setup(int nslots)
+/* トラックのスロットと、セクタキャッシュを nsec 個だけ渡す (残りは NULL =
+ * 使わない)。区切りと読み直しの試験はセクタキャッシュ無しで回す。 */
+static void cache_setup2(int ntrk, int nsec)
 {
     int i;
     memset(&s_cache, 0, sizeof(s_cache));
     for (i = 0; i < FDC_TRACK_SLOTS; i++) {
-        fdc_track_init(&s_cache, i, i < nslots ? s_cache_buf[i] : (u8 *)0);
+        fdc_track_init(&s_cache, i, i < ntrk ? s_cache_buf[i] : (u8 *)0);
+    }
+    for (i = 0; i < FDC_SECTOR_SLOTS; i++) {
+        fdc_track_init_sector(&s_cache, i, i < nsec ? s_sec_buf[i] : (u8 *)0);
     }
     s_fake_gen = 0;
 }
 
+static void cache_setup(int nslots) { cache_setup2(nslots, 0); }
 static void cache_reset(void) { cache_setup(1); }
 
 /* 要求 [lba, lba+count) を読み、中身が正しいことと、その外に書いていない
@@ -961,14 +989,14 @@ static void fdc_end_to_end(void)
 
 /* FatFs (FF_FS_TINY=1) の読み方: 1KB ずつ 16B ずれて読むと、セクタを
  * 越えるたびに FAT のセクタ (C0 H0 の LBA 1) とデータのセクタが交互に来る。
- * 2 本持てば FAT のトラックは居続け、データはトラックごとに 1 回で済む。 */
+ * FAT のセクタはセクタキャッシュに居続け、データはトラックごとに 1 回。 */
 static void fat_data_interleave(void)
 {
     const struct fdc_geom *g = &fdc_geom_2hd;
     u32 l;
     int i, fat_reads = 0;
 
-    fake_reset(); cache_setup(2);
+    fake_reset(); cache_setup2(1, FDC_SECTOR_SLOTS);
     for (l = 100; l < 132; l++) {               /* データ 32 セクタ = 4 トラック */
         CHECK(read_and_verify(0, g, 1, 1) == 0);    /* FAT */
         CHECK(read_and_verify(0, g, l, 1) == 0);    /* データ */
@@ -981,6 +1009,7 @@ static void fat_data_interleave(void)
     /* データ: lba 100 = C6 H0 R5 から R8 (1 回)、C6 H1、C7 H0、C7 H1、
      * C8 H0 (lba 128..131) の 5 回 + FAT 1 回 */
     CHECK(F.n == 6);
+    CHECK(s_cache.sec_hits >= 31);              /* 2 回目からの FAT は全部 */
 
     /* 本物の fdc.c で同じ読み方をしたときのシーク: FAT (C0) 1 回、
      * データ C6 / C7 / C8 で 3 回。期限切れは 0。 */
@@ -990,7 +1019,7 @@ static void fat_data_interleave(void)
         int ok = 1;
 
         model_boot(0);
-        cache_setup(2);
+        cache_setup2(1, FDC_SECTOR_SLOTS);
         for (l = 100; l < 132; l++) {
             if (fdc_track_read(&s_cache, &REAL_OPS, 0, g, 1, 1, one) != 0) ok = 0;
             if (fdc_track_read(&s_cache, &REAL_OPS, 0, g, l, 1, one) != 0) ok = 0;
@@ -1004,8 +1033,9 @@ static void fat_data_interleave(void)
         CHECK(M.reads == 6);
     }
 
-    /* 1 本だけなら取り合って毎回読む (直す前の姿を記録しておく) */
-    fake_reset(); cache_setup(1);
+    /* セクタキャッシュ無し・1 本だけなら取り合って毎回読む
+     * (9ed7c80 の姿を記録しておく) */
+    fake_reset(); cache_setup2(1, 0);
     for (l = 100; l < 104; l++) {
         CHECK(read_and_verify(0, g, 1, 1) == 0);
         CHECK(read_and_verify(0, g, l, 1) == 0);
@@ -1013,29 +1043,50 @@ static void fat_data_interleave(void)
     CHECK(F.n == 8);
 }
 
-/* 世代が進んだら (書き込み・Ready 変化・メディアの変更) 当てない。
- * 使ったばかりのスロットは追い出さない (LRU)。 */
+/* 世代が進んだら (書き込み・Ready 変化・メディアの変更) トラックもセクタも
+ * 当てない。セクタキャッシュは LRU (毎回使うセクタは追い出さない)。 */
 static void gen_and_lru(void)
 {
     const struct fdc_geom *g = &fdc_geom_2hd;
+    u32 k;
 
-    fake_reset(); cache_setup(2);
-    CHECK(read_and_verify(0, g, 0, 1) == 0);    /* A = C0 H0 */
-    CHECK(read_and_verify(0, g, 8, 1) == 0);    /* B = C0 H1 */
+    /* 世代: トラック */
+    fake_reset(); cache_setup2(1, 0);
+    CHECK(read_and_verify(0, g, 0, 1) == 0);
+    CHECK(F.n == 1);
+    s_fake_gen++;
+    CHECK(read_and_verify(0, g, 1, 1) == 0);
+    CHECK(F.n == 2);
+    CHECK(read_and_verify(0, g, 2, 1) == 0);    /* 新しい世代は当たる */
+    CHECK(F.n == 2);
+
+    /* 世代: セクタ (トラックは別のものに入れ替えておく) */
+    fake_reset(); cache_setup2(1, FDC_SECTOR_SLOTS);
+    CHECK(read_and_verify(0, g, 5, 1) == 0);    /* C0H0 を埋め、LBA 5 を覚える */
+    CHECK(read_and_verify(0, g, 100, 1) == 0);  /* トラックは C6H0 に */
+    CHECK(read_and_verify(0, g, 5, 1) == 0);    /* セクタキャッシュで返す */
     CHECK(F.n == 2);
     s_fake_gen++;
-    CHECK(read_and_verify(0, g, 1, 1) == 0);    /* 世代が違う → 読み直す */
+    CHECK(read_and_verify(0, g, 5, 1) == 0);    /* 世代違い → 読み直す */
     CHECK(F.n == 3);
-    CHECK(read_and_verify(0, g, 2, 1) == 0);    /* 新しい世代の A は当たる */
-    CHECK(F.n == 3);
-    /* LRU: A を使った直後に C を読むと B が追い出され、A は残る */
-    CHECK(read_and_verify(0, g, 16, 1) == 0);   /* C = C1 H0 (B は古い世代) */
-    CHECK(read_and_verify(0, g, 24, 1) == 0);   /* D = C1 H1 → A か C の古い方 = A */
-    CHECK(F.n == 5);
-    CHECK(read_and_verify(0, g, 17, 1) == 0);   /* C は残っている */
-    CHECK(F.n == 5);
-    CHECK(read_and_verify(0, g, 3, 1) == 0);    /* A は追い出された */
-    CHECK(F.n == 6);
+
+    /* LRU: 4 本のトラックを巡回するメタデータ (VFS の開き直し) の形。
+     * A, B, C は毎回使い、データ D は毎回違うトラック。 */
+    fake_reset(); cache_setup2(1, FDC_SECTOR_SLOTS);
+    for (k = 0; k < 40; k++) {
+        CHECK(read_and_verify(0, g, 5, 1) == 0);         /* ルート (C0H0) */
+        CHECK(read_and_verify(0, g, 15, 1) == 0);        /* /SYS (C0H1) */
+        CHECK(read_and_verify(0, g, 997, 1) == 0);       /* /SYS/FONT (C62H0) */
+        CHECK(read_and_verify(0, g, 2, 1) == 0);         /* FAT */
+        CHECK(read_and_verify(0, g, 998 + k, 1) == 0);   /* データ */
+    }
+    /* 1 巡目: A (C0H0)、B (C0H1)、C (C62H0)、FAT (C0H0 をもう一度 — トラック
+     * は 1 本しか持たない)、D (C62H0 をもう一度) の 5 回。2 巡目からは
+     * A・B・C・FAT がセクタキャッシュで返り、データだけがトラックを埋める:
+     * C62H1 / C63H0 / C63H1 / C64H0 / C64H1 の 5 回 (998..1037)。
+     * 巡回でメタデータが追い出されない (LRU)。 */
+    CHECK(F.n == 10);
+    CHECK(s_cache.sec_hits == 39 * 4);
 }
 
 /* SEEK の完了の前に別ドライブの通知 / 自ドライブの Ready 変化が積まれて
@@ -1089,7 +1140,7 @@ static void readychange_invalidates(void)
     const struct fdc_geom *g = &fdc_geom_2hd;
 
     model_boot(0);
-    cache_setup(2);
+    cache_setup2(1, FDC_SECTOR_SLOTS);
     CHECK(fdc_track_read(&s_cache, &REAL_OPS, 0, g, 32, 1, buf) == 0);  /* C2 H0 */
     CHECK(check_bytes(buf, 0, 2, 0, 1, 1024));
     s_media_seed = 1;                           /* 入れ替え */
@@ -1195,6 +1246,120 @@ static void buf_layout(void)
     CHECK((((u32)(unsigned long)dma_buffer & 0xFFFF) + slot) <= 0x10000);
 }
 
+
+/* ======================================================================== */
+/*  (4) 実物のフォントの読み方の再現 (2026-09-24 夕、6541ef1 の実測を受けて)*/
+/*                                                                          */
+/*  イメージ: images/os32_boot.d88 を LBA 順に直したもの (試験の Python が   */
+/*  作って FDC_TRACK_IMAGE で渡す)。期待する中身は Python が FAT をたどって  */
+/*  取り出したファイル (FDC_TRACK_FONT)。                                    */
+/*  読み方: kernel/boot_font.c → drivers/kcg.c の kcg_load_font と           */
+/*  fs/vfs_fd.c / fs/fatfs_vfs.c のとおり:                                  */
+/*    vfs_open        = stat + get_file_size (どちらも f_stat)               */
+/*    vfs_read_fd(16) = read_stream = f_open → f_lseek → f_read → f_close   */
+/*    vfs_get_size    = f_stat                                               */
+/*    kcg_read_chunked = 1024B ずつ read_stream                              */
+/*  read_stream の形が変わっていないことは Python 側が静的に見る。          */
+/* ======================================================================== */
+static u8 *s_font;
+static long s_font_len;
+static const char *s_font_path = "0:/sys/font/default.kcg";
+
+static int replay_read_stream(void *buf, u32 size, u32 offset)
+{
+    FIL fil;
+    FRESULT fr;
+    UINT br;
+
+    fr = f_open(&fil, s_font_path, FA_READ);
+    if (fr != FR_OK) return -1;
+    fr = f_lseek(&fil, (FSIZE_t)offset);
+    if (fr != FR_OK) { f_close(&fil); return -1; }
+    fr = f_read(&fil, buf, size, &br);
+    f_close(&fil);
+    if (fr != FR_OK) return -1;
+    return (int)br;
+}
+
+static void font_replay(void)
+{
+    static FATFS fs;
+    static u8 hdr[16], chunk[1024];
+    FILINFO fno;
+    struct fdc_stats st;
+    long off, total;
+    int ok = 1, n;
+
+    if (!s_image || !s_font) {
+        fprintf(stderr, "font_replay: FDC_TRACK_IMAGE / FDC_TRACK_FONT が無い\n");
+        failed++;
+        return;
+    }
+    model_boot(0);
+    diskio_set_fdd_drive(0);
+    CHECK(f_mount(&fs, "0:", 1) == FR_OK);
+    memset(&s_stats, 0, sizeof(s_stats));
+    memset(&fdd_track.sec_hits, 0, 3 * sizeof(u32));
+    M.seeks = 0; M.reads = 0; M.multi_reads = 0;
+
+    /* vfs_open: stat + get_file_size */
+    CHECK(f_stat(s_font_path, &fno) == FR_OK);
+    CHECK(f_stat(s_font_path, &fno) == FR_OK);
+    CHECK((long)fno.fsize == s_font_len);
+    /* ヘッダ 16B */
+    CHECK(replay_read_stream(hdr, 16, 0) == 16);
+    CHECK(memcmp(hdr, s_font, 16) == 0);
+    /* vfs_get_size */
+    CHECK(f_stat(s_font_path, &fno) == FR_OK);
+    /* 本体を 1024B ずつ */
+    total = s_font_len - 16;
+    for (off = 0; off < total; off += n) {
+        int want = (total - off > 1024) ? 1024 : (int)(total - off);
+        n = replay_read_stream(chunk, (u32)want, (u32)(16 + off));
+        if (n != want || memcmp(chunk, s_font + 16 + off, (size_t)want) != 0) {
+            ok = 0;
+            break;
+        }
+    }
+    CHECK(ok);
+
+    fdc_get_stats(&st);
+    printf("font_replay: bytes=%ld seek=%u skip=%u multi=%u/%u single=%u "
+           "tmo=%u sec_hit=%u trk_hit=%u fill=%u (model READ=%d SEEK=%d)\n",
+           s_font_len, (unsigned)st.seek_issued, (unsigned)st.seek_skipped,
+           (unsigned)st.multi_ok, (unsigned)st.multi_fail,
+           (unsigned)st.single_reads, (unsigned)st.seek_timeout,
+           (unsigned)fdd_track.sec_hits, (unsigned)fdd_track.trk_hits,
+           (unsigned)fdd_track.fills, M.reads, M.seeks);
+    /* 目安 (PM): トラックの数 (188KB ÷ 8KB ≈ 24) + メタデータの分。
+     * このイメージは データ 24 トラック / 12 シリンダ、メタデータは
+     * C0H0 (FAT・ルート)、C0H1 (/SYS)、C62H0 (/SYS/FONT = データの先頭と
+     * 同じトラック)。まとめ読み ≦ 24 + 3、シーク ≦ 12 + 2。 */
+    CHECK(st.multi_ok <= 27);
+    CHECK(st.multi_fail == 0);
+    CHECK(st.seek_issued <= 14);
+    CHECK(st.seek_timeout == 0);
+    CHECK(st.single_reads == 0);
+    CHECK(M.reads == (int)st.multi_ok);
+}
+
+static u8 *load_file(const char *env, long *len)
+{
+    const char *path = getenv(env);
+    FILE *f;
+    u8 *b;
+    if (!path) return (u8 *)0;
+    f = fopen(path, "rb");
+    if (!f) return (u8 *)0;
+    fseek(f, 0, SEEK_END);
+    *len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    b = (u8 *)malloc((size_t)*len + 1);
+    if (b && fread(b, 1, (size_t)*len, f) != (size_t)*len) { free(b); b = 0; }
+    fclose(f);
+    return b;
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -1220,8 +1385,13 @@ int main(int argc, char **argv)
         { "multi_nr_quiet", multi_nr_quiet },
         { "diskio_rw", diskio_rw },
         { "buf_layout", buf_layout },
+        { "font_replay", font_replay },
     };
     if (argc != 2) { fprintf(stderr, "usage: %s CASE\n", argv[0]); return 2; }
+    if (strcmp(argv[1], "font_replay") == 0) {
+        s_image = load_file("FDC_TRACK_IMAGE", &s_image_len);
+        s_font = load_file("FDC_TRACK_FONT", &s_font_len);
+    }
     for (i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
         if (strcmp(argv[1], cases[i].name) == 0) {
             cases[i].fn();

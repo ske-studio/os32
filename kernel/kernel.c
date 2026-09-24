@@ -12,6 +12,7 @@
 #include "io.h"
 #include "kbd.h"
 #include "fdc.h"
+extern void diskio_print_fdd_cache(const char *tag);   /* fs/fatfs/diskio.c */
 #include "disk.h"
 #include "dev.h"
 #include "path.h"
@@ -525,6 +526,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
          * 起動したときフォントの読み込みが遅い件 (2026-09-24) の切り分け用。
          * FD に触っていなければ何も出ない。 */
         fdc_print_stats("font");
+        diskio_print_fdd_cache("font");
     }
 
     /* TTF由来フォント: 外部プログラムから kcg_load_font() (KAPI) で呼ぶ */

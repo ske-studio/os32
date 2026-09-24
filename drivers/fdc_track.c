@@ -59,11 +59,60 @@ void fdc_track_init(struct fdc_track_cache *c, int i, u8 *buf)
     c->slot[i].buf = buf;
 }
 
+void fdc_track_init_sector(struct fdc_track_cache *c, int j, u8 *buf)
+{
+    if (j < 0 || j >= FDC_SECTOR_SLOTS) return;
+    c->sec[j].valid = 0;
+    c->sec[j].buf = buf;
+}
+
 void fdc_track_invalidate(struct fdc_track_cache *c)
 {
     int i;
     for (i = 0; i < FDC_TRACK_SLOTS; i++) c->slot[i].valid = 0;
+    for (i = 0; i < FDC_SECTOR_SLOTS; i++) c->sec[i].valid = 0;
     c->bad_valid = 0;
+}
+
+/* ======================================================================== */
+/*  セクタキャッシュ (count == 1 の読みだけ)                                */
+/* ======================================================================== */
+static int fdc_sec_find(const struct fdc_track_cache *c, int drv,
+                        const struct fdc_geom *g, u32 gen, u32 lba)
+{
+    int j;
+
+    for (j = 0; j < FDC_SECTOR_SLOTS; j++) {
+        const struct fdc_sector_ent *e = &c->sec[j];
+        if (!e->valid || e->buf == 0) continue;
+        if (e->gen != gen || e->geom != g) continue;
+        if (e->drv != drv || e->lba != lba) continue;
+        return j;
+    }
+    return -1;
+}
+
+/* 返したばかりのセクタを覚える: 空き、無ければいちばん長く使っていないもの。 */
+static void fdc_sec_put(struct fdc_track_cache *c, const struct fdc_track_ops *ops,
+                        int drv, const struct fdc_geom *g, u32 gen, u32 lba,
+                        const u8 *src)
+{
+    int j, v = -1;
+
+    if (g->bps > FDC_SECTOR_SLOT_BYTES) return;
+    for (j = 0; j < FDC_SECTOR_SLOTS; j++) {
+        if (c->sec[j].buf == 0) continue;
+        if (!c->sec[j].valid) { v = j; break; }
+        if (v < 0 || c->sec[j].used < c->sec[v].used) v = j;
+    }
+    if (v < 0) return;
+    ops->copy(c->sec[v].buf, src, g->bps);
+    c->sec[v].drv = drv;
+    c->sec[v].lba = lba;
+    c->sec[v].geom = g;
+    c->sec[v].gen = gen;
+    c->sec[v].used = ++c->clock;
+    c->sec[v].valid = 1;
 }
 
 /* 先読みが失敗した印の付いたトラックか。 */
@@ -139,6 +188,21 @@ int fdc_track_read(struct fdc_track_cache *c, const struct fdc_track_ops *ops,
 {
     struct fdc_run run;
     u8 *dst = buff;
+    int single = (count == 1);
+    u32 gen0 = 0;
+
+    /* 1 セクタの読み (FatFs の窓の出し入れ) はまずセクタキャッシュ。 */
+    if (single && g != 0 && g->spt != 0) {
+        int j;
+        gen0 = ops->gen(ops->ctx, drv);
+        j = fdc_sec_find(c, drv, g, gen0, lba);
+        if (j >= 0) {
+            ops->copy(buff, c->sec[j].buf, g->bps);
+            c->sec[j].used = ++c->clock;
+            c->sec_hits++;
+            return 0;
+        }
+    }
 
     while (count > 0) {
         int n = fdc_track_split(g, lba, count, &run);
@@ -158,6 +222,7 @@ int fdc_track_read(struct fdc_track_cache *c, const struct fdc_track_ops *ops,
             ops->copy(dst, t->buf + (u32)(run.sect - t->first) * g->bps,
                       bytes);
             t->used = ++c->clock;
+            c->trk_hits++;
         } else if (!fdc_track_fits(g) || fdc_track_victim(c) < 0) {
             /* 受け皿に入らないジオメトリ / 受け皿が無い。旧来どおり読む。 */
             if (fdc_track_read_singly(ops, drv, g, &run, dst) != 0) return -1;
@@ -188,6 +253,7 @@ int fdc_track_read(struct fdc_track_cache *c, const struct fdc_track_ops *ops,
                 t->gen = gen;
                 t->used = ++c->clock;
                 t->valid = 1;
+                c->fills++;
                 ops->copy(dst, t->buf, bytes);
             } else {
                 /* 先読みの分まで読もうとして落ちたなら、このトラックに印を
@@ -213,5 +279,9 @@ int fdc_track_read(struct fdc_track_cache *c, const struct fdc_track_ops *ops,
         lba += (u32)n;
         count -= (u32)n;
     }
+
+    /* 読めた 1 セクタを覚える。世代は読む前に聞いた値 (読みの途中で
+     * Ready 変化を見て進んでいれば、次から当たらない)。 */
+    if (single) fdc_sec_put(c, ops, drv, g, gen0, lba - 1u, buff);
     return 0;
 }
