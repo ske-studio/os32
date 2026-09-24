@@ -9,37 +9,27 @@
 /* ======================================================================== */
 
 #include "boot_defs.h"
+#include "pc98pt.h"   /* 区画表の共有部 (drivers/pc98pt.c、票 TASK_HDD_INSTALL 段 1-4) */
 
 /* ================================================================ */
-/*  パーティション検索 (PC-98 パーティションテーブル: LBA 1)         */
+/*  パーティション検索 (PC-98 区画表: LBA 1、標準配置)               */
+/*                                                                  */
+/*  CHS → LBA の幾何は IPL から受けた heads / SPT (= インストーラが  */
+/*  IPL に焼いた BIOS 幾何。HDD ローダは AH=84h と食い違えば止まる)。 */
+/*  **見つからなければ失敗** — 以前は LBA 1088 を仮定して読みに行った */
+/*  (票 TASK_HDD_INSTALL 段 1-5)。総数は知らないので 0 (見ない)。     */
 /* ================================================================ */
-static u32 find_partition(void)
+static int find_partition(u32 *out_lba)
 {
-    u8 pt_buf[512];
-    int i;
-    u32 lba = 1088;  /* フォールバック (シリンダ8) */
+    u8 pt_buf[PC98PT_SECTOR_SIZE];
+    unsigned long start, len;
 
-    boot_read_sector_asm(1, pt_buf);
-
-    for (i = 0; i < 16; i++) {
-        u8 *ent = &pt_buf[i * 32];
-        u8 bootable = ent[0];
-        u8 sys_type = ent[1];
-
-        if (sys_type == 0x00) continue;
-
-        if (bootable & 0x80) {
-            u16 start_c = (u16)ent[8] | ((u16)ent[9] << 8);
-            u8  start_h = ent[7];
-            u8  start_s = ent[6];
-            lba = ((u32)start_c * param_heads + start_h)
-                  * param_spt + start_s;
-            break;
-        }
-    }
-
-    if (lba == 0) lba = 1088;
-    return lba;
+    boot_read_sector_asm(PC98PT_LBA, pt_buf);
+    if (pc98pt_find_os32(pt_buf, param_heads, param_spt, 0,
+                         (int *)0, &start, &len) != PC98PT_OK)
+        return -1;
+    *out_lba = start;
+    return 0;
 }
 
 /* ================================================================ */
@@ -57,7 +47,10 @@ int boot_main(void)
 
     /* 1. パーティション検索 */
     boot_print_asm(0xA0000 + 160, "Finding partition...");
-    part_lba = find_partition();
+    if (find_partition(&part_lba) != 0) {
+        boot_print_asm(0xA0000 + 320, "No OS32 partition in LBA 1 (PC-98 table)!");
+        return -7;
+    }
 
     /* 2. ext2初期化 */
     if (ext2m_init(part_lba) != 0) {

@@ -79,6 +79,52 @@
 
 ### 段 1 — 一時置き場 (FD 起動のまま)
 
+#### 段 1 の実装メモ (2026-09-24、wt/hdd-stage1、KAPI v64)
+
+- **区画表の共有部**: `drivers/pc98pt.h` / `pc98pt.c` (純粋関数、型は C の素の型でローダでも組める)。
+  標準配置 (+8/+9/+10-11 開始、+12/+13/+14-15 終了)、区画はシリンダ単位 (終わり = (終了シリンダ + 1) ×
+  heads × spt、終了ヘッド・セクタは読まない)。OS32 の区画 = sid 0xE2 の最初の項目。読み手は
+  `fs/ext2_super.c` (`ext2_find_partition`)・`boot/boot_main.c` (+ `boot_debug.c`)・`fs/fatfs_vfs.c`
+  (`PC98PartEntry` を共有、`pc98pt_get` で読む)・`userland/shell/cmd_hdprep.c`。ホスト側は
+  `tools/pc98pt.py` (C と 1 バイトずつ突き合わせる)。cdinst / install の書き手は段 2 で標準配置に移した
+  (下の「段 2 の実装メモ」)。
+- **`ext2_find_partition(drive, &start, &len)`**: 失敗 (`EXT2_ERR_IO` / `EXT2_ERR_NOPART` = -13) を返す。
+  1088 のフォールバックは廃止。CHS → LBA は `bootinfo_part_geom` (DA 80h/81h の BIOS 幾何、無ければ
+  IDENTIFY の既定)、終わりは IDENTIFY の総数の内側。マウントは FS が区画より大きければ断り、
+  `Ext2Ctx.part_len` でブロック I/O が区画の外を断る。`ext2_format` は区画の長さで頭打ち。
+- **ATA**: `drivers/ide_addr.c` が方式を決める (word 49 bit9 → LBA28、word 53 bit0 → 現在の CHS、
+  どちらも無ければ既定の CHS)。範囲外は `IDE_ERR_RANGE` (-4)。`drivers/dev.c` の hd0-3 は LBA の
+  API (`ide_read_sectors`) へ委譲し、CHS の変換はここに無くなった。`dev_blk_*_lba` は `lba + count` の
+  桁あふれを断る。
+- **KAPI v64** (slot 230〜233): `ext2_format_at` / `dev_mount_count` / `sys_umount_checked` /
+  `hdd_geom_info` (表示と断る条件に BIOS 幾何と ATA の申告が要るので 4 本目を足した)。
+- **固定点**: `fs/ext2_layout.c`。最終グループの必要量 = sparse の SB + GDT + bitmap 2 + inode 表
+  (+ group 0 のルート 1)。lost+found は formatter が作らないので数えない。
+- **hdprep**: `userland/shell/cmd_hdprep.c` + `hdprep_plan.c` (純粋)。開始 = 1632 以上の最初の BIOS
+  シリンダ境界、長さ = 指定 (既定 256MiB) をシリンダへ切り下げ、上限は BIOS の CX × シリンダと IDENTIFY の
+  総数の小さい方。`yes` は打鍵で読む (rshell の `/api/cmd` からは答えられない)。
+- **migrate-pt**: `tools/nhd_deploy.py migrate-pt` / `make nhd-migrate-pt` (08_build.md §8-4)。
+- **実装レビュー往復 1 (Codex C1〜C4 / Opus M1・M2・m2〜m5) で足したもの**:
+  migrate-pt は全部の検査 (ローダ ≤ 8KiB・カーネル ≤ 508KiB・表・1KiB ブロックの ext2・push の来歴) を
+  **最初の書き込みの前**に行う (`migrate_preflight`)。`hdprep` は IDENTIFY の総数 0 を計画の段階で断り、
+  上限を BIOS 幾何・総数・ATA の方式 (LBA28 の 2^28 / 現在の CHS の容量) の最小にする。`ext2_format_at` は
+  範囲全体を `ide_range_ok` で照合する。`ext2_format` は 32 グループへ頭打ち (断らない) にし、区画の位置を
+  BIOS 幾何で決められないときは書かない。マウントはどちらの幾何を使ったかを出し、旧配置の表を見つけたら
+  「migrate-pt が要る」と出す。`fatfs_vfs.c` の区画走査も `bootinfo_part_geom` を使う。ホストの
+  `deploy` / `sync-from-hostdrv` / `sync` は旧配置の NHD に v64 以降のカーネルを配らない (`legacy_pt_guard`)。
+- **ラリー 2 (Codex 1〜3 / Opus a・c)**: `legacy_pt_guard` は「旧配置か」(`classify_pt_layout`、カーネルと
+  同じく sid 0xE2 の最初の項目) と「自動で移行できるか」(`plan_migrate_pt`) を分け、旧配置・OS32 項目なし・
+  壊れた項目はどれも断る。通すのは NHD のヘッダが無いファイル (警告) とファイルが無いときだけで、読めない・切り詰め・移行の可否の調べの例外 (OSError を含む) は断る (ラリー 3)。 push (`do_deploy`) はヘッダの無い・0 バイトの NHD も断る (Opus ラリー 3)。sync / sync-from-hostdrv の
+  マウントは `ensure_mounted_for_kernel` で、取り込みの後・losetup の前に門を通す。ext2 の書き込み範囲は
+  入口に関係なく `ext2_format_range` の入口で `ide_range_ok` と照合する。変異試験に恒等の対照を足した。
+- **組み合わせの危険** (08_build.md §8-4): 旧配置の NHD + v64 のカーネル (HostDrv + `hsync boot` で起きる) は
+  `/` がマウントできない。v63 以前のカーネル + 標準配置の表は、OS32 項目 (シリンダ 12) を **LBA 12** と読み、
+  `format 0` がローダと ext2 を壊す。
+- 試験: `make check-hdd-stage1-host` (`tools/tests/test_hdd_stage1.py`、記録 `tools/tests/hdd_stage1_tdd.md`)。
+  既存の ext2 の RAM ディスク試験 5 本は LBA 1 に区画表を置く足場 `tools/tests/hdd_pt_fake.h` に乗せた。
+
+
+
 4. **区画表の読み書きを 1 つの共有部に集約**し、標準配置で読み書きする: `ext2_find_partition`、`boot/boot_main.c`、cdinst、install、`tools/nhd_deploy.py`、fatfs の読み手と同じ struct を使う。**同じコミット**で揃える。既存 NHD は `make deploy-kernel` の区画表書き直しで移行する (H2 で確認)。旧配置を読む互換はしない (実機に OS32 の旧配置の区画は存在しない)。
 5. **区画の探索は失敗を返す**: `ext2_find_partition` の 1088 フォールバックを廃止し、(start, length) を返す。format は検証済みの (start, length) だけを受け、その範囲外に書かない。
 6. **大きさは既存の上限内**: 段 1 の既定は **256MiB 以下** (ext2 32 グループ)。最終グループがメタデータ (bitmap 2 + inode 表) を収められない長さは切り下げる。2GB への拡張 (`EXT2_MAX_GROUPS` を上げる、format の進捗表示) は**別票**。
@@ -90,6 +136,81 @@
 9. cdinst / install を段 1 の共有部 (区画表・幾何・検査) に乗せる。IPL の `[8]/[9]` には段 0 の BIOS 幾何を書く。区画開始 = LBA 1632 以上の最初の BIOS シリンダ境界 (8/17 なら 1632、16/63 なら 2016)。
 10. 既存区画の再利用は**今回しない** (区画表を 2 回書く現行経路、`/sys` の mkdir 失敗、上書きの扱いが未整理 — Codex B7)。インストールは段 1 の区画を**作り直す** (その旨を確認画面で表示)。一時置き場のデータは失われることを明記。
 11. 事前検査: パッケージの必須内容・ローダ 8192B 以下・展開先の容量。追加パッケージ・sync の失敗で「完了」と言わない。
+
+#### 段 2 の実装メモ (2026-09-24、wt/hdd-stage2、KAPI 変更なし)
+
+- **共有部**: `userland/system/inst_disk.c` (純粋: モードの判定・媒体の大きさ・容量の見積もり・IPL と区画表の
+  組み立て) と `inst_hdd.c` (KAPI で hd0 を検査して書く手順)。cdinst と install の両方がこれを繋ぐ
+  (`build/programs.mk` の `INST_OBJ`)。幾何と計画は hdprep と同じ `hdprep_plan.c`、区画表は `pc98pt.c`、
+  ext2 の配置は `fs/ext2_layout.c` をそのまま組む (写さない)。
+- **計画**: `hdprep_plan(g, 256)` — 開始 = 1632 以上の最初の BIOS シリンダ境界、長さ = 256MiB を
+  シリンダへ切り下げ (上限は BIOS 幾何・IDENTIFY の総数・ATA の方式の最小)。区画表と IPL の [8]/[9] は
+  BIOS 幾何 (旧 install が IPL に書いた IDENTIFY の幾何は使わない、F15)。
+- **モード** (`inst_classify`): 区画項目 0 で LBA 0 に 55AA 無し = 空。項目がちょうど 1 つで sid 0xE2・名前
+  "OS32" (後ろは空白か NUL)・開始 = 計画の開始なら**再作成**。**判断**: 旧配置の OS32 の 1 項目も、旧配置で
+  読んだ開始が計画の開始と同じとき (= 8/17 の NHD、シリンダ 12 = LBA 1632) は再作成の対象にした (PM の推奨、
+  これまでの CD / FD インストールで作った NHD を入れ直せる)。16/63 ではシリンダ 12 は LBA 12,096 で
+  期待値 2016 と違うので断る (実機に旧配置は無い)。それ以外 (未知の区画・2 項目以上・開始違い・
+  どちらの配置でも読めない項目・空の表で 55AA) は断る。再作成では確認画面に「一時置き場 (/hd0) の
+  ファイルは全部消える」と出す。
+- **順序** (R3-1): 全検査 (媒体 → hd0 の幾何・モード・マウント → 大きさ・容量) → 表示 → 承認 (y) →
+  `inst_hdd_release` (hd0 がマウント中なら `sys_umount_checked("/hd0")`、その後 `dev_mount_count(0)` が 0 で
+  なければ断る — ここまでは 1 セクタも書かない) → `ext2_format_at` → 区画表 (項目 0 だけ、他は 0) →
+  読み戻し比較 → `sys_mount("/hd0")` → ローダ (LBA 2〜、512 B ずつ書いて読み戻し) → IPL (LBA 0) →
+  ディレクトリ → 展開 → sync。書いた後の失敗は `INCOMPLETE:` と出し、「完了」は出さない。
+  ローダと IPL をマウントの確認の**後**に書くので、どこで止まっても次の実行は通る (format の失敗なら
+  空のディスク、区画表の後なら再作成)。
+- **事前検査**: cdinst は選んだ型のパッケージを全部 `pkg_parse` し、前置 (/hd0) の溢れ・MINIMAL の
+  `/boot/vmkernel.lz4` と `/sys/shell.bin`・BOOT.PKG の boot_hdd.bin / loader_hdd.bin (無圧縮)・大きさ・容量を
+  書く前に見る (以前は展開の途中で溢れに気付いた)。install は FD を書く前に一度列挙して数える (列挙の
+  失敗もここで分かる)。容量は `ext2_layout_plan` から空き (ブロック・inode) を出し、ファイルごとの
+  データ + 間接ブロック、ディレクトリ 1 ブロック、項目 16 件に 1 ブロック、余白 256 ブロックと比べる。
+  空きの計算は実物の `ext2_format_at` の像の dumpe2fs と一致する (試験)。
+- **ext2_mini の上限** (N8) と **容量表示の 32 ビットの溢れ** (`ide.c` の `size_mb`) は段 0 で直っていた
+  (431822e)。この段では ext2_mini に試験を付けた。
+- **使わなくなった経路**: cdinst / install は `ext2_format` (区画表を読んで位置を決める)・`ide_write_sectors`・
+  `sys_umount` (void) を呼ばない。HDD の自動検出 (`dev_get_info` の hd*) もやめ、hd0 = DA 80h だけを扱う。
+- 試験: `make check-hdd-stage2-host` (`tools/tests/test_hdd_stage2.py`、記録 `tools/tests/hdd_stage2_tdd.md`)、
+  `make check-install-fresh-host` (install.c の段 2 のケース 6 本)。
+- **実装レビュー往復 1 (Codex P1-1〜3・P2-4〜6 / Fable minor) で足したもの**:
+  - cdinst は書く前に各 PKG の**データ部**を表と突き合わせる (項目の大きさの和 = orig_size、無圧縮なら
+    comp_size = orig_size、PKG の長さ = データ部の先頭 + comp_size)。必須 (vmkernel.lz4・shell.bin) は空でも断る。
+  - パスは要素ごとに見る (`inst_check_path`): 絶対パス・空 / `.` / `..` の要素なし・`/hd0` と合わせて
+    32 要素 (VFS_MAX_PATH_DEPTH) 以内。事前検査と展開の直前の 2 か所。
+  - install は FD の `/sys/shell.bin` も必須にし、4 本とも「通常のファイル・空でない」を見る (cdinst と同じ規則)。
+  - 1 ファイルの上限 (ext2 1KiB ブロックで二重間接まで、67,383,296 B) を超える項目は容量の検査で断る。
+    自動で作る親ディレクトリの分として inode に 128 の余白を持つ。
+  - hd0 を外すのは `/hd0` に hd0 が 1 つだけマウントされているときだけ。別の prefix にもあれば**承認の前に**断る。
+  - **INCOMPLETE の後は再起動してから入れ直す** (同じ起動のまま再実行すると ext2 の fs_error などで通らない
+    ことがある)。区画表の読み戻しが違った場合と、次の実行が区画表を断った場合は、**ゲストからは直せない**
+    旨とホスト側の手当てを出す: NP21/W は NP21/W を止めて `make nhd-init` (`tools/nhd_deploy.py init`、
+    NHD を作り直す)、実機は OS32 の外の道具で LBA 1 を消す。
+- **NP21/W で見つかった落ち (628c61f、2026-09-24)**: cdinst が hd0 の検査の `vfs_devname("/")` の返り値を読んで
+  CPL=3 の fault kill。`fs/vfs.c` の `vfs_devname` はカーネル帯のマウント表の `dev_name` をそのまま返し、
+  そこに USER ビットは無い。常駐シェル (CPL=0) の hdprep では出ず、ホスト試験の贋物は利用者の文字列を返すので
+  見えなかった。`sys_getcwd` と同じ手で直した: `sdk/kapi.json` の target を `vfs_devname_user` (exec/exec.c、
+  トランポリンページの写しを返す) に差し替え。スロット・引数・戻り型・版は不変 (KAPI_SPEC.md に注記)。
+  `sh.bin` の hdprep / filer も同じ経路で直る。あわせて `build/app.conf` の cdinst / install の版を 64 にした
+  (v63 以前のカーネルで予約スロットを呼ばない)。`path_get_drive` / `path_get_cwd` も target が素のままで、
+  同じ種類の潜在不具合の疑いがある (インストーラは呼ばない。未確認・未修正)。
+  → 往復 2 で直した (下)。
+- **NP21/W の確認 (c76da0b、PM、2026-09-24)**: 空の NHD → CD から Normal → HDD 起動 → kselftest 212/0 →
+  ホストで `e2fsck -fn` clean。
+- **実装レビュー往復 2 (Codex P1-1・P1-2 / Fable minor) で足したもの**:
+  - cdinst の事前検査は項目の型を見る: ファイル・ディレクトリ以外の型は断る (`pkg_extract` は黙って飛ばす
+    ので、型 2 の `/sys/shell.bin` が必須として通って展開されなかった)。展開の直前にも同じ検査。
+  - 必須 (vmkernel.lz4・shell.bin) は**展開順にたどった最終の大きさ**で判定する (MINIMAL → GUI → NORMAL →
+    DEBUG、PKG の中は項目の順。後の同じパスの項目が O_TRUNC で置き換える — NORMAL の大きさ 0 の shell や
+    同じ PKG の中の重複が「完了」になっていた)。展開の後にも `/hd0` の実物をその大きさと突き合わせ、違えば
+    INCOMPLETE。install (FD) は FAT の名前が一意で後からの上書きは無いが、写した `/hd0/sys/shell.bin` を
+    同じく突き合わせる。
+  - `path_get_drive` / `path_get_cwd` も `vfs_devname` と同じ形で直した (`exec/exec.c` の `*_user`、target の
+    差し替え、版は据え置き)。kselftest `test_tramp_user_str` に `vfs_devname("/")` と `path_get_*` の返り番地が
+    トランポリンの写しであることの 2 項を足した (**kselftest は 212 → 214 項**)。str-return guard は
+    `const char *` を返す KAPI の全部と userland/ の全 C ソースを見る。
+  - 他の OS の区画 (未知の sid・2 項目以上・空の表で 55AA) には「このディスクは対象外」と出し、表を消せとは
+    言わない。ホスト側の手当て (`make nhd-init`) は OS32 の項目が中途半端なとき (開始違い・壊れ) と区画表の
+    読み戻しが違ったときだけ出す。
 
 ### 段 3 — CD インストール → HDD 起動
 

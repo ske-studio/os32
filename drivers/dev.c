@@ -3,7 +3,7 @@
 /*                                                                          */
 /*  CHS / LBA 2系統デバイス:                                                */
 /*    fd0/fd1 — FDD (CHS ネイティブ via fdc_read_sector)                   */
-/*    hd0-3  — IDE HDD (CHS ネイティブ via ide_read_sector_chs)            */
+/*    hd0-3  — IDE HDD (LBA via ide_read_sectors、方式は ide_addr.c)       */
 /*    cd0    — ATAPI CD (LBA ネイティブ via atapi_read_sectors)             */
 /*    lo0-3  — ループバック (loop_dev.c が独自に登録)                       */
 /*                                                                          */
@@ -99,90 +99,56 @@ static Device fdd1_dev = {
 };
 
 /* ======================================================================== */
-/*  HDD ドライバ (IDE CHS ネイティブ)                                      */
+/*  HDD ドライバ (IDE — LBA の API へ委譲)                                  */
+/*                                                                          */
+/*  以前はここで IDENTIFY の**既定**幾何を使って LBA → CHS にしていた        */
+/*  (ide.c にも同じ変換があった)。BIOS がドライブの現在の変換を変えていると  */
+/*  別の物理セクタを指す (票 TASK_HDD_INSTALL F8 / F13)。変換は ide.c の     */
+/*  1 か所 (drivers/ide_addr.c の方式選択: LBA28 / 現在の CHS / 既定の CHS)  */
+/*  に寄せ、ここは LBA をそのまま渡す。範囲外は ide.c が 1 セクタも出さずに  */
+/*  断る (IDE_ERR_RANGE)。                                                  */
 /* ======================================================================== */
 
-static int hd0_read_chs(Device *self, u16 cyl, u8 head, u8 sect,
-                         void *buf)
+static int hd_read(Device *self, int lba, int count, void *buf)
 {
-    (void)self;
-    return ide_read_sector_chs(0, cyl, head, sect, buf);
+    if (count < 0) return -1;
+    return ide_read_sectors((int)self->bus_id, (u32)lba, (u32)count, buf);
 }
 
-static int hd0_write_chs(Device *self, u16 cyl, u8 head, u8 sect,
-                          const void *buf)
+static int hd_write(Device *self, int lba, int count, const void *buf)
 {
-    (void)self;
-    return ide_write_sector_chs(0, cyl, head, sect, buf);
+    if (count < 0) return -1;
+    return ide_write_sectors((int)self->bus_id, (u32)lba, (u32)count, buf);
 }
 
-static int hd1_read_chs(Device *self, u16 cyl, u8 head, u8 sect,
-                         void *buf)
-{
-    (void)self;
-    return ide_read_sector_chs(1, cyl, head, sect, buf);
-}
-
-static int hd1_write_chs(Device *self, u16 cyl, u8 head, u8 sect,
-                          const void *buf)
-{
-    (void)self;
-    return ide_write_sector_chs(1, cyl, head, sect, buf);
-}
-
-static int hd2_read_chs(Device *self, u16 cyl, u8 head, u8 sect,
-                         void *buf)
-{
-    (void)self;
-    return ide_read_sector_chs(2, cyl, head, sect, buf);
-}
-
-static int hd2_write_chs(Device *self, u16 cyl, u8 head, u8 sect,
-                          const void *buf)
-{
-    (void)self;
-    return ide_write_sector_chs(2, cyl, head, sect, buf);
-}
-
-static int hd3_read_chs(Device *self, u16 cyl, u8 head, u8 sect,
-                         void *buf)
-{
-    (void)self;
-    return ide_read_sector_chs(3, cyl, head, sect, buf);
-}
-
-static int hd3_write_chs(Device *self, u16 cyl, u8 head, u8 sect,
-                          const void *buf)
-{
-    (void)self;
-    return ide_write_sector_chs(3, cyl, head, sect, buf);
-}
-
+/* cyls/heads/spt は情報用 (dev_register_hdd が IDENTIFY の既定値で埋める)。
+ * I/O には使わない — blk_read / blk_write があるので dev_blk_read_lba は
+ * CHS の経路を通らない。 */
 static Device hd0_dev = {
     "hd0", DEV_BLOCK, DEV_BUS_IDE, 0, 512, 0,
-    0, 0, 0, 0, 0, 0,      /* blk_read/write(LBA)=NULL, chr, ioctl, priv */
-    hd0_read_chs, hd0_write_chs,
-    0, 0, 0                 /* cyls/heads/spt: dev_register_hdd で設定 */
+    hd_read, hd_write, 0, 0, 0, 0,   /* blk_read/write(LBA), chr, ioctl, priv */
+    0, 0,                            /* blk_read_chs/write_chs = NULL */
+    0, 0, 0                          /* cyls/heads/spt: dev_register_hdd で設定 */
 };
 
 static Device hd1_dev = {
     "hd1", DEV_BLOCK, DEV_BUS_IDE, 1, 512, 0,
-    0, 0, 0, 0, 0, 0,
-    hd1_read_chs, hd1_write_chs,
+    hd_read, hd_write, 0, 0, 0, 0,
+    0, 0,
     0, 0, 0
 };
 
 static Device hd2_dev = {
     "hd2", DEV_BLOCK, DEV_BUS_IDE, 2, 512, 0,
-    0, 0, 0, 0, 0, 0,
-    hd2_read_chs, hd2_write_chs,
+    hd_read, hd_write, 0, 0, 0, 0,
+    0, 0,
     0, 0, 0
 };
 
 static Device hd3_dev = {
     "hd3", DEV_BLOCK, DEV_BUS_IDE, 3, 512, 0,
-    0, 0, 0, 0, 0, 0,
-    hd3_read_chs, hd3_write_chs,
+    hd_read, hd_write, 0, 0, 0, 0,
+    0, 0,
     0, 0, 0
 };
 
@@ -198,10 +164,6 @@ void dev_register_hdd(int drive)
         hd_devs[drive]->cyls  = info.cylinders;
         hd_devs[drive]->heads = info.heads;
         hd_devs[drive]->spt   = info.sectors;
-        /* ジオメトリ未取得時のフォールバック (旧 ide_set_chs と同一)。
-         * dev_blk_read_lba は heads/spt が 0 だと即エラーを返すため必須。 */
-        if (hd_devs[drive]->heads == 0) hd_devs[drive]->heads = 8;
-        if (hd_devs[drive]->spt   == 0) hd_devs[drive]->spt   = 17;
         dev_register(hd_devs[drive]);
     }
 }
@@ -251,12 +213,23 @@ void dev_register_scsi(int scsi_id)
 /*  LBA デバイス: blk_read を直接呼び出し                                   */
 /* ======================================================================== */
 
+/* [lba, lba+count) が 32 ビットで桁あふれしないか。count < 0 も断る。
+ * 各デバイスの上限 (総数・LBA28) は下の層 (ide.c / atapi.c / loop) が見る —
+ * ここは「足したら 0 付近へ戻る」要求を下へ渡さないためだけ。 */
+static int dev_span_ok(u32 lba, int count)
+{
+    if (count < 0) return 0;
+    if (count == 0) return 1;
+    return ((u32)count - 1U <= 0xFFFFFFFFUL - lba) ? 1 : 0;
+}
+
 int dev_blk_read_lba(Device *dev, u32 lba, int count, void *buf)
 {
     int i;
     u8 *p;
 
     if (!dev) return -1;
+    if (!dev_span_ok(lba, count)) return -1;
 
     /* LBA ネイティブデバイス (ATAPI CD) */
     if (dev->blk_read)
@@ -286,6 +259,7 @@ int dev_blk_write_lba(Device *dev, u32 lba, int count, const void *buf)
     const u8 *p;
 
     if (!dev) return -1;
+    if (!dev_span_ok(lba, count)) return -1;
 
     /* LBA ネイティブデバイス */
     if (dev->blk_write)

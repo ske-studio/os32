@@ -39,6 +39,7 @@
 #include "kapi_host.h"
 #include "pci.h"
 #include "pcm_cs4231.h"
+#include "bootinfo.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -52,7 +53,7 @@ extern int kapi_pci_bind_info(u32 idx, void *out);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[230];
+volatile u32 kapi_hits[234];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -288,6 +289,10 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     0,  /* pcm_close */
     4,  /* pcm_set_volume */
     4,  /* kbd_diag */
+    12,  /* ext2_format_at */
+    4,  /* dev_mount_count */
+    4,  /* sys_umount_checked */
+    8,  /* hdd_geom_info */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -523,6 +528,10 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* pcm_close */
     0x0000,  /* pcm_set_volume */
     0x0001,  /* kbd_diag: out */
+    0x0000,  /* ext2_format_at */
+    0x0000,  /* dev_mount_count */
+    0x0001,  /* sys_umount_checked: prefix */
+    0x0002,  /* hdd_geom_info: out */
 };
 
 /* ---- 出力ポインタの書き込み可検査 (票 TASK_KAPI_OUTPUT_GUARD) --------
@@ -738,7 +747,7 @@ const char * __cdecl wrap_sys_getcwd(void)
 const char * __cdecl wrap_vfs_devname(const char *prefix)
 {
     KAPI_HIT(30);
-    return vfs_devname(prefix);
+    return vfs_devname_user(prefix);
 }
 
 int __cdecl wrap_vfs_sync(void)
@@ -913,13 +922,13 @@ int __cdecl wrap_ide_read_sector(int drv, u32 lba, void *buf)
 const char * __cdecl wrap_path_get_drive(void)
 {
     KAPI_HIT(53);
-    return path_get_drive();
+    return path_get_drive_user();
 }
 
 const char * __cdecl wrap_path_get_cwd(void)
 {
     KAPI_HIT(54);
-    return path_get_cwd();
+    return path_get_cwd_user();
 }
 
 int __cdecl wrap_path_set_drive(const char *d)
@@ -2129,5 +2138,34 @@ int __cdecl wrap_kbd_diag(KbdDiag *out)
         ring3_fault_kill();   /* 戻らない */
     }
     return kbd_diag(out);
+}
+
+int __cdecl wrap_ext2_format_at(int drv, u32 start_lba, u32 length)
+{
+    KAPI_HIT(230);
+    return ext2_format_at(drv, start_lba, length);
+}
+
+int __cdecl wrap_dev_mount_count(int drv)
+{
+    KAPI_HIT(231);
+    return vfs_dev_mount_count(drv);
+}
+
+int __cdecl wrap_sys_umount_checked(const char *prefix)
+{
+    KAPI_HIT(232);
+    return vfs_umount_checked(prefix);
+}
+
+int __cdecl wrap_hdd_geom_info(int drv, HddGeom *out)
+{
+    KAPI_HIT(233);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)out, KAPI_OUT_LEN(out, sizeof(HddGeom)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
+    return hdd_geom_info(drv, (void *)out);
 }
 

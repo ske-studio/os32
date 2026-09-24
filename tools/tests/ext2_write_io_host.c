@@ -27,6 +27,7 @@
 #include "ext2_priv.h"
 #include "ide.h"
 #include "kmalloc.h"
+#include "hdd_pt_fake.h"   /* LBA 1 に OS32 区画 (票 TASK_HDD_INSTALL 段 1、1088 の廃止) */
 
 /* ======================================================================== */
 /*  libc の代わり (-nostdlib)                                               */
@@ -196,11 +197,11 @@ void vfs_register_fs(VfsOps *ops) { (void)ops; }
 /*  RAM ディスク + セクタ I/O 計数                                          */
 /* ======================================================================== */
 
-/* 8MB の ext2。base_lba はパーティションテーブルが空なので
- * ext2_find_partition() のフォールバック (1088) になる。 */
+/* 8MB の ext2。base_lba は LBA 1 の区画表 (hdd_pt_fake.h が標準配置で書く) の
+ * 開始 = 1088。区画はシリンダ単位なのでディスクは FS をシリンダへ切り上げた分。 */
 #define DISK_FS_SECTORS   16384u
 #define DISK_BASE_LBA     1088u
-#define DISK_SECTORS      (DISK_BASE_LBA + DISK_FS_SECTORS)
+#define DISK_SECTORS      (DISK_BASE_LBA + PT_FAKE_ROUNDUP(DISK_FS_SECTORS))
 
 static u8 g_disk[DISK_SECTORS * 512u];
 static u32 g_rd_sect;     /* 512B セクタ読み出し回数 */
@@ -293,6 +294,7 @@ static void line(const char *tag, u32 rd, u32 wr)
 static void disk_setup(void)
 {
     kmemset(g_disk, 0, sizeof(g_disk));
+    CHECK(pt_fake_write(g_disk, DISK_BASE_LBA, DISK_SECTORS - DISK_BASE_LBA) == 0);
     kmemset(&g_hd0, 0, sizeof(g_hd0));
     g_hd0.name = "hd0";
     g_hd0.type = DEV_BLOCK;

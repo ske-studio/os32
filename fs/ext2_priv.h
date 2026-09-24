@@ -65,7 +65,15 @@ void ext2_ns_touch(Ext2Ctx *ctx);
 void ext2_path_memo_reset(Ext2Ctx *ctx);
 int  ext2_path_memo_get(Ext2Ctx *ctx, const char *path, u32 *out_ino);
 void ext2_path_memo_put(Ext2Ctx *ctx, const char *path, u32 ino);
-u32 ext2_find_partition(int ide_drive);
+/* 区画表 (LBA 1) の OS32 区画を探す (drivers/pc98pt.c)。CHS → LBA の幾何は
+ * bootinfo_part_geom (BIOS 幾何、無ければ IDENTIFY)。戻り値 EXT2_OK /
+ * EXT2_ERR_IO (ドライブが無い・読めない) / EXT2_ERR_NOPART (項目が無い・
+ * 範囲が壊れている・ディスクの外)。**失敗時にどこかの LBA を仮定しない**。 */
+int ext2_find_partition(int ide_drive, u32 *out_start, u32 *out_len);
+/* 同じ。geom_src に使った幾何 (BOOTINFO_GEOM_BIOS / _IDENTIFY) を返す。
+ * 書き込み (ext2_format) は BIOS 幾何でなければ断る (m3)。 */
+int ext2_find_partition_src(int ide_drive, u32 *out_start, u32 *out_len,
+                            int *geom_src);
 /* IDEドライブ番号から Device* を解決 ("hd0".."hd3")。
  * ide_drive は VFS から (dev_type<<8)|dev_id 形式で渡ることがあるため
  * 下位バイトのみを使用する。未登録なら NULL。 */

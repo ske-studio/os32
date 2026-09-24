@@ -41,6 +41,7 @@
 #include "ext2_priv.h"
 #include "ide.h"
 #include "kmalloc.h"
+#include "hdd_pt_fake.h"   /* LBA 1 に OS32 区画 (票 TASK_HDD_INSTALL 段 1、1088 の廃止) */
 
 /* ======================================================================== */
 /*  libc の代わり (-nostdlib)                                               */
@@ -205,8 +206,8 @@ void kfree(void *p)
 /*  RAM ディスク + **一度だけの I/O 失敗**の注入                            */
 /* ======================================================================== */
 
-/* 8MB の ext2。base_lba はパーティションテーブルが空なので
- * ext2_find_partition() のフォールバック (1088) になる。
+/* 8MB の ext2。base_lba は LBA 1 の区画表 (hdd_pt_fake.h が標準配置で書く) の
+ * 開始 = 1088 (区画はシリンダ単位 = FS をシリンダへ切り上げた長さ)。
  *
  * 票 B8 往復 6: 8MB (8192 ブロック) は **1 グループ**に収まるので、グループを
  * またぐ割り当て (ext2_alloc_block が次のグループへ進む) が試験から見えなかった。
@@ -217,9 +218,9 @@ void kfree(void *p)
 #define DISK_FS_SECTORS        16384u
 #define DISK_GROUPS_FS_SECTORS 36000u   /* 18000 ブロック = 3 グループ (8192 / 8192 / 1615) */
 #define DISK_BASE_LBA          1088u
-#define DISK_MAX_SECTORS       (DISK_BASE_LBA + DISK_GROUPS_FS_SECTORS)
+#define DISK_MAX_SECTORS       (DISK_BASE_LBA + PT_FAKE_ROUNDUP(DISK_GROUPS_FS_SECTORS))
 static u32 g_fs_sectors = DISK_FS_SECTORS;
-#define DISK_SECTORS           (DISK_BASE_LBA + g_fs_sectors)
+#define DISK_SECTORS           (DISK_BASE_LBA + PT_FAKE_ROUNDUP(g_fs_sectors))
 
 static u8 g_disk[DISK_MAX_SECTORS * 512u];
 static u32 g_rd_sect;
@@ -584,6 +585,7 @@ static void disk_setup(void)
     char name[8];
 
     kmemset(g_disk, 0, sizeof(g_disk));
+    CHECK(pt_fake_write(g_disk, DISK_BASE_LBA, DISK_SECTORS - DISK_BASE_LBA) == 0);
     kmemset(&g_hd0, 0, sizeof(g_hd0));
     g_hd0.name = "hd0";
     g_hd0.type = DEV_BLOCK;

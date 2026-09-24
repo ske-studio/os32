@@ -39,6 +39,7 @@
 #include "ext2_priv.h"
 #include "ide.h"
 #include "kmalloc.h"
+#include "hdd_pt_fake.h"   /* LBA 1 に OS32 区画 (票 TASK_HDD_INSTALL 段 1、1088 の廃止) */
 #include "kstring.h"
 #include <stdarg.h>
 
@@ -164,7 +165,7 @@ void kfree(void *p)
 
 #define DISK_FS_SECTORS 16384u
 #define DISK_BASE_LBA   1088u
-#define DISK_SECTORS    (DISK_BASE_LBA + DISK_FS_SECTORS)
+#define DISK_SECTORS    (DISK_BASE_LBA + PT_FAKE_ROUNDUP(DISK_FS_SECTORS))
 #define SB_STATE_LBA    (DISK_BASE_LBA + 2u)
 
 static u8 g_disk[DISK_SECTORS * 512u];
@@ -293,6 +294,7 @@ static void disk_setup(void)
 {
     int i;
     kmemset(g_disk, 0, sizeof(g_disk));
+    CHECK(pt_fake_write(g_disk, DISK_BASE_LBA, DISK_SECTORS - DISK_BASE_LBA) == 0);
     kmemset(&g_hd0, 0, sizeof(g_hd0));
     g_hd0.name = "hd0";
     g_hd0.type = DEV_BLOCK;
@@ -1185,6 +1187,12 @@ static int __cdecl f_vfs_sync(void) { return vfs_sync(); }
 #define main cdinst_main
 #include "../system/cdinst.c"   /* -I の userland/lib (変異では写し) から */
 #undef main
+/* 段 2 (票 TASK_HDD_INSTALL): cdinst が繋ぐ hd0 の共有部。pc98pt.c と
+ * ext2_layout.c は hdd_pt_fake.h が取り込み済み。ここの段は install_packages と
+ * report_missing_packages だけを回す (hd0 の手順の試験は test_hdd_stage2.py) */
+#include "../system/inst_hdd.c"
+#include "../system/inst_disk.c"
+#include "userland/shell/hdprep_plan.c"   /* -I のリポジトリ根から */
 
 static void cdinst_setup(const char *set)
 {

@@ -104,6 +104,11 @@ i32 exec_abort_clear(void);
  * 読んだ瞬間に #PF → fault kill になる。sdk/kapi.json の target をこれに
  * 差し替えてあるだけで、スロット・引数・戻り型は不変 ([ABI2])。 */
 const char *vfs_cwd_user(void);
+/* vfs_devname の CPL=3 向けの写し (KAPI vfs_devname の実体、TASK_HDD_INSTALL 段 2) */
+const char *vfs_devname_user(const char *prefix);
+/* path_get_drive / path_get_cwd の CPL=3 向けの写し (KAPI の実体、同上) */
+const char *path_get_drive_user(void);
+const char *path_get_cwd_user(void);
 
 /* 上の写し場の番地とページ属性をブート時に踏む (票 T9 §12 R1)。
  * kselftest_run() は exec_init() より前に走るので、この項だけ

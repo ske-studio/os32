@@ -5,7 +5,10 @@
 # === ベースプログラム (単体ソースファイル → 自動ビルド) ===
 C_CMDS = $(wildcard userland/cmds/*.c)
 C_TESTS = $(filter-out userland/tests/gfx200_test.c userland/tests/gfx_demo200.c userland/tests/blit_test.c userland/tests/blit_test2.c userland/tests/demo_tile.c userland/tests/tile_bench.c userland/tests/rotate_test.c userland/tests/db_test.c userland/tests/dbq.c userland/tests/e2test.c userland/tests/math_test.c userland/tests/chem_test.c userland/tests/chem_demo.c userland/tests/map_test.c userland/tests/map_demo.c userland/tests/input_test.c userland/tests/asset_test.c userland/tests/asset_demo.c userland/tests/ecs_test.c userland/tests/ecs_demo.c userland/tests/text_test.c userland/tests/text_demo.c userland/tests/econ_test.c userland/tests/ai_test.c userland/tests/btl_test.c userland/tests/board_test.c userland/tests/evt_test.c userland/tests/inv_test.c userland/tests/turn_test.c userland/tests/rpg_test.c userland/tests/save_test.c userland/tests/mgx_test.c userland/tests/kbd_echo.c userland/tests/ring3_hello.c userland/tests/ring3_fault.c userland/tests/ring3_guard.c userland/tests/kstr_bench.c, $(wildcard userland/tests/*.c))
-C_SYSTEM = $(filter-out userland/system/lz4.c userland/system/cdinst.c, $(wildcard userland/system/*.c))
+C_SYSTEM = $(filter-out userland/system/lz4.c userland/system/cdinst.c $(INST_SHARED_SRC), $(wildcard userland/system/*.c))
+# cdinst / install が共有する hd0 の検査と書き込み (票 TASK_HDD_INSTALL 段 2)。
+# main を持たないので単体のプログラムにはしない (下の INST_OBJ でリンクする)
+INST_SHARED_SRC = userland/system/inst_disk.c userland/system/inst_hdd.c
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_TESTS) $(C_SYSTEM)
 BASE_PROGRAMS_BIN = $(C_BASE_PROGRAMS:.c=.bin) userland/shell.bin
@@ -34,7 +37,7 @@ SHELL_OBJ = $(SHELL_SRC:.c=.o)
 # 走査しないので userland の .d は読まれない。sh_launch.inc / sh_pipe.inc /
 # sh_redraw.inc を直しても .o が作り直されないと、直したつもりの sh.bin が
 # 出来上がる。常駐側にも同じ依存を足す (レシピは変えないので .o は不変)。
-SHELL_DEPS = userland/shell/shell.h $(wildcard userland/shell/*.inc)
+SHELL_DEPS = userland/shell/shell.h userland/shell/hdprep_plan.h drivers/pc98pt.h $(wildcard userland/shell/*.inc)
 
 userland/shell/%.o: userland/shell/%.c $(SHELL_DEPS)
 	$(CC) $(PROGRAM_FLAGS) -Iuserland/shell $(INC_libos32filer) -c $< -o $@
@@ -48,8 +51,15 @@ PCI_DECODE_USER_OBJ = userland/shell/pci_decode_user.o
 $(PCI_DECODE_USER_OBJ): drivers/pci_decode.c drivers/pci_decode.h
 	$(CC) $(PROGRAM_FLAGS) -Idrivers -c drivers/pci_decode.c -o $@
 
-userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(PCI_DECODE_USER_OBJ) $(FILER_DRAW_OBJ)
-	$(LD) -m elf_i386 -T sdk/link/app_sys.ld -nostdlib --nmagic --gc-sections -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(PCI_DECODE_USER_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
+# 区画表の共有部 (drivers/pc98pt.c) も同じ扱い — `hdprep` が書く区画表は
+# カーネル・ローダ・nhd_deploy.py と 1 バイトも違ってはいけない
+# (票 TASK_HDD_INSTALL 段 1-4)。
+PC98PT_USER_OBJ = userland/shell/pc98pt_user.o
+$(PC98PT_USER_OBJ): drivers/pc98pt.c drivers/pc98pt.h
+	$(CC) $(PROGRAM_FLAGS) -Idrivers -c drivers/pc98pt.c -o $@
+
+userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(PCI_DECODE_USER_OBJ) $(PC98PT_USER_OBJ) $(FILER_DRAW_OBJ)
+	$(LD) -m elf_i386 -T sdk/link/app_sys.ld -nostdlib --nmagic --gc-sections -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(PCI_DECODE_USER_OBJ) $(PC98PT_USER_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
 
 # === sh — 同じシェルのソースを CPL=3 の外部アプリとして (票 T9 D1) ===
 # 常駐 shell.bin (app_sys.ld = 0x300000) の規則は上のまま一切変えない。同じ
@@ -72,6 +82,11 @@ $(SH_PCI_DECODE_OBJ): drivers/pci_decode.c drivers/pci_decode.h
 	@mkdir -p $(SH_OBJDIR)
 	$(CC) $(PROGRAM_FLAGS) -DSHELL_AS_APP -Idrivers -c drivers/pci_decode.c -o $@
 
+SH_PC98PT_OBJ = $(SH_OBJDIR)/pc98pt_user.o
+$(SH_PC98PT_OBJ): drivers/pc98pt.c drivers/pc98pt.h
+	@mkdir -p $(SH_OBJDIR)
+	$(CC) $(PROGRAM_FLAGS) -DSHELL_AS_APP -Idrivers -c drivers/pc98pt.c -o $@
+
 # main.c だけが #include する .inc の明示依存 (レシピ無し = 上のパターン規則に
 # 前提だけを足す)。$(SHELL_DEPS) の wildcard でも拾えるが、wildcard は
 # Makefile 読み込み時の 1 度しか評価されないので、新しく足した .inc が
@@ -80,8 +95,8 @@ $(SH_PCI_DECODE_OBJ): drivers/pci_decode.c drivers/pci_decode.h
 userland/shell/main.o:    userland/shell/sh_exec.inc
 $(SH_OBJDIR)/main.o:      userland/shell/sh_exec.inc
 
-userland/sh.elf: sdk/link/app.ld $(CRT0_OBJ) $(SH_OBJ) $(SH_PCI_DECODE_OBJ) $(FILER_DRAW_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(SH_OBJ) $(SH_PCI_DECODE_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
+userland/sh.elf: sdk/link/app.ld $(CRT0_OBJ) $(SH_OBJ) $(SH_PCI_DECODE_OBJ) $(SH_PC98PT_OBJ) $(FILER_DRAW_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(SH_OBJ) $(SH_PCI_DECODE_OBJ) $(SH_PC98PT_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
 
 sh: $(CRT0_OBJ) userland/sh.bin
 
@@ -151,8 +166,29 @@ userland/lib/rt/pkg.o: userland/lib/rt/pkg.c userland/lib/rt/pkg.h
 userland/system/cdinst.o: userland/system/cdinst.c userland/lib/rt/pkg.h userland/lib/rt/dbgserial.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-userland/system/cdinst.elf: sdk/link/app.ld $(CRT0_OBJ) userland/system/cdinst.o userland/lib/rt/pkg.o $(DBG_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/system/cdinst.o userland/lib/rt/pkg.o $(DBG_OBJ) -lc -lgcc
+# hd0 の規則は install と共有 (userland/system/inst_hdd.c / inst_disk.c)。区画表
+# (drivers/pc98pt.c)、幾何と計画 (userland/shell/hdprep_plan.c)、ext2 の配置
+# (fs/ext2_layout.c) はカーネル・hdprep と同じソースを組む — **写さない**
+# (票 TASK_HDD_INSTALL 段 2-9)。
+INST_HDRS = userland/system/inst_hdd.h userland/system/inst_disk.h \
+            userland/shell/hdprep_plan.h drivers/pc98pt.h fs/ext2_layout.h $(SDK_KAPI_HDR)
+userland/system/inst_disk.o: userland/system/inst_disk.c $(INST_HDRS)
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+userland/system/inst_hdd.o: userland/system/inst_hdd.c $(INST_HDRS)
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+userland/system/ext2_layout_user.o: fs/ext2_layout.c fs/ext2_layout.h
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+userland/system/hdprep_plan_inst.o: userland/shell/hdprep_plan.c userland/shell/hdprep_plan.h drivers/pc98pt.h
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+userland/system/pc98pt_inst.o: drivers/pc98pt.c drivers/pc98pt.h
+	$(CC) $(PROGRAM_FLAGS) -Idrivers -c $< -o $@
+INST_OBJ = userland/system/inst_hdd.o userland/system/inst_disk.o \
+           userland/system/hdprep_plan_inst.o userland/system/pc98pt_inst.o \
+           userland/system/ext2_layout_user.o
+
+userland/system/cdinst.o: $(INST_HDRS)
+userland/system/cdinst.elf: sdk/link/app.ld $(CRT0_OBJ) userland/system/cdinst.o userland/lib/rt/pkg.o $(DBG_OBJ) $(INST_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/system/cdinst.o userland/lib/rt/pkg.o $(DBG_OBJ) $(INST_OBJ) -lc -lgcc
 
 cdinst: $(CRT0_OBJ) userland/system/cdinst.bin
 
@@ -466,6 +502,11 @@ userland/system/%.elf: userland/system/%.c sdk/link/app.ld $(CRT0_OBJ)
 # 2026-09-14: install_recover.inc を直しても install.bin が再ビルドされず古いバイナリを配備した
 # (userland の .d は Makefile 末尾の -include の対象外)。
 userland/system/install.elf: userland/system/install_recover.inc
+# install は hd0 の手順を cdinst と共有する (上の INST_OBJ)。パターン規則は
+# 自分の .o しか繋がないので、install だけ明示の規則で置き換える。
+userland/system/install.elf: userland/system/install.c $(INST_HDRS) $(INST_OBJ) sdk/link/app.ld $(CRT0_OBJ)
+	$(CC) $(PROGRAM_FLAGS) -c $< -o userland/system/install.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/system/install.o $(INST_OBJ) -lc -lgcc
 userland/system/hsync.elf: userland/system/hsync_protect.inc
 userland/system/hsync.elf: lib/crc32_core.inc
 

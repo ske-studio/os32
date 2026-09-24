@@ -384,6 +384,46 @@ void vfs_umount(const char *prefix)
     }
 }
 
+int vfs_umount_checked(const char *prefix)
+{
+    int i, rc;
+
+    if (!prefix) return VFS_ERR_INVAL;
+    for (i = 0; i < VFS_MAX_FS; i++) {
+        if (!mounts[i].in_use || kstrcmp(mounts[i].prefix, prefix) != 0)
+            continue;
+        /* ルートを外すと以後のパスが全部行き先を失う (シェル・ライブラリも)。 */
+        if (mounts[i].prefix[0] == '/' && mounts[i].prefix[1] == '\0')
+            return VFS_ERR_BUSY;
+        /* 書き戻しを**先に**、失敗を拾う。vfs_umount は ops->umount の中の
+         * sync の失敗を捨てるので、ここで見ないと「外せた = ディスクは正しい」
+         * と言えない (N6)。失敗したら外さない — 呼び手が判断する。 */
+        if (mounts[i].ops->sync) {
+            rc = mounts[i].ops->sync(mounts[i].fs_ctx);
+            if (rc < 0) return rc;
+        }
+        vfs_fd_invalidate_mount(mounts[i].fs_ctx);
+        mounts[i].ops->umount(mounts[i].fs_ctx);
+        mounts[i].in_use = 0;
+        mounts[i].fs_ctx = (void *)0;
+        return VFS_OK;
+    }
+    return VFS_ERR_NOTFOUND;
+}
+
+int vfs_dev_mount_count(int drive)
+{
+    int i, n = 0;
+
+    if (drive < 0 || drive > 3) return VFS_ERR_INVAL;
+    for (i = 0; i < VFS_MAX_FS; i++) {
+        if (mounts[i].in_use && mounts[i].dev_type == VFS_DEV_HD &&
+            mounts[i].dev_id == drive)
+            n++;
+    }
+    return n;
+}
+
 int vfs_is_mounted(const char *prefix)
 {
     int i;

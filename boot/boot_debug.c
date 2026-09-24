@@ -15,6 +15,7 @@
 /* ======================================================================== */
 
 #include "boot_defs.h"
+#include "pc98pt.h"   /* 区画表の共有部 (標準配置) */
 
 /* ================================================================ */
 /*  16進表示ユーティリティ                                           */
@@ -160,13 +161,15 @@ int boot_main(void)
         show_dump(row, " ent:", ent, 16);
         row += 160;
 
-        if (bootable & 0x80) {
-            u16 start_c = (u16)ent[8] | ((u16)ent[9] << 8);
-            u8  start_h = ent[7];
-            u8  start_s = ent[6];
+        if (sys_type == PC98PT_SID_OS32) {
+            PC98PartEntry pe;
+            unsigned long st, ln;
 
-            part_lba = ((u32)start_c * param_heads + start_h)
-                       * param_spt + start_s;
+            /* 標準配置で読む (drivers/pc98pt.c、票 TASK_HDD_INSTALL 段 1-4) */
+            (void)pc98pt_get(buf, i, &pe);
+            if (pc98pt_entry_range(&pe, param_heads, param_spt, 0,
+                                   &st, &ln) == PC98PT_OK)
+                part_lba = st;
 
             show_val(row, " CHS->LBA=", part_lba);
             row += 160;
@@ -175,9 +178,9 @@ int boot_main(void)
     }
 
     if (part_lba == 0) {
-        boot_print_asm(row, "[3]No boot part! use 1088");
-        row += 160;
-        part_lba = 1088;
+        /* 以前は LBA 1088 を仮定した。本物のローダ (boot_main.c) と同じく止まる */
+        boot_print_asm(row, "[3]No OS32 partition in LBA 1!");
+        return -7;
     }
 
     /* ---- Step 4: ext2 スーパーブロック読み出し ---- */

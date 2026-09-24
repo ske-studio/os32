@@ -15,6 +15,8 @@
 #include "ide.h"    /* ide_get_info, ide_drive_present — ジオメトリ情報取得のみ */
 #include "dev.h"
 #include "os_time.h"
+#include "pc98pt.h"   /* PC98PartEntry (票 TASK_HDD_INSTALL 段 1-4) */
+#include "bootinfo.h" /* bootinfo_part_geom (区画表の幾何、m4) */
 
 #include "fatfs/diskio_os32.h"   /* diskio_set_* */
 
@@ -438,23 +440,9 @@ static u32 fatfs_vfs_block_size(void *ctx)
 
 /* ======== PC-98パーティション検出 ======== */
 
-/* PC-98パーティションテーブルエントリ (32バイト)
- * LBA 1 に最大16エントリ格納 (512バイトセクタの場合) */
-typedef struct {
-    u8  bootable;        /* 0x80 = アクティブ */
-    u8  sys_id;          /* システムID */
-    u8  reserved1[2];
-    u8  ipl_sector;      /* IPL開始セクタ */
-    u8  ipl_head;        /* IPL開始ヘッド */
-    u16 ipl_cyl;         /* IPL開始シリンダ */
-    u8  start_sector;    /* パーティション開始セクタ */
-    u8  start_head;      /* パーティション開始ヘッド */
-    u16 start_cyl;       /* パーティション開始シリンダ */
-    u8  end_sector;      /* パーティション終了セクタ */
-    u8  end_head;        /* パーティション終了ヘッド */
-    u16 end_cyl;         /* パーティション終了シリンダ */
-    char name[16];       /* パーティション名 (SJIS) */
-} PC98PartEntry;
+/* PC-98パーティションテーブルエントリ (32バイト) は drivers/pc98pt.h の
+ * PC98PartEntry (標準配置、ext2 / ローダ / hdprep / nhd_deploy.py と共有)。
+ * バイト列からは pc98pt_get で取り出す (構造体を重ねない)。 */
 
 /* FAT系パーティションかどうかの判定 (sys_id) */
 static int pc98_is_fat_sysid(u8 id)
@@ -495,10 +483,10 @@ static u32 pc98_find_fat_partition(int drv, u16 phys_sec_size)
     char devname[8];
     Device *dev;
 
-    /* ジオメトリ取得 */
+    /* ジオメトリ取得。区画表の CHS → LBA は ext2 と同じ規則 (BIOS 幾何、無ければ
+     * IDENTIFY の既定) で読む — 票 TASK_HDD_INSTALL 段 1 (m4)。 */
     if (ide_get_info(drv, &info) != 0) return 0;
-    heads = info.heads;
-    spt   = info.sectors;
+    if (bootinfo_part_geom(drv, &heads, &spt) < 0) return 0;
 
     /* Device API ポインタ取得 */
     devname[0] = 'h'; devname[1] = 'd';
@@ -529,8 +517,11 @@ static u32 pc98_find_fat_partition(int drv, u16 phys_sec_size)
 
     /* パーティションエントリをスキャン */
     for (i = 0; i < pt_max; i++) {
-        PC98PartEntry *pe = (PC98PartEntry *)(buf + pt_offset + i * 32);
+        PC98PartEntry ent;
+        PC98PartEntry *pe = &ent;
         u32 lba;
+
+        (void)pc98pt_get(buf + pt_offset, i, &ent);
 
         /* 空エントリの検出: sys_idとbootableが共に0なら終了 */
         if (pe->sys_id == 0 && pe->bootable == 0) break;

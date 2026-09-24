@@ -2,8 +2,9 @@
 /*  DEV.H — デバイス抽象化層                                                */
 /*                                                                          */
 /*  CHS / LBA 2系統ブロックI/O:                                            */
-/*    blk_read_chs — CHS ネイティブ (FDD, HDD, loop)                      */
-/*    blk_read     — LBA ネイティブ (ATAPI CD のみ)                        */
+/*    blk_read_chs — CHS ネイティブ (FDD, loop)                           */
+/*    blk_read     — LBA ネイティブ (ATAPI CD、IDE HDD)                    */
+/*                   HDD の LBA → レジスタ値は drivers/ide_addr.c が決める */
 /*                                                                          */
 /*  dev_blk_read_lba() 汎用ラッパー:                                       */
 /*    CHS デバイス → LBA→CHS 変換 → blk_read_chs                         */
