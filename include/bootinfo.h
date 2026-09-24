@@ -34,7 +34,7 @@
 
 /* ---- 識別 ---------------------------------------------------------------- */
 #define BOOTINFO_MAGIC        0x49544F42UL  /* 'B','O','T','I' (LE) */
-#define BOOTINFO_VERSION      1U
+#define BOOTINFO_VERSION      2U            /* v2 = イメージ欄 (0x30〜0x3F) を足した */
 #define BOOTINFO_CHECK        ((~(BOOTINFO_MAGIC ^ (u32)BOOTINFO_VERSION)) & 0xFFFFFFFFUL)
 #define BOOTINFO_NDRIVES      2U            /* DA 80h / 81h */
 
@@ -53,7 +53,19 @@
 #define BI_OFF_SUM            0x28          /* u16 ドライブ記録 (0x08〜0x27) のバイト和 */
 #define BI_OFF_RSVD           0x2A          /* u16 0 */
 #define BI_OFF_CHECK          0x2C          /* u32 = BOOTINFO_CHECK。**最後に書く** */
-#define BOOTINFO_WIRE_SIZE    0x30
+/* イメージ欄 (v2、票 TASK_SERIAL_HOSTFS 部品 A-4 / §1-v3「.old の識別」)。
+ * ローダが vmkernel.lz4 を**検査し終えてから**書く (主部の封印より後 —
+ * HDD ローダは PM の boot_main、FD ローダは PM の pm_entry32)。主部の sum /
+ * check には含めず、自分のチェック語 img_check を**最後に**書く:
+ *   img_check = img_crc ^ img_size ^ BOOTINFO_IMG_KEY
+ * 主部が有効で img_check が合い img_size != 0 のときだけ「記録あり」。
+ * **写し**: boot/bootinfo.inc (NASM) と boot/boot_defs.h (HDD ローダの C)。 */
+#define BI_OFF_IMG_CRC        0x30          /* u32 VK32 ファイル全体の CRC32 (image_crc) */
+#define BI_OFF_IMG_SIZE       0x34          /* u32 読んだファイルの長さ */
+#define BI_OFF_IMG_CHECK      0x38          /* u32 **最後に書く** */
+#define BI_OFF_IMG_RSVD       0x3C          /* u32 0 */
+#define BOOTINFO_IMG_KEY      0x43474D49UL  /* 'I','M','G','C' (LE) */
+#define BOOTINFO_WIRE_SIZE    0x40
 
 /* ---- ドライブ記録 (BI_OFF_DRIVE0 + i * BI_DRIVE_SIZE) 内のオフセット ----- */
 /* INT 1Bh AH=84h の戻り (PC-9800 Bible 2-9 §3 SENSE [HDD]):               */
@@ -100,6 +112,10 @@ struct bootinfo_wire {
     u16 sum;
     u16 rsvd;
     u32 check;
+    u32 img_crc;
+    u32 img_size;
+    u32 img_check;
+    u32 img_rsvd;
 };
 
 /* ---- カーネルが保存する写し (kernel/bootinfo.c) --------------------------- */
@@ -123,6 +139,9 @@ struct bootinfo {
     u8  source;
     u8  ndrives;
     struct bootinfo_drive drive[BOOTINFO_NDRIVES];
+    u8  img_valid;      /* 1 = ローダが検査済みイメージの CRC を記録した */
+    u32 img_crc;        /* img_valid のときだけ意味がある */
+    u32 img_size;
 };
 
 /* bootinfo_parse の結果 */
@@ -137,6 +156,10 @@ struct bootinfo {
 
 /* ---- 純粋関数 (kernel/bootinfo_check.c、ホスト試験の対象) ----------------- */
 
+/* イメージ欄のチェック語 (ローダと同じ計算)。 */
+#define BOOTINFO_IMG_CHECK_OF(crc, size) \
+    ((u32)(((u32)(crc) ^ (u32)(size) ^ (u32)BOOTINFO_IMG_KEY) & 0xFFFFFFFFUL))
+
 /* バイト列 raw[0..len) を検証して out を埋める。戻り値 BOOTINFO_OK / ERR_*。
  * 失敗しても out->status と out->magic は埋める (全ドライブ valid = 0)。 */
 int bootinfo_parse(const u8 *raw, unsigned int len, struct bootinfo *out);
@@ -150,6 +173,9 @@ u16 bootinfo_sum(const u8 *raw);
 /* 試験用: version〜ドライブ記録が書かれた raw に sum / magic / check を
  * ローダと同じ順で書く。 */
 void bootinfo_seal(u8 *raw);
+
+/* 試験用: イメージ欄をローダと同じ順 (crc → size → check) で書く。 */
+void bootinfo_seal_image(u8 *raw, u32 crc, u32 size);
 
 /* 起動画面の 1 行を作る。buf は BOOTINFO_LINE_MAX 以上。
  *   [hdd] bios da=80 cf=0 ah=00 len=512 C/H/S=16382/16/63 src=fd
@@ -198,5 +224,13 @@ int hdd_geom_info(int drive, void *out);
 
 /* 起動画面へ [hdd] 行を出す (ide_init の後)。 */
 void bootinfo_report(void);
+
+/* KAPI boot_image_info (v65) の実体。out は BootImageInfo (os32_kapi_shared.h、
+ * 40 B)。起動したイメージの CRC (ローダの記録) とカーネルのコミット ID。
+ * 0 / OS32_ERR_INVAL (out が NULL)。 */
+int boot_image_info(void *out);
+
+/* 起動画面の 2 行 (Build + Commit、Image CRC)。kernel_main が出す。 */
+void bootinfo_report_image(void);
 
 #endif /* BOOTINFO_H */

@@ -19,17 +19,21 @@
 #  超えたら**出力を書かずに失敗**する (TASK_HDD_INSTALL N8 の生成側)。
 #  ホスト試験: tools/tests/test_vmkernel_lz4.py
 #
-#  VK32ヘッダ仕様:
-#    Offset  Size  Field
-#    0x00    4     magic: 'VK32' (0x32334B56 LE)
-#    0x04    4     header_size: 16 + entry_count * 16
-#    0x08    4     version: 1
-#    0x0C    4     entry_count: エントリ数
-#    --- entry[i] ---
-#    +0x00   4     load_addr: 展開先アドレス
-#    +0x04   4     raw_size: 展開後サイズ
-#    +0x08   4     data_offset: ファイル先頭からの絶対オフセット
-#    +0x0C   4     compressed_size: LZ4圧縮後サイズ
+#  VK32ヘッダ仕様 (v2、票 TASK_SERIAL_HOSTFS 部品 A-4。正典の説明は
+#  boot/boot_defs.h、n = entry_count):
+#    Offset     Size  Field
+#    0x00       4     magic: 'VK32' (0x32334B56 LE)
+#    0x04       4     header_size: 16 + 20n + 8
+#    0x08       4     version: 2
+#    0x0C       4     entry_count: エントリ数 (1〜4)
+#    0x10+16i   16    entry[i]: load_addr / raw_size / data_offset / compressed_size
+#    0x10+16n   4n    entry_crc[i]: 展開後 (元の kernel.bin / sqlite.bin) の CRC32
+#    0x10+20n   4     image_size: ファイル全体の長さ (完全長)
+#    0x14+20n   4     image_crc: ファイル全体の CRC32 (**この欄を 0 として**計算)
+#  CRC32 は IEEE 802.3 (zlib.crc32)。ローダ (HDD: boot/vk32_boot.c、FD:
+#  boot/loader_fat_new.asm の pm_vk32_boot) が全部を検査し、外れたら止まる。
+#  image_crc はローダがブート情報域に残し、カーネルが `ver` / KAPI
+#  boot_image_info で見せる (hsync の `.old` の識別に使う)。
 # ========================================================================
 
 import os
@@ -37,6 +41,7 @@ import re
 import sys
 import struct
 import argparse
+import zlib
 
 try:
     import lz4.block
@@ -47,7 +52,7 @@ except ImportError:
 
 # VK32 定数
 VK32_MAGIC   = 0x32334B56  # 'VK32' LE
-VK32_VERSION = 1
+VK32_VERSION = 2
 
 # LZ4 高圧縮の level。2026-09-24 の実測 (kernel 293,832 B + sqlite 374,840 B):
 #   既定 (fast)  kernel 210,296 + sqlite 306,387 = 516,731 B (上限まで残り 3.4KB)
@@ -120,15 +125,18 @@ def main():
 
     entry_count = len(entries)
     common_hdr_size = 16  # magic + header_size + version + entry_count
-    header_size = common_hdr_size + entry_count * 16
+    # エントリ表 + エントリごとの CRC32 + image_size + image_crc
+    header_size = common_hdr_size + entry_count * (16 + 4) + 8
 
     # 各エントリの圧縮データを準備
     compressed_list = []
     raw_sizes = []
+    raw_crcs = []
     for path, addr, label in entries:
         with open(path, 'rb') as f:
             raw_data = f.read()
         raw_size = len(raw_data)
+        raw_crcs.append(zlib.crc32(raw_data) & 0xFFFFFFFF)
         compressed = lz4.block.compress(raw_data, store_size=False,
                                         mode='high_compression',
                                         compression=LZ4_HC_LEVEL)
@@ -153,6 +161,11 @@ def main():
                             data_offsets[i],
                             len(compressed_list[i]))
         hdr += entry
+    for i in range(entry_count):
+        hdr += struct.pack('<I', raw_crcs[i])
+    # image_size (= 完全長) と、仮に 0 を入れた image_crc
+    hdr += struct.pack('<II', offset, 0)
+    assert len(hdr) == header_size
 
     # 上限の検査。超えたイメージはローダが読まずに止まる (boot_main.c の
     # "vmkernel.lz4 too large")。起動しないものを配備させないよう、ここで落とす。
@@ -168,23 +181,30 @@ def main():
             pass
         sys.exit(1)
 
-    # 出力ファイル書き込み
-    with open(args.output, 'wb') as f:
-        f.write(hdr)
-        for comp in compressed_list:
-            f.write(comp)
+    # ファイル全体の CRC32 を、image_crc の欄を 0 としたバイト列から求めて埋める
+    image = bytearray(hdr + b''.join(compressed_list))
+    assert len(image) == offset
+    image_crc = zlib.crc32(bytes(image)) & 0xFFFFFFFF
+    struct.pack_into('<I', image, header_size - 4, image_crc)
+
+    # 出力ファイル書き込み (一時名に書いてから置き換える — 途中で止まって
+    # 半端なイメージが残らないように)
+    tmp_out = args.output + '.tmp'
+    with open(tmp_out, 'wb') as f:
+        f.write(image)
+    os.replace(tmp_out, args.output)
 
     # 結果表示
     total_size = offset
     print("=== VK32 Image: {} ===".format(args.output))
-    print("  magic=0x{:08X} version={} entries={} lz4=HC level {}".format(
-        VK32_MAGIC, VK32_VERSION, entry_count, LZ4_HC_LEVEL))
+    print("  magic=0x{:08X} version={} entries={} lz4=HC level {} image_crc={:08x}".format(
+        VK32_MAGIC, VK32_VERSION, entry_count, LZ4_HC_LEVEL, image_crc))
     for i in range(entry_count):
         path, addr, label = entries[i]
         comp_size = len(compressed_list[i])
         ratio = 100 * comp_size // raw_sizes[i] if raw_sizes[i] > 0 else 0
-        print("  [{}] {}: addr=0x{:X} raw={} compressed={} ({}%)".format(
-            i, label, addr, raw_sizes[i], comp_size, ratio))
+        print("  [{}] {}: addr=0x{:X} raw={} compressed={} ({}%) crc={:08x}".format(
+            i, label, addr, raw_sizes[i], comp_size, ratio, raw_crcs[i]))
     print("  total: {} bytes ({} KB), limit {} bytes (残り {})".format(
         total_size, total_size // 1024, max_image_size,
         max_image_size - total_size))

@@ -54,6 +54,13 @@ void bootinfo_seal(u8 *raw)
     wr32(raw + BI_OFF_CHECK, (u32)BOOTINFO_CHECK);
 }
 
+void bootinfo_seal_image(u8 *raw, u32 crc, u32 size)
+{
+    wr32(raw + BI_OFF_IMG_CRC, crc);
+    wr32(raw + BI_OFF_IMG_SIZE, size);
+    wr32(raw + BI_OFF_IMG_CHECK, BOOTINFO_IMG_CHECK_OF(crc, size));
+}
+
 int bootinfo_drive_usable(const struct bootinfo_drive *d)
 {
     if (d == 0) return 0;
@@ -127,6 +134,18 @@ int bootinfo_parse(const u8 *raw, unsigned int len, struct bootinfo *out)
         /* ローダの判定は信じ切らず、同じ規則で判定し直す。両方が 1 のときだけ使う
          * (ローダが 0 と書いたものを拾い直さない)。 */
         d->valid = (u8)((d->loader_valid == 1 && bootinfo_drive_usable(d)) ? 1 : 0);
+    }
+    /* イメージ欄 (v2)。主部とは別のチェック語で、合わなければ「記録なし」
+     * (主部の status は OK のまま — 幾何は使える)。 */
+    {
+        u32 crc  = rd32(raw + BI_OFF_IMG_CRC);
+        u32 size = rd32(raw + BI_OFF_IMG_SIZE);
+        if (size != 0 &&
+            rd32(raw + BI_OFF_IMG_CHECK) == BOOTINFO_IMG_CHECK_OF(crc, size)) {
+            out->img_valid = 1;
+            out->img_crc   = crc;
+            out->img_size  = size;
+        }
     }
     out->status = BOOTINFO_OK;
     return out->status;

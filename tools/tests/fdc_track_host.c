@@ -1405,6 +1405,8 @@ static void sis_edge_limit(void)
 static u8 *s_font;
 static long s_font_len;
 static const char *s_font_path = "0:/sys/font/default.kcg";
+/* 上限 (FDC_TRACK_SEEK_MAX / FDC_TRACK_MULTI_MAX)。無ければ 0 = 失敗にする */
+static long s_seek_max, s_multi_max;
 
 static int replay_read_stream(void *buf, u32 size, u32 offset)
 {
@@ -1472,13 +1474,15 @@ static void font_replay(void)
            (unsigned)st.single_reads, (unsigned)st.seek_timeout,
            (unsigned)fdd_track.sec_hits, (unsigned)fdd_track.trk_hits,
            (unsigned)fdd_track.fills, M.reads, M.seeks);
-    /* 目安 (PM): トラックの数 (188KB ÷ 8KB ≈ 24) + メタデータの分。
-     * このイメージは データ 24 トラック / 12 シリンダ、メタデータは
-     * C0H0 (FAT・ルート)、C0H1 (/SYS)、C62H0 (/SYS/FONT = データの先頭と
-     * 同じトラック)。まとめ読み ≦ 24 + 3、シーク ≦ 12 + 2。 */
-    CHECK(st.multi_ok <= 27);
+    /* 上限は**実物のイメージの配置から** test_fdc_track.py の font_bounds が
+     * 出して渡す (PM 判断 2026-09-24)。シーク ≦ データのシリンダ数 + データの
+     * 外のメタデータのシリンダ数 + FAT への往復、まとめ読み ≦ データのトラック数
+     * + データの外のメタデータのトラック数 + 往復の読み直し。以前の 14 / 27 は
+     * 1 つの配置に合わせた固定値で、ローダが 1 クラスタ増えただけで落ちた。 */
+    CHECK(s_seek_max > 0 && s_multi_max > 0);
+    CHECK((long)st.multi_ok <= s_multi_max);
     CHECK(st.multi_fail == 0);
-    CHECK(st.seek_issued <= 14);
+    CHECK((long)st.seek_issued <= s_seek_max);
     CHECK(st.seek_timeout == 0);
     CHECK(st.single_reads == 0);
     CHECK(M.reads == (int)st.multi_ok);
@@ -1538,6 +1542,8 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "font_replay") == 0) {
         s_image = load_file("FDC_TRACK_IMAGE", &s_image_len);
         s_font = load_file("FDC_TRACK_FONT", &s_font_len);
+        s_seek_max  = getenv("FDC_TRACK_SEEK_MAX") ? atol(getenv("FDC_TRACK_SEEK_MAX")) : 0;
+        s_multi_max = getenv("FDC_TRACK_MULTI_MAX") ? atol(getenv("FDC_TRACK_MULTI_MAX")) : 0;
     }
     for (i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
         if (strcmp(argv[1], cases[i].name) == 0) {

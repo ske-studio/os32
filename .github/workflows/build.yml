@@ -36,6 +36,10 @@ jobs:
     outputs:
       artifact: ${{ steps.name.outputs.artifact }}
     steps:
+      # fetch-depth は既定の 1 (GITHUB_SHA の 1 コミットだけ)。カーネルに埋め込む
+      # コミット ID (tools/gen_build_id.py の `git rev-parse --short=7 HEAD`) は
+      # これで足りる — 履歴は要らない。push でしか回さないので HEAD は GITHUB_SHA
+      # そのもの (pull_request の合成マージコミットにはならない)。
       - uses: actions/checkout@v4
 
       # apps/ と game/ (submodule) は private repo なので既定の GITHUB_TOKEN では clone できない。
@@ -104,6 +108,21 @@ jobs:
           # NP21W_DIR は存在しない場所にしておく (コピーは Warning で続行する)
           make -j"$(nproc)" all $EXTERNAL fd144 \
             CROSS_DIR="$CROSS_DIR" NP21W_DIR="$RUNNER_TEMP/np21w"
+
+      # ver / 起動画面の Commit: がこの run のコミットを指すこと。-dirty は
+      # ビルドが追跡中のファイルを書き換えた印、unknown は git が読めなかった印で、
+      # どちらも成果物の来歴が崩れているので落とす (票 TASK_SERIAL_HOSTFS A-4)。
+      - name: Embedded commit id
+        run: |
+          want="${GITHUB_SHA::7}"
+          line="$(grep -o 'os32_build_commit\[\] = "[^"]*"' build/out/build_id.c)"
+          echo "$line"
+          got="${line#*\"}"; got="${got%\"}"
+          case "$got" in
+            "$want"*-dirty|unknown|"") echo "::error::commit id '$got' (want $want)"; git status --porcelain --untracked-files=no; exit 1 ;;
+            "$want"*) echo "commit id OK: $got" ;;
+            *) echo "::error::commit id '$got' does not start with $want"; exit 1 ;;
+          esac
 
       - name: Deploy tree (make deploy into a temp HOSTDRV_DIR)
         run: |

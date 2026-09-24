@@ -39,7 +39,9 @@
 /* スタブの終わり = 写し場の先頭 (4B 整列)。 */
 #define RING3_USTR_OFF       ((u32)((RING3_USTR_STUB_OFF + \
                                      (u32)KAPI_FUNC_CAPACITY * 8u + 3u) & ~3u))
-/* 写し場の大きさ。cwd が入れば足りる (いま返すのは sys_getcwd だけ)。 */
+/* 写し場の大きさ。パス 1 本が入れば足りる。いま写しを返すのは 4 本
+ * (sys_getcwd = vfs_cwd_user、vfs_devname_user、path_get_drive_user、
+ * path_get_cwd_user — exec/exec.c の tramp_copy)。どれも OS32_MAX_PATH 以内。 */
 #define RING3_USTR_CAP       ((u32)OS32_MAX_PATH)
 
 /* カーネル帯の文字列を CPL=3 の呼び手へ返してよい形に直す。

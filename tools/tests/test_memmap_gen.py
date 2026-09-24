@@ -70,7 +70,9 @@ MIRROR_FILES = ("build/os32.ld", "kernel/kentry.asm",
                 # 2026-09-17 に実際にずれたので写しの照合対象に入っている。
                 "tools/tests/test_owner_reclaim.py",
                 # ローダ (NASM) のブート情報域の番地 (票 TASK_HDD_INSTALL 段 0)
-                "boot/bootinfo.inc")
+                "boot/bootinfo.inc",
+                # VK32 の展開先の帯と HDD ローダのブート情報域 (票 TASK_SERIAL_HOSTFS A-4)
+                "boot/boot_defs.h", "boot/loader_fat_new.asm")
 
 
 def make_tree(tmp, bss_end):

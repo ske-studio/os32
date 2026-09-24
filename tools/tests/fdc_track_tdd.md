@@ -96,9 +96,19 @@ tmo=0 で IRQ の取りこぼしは消えたが、**まとめ読み 767 回・�
   - 6541ef1 の形 (トラック 2 本・セクタキャッシュ無し) で回すと **seek=752 / multi=769**
     — 実測の 751 / 767 とほぼ一致 (模型が実物の読み方を写している証拠)
   - 直した後: **seek=14 / multi=27 / single=0 / tmo=0** (sec_hit=1110、trk_hit=161)。
-    試験は multi ≦ 27 (データ 24 トラック + メタデータ 3)、seek ≦ 14 (データ 12 シリンダ
-    + 2) で固定
-  - `images/os32_boot.d88` が無ければ `SKIP font_replay` と出して飛ばす ([V4]、make all の後で回す)
+    当時の試験は multi ≦ 27、seek ≦ 14 の固定値だった
+  - **上限は配置から出す (2026-09-24、PM 判断)**。FD ローダが 1207B → 2648B (A-4) で
+    1 クラスタ増えると後ろのファイルが 1 セクタずれ、/SYS が C0 → C1 に移ってフォントが
+    13 シリンダに跨り、seek=16 で固定値に落ちた (読みの回数は同じ 27)。いまは
+    `test_fdc_track.py` の `font_bounds` が d88 の FAT をたどって
+    seek ≦ データのシリンダ数 + データの外のメタデータのシリンダ数 (C0 を除く) + FAT への往復 2、
+    multi ≦ データのトラック数 + データの外のメタデータのトラック数 + 往復の読み直し 1
+    を出し、ハーネスへ `FDC_TRACK_SEEK_MAX` / `FDC_TRACK_MULTI_MAX` で渡す (無ければ FAIL)。
+    基点の配置で 14 / 27 (従来の値と同じ、実測 14 / 27)、ローダ 2648B の配置で 16 / 28 (実測 16 / 27)。
+    往復の 2 は実測の経路 (`SEEK 64 -> 0 -> 64` が 1 回) から
+  - `images/os32_boot.d88` が無ければ `--require-image` で FAIL (make check)。
+    check-fdc-track-host はイメージを前提にしない — 作り直すと kernel まで組み直され、
+    check-par の他の試験と食い違うため。make all が先
 - 起動時の行は 80 桁で切れないよう 2 行に分け、キャッシュの行を足した:
   `[fdc] font: seek= skip= recal= tmo= foreign= rdy=` /
   `[fdc] font: multi=ok/fail nr= single= retry= write=` /
@@ -151,7 +161,7 @@ DMA ch2 は閉じている) と変異「単発の WRITE の NR で回復とリ�
 | `single_nr_no_recover` | 単発の READ の NR で回復もリトライもしない |
 | `write_nr_no_recover` | 単発の WRITE の NR でも回復もリトライもしない (READ と同じ) |
 | `sis_edge_limit` | 上限ちょうどの別の通知の後ろの完了を期限切れにしない |
-| `font_replay` | 実物の FD イメージと実物の `ff.c` で、フォントの読み込みを VFS の読み方のまま再現する。multi ≦ 27、seek ≦ 14、single 0、期限切れ 0、中身がファイルと一致 |
+| `font_replay` | 実物の FD イメージと実物の `ff.c` で、フォントの読み込みを VFS の読み方のまま再現する。multi / seek は配置から出した上限以下 (`font_bounds`)、single 0、期限切れ 0、中身がファイルと一致 |
 | `seek_edge_foreign` | SEEK の完了の前に別ドライブの通知 / 自ドライブの Ready 変化が積まれていても、1 本のエッジで全部読んで期限切れを待たない。Ready 変化で世代が進む |
 | `drain_before_skip` | 取り残しの通知で INT 線が上がったままでも、省略の前の排水で下ろし、READ の完了のエッジが来る |
 | `readychange_invalidates` | SIS で Ready 変化を見たら、持っている先読みを入れ替え後の媒体に当てない |

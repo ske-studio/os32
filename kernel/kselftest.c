@@ -792,6 +792,13 @@ static void test_bootinfo(void)
         check(bootinfo_hdd_geom(bootinfo_get()->drive[0].da, &c, &h, &s, &sec) == 0
               && sec == 512 && h != 0 && s != 0, "bootinfo:geom");
     }
+    /* v2 のローダ (FD / HDD) は vmkernel.lz4 を検査し終えてから、起動した
+     * イメージの CRC をイメージ欄に残す (票 TASK_SERIAL_HOSTFS A-4)。
+     * 主部が有効なのに記録が無ければ、ローダが古いか書き忘れ。 */
+    if (bootinfo_get()->status == BOOTINFO_OK) {
+        check(bootinfo_get()->img_valid == 1 && bootinfo_get()->img_size != 0,
+              "bootinfo:image crc recorded");
+    }
 
     for (i = 0; i < (int)sizeof(raw); i++) raw[i] = 0;
     raw[BI_OFF_VERSION] = (u8)BOOTINFO_VERSION;
@@ -804,6 +811,13 @@ static void test_bootinfo(void)
     bootinfo_seal(raw);
     check(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_OK &&
           bi.drive[0].valid == 1 && bi.drive[0].cyl == 272, "bootinfo:good");
+    bootinfo_seal_image(raw, 0x12345678UL, 447337UL);
+    check(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_OK &&
+          bi.img_valid == 1 && bi.img_crc == 0x12345678UL && bi.img_size == 447337UL,
+          "bootinfo:image good");
+    raw[BI_OFF_IMG_CRC] ^= 1;
+    check(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_OK && bi.img_valid == 0,
+          "bootinfo:image bad check");
     raw[BI_OFF_CHECK] ^= 1;
     check(bootinfo_parse(raw, sizeof(raw), &bi) == BOOTINFO_ERR_CHECK,
           "bootinfo:bad check");

@@ -238,8 +238,9 @@
 #define KAPI_SLOT_DEV_MOUNT_COUNT 231
 #define KAPI_SLOT_SYS_UMOUNT_CHECKED 232
 #define KAPI_SLOT_HDD_GEOM_INFO 233
+#define KAPI_SLOT_BOOT_IMAGE_INFO 234
 
-#define KAPI_SLOT_COUNT 234
+#define KAPI_SLOT_COUNT 235
 #define KAPI_FUNC_CAPACITY 300
 #define KAPI_DATA_FIELDS_OFF 0x4B8
 #define OS32_KAPI_LAYOUT_STAMP() __asm__(".pushsection .os32_kapi_layout,\"\",@progbits\n\t.p2align 2\n\t.long 0x4B8\n\t.popsection")

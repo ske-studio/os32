@@ -38,7 +38,10 @@ loader_hdd.asm (16bit → 32bit) — 第2段階ローダー (ELF + C)
 boot_main.c (32bit プロテクトモード) — Cメインロジック
   ├── PC-98パーティションテーブル (LBA 1) からext2パーティション特定
   ├── ext2 ミニドライバで /boot/vmkernel.lz4 を 0x10000 に読み込み
-  ├── VK32ヘッダ検証 + LZ4展開 (kernel.bin→0x100000, sqlite.bin→0x200000)
+  ├── VK32 v2 の検査 + LZ4展開 (kernel.bin→0x100000, sqlite.bin→0x200000) — boot/vk32_boot.c
+  │   完全長・entry_count・入力と展開先の範囲・decoded == raw_size・展開後とファイル全体の
+  │   CRC32 を見て、外れたら 5 行目に理由を出して止まる
+  ├── 起動したイメージの CRC をブート情報域 (0x7E00) のイメージ欄へ
   └── return 0 (ASMに復帰)
   ↓
 loader_hdd.asm (32bit PM 復帰)
@@ -77,15 +80,18 @@ kernel.c :: kernel_main(u32 mem_kb, u32 boot_drive)
   ↓
 BIOS POST → FDD1からIPL読込 (C0/H0/S1 → 1FC0:0000)
   ↓
-boot_fat.asm (16bit リアルモード) — FAT12 IPL (1024B)
+boot_fat.asm (16bit リアルモード) — FAT12 IPL (1024B、1.44MB 版は 512B)
   ├── テキストVRAMにブートメッセージ表示
-  ├── FAT12ルートDirから /LOADER.BIN を検索・読み込み → 0x8000
+  ├── FAT12ルートDirから /LOADER.BIN を検索し、FAT チェーンを EOC まで辿って → 0x8000
+  │   (ローダは 2.6KB = 2HD で 3 クラスタ、1.44MB で 6 クラスタ)
   └── far jmp 0000:8000h
   ↓
 loader_fat_new.asm (16bit → 32bit) — 第2段階
-  ├── FAT12から /VMKRNL.LZ4 を検索・読み込み (DMA境界対応)
+  ├── FAT12から /VMKRNL.LZ4 を検索、読む前に FAT チェーン全体を検査
+  │   (長さ・早期終端・範囲外・循環 = fat_chain_check) してから読み込み (DMA境界対応)
   ├── A20ゲート有効化 / GDT設定 / PM遷移
-  ├── VK32ヘッダ解析 + LZ4展開 (kernel.bin→0x100000, sqlite.bin→0x200000)
+  ├── VK32 v2 の検査 + LZ4展開 (kernel.bin→0x100000, sqlite.bin→0x200000) — pm_vk32_boot
+  │   (HDD ローダと同じ検査・同じ VK32_ERR_*)。起動したイメージの CRC を 0x7E00 へ
   ├── メモリプロービング
   └── far jmp 0x08:0x100000 (kernel_main へジャンプ)
 ```

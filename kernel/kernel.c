@@ -382,6 +382,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* HDD の幾何: BIOS (ローダの AH=84h) と IDENTIFY を 1 行ずつ。
      * 段 1 の設計値はこの 2 つで決める (票 TASK_HDD_INSTALL 段 0)。 */
     bootinfo_report();
+    /* Build (日時 + コミット ID) と、ローダが検査して起動したイメージの CRC
+     * (票 TASK_SERIAL_HOSTFS A-4 — 更新の証拠は Build ではなくこの CRC)。 */
+    bootinfo_report_image();
 
     /* ATAPI CD-ROM 検出 */
     {

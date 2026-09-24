@@ -61,7 +61,10 @@ def sh(cmd, **kw):
 # ---------------------------------------------------------------- ビルド
 
 def extract_asm(text):
-    """loader_fat_new.asm から pm_lz4_decode と LZ4_MINMATCH を切り出す。"""
+    """loader_fat_new.asm から pm_lz4_decode と LZ4_MINMATCH を切り出す。
+
+    pm_lz4_decode は VK32_HOST_BEGIN〜END の中にある (test_vk32_crc.py と同じ
+    区間)。ここは関数の頭から次の区切り (;; ===== か区間の終わり) まで。"""
     m = re.search(r"^LZ4_MINMATCH\s+EQU\s+\S+\s*$", text, re.MULTILINE)
     if not m:
         raise Fail("LZ4_MINMATCH EQU が見つからない")
@@ -72,7 +75,9 @@ def extract_asm(text):
     except StopIteration:
         raise Fail("pm_lz4_decode: が見つからない")
     end = start + 1
-    while end < len(lines) and not lines[end].startswith(";; ====="):
+    while end < len(lines) and not (lines[end].startswith(";; =====")
+                                    or lines[end].startswith(";; <<< VK32_HOST_END")
+                                    or lines[end].startswith(";; CRC-32 nibble")):
         end += 1
     body = "\n".join(lines[start:end])
     return ("bits 32\n{}\nsection .text\nglobal pm_lz4_decode\n{}\n".format(equ, body))
@@ -207,8 +212,10 @@ def run_mk(script, kernel_path, sqlite_path, out_path):
 
 
 def parse_vk32(img):
+    # VK32 v2 (エントリ表の後ろに CRC 表 + image_size + image_crc)。CRC の中身は
+    # tools/tests/test_vk32_crc.py が見る。ここは展開側の一致だけ。
     magic, hsz, ver, cnt = struct.unpack_from("<4I", img, 0)
-    if magic != 0x32334B56 or ver != 1 or hsz != 16 + cnt * 16:
+    if magic != 0x32334B56 or ver != 2 or hsz != 16 + cnt * 20 + 8:
         raise Fail("VK32 ヘッダ不正 magic={:#x} ver={} hsz={} cnt={}".format(
             magic, ver, hsz, cnt))
     ents = []
@@ -240,7 +247,7 @@ def check_image(exe, script, work, kernel, sqlite, label, need_features):
     ents = parse_vk32(img)
     if [e[0] for e in ents] != [0x100000, 0x200000]:
         raise Fail("[{}] load_addr がずれた".format(label))
-    fast_total = 48 + sum(len(lz4.block.compress(x, store_size=False)) for x in (kernel, sqlite))
+    fast_total = 64 + sum(len(lz4.block.compress(x, store_size=False)) for x in (kernel, sqlite))
     if not len(img) < fast_total:
         raise Fail("[{}] 高圧縮になっていない ({} >= 既定 {})".format(label, len(img), fast_total))
     lines = ["[{}] image {} B (既定の圧縮なら {} B)".format(label, len(img), fast_total)]
@@ -297,7 +304,7 @@ def case_boundary(script, work):
                                   compression=12))
 
     def total(n):
-        return 48 + sq_c + len(lz4.block.compress(pool[:n], store_size=False,
+        return 64 + sq_c + len(lz4.block.compress(pool[:n], store_size=False,
                                                   mode="high_compression", compression=12))
 
     found = {}

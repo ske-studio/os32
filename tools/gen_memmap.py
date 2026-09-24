@@ -376,6 +376,18 @@ MIRRORS = (
     ("tools/tests/test_owner_reclaim.py",
      r'"#define MEM_SHM_SIZE\s+(0x[0-9A-Fa-f]+)U',
      "MEM_SHM_SIZE"),
+    # VK32 の展開先の帯と、ローダ (C) が書くブート情報域 (票 TASK_SERIAL_HOSTFS
+    # A-4)。HDD ローダ (boot/boot_defs.h) と FD ローダ (NASM) がそれぞれ写しを持つ。
+    ("boot/boot_defs.h", r"^#define\s+VK32_LOAD_MIN\s+(0x[0-9A-Fa-f]+)UL",
+     "KERNEL_LOAD_ADDR"),
+    ("boot/boot_defs.h", r"^#define\s+VK32_LOAD_END\s+(0x[0-9A-Fa-f]+)UL",
+     "MEM_DMA_POOL_BASE"),
+    ("boot/boot_defs.h", r"^#define\s+BOOTINFO_BASE\s+(0x[0-9A-Fa-f]+)UL",
+     "MEM_BOOTINFO_BASE"),
+    ("boot/loader_fat_new.asm", r"^VK32_LOAD_MIN\s+EQU\s+(0x[0-9A-Fa-f]+)\s*$",
+     "KERNEL_LOAD_ADDR"),
+    ("boot/loader_fat_new.asm", r"^VK32_LOAD_END\s+EQU\s+(0x[0-9A-Fa-f]+)\s*$",
+     "MEM_DMA_POOL_BASE"),
 )
 
 # ASM は値ではなくシンボルで引くこと。数値直書きに戻したらここで気づく。
