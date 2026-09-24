@@ -682,6 +682,19 @@ class Prune(Base):
 # ======================================================================
 #  (5) NHD イメージ全体の配備 — pull の来歴 (stamp)
 # ======================================================================
+def _std_nhd_bytes():
+    """標準配置の OS32 区画を持つ最小の NHD (13 シリンダ × 8/17)。
+
+    do_deploy は push の前に区画表を見る (票 TASK_HDD_INSTALL 段 1: NHD として読めない像や
+    v64 のカーネルが読めない表の NHD で NP21/W の NHD を上書きしない)。来歴の試験の
+    像も本物の NHD の形にしておく。"""
+    pt = nd.pc98pt
+    cyls, heads, spt = 13, 8, 17
+    img = bytearray(pt.make_nhd_header(cyls, heads, spt) + bytes(cyls * heads * spt * 512))
+    img[512 + 512:512 + 512 + 32] = pt.make_os32(1632, 136, heads, spt)
+    return bytes(img)
+
+
 class Stamp(Base):
 
     def setUp(self):
@@ -690,7 +703,7 @@ class Stamp(Base):
         self.local = pathlib.Path(nd.NHD_LOCAL)
         self.remote = pathlib.Path(nd.NHD_REMOTE)
         self.remote.parent.mkdir(parents=True, exist_ok=True)
-        self.remote.write_bytes(b'REMOTE-IMAGE-CONTENT' * 16)
+        self.remote.write_bytes(_std_nhd_bytes())
         self._patch(nd, 'do_mount', lambda: True)
 
     def _pull(self):
@@ -719,7 +732,9 @@ class Stamp(Base):
         """mtime を保ったまま中身だけ変わっても (ゲストが書いても) 検出する。"""
         self.assertIs(self._pull(), True)
         st = os.stat(str(self.remote))
-        self.remote.write_bytes(b'GUEST-WROTE-SETTINGS' * 16)
+        data = bytearray(self.remote.read_bytes())
+        data[-320:] = b'GUEST-WROTE-SETTINGS' * 16    # 大きさは同じ、中身だけ変わる
+        self.remote.write_bytes(bytes(data))
         os.utime(str(self.remote), (st.st_atime, st.st_mtime))
         self.assertEqual(os.path.getsize(str(self.remote)), st.st_size)
         self.assertIs(nd.do_deploy(), False)
@@ -996,7 +1011,7 @@ class ReviewB8PullStamp(Base):
         self.local = pathlib.Path(nd.NHD_LOCAL)
         self.remote = pathlib.Path(nd.NHD_REMOTE)
         self.remote.parent.mkdir(parents=True, exist_ok=True)
-        self.remote.write_bytes(b'REMOTE-IMAGE' * 16)
+        self.remote.write_bytes(_std_nhd_bytes())
         self._patch(nd, 'do_mount', lambda: True)
 
     def test_missing_remote_removes_stale_stamp(self):
@@ -1195,7 +1210,7 @@ class Review2StampWrite(Base):
         self.local = pathlib.Path(nd.NHD_LOCAL)
         self.remote = pathlib.Path(nd.NHD_REMOTE)
         self.remote.parent.mkdir(parents=True, exist_ok=True)
-        self.remote.write_bytes(b'REMOTE-IMAGE' * 16)
+        self.remote.write_bytes(_std_nhd_bytes())
         self._patch(nd, 'do_mount', lambda: True)
 
     def test_stamp_is_written_atomically(self):

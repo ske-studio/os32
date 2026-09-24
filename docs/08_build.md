@@ -162,6 +162,7 @@ Makefile ターゲットとの対応 (`build/deploy.mk`)。**このリポジト�
 | `make fd144` | **1.44MB フロッピーイメージ** `images/os32_boot144.img` (生イメージ、1,474,560 バイト)。2HD の `images/os32_boot.d88` とは別物で、既定は 2HD のまま。2026-09-24 から `make all` も作る (中身が CD の MINIMAL と同じなので容量の検査を毎回通す)。票 [`tasks/realhw/TASK_FD144.md`](tasks/realhw/TASK_FD144.md) |
 | `make deploy` | HostDrv (`C:\os32`) への同期 — 再起動不要 |
 | `make deploy-kernel` | HostDrv同期 + HostDrv→ext2同期 + NHDコピー — **要NP21/W再起動**。名前に反して**カーネル単独ではなく一式** (ユーザーランド・`/sys` も NHD へ書く) |
+| `make nhd-migrate-pt` | 旧配置の区画表を PC-98 標準配置へ + ローダ + カーネルを同時に (KAPI v64 への初回だけ、[下の節](#区画表の移行-v64))。NP21/W 停止中 ([D1]) |
 | `make deploy-boot` | ブートローダー (loader_hdd.bin) をNHDブート領域へ書き込み |
 | `make deploy-nhd` | deploy.yaml フルデプロイ + NHDコピー — **要NP21/W再起動** |
 | `make prune-stale` / `make prune-stale-delete` | 配備先 (HostDrv + NHD) に残ったマニフェストに無い *.bin を一覧 / 削除。deploy 系は既定で削除まで行う (`NO_PRUNE=1` で一覧のみ) |
@@ -201,6 +202,50 @@ v63 で KernelAPI のデータ欄を 0x4B8 に固定し、OS32X ヘッダを v3 
 shlib ローダが要求版で断ったときは、GUI を選んでいても CUI shell で起動し
 `GUI shlib: needs a newer kernel -> CUI shell` (カーネルを先に更新する案内) を出す —
 配置違いの `rebuild required (KAPI data layout)` とは直し方が逆なので案内を分けてある。
+
+<a id="区画表の移行-v64"></a>
+**v64 の区画表の移行 (NHD、票 [TASK_HDD_INSTALL](tasks/realhw/TASK_HDD_INSTALL.md) N3)**:
+v64 のカーネルとローダは区画表 (LBA 1) を **PC-98 標準配置**でしか読まない
+(開始 = +8/+9/+10-11。2026-09-23 までの OS32 は +6/+7/+8-9 の独自配置で書いていた)。
+旧配置の NHD を新しいカーネルで起動すると `/` (hd0) がマウントできず、新しいローダは
+`No OS32 partition in LBA 1` で止まる。**`make deploy-kernel` だけでは移行しない**
+(カーネルと ext2 の中身しか替えない)。NP21/W を止めて ([D1])、次の 1 操作で
+区画表・第二段ローダ (LBA 2〜17)・`/boot/vmkernel.lz4` を**同時に**入れ替える:
+
+```bash
+make all                      # boot/loader_hdd.bin と build/out/vmkernel.lz4
+make nhd-migrate-pt           # = python3 tools/nhd_deploy.py migrate-pt (push まで)
+```
+
+`migrate-pt` は空でない項目が**ちょうど 1 つ**の OS32 区画 (sid 0xE2) で、旧配置で読んだ
+範囲の先頭に ext2 があり FS が区画に収まるときだけ、**同じ開始 LBA・長さ**を標準配置で
+書き直す (カーネル → ローダ → 区画表の順、区画表は読み戻して比較)。それ以外は NHD を
+1 バイトも変えずに断る。既に標準配置なら何も書かない。`--no-push` で NP21/W 側へ送らずに
+止められる。確認は起動 → `/` のマウント → 既存ファイルの md5 (受入 H2)。
+CD インストーラ (`cdinst` / `install`) は段 2 まで**旧配置で書く**ので、v64 のカーネルで
+CD から入れた HDD は区画が見つからず format で止まる (段 2 で直す)。
+
+- **旧配置の NHD には下の HostDrv の手順 (`make deploy` → ゲストで `hsync boot`) を使わない。**
+  カーネルだけが v64 になり、次の起動で `/` がマウントできない (ローダは旧いままなので起動は
+  進み、カーネルが `[EXT2] hd0: partition table is in the pre-v64 OS32 layout; migrate it
+  (host: make nhd-migrate-pt) or reinstall` を出す)。ホスト側の `deploy` / `deploy-kernel`
+  (`sync-from-hostdrv`) / `deploy-nhd` (`sync`) は、ローカルの NHD が旧配置でこのツリーの
+  KAPI が v64 以上なら**配らずに断る** (`nhd_deploy.py` の `legacy_pt_guard`、`--force` でも
+  通さない)。「旧配置か」は自動で移行できるかと**別に**判定する — 旧配置の OS32 項目に別の区画が
+  並んでいて `migrate-pt` が断る NHD も断る (その理由も出す)。OS32 の項目が無い・どちらの配置でも
+  読めない NHD も断る。通すのは **NHD のヘッダが無いファイル** (警告を出す) と**ファイルが無いとき**だけで、開けない・読めない・切り詰められた NHD や、移行の可否を調べる途中の例外 (OSError を含む) は断る。ただし **`deploy` (NP21/W の NHD を丸ごと上書きする push) は、ヘッダの無い・0 バイトの NHD も断る** (壊れたローカルの像で NP21/W の NHD を潰さない)。ローカルの NHD の読み取りの失敗 (OSError、旧配置の移行の可否を調べる途中のものを含む) は版に関係なく、`deploy` / `sync` / `sync-from-hostdrv` / `migrate-pt` のどれでも断る。
+  ローカルの NHD が無いときは、取り込み (`ensure_local_nhd`) の**後・マウントの前**にもう一度見る。
+  `hsync` はゲスト側なので止められない — 先に `make nhd-migrate-pt`。
+- **v64 の `format N` は、区画の位置を BIOS 幾何で決められないと書かない** (`EXT2_ERR_INVAL`、
+  `[EXT2] format: no BIOS geometry`)。当たる場面: DA 80h の HDD から起動して `format 1`
+  (HDD ローダは自分の DA しか AH=84h を聞かない)、段 0 より前のローダ (0x7E00 のブート情報域を
+  書かない) で起動した標準配置の NHD。FD から起動し直せば 80h / 81h の両方が得られる。
+  マウント (読むだけ) は IDENTIFY の幾何でも通る。
+- **逆の組み合わせ (v63 以前のカーネル + 標準配置の表) も危険**。旧カーネルは +6〜+9 を
+  開始と読むので、標準配置の OS32 項目 (1632 = シリンダ 12) を **LBA 12** と解釈する。
+  そのカーネルで `format 0` を打つと LBA 12 から書き、第二段ローダ (LBA 2〜17) と ext2 を
+  壊す。移行した NHD・`hdprep` した HDD を旧カーネルで起動しない (FD 起動の FD も v64 に
+  揃える)。
 
 HostDrv 経由 (NP21/W を止めない) で v63 以降の稼働機を v64 以降へ上げる手順:
 

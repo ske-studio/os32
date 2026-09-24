@@ -228,10 +228,14 @@ extern int __cdecl wrap_pcm_status(u32 *free_bytes, u32 *counters);
 extern int __cdecl wrap_pcm_close(void);
 extern int __cdecl wrap_pcm_set_volume(u32 percent);
 extern int __cdecl wrap_kbd_diag(KbdDiag *out);
+extern int __cdecl wrap_ext2_format_at(int drv, u32 start_lba, u32 length);
+extern int __cdecl wrap_dev_mount_count(int drv);
+extern int __cdecl wrap_sys_umount_checked(const char *prefix);
+extern int __cdecl wrap_hdd_geom_info(int drv, HddGeom *out);
 extern i32 __cdecl kapi_reserved_nosys(void);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 63;
+kapi->version = 64;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -463,6 +467,10 @@ kapi->version = 63;
     kapi->pcm_close = wrap_pcm_close;
     kapi->pcm_set_volume = wrap_pcm_set_volume;
     kapi->kbd_diag = wrap_kbd_diag;
+    kapi->ext2_format_at = wrap_ext2_format_at;
+    kapi->dev_mount_count = wrap_dev_mount_count;
+    kapi->sys_umount_checked = wrap_sys_umount_checked;
+    kapi->hdd_geom_info = wrap_hdd_geom_info;
     {
         u32 _kr;
         for (_kr = 0; _kr < (u32)KAPI_FUNC_RESERVED; _kr++)

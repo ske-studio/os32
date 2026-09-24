@@ -10,8 +10,10 @@
 /* ======================================================================== */
 
 #include "ext2_priv.h"
-#include "ide.h"    /* ide_drive_present, ide_get_info — ジオメトリ情報取得のみ */
+#include "ide.h"    /* ide_drive_present, ide_get_info — 存在と総セクタ数 */
 #include "kprintf.h"
+#include "bootinfo.h" /* bootinfo_part_geom — 区画表の CHS の幾何 */
+#include "pc98pt.h"   /* 区画表の共有部 (票 TASK_HDD_INSTALL 段 1-4) */
 
 /* 共有静的バッファ (スタックオーバーフロー防止)
  * シングルタスクOSのため全インスタンスで共有可能。
@@ -26,12 +28,23 @@ u8 ext2_g_dat[EXT2_BLOCK_SIZE];
 /*  ブロック読み書き基盤                                                     */
 /* ======================================================================== */
 
+/* ブロック block_num (1KB = 2 セクタ) が区画の中か。part_len は区画の長さ
+ * (セクタ)。媒体から読んだブロック番号は壊れていることがあるので、掛け算の
+ * 前に割り算の側で比べる (block_num * 2 の桁あふれで範囲内に化けない)。 */
+static int ext2_block_in_part(const Ext2Ctx *ctx, u32 block_num)
+{
+    return (block_num < ctx->part_len / 2U) ? 1 : 0;
+}
+
 /* ---- 生の 1KB ブロック I/O (エラー状態に触らない) ---- */
 static int ext2_raw_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
 {
-    u32 sector = ctx->base_lba + block_num * 2;
+    u32 sector;
     u8 *dst = (u8 *)buf;
     int ret;
+
+    if (!ext2_block_in_part(ctx, block_num)) return EXT2_ERR_IO;
+    sector = ctx->base_lba + block_num * 2;
 
     /* セクタ0 → buf[0..511] */
     ret = dev_blk_read_lba(ctx->dev, sector, 1, dst);
@@ -44,8 +57,11 @@ static int ext2_raw_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
 
 static int ext2_raw_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
 {
-    u32 sector = ctx->base_lba + block_num * 2;
+    u32 sector;
     int ret;
+
+    if (!ext2_block_in_part(ctx, block_num)) return EXT2_ERR_IO;
+    sector = ctx->base_lba + block_num * 2;
     ret = dev_blk_write_lba(ctx->dev, sector, 1, buf);
     if (ret != 0) return ret;
     ret = dev_blk_write_lba(ctx->dev, sector + 1, 1, (const u8 *)buf + 512);
@@ -99,12 +115,14 @@ int ext2_write_data_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
  * (そして書き込み禁止にするか) は呼び手が決める。 */
 int ext2_read_sector(Ext2Ctx *ctx, u32 block_num, u32 sect, void *buf)
 {
+    if (!ext2_block_in_part(ctx, block_num) || sect > 1) return EXT2_ERR_IO;
     return dev_blk_read_lba(ctx->dev, ctx->base_lba + block_num * 2 + sect,
                             1, buf);
 }
 
 int ext2_write_sector(Ext2Ctx *ctx, u32 block_num, u32 sect, const void *buf)
 {
+    if (!ext2_block_in_part(ctx, block_num) || sect > 1) return EXT2_ERR_IO;
     return dev_blk_write_lba(ctx->dev, ctx->base_lba + block_num * 2 + sect,
                              1, buf);
 }
@@ -297,46 +315,57 @@ Device *ext2_dev_for(int ide_drive)
     return dev_find(devname);
 }
 
-u32 ext2_find_partition(int ide_drive)
+/* 区画表を読む共通部。geom_src (NULL 可) にどちらの幾何で CHS を LBA にしたか
+ * (BOOTINFO_GEOM_BIOS / BOOTINFO_GEOM_IDENTIFY) を返す。legacy (NULL 可) は
+ * NOPART のとき「旧配置の OS32 項目があった」なら 1。 */
+static int ext2_find_partition_ex(int ide_drive, u32 *out_start, u32 *out_len,
+                                  int *geom_src, int *legacy)
 {
-    u8 pt_sect[512];
-    int ret, i;
-    u32 lba = 1088; /* デフォルトフォールバック (シリンダー8) */
+    u8 pt_sect[PC98PT_SECTOR_SIZE];
+    u16 heads, spt;
+    unsigned long start, len;
     IdeInfo info;
     Device *dev;
+    int src;
 
-    if (ide_get_info(ide_drive, &info) != IDE_OK) return lba;
+    if (legacy) *legacy = 0;
+    if (!out_start || !out_len) return EXT2_ERR_INVAL;
+    if (ide_get_info(ide_drive, &info) != IDE_OK) return EXT2_ERR_IO;
 
-    /* Device API 経由でパーティションテーブルを読み込み */
     dev = ext2_dev_for(ide_drive);
-    if (!dev) return lba;
+    if (!dev) return EXT2_ERR_IO;
 
-    /* LBA 1 (PC-98パーティションテーブル) を読み込む */
-    ret = dev_blk_read_lba(dev, 1, 1, pt_sect);
-    if (ret != 0) return lba;
+    /* 区画表 (LBA 1)。**読めなければ失敗** — 以前はここで LBA 1088 を仮定し、
+     * format はその位置から書き始めた (F12)。 */
+    if (dev_blk_read_lba(dev, PC98PT_LBA, 1, pt_sect) != 0) return EXT2_ERR_IO;
 
-    for (i = 0; i < 16; i++) {
-        u8 *ent = &pt_sect[i * 32];
-        u8 bootable = ent[0];
-        u8 sys_type = ent[1];
-        
-        if (sys_type == 0x00) continue;
+    /* 区画表の CHS は BIOS 幾何で書かれている (IPL と同じ)。ATA の IDENTIFY と
+     * 違う機械がある (実機 8GB: BIOS 未測定、IDENTIFY 16/63。F4)。 */
+    src = bootinfo_part_geom(ide_drive, &heads, &spt);
+    if (src < 0) return EXT2_ERR_NOPART;
+    if (geom_src) *geom_src = src;
 
-        /* アクティブなパーティションエントリから開始LBAを計算 */
-        /* bootable = bit7 (0x80 または 0xA0 等) */
-        if (bootable & 0x80) {
-            u16 start_c = le16_rd(&ent[8]);
-            u8  start_h = ent[7];
-            u8  start_s = ent[6];
-            /* HDD BIOSのセクタ番号は0開始 (FDDの1開始とは異なる) */
-            lba = ((u32)start_c * info.heads + start_h) * info.sectors + start_s;
-            break;
-        }
+    if (pc98pt_find_os32(pt_sect, heads, spt, info.total_sectors,
+                         (int *)0, &start, &len) != PC98PT_OK) {
+        if (legacy)
+            *legacy = pc98pt_os32_is_legacy(pt_sect, heads, spt, info.total_sectors);
+        return EXT2_ERR_NOPART;
     }
 
-    /* 念のためLBAが0ならフォールバック */
-    if (lba == 0) lba = 1088;
-    return lba;
+    *out_start = (u32)start;
+    *out_len = (u32)len;
+    return EXT2_OK;
+}
+
+int ext2_find_partition(int ide_drive, u32 *out_start, u32 *out_len)
+{
+    return ext2_find_partition_ex(ide_drive, out_start, out_len, (int *)0, (int *)0);
+}
+
+int ext2_find_partition_src(int ide_drive, u32 *out_start, u32 *out_len,
+                            int *geom_src)
+{
+    return ext2_find_partition_ex(ide_drive, out_start, out_len, geom_src, (int *)0);
 }
 
 /* ======================================================================== */
@@ -355,8 +384,25 @@ int ext2_mount(Ext2Ctx *ctx, int ide_drive)
     ctx->dev = ext2_dev_for(ide_drive);
     if (!ctx->dev) return EXT2_ERR_IO;
 
-    /* パーティションテーブルを解析してbase_lbaを設定 */
-    ctx->base_lba = ext2_find_partition(ide_drive);
+    /* 区画表から (開始, 長さ) を得る。見つからない / 読めないならマウントしない */
+    {
+        int src = 0, legacy = 0;
+        ret = ext2_find_partition_ex(ide_drive, &ctx->base_lba, &ctx->part_len,
+                                     &src, &legacy);
+        if (ret == EXT2_ERR_NOPART && legacy) {
+            /* v63 までの OS32 が書いた旧配置。v64 は読まない (票 段 1-4) ので、
+             * NOPART だけでは直し方が分からない — 何をすればよいかを出す (Opus M2) */
+            kprintf(0x0C, "[EXT2] hd%d: partition table is in the pre-v64 OS32 layout; "
+                          "migrate it (host: make nhd-migrate-pt) or reinstall\n",
+                    ide_drive & 3);
+        }
+        if (ret != EXT2_OK) return ret;
+        /* どちらの幾何で区画の位置を決めたか (BIOS が無いと IDENTIFY に落ちる。m3) */
+        kprintf(0x07, "[EXT2] hd%d: partition LBA %u +%u (CHS geometry from %s)\n",
+                ide_drive & 3, ctx->base_lba, ctx->part_len,
+                src == BOOTINFO_GEOM_BIOS ? "BIOS" : "IDENTIFY");
+    }
+    if (ctx->part_len < 4) return EXT2_ERR_NOPART;   /* ブロック 0〜1 も無い */
 
     /* スーパーブロック読み込み: Device API 経由 */
     {
@@ -385,6 +431,13 @@ int ext2_mount(Ext2Ctx *ctx, int ide_drive)
     ctx->sb_info.inodes_per_group = le32_rd(&ext2_g_blk[40]);
     ctx->sb_info.magic            = le16_rd(&ext2_g_blk[56]);
     ctx->sb_info.first_ino        = le32_rd(&ext2_g_blk[84]);
+    /* ファイルシステムが区画より大きい = 区画表と中身が食い違っている。
+     * マウントすると区画の外 (次の区画・ディスクの外) を割り当てに使う。 */
+    if (ctx->sb_info.total_blocks > ctx->part_len / 2U) {
+        kprintf(0x0C, "[EXT2] fs (%u blocks) exceeds partition (%u sectors)\n",
+                ctx->sb_info.total_blocks, ctx->part_len);
+        return EXT2_ERR_NOPART;
+    }
     /* 媒体にエラーの印が残っていても**読み書きでマウントする** (Linux と同じ、
      * ユーザー決裁 2 の条件)。警告だけ出す。印は e2fsck だけが消す。 */
     ctx->fs_error = 0;

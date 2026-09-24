@@ -134,6 +134,9 @@ typedef struct {
 /* links_count が EXT2_LINK_MAX に達していて増やせない (Linux の EMLINK)。
  * VFS へは OS32_ERR_FULL (資源が満杯) に写す。 */
 #define EXT2_ERR_MLINK   -12
+/* 区画表に OS32 の区画が無い / 項目の範囲が壊れている (票 TASK_HDD_INSTALL
+ * 段 1-5)。以前は LBA 1088 へフォールバックしてそこを読み書きした。 */
+#define EXT2_ERR_NOPART  -13
 
 /* スーパーブロックの s_state / s_errors (ext2 の仕様どおり、offset 58 / 60)。
  *   s_state  … EXT2_VALID_FS (1) / EXT2_ERROR_FS (2) のビット
@@ -177,7 +180,16 @@ const Ext2Super *ext2_get_super_ctx(Ext2Ctx *ctx);
 int ext2_sync(Ext2Ctx *ctx);
 
 /* ---- フォーマット (コンテキスト不要: 一時CTXを内部で使用) ---- */
+/* 区画表の OS32 区画の先頭から total_sectors (区画の長さで頭打ち) に作る。
+ * 区画が無ければ EXT2_ERR_NOPART。 */
 int ext2_format(int ide_drive, u32 total_sectors);
+/* 区画表を**読まずに** [start_lba, start_lba + length) だけに作る (KAPI v64、
+ * hdprep / インストーラ用、票 TASK_HDD_INSTALL §1-v3 N5)。範囲がディスクの
+ * 総数を超える・桁あふれ・LBA 0〜EXT2_FMT_MIN_LBA-1 (IPL / 区画表 / ローダ) に
+ * 掛かるなら 1 バイトも書かずに EXT2_ERR_INVAL。大きさは ext2_layout_plan の
+ * 固定点 (最終グループに全メタデータが収まる長さへ切り下げ)。 */
+#define EXT2_FMT_MIN_LBA  18   /* LBA 0 = IPL、1 = 区画表、2〜17 = ローダ (8KB) */
+int ext2_format_at(int ide_drive, u32 start_lba, u32 length);
 
 /* ---- VFS登録 ---- */
 void ext2_init(void);

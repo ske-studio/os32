@@ -26,6 +26,15 @@ deploy-boot: boot/loader_hdd.bin
 	@echo "=== Boot Loader Deploy ==="
 	$(NHD_DEPLOY) write-boot boot/loader_hdd.bin
 
+# nhd-migrate-pt: 区画表を旧配置 → PC-98 標準配置へ移す (票 TASK_HDD_INSTALL N3)。
+#   KAPI v64 以降のカーネルとローダは**標準配置しか読まない**ので、旧配置の NHD は
+#   区画表・ローダ (LBA 2-17)・/boot/vmkernel.lz4 を**同時に**替える必要がある。
+#   deploy-kernel はカーネルしか替えないので移行しない。NP21/W を止めて実行 ([D1])。
+#   既に標準配置なら何も書かずに終わる。
+nhd-migrate-pt: boot/loader_hdd.bin $(BUILD_OUT)/vmkernel.lz4
+	@echo "=== NHD partition table migration (legacy -> PC-98 standard) ==="
+	$(NHD_DEPLOY) migrate-pt --loader boot/loader_hdd.bin --kernel $(BUILD_OUT)/vmkernel.lz4
+
 # deploy-nhd: NHDフルデプロイ (ローダー+全ファイル)
 deploy-nhd: $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
 	@echo "=== NHD Deploy (using deploy.yaml) ==="
@@ -79,4 +88,4 @@ nhd-pull:
 nhd-init:
 	$(NHD_DEPLOY) init
 
-.PHONY: deploy deploy-kernel deploy-boot deploy-nhd hotdeploy nhd-mount nhd-umount nhd-pull nhd-init prune-stale prune-stale-delete
+.PHONY: deploy deploy-kernel deploy-boot deploy-nhd nhd-migrate-pt hotdeploy nhd-mount nhd-umount nhd-pull nhd-init prune-stale prune-stale-delete

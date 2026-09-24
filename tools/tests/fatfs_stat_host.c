@@ -170,6 +170,16 @@ char *kstrncat(char *dst, const char *src, u32 n)
     return dst;
 }
 
+#include "../../drivers/pc98pt.c"   /* fatfs_vfs.c の PC98PartEntry 読み (票 TASK_HDD_INSTALL 段 1-4) */
+/* 区画表の幾何 (fatfs_vfs.c が ext2 と同じ規則で引く、m4)。この試験は区画を
+ * 探さないので、呼ばれたら IDENTIFY と同じ 8/17 を返すだけ */
+int bootinfo_part_geom(int ide_drive, u16 *heads, u16 *spt)
+{
+    (void)ide_drive;
+    if (heads) *heads = 8;
+    if (spt) *spt = 17;
+    return 2;
+}
 #include "../../fs/fatfs_vfs.c"
 
 /* ---- 試験用コンテキスト (mount を通さず直接組む) ---- */

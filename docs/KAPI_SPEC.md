@@ -1,4 +1,4 @@
-# KernelAPI v63 仕様書
+# KernelAPI v64 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **63** |
-| 合計エントリ数 | **304** (ヘッダ 2 + 関数表の容量 300 (うち実装 230・予約 70) + データフィールド 2)。データ欄は **0x4B8 に固定** (§4-0) |
+| 現在のバージョン | **64** |
+| 合計エントリ数 | **304** (ヘッダ 2 + 関数表の容量 300 (うち実装 234・予約 66) + データフィールド 2)。データ欄は **0x4B8 に固定** (§4-0) |
 
 ---
 
@@ -106,6 +106,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v60 | **実装済み (2026-09-23、手元ビルドのみ)** | PCI 結線の診断の取得口 `pci_bind_info` 1 本 (slot 223 = 0x384、data_fields は 0x388 / 0x38C へ)。`idx` 番目 (**`pci_get` と同じ列挙順**) の結線結果を呼び手のバッファへ**8 バイトちょうど**写す。並びは `drivers/pci_bind.h` の `struct pci_bind_info`。`result` = NONE / BOUND / DECLINED / QUARANTINED、`reason` は上書き規則 1 つだけが正、`line_state` は**読む時点で合成**する (結線のときは正常だった線が後から隔離されても `result` は BOUND のまま `line_state` だけが QUARANTINED になる)。**既存 `pci_get` の 40 バイトは広げない** — 旧呼び手のバッファを踏むので別の口にした。戻り 0 = 成功 / `OS32_ERR_INVAL` = `out` が NULL・8 バイトが帯境界を跨ぐ・`idx` が範囲外 (**負のときは 1 バイトも書かない**)。出力が読み取り専用の USER ページなら `ring3_fault_kill` (v59 と同じ規則)。シェルの `lspci` が注記を出す。実体は `drivers/pci_bind.c`、検証は `kapi/kapi_sys.c` の `kapi_pci_bind_info` | [tasks/v3/TASK_HAL_WIRING.md](tasks/v3/TASK_HAL_WIRING.md) §1-4 |
 | v61 | **実装済み (2026-09-23、手元ビルドのみ)** | CS4231 (MATE-X PCM) の再生 `pcm_open` / `pcm_write` / `pcm_status` / `pcm_close` / `pcm_set_volume` の 5 本 (slot 224〜228 = 0x388〜0x398、data_fields は 0x39C / 0x3A0 へ)。16 ビット・ステレオ・44.1k / 22.05kHz の**再生だけ**で、単位は frame (左右 1 組 = 4 バイト)。カーネルが DMA リング 16KB (`dma_pool`) とステージング 16KB (`kmalloc`) を持ち、**アプリのバッファを IRQ から読むことはしない** — `pcm_write` はステージングへ写すだけで、リングを書くのは `pcm_advance` (IRQ / tick、IF=0) と停止中の `pcm_start` / RS_RESTART に限る。所有者は既存の資源 owner と同じアプリ ID で、異常終了は `exec_reclaim_owned` の `pcm_reclaim` が**待たずに**止めて返す。実体は `drivers/pcm_cs4231.c` / `drivers/pcm_cs4231_math.c` | [tasks/v3/TASK_PCM_CS4231.md](tasks/v3/TASK_PCM_CS4231.md) |
 | v63 | **実装済み (2026-09-24、手元ビルドのみ)** | **データ欄の固定配置** (票 TASK_KAPI_DATA_FIELDS)。関数は増えていない。関数表の容量を **R = 300** 予約し (予約スロット 230〜299)、`sbrk_heap_limit` / `shm_base` を **0x4B8 / 0x4BC に固定** — 以後の関数追加でデータ欄は動かない。OS32X ヘッダを **v3** (末尾に `kapi_data_off`) にし、exec / shlib ローダ / 常駐シェルの起動は値がカーネルと違えば断る。crt の `kapi` の実名を `os32_kapi_v63` に変えた。**旧バイナリは一度だけ全部断られる** — 移行は [08_build.md](08_build.md) §8-4 | [tasks/memory/TASK_KAPI_DATA_FIELDS.md](tasks/memory/TASK_KAPI_DATA_FIELDS.md) |
+| v64 | **実装済み (2026-09-24、手元ビルドのみ)** | HDD の一時置き場 (票 TASK_HDD_INSTALL 段 1): `ext2_format_at` / `dev_mount_count` / `sys_umount_checked` / `hdd_geom_info` の 4 本 (slot 230〜233 = 0x3A0〜0x3AC。データ欄は v63 で固定済みなので動かない、crt の `kapi` の実名も `os32_kapi_v63` のまま)。`ext2_format_at` は区画表を読まずに範囲だけに作る (ディスク総数超過・LBA 0〜17・桁あふれは 1 バイトも書かずに断る)、`sys_umount_checked` は sync を先に呼んで失敗なら外さない、`hdd_geom_info` は BIOS 幾何 (INT 1Bh AH=84h) と IDENTIFY と I/O の方式を `HddGeom` (32 バイト) に写す。同じ版で ATA I/O を LBA28 (word 49 bit9) に、区画表を PC-98 標準配置に、ext2 の区画探索を「見つからなければ失敗」に変えた — **旧配置の NHD は `make nhd-migrate-pt` で移す** ([08_build.md](08_build.md) §8-4)。配備は**カーネルを先** | [tasks/realhw/TASK_HDD_INSTALL.md](tasks/realhw/TASK_HDD_INSTALL.md) 段 1 |
 | v62 | **実装済み (2026-09-23、手元ビルドのみ)** | キーボード 8251 の診断 `kbd_diag` 1 本 (slot 229 = 0x39C、data_fields は 0x3A0 / 0x3A4 へ)。`KbdDiag` (24 バイト、`os32_kapi_shared.h`) を呼び手のバッファへ写す — IRQ1 回数・空 IRQ (RxRDY = 0)・エラー (PE/FE)・オーバーラン (OE だけ、バイトは使う)・起動時に読み捨てたバイト数・`kbd_init` の前後の 0043h・直近の 0043h とスキャンコード・書いたコマンド語・呼んだ時点の 0043h。戻り 0 / `OS32_ERR_INVAL` (`out` が NULL)。出力は生成ラッパの `out` 検査 (読み取り専用の USER ページなら `ring3_fault_kill`)。シェルの `kbdstat` が 1 行で出す。同じ変更でカーネルが 0043h に書くコマンド語を **0x14 → 0x16** (DTR = 1 = RTY# HIGH、BIOS の定常値) に直した — 実機 PC-9821Ra266 で打鍵が一切届かなかった件。実体は `drivers/kbd.c` / `drivers/kbd_status.c` | [POLICY_DEBUG.md](POLICY_DEBUG.md) §4-57 |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
@@ -175,7 +176,7 @@ v62 まではデータ欄 (`sbrk_heap_limit` / `shm_base`) を関数表の**直�
 |---|---|---|
 | 関数表の容量 R | **300** スロット (`KAPI_FUNC_CAPACITY`) | `sdk/kapi.json` の `func_capacity` |
 | データ欄の先頭 | **0x4B8** = 8 + 4 × R (`KAPI_DATA_FIELDS_OFF`) | `sdk/gen_kapi.py` が生成 |
-| 予約スロット | 230〜299 (`kapi_reserved[70]`)。カーネルの表は `kapi_reserved_nosys` (= `OS32_ERR_NOSYS`)、CPL=3 のトランポリンは int 0x80 のスタブ (ディスパッチャが `slot >= KAPI_FUNC_COUNT` で kill)。**NULL にしない** | `exec/exec.c` |
+| 予約スロット | 234〜299 (`kapi_reserved[66]`、v64 時点。v63 は 230〜299)。カーネルの表は `kapi_reserved_nosys` (= `OS32_ERR_NOSYS`)、CPL=3 のトランポリンは int 0x80 のスタブ (ディスパッチャが `slot >= KAPI_FUNC_COUNT` で kill)。**NULL にしない** | `exec/exec.c` |
 | R の上限 | トランポリン 1 ページ: `sizeof(KernelAPI)` + スタブ 8B × R + 写し場 256B ≤ 4096 → **R ≤ 318** (`STATIC_ASSERT`) | `exec/exec.c` |
 
 関数を足すときは `kapi_reserved[]` が 1 本減るだけで、データ欄は動かない。**関数数が R を
@@ -212,7 +213,7 @@ v62 以前にコンパイルしたオブジェクトは `kapi` を参照した�
 | Offset | フィールド | 説明 |
 |--------|-----------|------|
 | 0x00 | magic | 0x4B415049 ("KAPI") |
-| 0x04 | version | APIバージョン (現在: 63) |
+| 0x04 | version | APIバージョン (現在: 64) |
 
 ### API関数 (自動生成 — os32_kapi_generated.h 準拠)
 
@@ -988,6 +989,62 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   間に一括で写すので、同じ瞬間の組になる。
 - u32 のカウンタは飽和しない (折り返す)。`overrun_count` だけ u16 で飽和する。
 
+### HDD の一時置き場 (v64)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x3A0 | ext2_format_at | `int(int drv, u32 start_lba, u32 length)` |
+| 0x3A4 | dev_mount_count | `int(int drv)` |
+| 0x3A8 | sys_umount_checked | `int(const char *prefix)` |
+| 0x3AC | hdd_geom_info | `int(int drv, HddGeom *out)` |
+
+票 [TASK_HDD_INSTALL](tasks/realhw/TASK_HDD_INSTALL.md) 段 1。シェルの `hdprep`
+(空の hd0 に OS32 の一時置き場を作る) が使う。インストーラは段 2 でこれに乗る。
+
+- **`ext2_format_at`** — 区画表を**読まずに** `[start_lba, start_lba + length)` だけに
+  ext2 を作る。長さ 0・`start_lba < 18` (IPL / 区画表 / ローダ)・IDENTIFY の総数が 0・
+  開始 + 長さがディスクの外 (足し算の桁あふれも)・ATA の指定の方式で指せない範囲
+  (LBA28 の上限 2^28・現在の CHS の容量、`ide_range_ok`) は **1 バイトも書かずに**
+  `EXT2_ERR_INVAL` (-10)。ドライブが無ければ `EXT2_ERR_IO`。大きさは
+  `fs/ext2_layout.c` の固定点で決まる (最終グループに SB・GDT・bitmap 2・inode 表・
+  グループ 0 のルートが収まる長さへ切り下げ、上限 32 グループ = 256MiB、超えれば
+  `EXT2_ERR_NOSPC`)。既存の `ext2_format` は区画表の OS32 区画を探し (無ければ
+  `EXT2_ERR_NOPART` = -13)、区画の長さと 32 グループ (524,290 セクタ) で頭打ちにする
+  (断らない)。区画の位置を **BIOS 幾何で**決められなかった (IDENTIFY に落ちた) ときは
+  書かずに `EXT2_ERR_INVAL` (読むだけのマウントは IDENTIFY でも通る)。
+- **`dev_mount_count`** — `hd<drv>` を指す VFS のマウントの数 (どの prefix でも、
+  ルートも数える)。`drv` が 0〜3 の外なら `OS32_ERR_INVAL`。ルートかどうかは
+  `vfs_devname("/")` で見る。
+- **`sys_umount_checked`** — FS の sync を**先に**呼び、失敗したら外さずにその負値。
+  `"/"` は `OS32_ERR_BUSY`、未マウントは `OS32_ERR_NOTFOUND`、NULL は
+  `OS32_ERR_INVAL`。既存の `sys_umount` (void、sync の失敗を捨てる) は変えない。
+- **`hdd_geom_info`** — `HddGeom` (32 バイト、`os32_kapi_shared.h`、
+  `kernel/bootinfo.c` の `STATIC_ASSERT` が見張る) を写す。0 / `OS32_ERR_INVAL`
+  (`out` が NULL・`drv` が 0〜3 の外)。出力は生成ラッパの `out` 検査。
+
+| Offset | 型 | フィールド | 意味 |
+|---|---|---|---|
+| 0 | `u8` | `bios_queried` | ローダが INT 1Bh AH=84h を問い合わせた (DA 80h = drive 0、81h = drive 1) |
+| 1 | `u8` | `bios_valid` | カーネルの規則 (CF=0・BX=512・CX/DH/DL≠0) を満たす |
+| 2 | `u8` | `bios_heads` | DH |
+| 3 | `u8` | `bios_spt` | DL |
+| 4 | `u16` | `bios_cyl` | CX |
+| 6 | `u16` | `bios_seclen` | BX |
+| 8〜18 | `u16` × 6 | `ata_def_cyl/heads/spt`, `ata_cur_cyl/heads/spt` | IDENTIFY word 1/3/6、54/55/56 |
+| 20 | `u16` | `ata_w49` | word 49 (bit9 = LBA) |
+| 22 | `u16` | `ata_w53` | word 53 (bit0 = 54-58 が有効) |
+| 24 | `u32` | `ata_total` | word 60-61 |
+| 28 | `u8` | `ata_present` | IDENTIFY に答えた |
+| 29 | `u8` | `addr_mode` | I/O の方式 `HDD_AMODE_LBA28` (1) / `CHS_CUR` (2) / `CHS_DEF` (3) / `NONE` (0) |
+| 30 | `u8` | `bios_da` | 対応する DA (0x80 / 0x81、無ければ 0) |
+
+**同じ版で変わった振る舞い** (スロットではないが外から見える):
+ATA の LBA I/O (`ide_read_sector` 系・`dev_blk_*` の hd0-3) は IDENTIFY word 49 bit9 なら
+LBA28、無ければ word 53 bit0 の現在の CHS、それも無ければ既定の CHS。範囲外
+(LBA28 の上限 2^28・総数・シリンダ 16 ビット・`lba + count` の桁あふれ) は 1 セクタも
+出さずに `IDE_ERR_RANGE` (-4)。区画表 (LBA 1) は **PC-98 標準配置** (`drivers/pc98pt.h`)
+で、ext2 の区画探索は見つからない・読めないときに失敗する (以前は LBA 1088 を仮定した)。
+
 ### 排他的作成 (v53)
 
 **スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
@@ -1122,7 +1179,7 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 ### 予約スロット (v63〜)
 
-0x3A0〜0x4B4 (slot 230〜299、70 本) は `kapi_reserved[]`。関数を足すと先頭から使う
+0x3B0〜0x4B4 (slot 234〜299、66 本、v64 時点) は `kapi_reserved[]`。関数を足すと先頭から使う
 (§4-0)。カーネルの表は `kapi_reserved_nosys` (`OS32_ERR_NOSYS`)、トランポリンは
 int 0x80 のスタブで、CPL=3 からの呼び出しはアプリを kill する。
 

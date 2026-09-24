@@ -182,6 +182,18 @@ int vfs_dev_parse(const char *name, int *dev_type, int *dev_id);
 /* マウント/アンマウント */
 int  vfs_mount(const char *prefix, const char *dev_name, const char *fstype);
 void vfs_umount(const char *prefix);
+/* 戻り値つきのアンマウント (KAPI sys_umount_checked、v64、票 TASK_HDD_INSTALL
+ * §1-v3 N6)。**先に FS の sync を呼び、失敗したらアンマウントしない**。
+ *   VFS_OK           … 書き戻してアンマウントした
+ *   VFS_ERR_BUSY     … prefix が "/" (ルートは外さない)
+ *   VFS_ERR_NOTFOUND … その prefix はマウントされていない
+ *   VFS_ERR_INVAL    … prefix が NULL
+ *   sync の負値      … 書き戻せなかった (マウントは残る)
+ * 既存の vfs_umount (void、sync の失敗を捨てる) は変えない ([ABI2])。 */
+int  vfs_umount_checked(const char *prefix);
+/* IDE ドライブ drive (hd<drive>) を指すマウントの数 (どの prefix でも、ルートも
+ * 数える)。drive が 0〜3 の外なら VFS_ERR_INVAL。KAPI dev_mount_count (v64)。 */
+int  vfs_dev_mount_count(int drive);
 int  vfs_is_mounted(const char *prefix);
 const char *vfs_fstype(const char *prefix);
 const char *vfs_devname(const char *prefix);
