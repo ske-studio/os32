@@ -445,8 +445,11 @@ def _state_result(d):
 
 
 def tool_state_save(args):
+    # writes a host file at a caller-chosen path: the emulator wants the
+    # per-process token (np21w_client.token_headers)
     return _state_result(
-        _json(emu.post("/api/state/save", "file=" + args["file"])))
+        _json(emu.post("/api/state/save", "file=" + args["file"],
+                       headers=emu.token_headers())))
 
 
 def tool_state_load(args):
@@ -618,7 +621,8 @@ TOOLS = {
     "emu_trace_stop": (tool_trace_stop,
                        "Stop recording the CS:EIP trace.", _obj({})),
     "emu_state_save": (tool_state_save,
-                       "Save emulator state to a file.",
+                       "Save emulator state to a file (Windows path). Sends "
+                       "the aidebug token from np21w_aidebug_<port>.token.",
                        _obj({"file": {"type": "string"}}, ["file"])),
     "emu_state_load": (tool_state_load,
                        "Load emulator state from a file.",

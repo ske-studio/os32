@@ -695,8 +695,11 @@ python3 tools/np21w_ctl.py status [--ini <name>]         # プロセス・aidebu
   (利用者だけが読める ACL) の中身を `X-Aidebug-Token` で要求する。ctl は `NP21W_AIDEBUG_TOKEN_FILE`
   (WSL パス) → `/api/instance` の `token_file` → `NP21W_DIR/np21w_aidebug_8025.token` の順で読む。
   中身は出力しない ([D3])。読めなければ `stop` は exe 一致の強制終了に落ち、`fdd` は失敗する。
-  読み取り系の口 (`/api/status` `/api/cmd` `/api/key` など) はトークン不要のまま。Origin ヘッダを
-  付ける要求は 403 (ブラウザ経由を閉じる) — curl / urllib は付けないので手順は変わらない。
+  `/api/state/save` (ホストにファイルを書く) も同じトークンが要り、`tools/np21w_mcp` の `emu_state_save`
+  は `np21w_client.token_headers()` で付ける。読み取り系の口 (`/api/status` `/api/cmd` `/api/key` など)
+  はトークン不要のまま。Origin ヘッダを付ける要求は 403 (ブラウザ経由を閉じる) — curl / urllib は
+  付けないので手順は変わらない。トークンは NP21/W がサーバを (再) 起動するたびに変わる (ini の再読込を含む)
+  ので、道具は要求のたびに読む。
 - `fdd --insert` の 200 は「受理」で、FD は 0.4 秒のエミュレーション時間の後に入る (`DISK_DELAY`)。
   ctl は `/api/instance` の `fdd[].path` に現れるまで待って `ready` と言う。`pending` のまま
   なら理由 (ブレーク中 / 一時停止 / 背景で停止) を出して失敗する。
