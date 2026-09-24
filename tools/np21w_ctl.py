@@ -988,7 +988,13 @@ class Ctl(object):
 
     def fdd_confirm(self, drive, want_path, ready_wait):
         """/api/instance の fdd[drive] に反映されるまで待つ。insert は DISK_DELAY
-        (0.4 秒のエミュレーション時間) の後に path が立つ。eject は即時。"""
+        (0.4 秒のエミュレーション時間) の後に path が立つ。eject は即時。
+
+        成功と見るのは `media_fresh:true` の応答で path が一致したときだけ。
+        media_fresh:false は UI スレッドが答えず前回の快照が返ったという意味で、
+        操作の前の情報かもしれない (同じ FD を入れ直すと path だけは一致する)。
+        この関数の問い合わせは全部 /api/fdd の受理の後に出すので、fresh な応答は
+        操作の後に取った情報になる。"""
         deadline = self.clock() + ready_wait
         last = {}
 
@@ -1002,18 +1008,20 @@ class Ctl(object):
                     last.update(f)
                     last['_trap'] = inst.get('trap_pause')
                     last['_user'] = inst.get('user_pause')
+                    last['_fresh'] = inst.get('media_fresh') is True
                     return f
             return None
 
         def reflected():
             f = slot()
-            if f is None:
+            if f is None or not last.get('_fresh'):
                 return False
             return win_norm(f.get('path') or '') == win_norm(want_path)
 
         if ready_wait <= 0:
             slot()
-            if last and win_norm(last.get('path') or '') == win_norm(want_path):
+            if (last and last.get('_fresh') and
+                    win_norm(last.get('path') or '') == win_norm(want_path)):
                 self.say('fdd%d %s' % (drive, 'ready ' + want_path if want_path else 'empty'))
                 return 0
             self.say('fdd%d %s (反映は待たない)' % (drive, 'pending' if last.get('pending') else '?'))
@@ -1023,6 +1031,10 @@ class Ctl(object):
             return 0
         if not last:
             raise CtlError('fdd%d: /api/instance が %g 秒答えない' % (drive, ready_wait))
+        if not last.get('_fresh'):
+            raise CtlError('fdd%d: 受理されたが %g 秒のあいだ媒体の情報が更新されず '
+                           '(media_fresh:false — UI スレッドが答えない)、反映を確かめられなかった'
+                           % (drive, ready_wait))
         if want_path and last.get('pending'):
             why = ('ブレークで止まっている (/api/resume)' if last.get('_trap') else
                    '一時停止中 (/api/resume)' if last.get('_user') else

@@ -151,6 +151,11 @@ class FakeHttp(object):
         self.quit_error = quit_error
         self.latency = latency          # 1 要求あたりに進める偽の時計 (秒)
         self.quit_policy = quit_policy  # 既に受け付けた save (None = 未要求)
+        # stale_after_fdd: /api/fdd の後、何回目の /api/instance までを
+        # media_fresh:false (操作の前の快照) で返すか。None = いつも fresh
+        self.stale_after_fdd = None
+        self.fdd_snapshot = None
+        self.fdd_posted_at = None
         self.fdd = {1: {'path': D88, 'cfg': D88, 'pending': False}}
         self.fdd_inserted_at = {}
         self.base = 'http://127.0.0.1:8025'
@@ -208,8 +213,13 @@ class FakeHttp(object):
                 'instance_id': 'ab' * 16, 'started_at': '2026-09-25T00:00:00.000Z',
                 'dialog': self.instance_dialog,
                 'trap_pause': self.paused == 'trap', 'user_pause': self.paused == 'user',
-                'fdd': self._fdd_json(),
+                'fdd': self._fdd_json(), 'media_fresh': True,
                 'ide': [{'slot': 1, 'type': 'hdd', 'ready': True, 'path': NHD}]}
+            if self.stale_after_fdd is not None and self.fdd_posted_at is not None:
+                since = n - self.fdd_posted_at
+                if since <= self.stale_after_fdd:
+                    js['fdd'] = self.fdd_snapshot
+                    js['media_fresh'] = False
             if self.token_file is not None:
                 js['token_file'] = self.token_file
                 if not self.token_file:
@@ -242,6 +252,8 @@ class FakeHttp(object):
             q = parse_qs(body or '')
             d = int(q['drive'][0])
             n = len([c for c in self.calls if c[1] == '/api/instance'])
+            self.fdd_snapshot = self._fdd_json()     # 操作の前の快照
+            self.fdd_posted_at = n
             if q['action'][0] == 'insert':
                 self.fdd[d] = {'path': '', 'cfg': q['path'][0], 'pending': True}
                 self.fdd_inserted_at[d] = n
@@ -862,6 +874,28 @@ class Fdd(Base):
         self._pending_case('user', '一時停止')
         self._pending_case('bg', '進んでいない')
 
+    def test_reinsert_same_fd_with_stale_snapshot_fails(self):
+        # 同じ FD を入れ直す。UI スレッドが答えず media_fresh:false の間は、
+        # 操作前の快照でも path が一致してしまう — それを成功にしない (Codex P2)
+        c = self.make(ops=self.ops0)
+        self.http.stale_after_fdd = 10 ** 6
+        rc = self.run_main(c, ['fdd', '--drive', '1', '--insert', 'os32_boot.d88'])
+        self.assertEqual(rc, 1)
+        self.assertIn('確かめられなかった', self.err.getvalue())
+        self.assertIn('media_fresh:false', self.err.getvalue())
+        self.assertNotIn('ready', self.out.getvalue())
+        self.assertGreaterEqual(self.fc.now, 5)
+
+    def test_reinsert_same_fd_fresh_later_succeeds(self):
+        # 3 回は古い快照、その後 fresh になって反映が見える
+        c = self.make(ops=self.ops0)
+        self.http.stale_after_fdd = 3
+        rc = self.run_main(c, ['fdd', '--drive', '1', '--insert', 'os32_boot.d88'])
+        self.assertEqual(rc, 0, self.err.getvalue())
+        self.assertIn('fdd1 ready ' + D88, self.out.getvalue())
+        after = [x for x in self.http.calls if x[1] == '/api/instance'][1:]
+        self.assertGreaterEqual(len(after), 4)     # 古い 3 回を読み飛ばした
+
     def test_insert_not_opened_fails(self):
         c = self.make(ops=self.ops0, fdd_accepts=False)
         rc = self.run_main(c, ['fdd', '--drive', '1', '--insert', 'other.d88'])
@@ -1156,6 +1190,9 @@ MUTATIONS = [
     ("            return win_norm(f.get('path') or '') == win_norm(want_path)",
      "            return True",
      "insert の反映 (fdd[].path) を確かめない (PM 8)"),
+    ("            if f is None or not last.get('_fresh'):\n                return False",
+     "            if f is None:\n                return False",
+     "media_fresh:false の古い快照でも path が一致すれば成功にする (Codex P2)"),
     ("        if want_path and last.get('pending'):",
      "        if False:",
      "pending (エミュレーションが進んでいない) と開けない失敗を区別しない (PM 8)"),
