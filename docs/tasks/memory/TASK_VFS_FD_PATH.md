@@ -80,3 +80,9 @@
 - **長すぎる DB 名** (Opus nb2): `<名前>-journal` が 255 バイトを超える名前は、解決前・解決後のどちらで超えても**開く時点で**断る (`kapi_db_open` は CANTOPEN + `path too long (NAMETOOLONG)`、SQLite VFS の xOpen も MAIN_DB で CANTOPEN)。
 - **hsync と開いている辞書** (Opus nb1): FEP を有効にした後の `/db/fep.db` の置き換えは BUSY になる (決裁 ① どおり)。hsync は `reason=replace_failed err=-17 (BUSY)` に「使用中で置き換えられなかった: 旧内容のまま」と次の手 (再起動して FEP を有効にする前に hsync) を出す。
 - **受入の読み替え**: 「IME 辞書の置き換え後に FEP が動く」は、**`rm /db/fep.db` → 作り直し (コピー) → FEP で変換**の手順で見る。hsync の差し替え (置き換え rename) は辞書を開いている間は BUSY で断られるので、失効 → 開き直しの経路には入らない。
+
+## 実装レビュー ラリー 3 とユーザー決裁 (2026-09-24)
+
+- **FAT は直す** (ユーザー): (1) FD 起動で FAT が `/` のとき `ff_make_path` が `0:` を前に付けて末尾を切り詰める (Codex / Opus 一致) → 収まらなければ NAMETOOLONG。(2) FAT の `rmdir` (実体は `f_unlink`) がファイルも消し pinned を通らない (Opus) → 種別を見て NOTDIR。
+- **HostDrv** (ユーザー: 「ホストドライブはホストサービス実装後に使える経路にしたい」): 名前の厳密化を今入れる — `VFS_NAME_RULE_WIN32` で最短形の正しい BMP の UTF-8 以外と Win32 の禁止文字 `: * ? " < > |` を断る (`kutf8_to_utf16le` の途中終了・冗長符号化・U+FFFD 置換による別名を塞ぐ、`:` の代替データストリームもここで閉じる)。**将来: HostDrv を Host Services (ネットワーク越し) の経路でも使えるようにする** (v3 PLAN の候補へ)。
+- **8.3 短名 (`DISK-I~1.IMG`)・予約名 (CON)・ASCII 以外の大文字小文字 → 既知の制限** (ユーザー決裁 = 推奨): HostDrv 上のファイルを別名で指したときの BUSY / pinned の保護は保証しない。影響は開発者のホスト上のファイルとそれを載せた loop に限られる。docs/06_filesystem.md にも書く。
