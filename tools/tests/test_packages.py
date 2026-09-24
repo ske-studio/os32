@@ -23,7 +23,11 @@ CD インストール (userland/system/cdinst.c) の .PKG は、配備の正典
      (+ fd.only) と**等しい**か。構成 (fd_plan) と、実物のイメージ
      (images/os32_boot.img = 2HD の D88 のもと、images/os32_boot144.img) を
      FAT12 として読み戻してバイト列で見る。否定側 (8.3 違反・理由なし・古い
-     rename) も。空きを表示する
+     rename) も。空きを表示する。配布物の D88 (images/os32_boot.d88) のセクタを
+     読み戻し、RAW (os32_boot.img) と一致するか (否定側: D88 を 1 セクタ壊すと落ちる)
+  8. 8.3 の短い名前へのフォールバックは FD (FAT) のときだけ: 実物の
+     kernel/boot_font.c をホストで取り込み、HDD (ext2) では正規名が無ければ
+     失敗のまま (短い名前を読まない) であることと、その否定側 (FS を見ない変異)
 
 先に make all を通してから実行すること (4 と 5 は成果物を読む)。
 """
@@ -48,6 +52,8 @@ PKG_H = os.path.join(ROOT, 'userland', 'lib', 'rt', 'pkg.h')
 
 fails = []
 
+D88 = os.path.join(ROOT, 'images', 'os32_boot.d88')
+BOOT_FONT_C = os.path.join(ROOT, 'kernel', 'boot_font.c')
 FD_IMAGES = [('2HD', os.path.join(ROOT, 'images', 'os32_boot.img'),
               'boot/loader_fat_new.bin'),
              ('1.44MB', os.path.join(ROOT, 'images', 'os32_boot144.img'),
@@ -519,6 +525,174 @@ def case_fd(plan, resolved):
         print(f"  info FD {label}: 空き {free // 1024}KB / {total // 1024}KB")
 
 
+# ---------------------------------------------------------------- 7b. 配布物の D88
+
+def d88_to_raw(blob):
+    """D88 を読み、(c, h, r) 順に並べたセクタ列を RAW として返す
+
+    ヘッダ 0x2B0 (名前 17 + 予約 9 + 保護 1 + 種別 1 + 全長 4 + トラック表
+    164 × 4)。各セクタは 16 バイトのヘッダ (C, H, R, N, 数, 密度, 削除, 状態,
+    予約 5, データ長 2) + データ。トラックはシリンダ × 2 + ヘッド の順で読む。
+    形が崩れていれば ValueError。
+    """
+    import struct
+    if len(blob) < 0x2B0:
+        raise ValueError('D88 のヘッダより短い')
+    disk_size = struct.unpack_from('<I', blob, 0x1C)[0]
+    if disk_size != len(blob):
+        raise ValueError(f'ヘッダの全長 {disk_size} != 実物 {len(blob)}')
+    offs = struct.unpack_from('<164I', blob, 0x20)
+    out = bytearray()
+    for t, off in enumerate(offs):
+        if off == 0:
+            continue
+        p = off
+        first = True
+        nsec = None
+        secs = {}
+        while first or len(secs) < nsec:
+            first = False
+            if p + 16 > len(blob):
+                raise ValueError(f'トラック {t}: セクタのヘッダが範囲外')
+            c, h, r, n, ns, _dens, _dele, _st = struct.unpack_from('<BBBBHBBB', blob, p)
+            dlen = struct.unpack_from('<H', blob, p + 14)[0]
+            nsec = ns
+            if (c, h) != (t // 2, t % 2):
+                raise ValueError(f'トラック {t}: C/H = {c}/{h}')
+            if dlen != 128 << n:
+                raise ValueError(f'トラック {t} R{r}: データ長 {dlen} と N={n} が合わない')
+            secs[r] = blob[p + 16:p + 16 + dlen]
+            p += 16 + dlen
+        for r in sorted(secs):
+            out += secs[r]
+    return bytes(out)
+
+
+def case_d88():
+    print("case 7b: 配布物の D88 = RAW")
+    raw_path = FD_IMAGES[0][1]
+    if not (os.path.isfile(D88) and os.path.isfile(raw_path)):
+        check(False, "images/os32_boot.d88 と os32_boot.img がある (先に make all)")
+        return
+    blob = open(D88, 'rb').read()
+    raw = open(raw_path, 'rb').read()
+    try:
+        got = d88_to_raw(blob)
+    except ValueError as e:
+        check(False, f"D88 が読める: {e}")
+        return
+    check(got == raw, f"D88 のセクタを並べると RAW と同じ ({len(got)} / {len(raw)} B)")
+    # 否定側: データ部を 1 セクタ壊す / セクタのヘッダ (R) を壊す
+    import struct
+    off0 = struct.unpack_from('<I', blob, 0x20 + 4 * 10)[0]   # トラック 10 の先頭
+    bad = bytearray(blob)
+    for i in range(1024):
+        bad[off0 + 16 + i] ^= 0xFF
+    check(d88_to_raw(bytes(bad)) != raw, "否定: D88 の 1 セクタ (トラック 10 R1) のデータを壊すと不一致")
+    bad = bytearray(blob)
+    bad[off0 + 2] = 0x7F
+    try:
+        broken = d88_to_raw(bytes(bad)) != raw
+    except ValueError:
+        broken = True
+    check(broken, "否定: D88 のセクタ番号 (R) を壊すと不一致")
+    bad = bytearray(blob[:-1024])
+    try:
+        d88_to_raw(bytes(bad))
+        broken = False
+    except ValueError:
+        broken = True
+    check(broken, "否定: 末尾 1 セクタ欠けた D88 は読めない (全長が合わない)")
+
+
+# ---------------------------------------------------------------- 8. 短い名前は FD だけ
+
+BOOT_FONT_HARNESS = r"""
+#include <stdio.h>
+#include <string.h>
+static const char *g_fs = "ext2";
+static int g_long_ok, g_short_ok, g_short_tried;
+int kcg_load_font(const char *path)
+{
+    if (strcmp(path, "/sys/font/default.kcgfont") == 0) return g_long_ok ? 0 : -1;
+    if (strcmp(path, "/sys/font/default.kcg") == 0) {
+        g_short_tried = 1;
+        return g_short_ok ? 0 : -1;
+    }
+    return -9;
+}
+const char *vfs_fstype(const char *prefix)
+{
+    return strcmp(prefix, "/") == 0 ? g_fs : "";
+}
+int kstrcmp(const char *a, const char *b) { return strcmp(a, b); }
+#include "boot_font.c"
+static int fails;
+static void run(const char *fs, int lo, int sh, int want_rc, int want_tried, const char *label)
+{
+    int rc;
+    g_fs = fs; g_long_ok = lo; g_short_ok = sh; g_short_tried = 0;
+    rc = boot_font_load();
+    if ((rc == 0) != (want_rc == 0) || g_short_tried != want_tried) {
+        printf("FAIL %s (rc=%d tried=%d)\n", label, rc, g_short_tried);
+        fails++;
+    } else {
+        printf("ok %s\n", label);
+    }
+}
+int main(void)
+{
+    run("ext2", 0, 1, -1, 0, "HDD: 正規名が無ければ失敗のまま、短い名前を読まない");
+    run("ext2", 1, 1, 0, 0, "HDD: 正規名を読む");
+    run("fat", 0, 1, 0, 1, "FD: 正規名が無ければ短い名前を読む");
+    run("fat", 1, 1, 0, 0, "FD: 正規名があれば正規名");
+    run("fat", 0, 0, -1, 1, "FD: どちらも無ければ失敗");
+    return fails ? 1 : 0;
+}
+"""
+
+
+def run_boot_font(src_text):
+    """boot_font.c (src_text) をハーネスで回す。戻り値 (rc, 出力)"""
+    tmp = tempfile.mkdtemp(prefix='bootfont_')
+    try:
+        with open(os.path.join(tmp, 'boot_font.c'), 'w', encoding='utf-8') as f:
+            f.write(src_text)
+        h = os.path.join(tmp, 'h.c')
+        with open(h, 'w', encoding='utf-8') as f:
+            f.write(BOOT_FONT_HARNESS)
+        exe = os.path.join(tmp, 'a.out')
+        inc = ['-I' + tmp] + ['-I' + os.path.join(ROOT, d)
+                              for d in ('kernel', 'include', 'drivers', 'fs', 'lib',
+                                        'sdk/include', 'sdk/include/os32')]
+        r = subprocess.run(['gcc', '-std=gnu89', '-Wall', '-Wextra', '-Werror',
+                            '-Wdeclaration-after-statement', '-D__cdecl=', *inc,
+                            '-o', exe, h], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None, r.stderr
+        r = subprocess.run([exe], capture_output=True, text=True)
+        return r.returncode, r.stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def case_boot_font():
+    print("case 8: 8.3 の短い名前へのフォールバックは FD (FAT) のときだけ")
+    if not shutil.which('gcc'):
+        print("  SKIP gcc が無い")
+        return
+    src = open(BOOT_FONT_C, encoding='utf-8').read()
+    rc, out = run_boot_font(src)
+    for line in (out or '').splitlines():
+        print(f"       {line}")
+    check(rc == 0, "kernel/boot_font.c (実物): HDD は失敗のまま、FD だけ短い名前")
+    gate = ' && kstrcmp(vfs_fstype("/"), SYS_FONT_83_FSTYPE) == 0'
+    check(src.count(gate) == 1, "変異の目印がちょうど 1 か所")
+    rc, _ = run_boot_font(src.replace(gate, ' && (kstrcmp(vfs_fstype("/"), '
+                                            'SYS_FONT_83_FSTYPE) == 0 || 1)'))
+    check(rc not in (0, None), "否定: FS を見ずに短い名前へ落ちる変異は RED")
+
+
 def main():
     plan, resolved = case_real_plan()
     case_negative()
@@ -527,6 +701,8 @@ def main():
     case_iso(plan, fresh)
     case_consumer(plan)
     case_fd(plan, resolved)
+    case_d88()
+    case_boot_font()
     print()
     if fails:
         print(f"FAIL {len(fails)} 件")

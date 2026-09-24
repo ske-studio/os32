@@ -383,7 +383,7 @@ filesystem:
     # 起動に要るので core (MINIMAL)。data だったころ CD の MINIMAL に入らず、
     # CD インストール後の起動で `[KCG] kernel-init load failed` が出ていた。
     # FD (FAT、LFN なし) には 8.3 の /sys/font/default.kcg として入る
-    # (build/packages.yaml の fd.rename)。カーネルは長い名前が無ければそれを読む。
+    # (build/packages.yaml の fd.rename)。カーネルはルートが FAT のときだけそれを読む。
     - host: assets/fonts/ipaexg16.kcgfont
       guest: /sys/font/default.kcgfont
       tags: [core]

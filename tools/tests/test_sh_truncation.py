@@ -489,6 +489,10 @@ MUTATIONS = [
      "    if (0) {\n"
      "        return;\n"
      "    }"),
+    # 8.3 の /etc/filetype を FD 以外 (HDD) でも読む (Codex 実装レビュー、25n)
+    ("fd83_any_root", "userland/shell/cmd_filer.c",
+     "    if (fd < 0 && ft_root_is_fd()) fd = g_api->sys_open(FL_FILETYPES_PATH_83, O_RDONLY);",
+     "    if (fd < 0 && (ft_root_is_fd() || 1)) fd = g_api->sys_open(FL_FILETYPES_PATH_83, O_RDONLY);"),
 
     # T18-a: ask が 255 文字目以降を黙って捨てる
     ("t18_ask_input_silent", "userland/shell/cmd_script.c",

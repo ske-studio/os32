@@ -20,8 +20,15 @@
 /* ======================================================================== */
 
 #define FL_FILETYPES_PATH   "/etc/filetypes"
-/* FD (FAT、LFN なし) では 8.3 の短い名前で置く (build/packages.yaml の fd.rename) */
+/* FD (FAT、LFN なし) では 8.3 の短い名前で置く (build/packages.yaml の fd.rename)。
+ * **ルートが FD のときだけ**読む — HDD (ext2) で正規名が欠けたり壊れたりしたとき、
+ * 残っている短い名前を黙って掴まないように (Codex 実装レビュー)。判定は KAPI の
+ * vfs_devname("/") (ルートのマウントのデバイス名)。FD 起動のルートは必ず FAT
+ * (kernel.c のルートマウント: fd0 → "fat"、hd0 → "ext2")。KAPI に FS 種別を返す
+ * 口は無いのでデバイス名で見る。/etc に別のマウントは置かない前提 */
 #define FL_FILETYPES_PATH_83 "/etc/filetype"
+#define FL_FD_DEV_PREFIX0    'f'
+#define FL_FD_DEV_PREFIX1    'd'
 #define FL_FILETYPES_MAXSZ  8192
 #define FL_MAX_ASSOC        128
 
@@ -59,6 +66,13 @@ static int ft_count = 0;
 /*  ファイルタイプ関連付け読み込み                                           */
 /* ======================================================================== */
 
+/* ルートが FD (fd0, fd1 …) か */
+static int ft_root_is_fd(void)
+{
+    const char *dev = g_api->vfs_devname("/");
+    return dev && dev[0] == FL_FD_DEV_PREFIX0 && dev[1] == FL_FD_DEV_PREFIX1;
+}
+
 static void ft_load(void)
 {
     int fd, sz, i, line_start, got_eq;
@@ -67,7 +81,7 @@ static void ft_load(void)
     ft_count = 0;
 
     fd = g_api->sys_open(FL_FILETYPES_PATH, O_RDONLY);
-    if (fd < 0) fd = g_api->sys_open(FL_FILETYPES_PATH_83, O_RDONLY);
+    if (fd < 0 && ft_root_is_fd()) fd = g_api->sys_open(FL_FILETYPES_PATH_83, O_RDONLY);
     if (fd < 0) return;
 
     ft_buf = (char *)g_api->mem_alloc(FL_FILETYPES_MAXSZ);

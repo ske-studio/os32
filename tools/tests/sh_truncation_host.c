@@ -800,6 +800,13 @@ static int  __cdecl h_console_get_cursor_y(void)   { return 0; }
 static void __cdecl h_console_set_cursor(int x, int y) { (void)x; (void)y; }
 static void __cdecl h_tvram_clear(void) {}
 
+/* ルートのデバイス名 (vfs_devname("/"))。既定は HDD */
+static const char *g_root_dev = "hd0";
+static const char * __cdecl h_vfs_devname(const char *prefix)
+{
+    return (prefix[0] == '/' && prefix[1] == '\0') ? g_root_dev : "";
+}
+
 static KernelAPI g_fake;
 KernelAPI *g_api;
 
@@ -863,6 +870,7 @@ static void build_api(void)
     g_fake.console_get_cursor_y = h_console_get_cursor_y;
     g_fake.console_set_cursor = h_console_set_cursor;
     g_fake.tvram_clear = h_tvram_clear;
+    g_fake.vfs_devname = h_vfs_devname;
     g_api = &g_fake;
 }
 
@@ -1052,6 +1060,7 @@ static void fresh(void)
     ser_reset();
     g_popup_count = 0;
     g_popup[0] = '\0';
+    g_root_dev = "hd0";
     /* shell_run の試験が `exit` で抜けた後、この印が立ったままだと
      * 以降の script_exec が 1 行目で break して**何も走らない**
      * (窓 27e が実際にそれを捕まえた)。 */
@@ -3102,6 +3111,45 @@ static void case_filer_names(void)
     fl_action_enter();
     check(str_eq(g_launch_last, "mkassoc /d/a.txt"),
           "25m 同上: 関連付けで起動する");
+    ft_free();
+
+    /* --- 8.3 の短い名前 /etc/filetype は FD のときだけ (Codex 実装レビュー) --- */
+    /* HDD: 正規名が無ければ失敗のまま。残っている短い名前を掴まない */
+    fresh();
+    dir_set("/d");
+    dir_add("a.txt");
+    file_add("/etc/filetype", ".txt=shortname\n");
+    fl_init("/d");
+    check(ft_count == 0, "25n HDD では /etc/filetype (短い名前) を読まない");
+    fl_state.cursor = 1;
+    fl_action_enter();
+    check(g_launch_count == 0, "25n2 同上: 短い名前の関連付けで起動しない");
+    ft_free();
+
+    /* FD: 正規名が無ければ短い名前を読む (裏) */
+    fresh();
+    g_root_dev = "fd0";
+    dir_set("/d");
+    dir_add("a.txt");
+    file_add("/etc/filetype", ".txt=shortname\n");
+    fl_init("/d");
+    check(ft_count == 1, "25o FD では /etc/filetype を読む");
+    fl_state.cursor = 1;
+    fl_action_enter();
+    check(str_eq(g_launch_last, "shortname /d/a.txt"), "25o2 同上: 関連付けで起動する");
+    ft_free();
+
+    /* FD でも正規名があれば正規名 (短い名前より先) */
+    fresh();
+    g_root_dev = "fd0";
+    dir_set("/d");
+    dir_add("a.txt");
+    file_add("/etc/filetypes", ".txt=longname\n");
+    file_add("/etc/filetype", ".txt=shortname\n");
+    fl_init("/d");
+    fl_state.cursor = 1;
+    fl_action_enter();
+    check(str_eq(g_launch_last, "longname /d/a.txt"), "25p FD でも正規名を先に読む");
     ft_free();
 }
 

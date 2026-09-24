@@ -22,6 +22,7 @@
 #include "gfx.h"
 #include "gfx_hal.h"   /* H2b: GFX_PREF_* / gfx_set_backend_pref (GFX= の反映先) */
 #include "kcg.h"
+#include "boot_font.h"
 #include "boot_splash.h"
 #include "cpu_calibrate.h"
 #include "sysclk.h"   /* 0000:0501h のクロック判定 (pit_init より前に呼ぶ) */
@@ -512,11 +513,8 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     tvram_print(0, 3, "FONT..", TATTR_GREEN);
     {
         int fret;
-        fret = kcg_load_font(SYS_FONT_DEFAULT);
-        if (fret != 0) {
-            /* FD は FAT (8.3) なので短い名前で置いてある */
-            fret = kcg_load_font(SYS_FONT_DEFAULT_83);
-        }
+        /* FD (FAT) だけ 8.3 の短い名前へ落ちる (kernel/boot_font.c) */
+        fret = boot_font_load();
         if (fret == 0) {
             tvram_print(6, 3, "OK ", TATTR_WHITE);
         } else {

@@ -108,10 +108,10 @@ fd:
       reason: 8.3 に収まらない。install.bin (SRC_LOADER_H) が HDD の LBA 2 以降へ書く元
     - guest: /sys/font/default.kcgfont
       fd: /sys/font/default.kcg
-      reason: 8.3 に収まらない。カーネルは SYS_FONT_DEFAULT が読めなければ SYS_FONT_DEFAULT_83 を読む (include/config.h)
+      reason: 8.3 に収まらない。カーネルは SYS_FONT_DEFAULT が読めず、ルートが FAT のときだけ SYS_FONT_DEFAULT_83 を読む (kernel/boot_font.c)
     - guest: /etc/filetypes
       fd: /etc/filetype
-      reason: 8.3 に収まらない。シェルの filer は /etc/filetypes が開けなければ /etc/filetype を読む (userland/shell/cmd_filer.c)
+      reason: 8.3 に収まらない。シェルの filer は /etc/filetypes が開けず、ルートが FD のときだけ /etc/filetype を読む (userland/shell/cmd_filer.c)
   only:
     - fd: /LOADER.BIN
       host: "{loader}"

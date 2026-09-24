@@ -27,9 +27,11 @@
 #define SYS_SQLITE_BIN        "/sys/sqlite.bin"    /* SQLite拡張域バイナリ */
 /* 既定の 16px フォント (KCG)。HDD / CD は長い名前、FD (FAT、FatFs は LFN なし)
  * は 8.3 の短い名前で置く (build/packages.yaml の fd.rename)。カーネルは長い
- * 名前が読めなければ短い名前を読む。 */
+ * 名前が読めず、**かつルートが FAT (= FD 起動) のときだけ**短い名前を読む
+ * (kernel/boot_font.c)。HDD で長い名前が欠けても短い名前は掴まない。 */
 #define SYS_FONT_DEFAULT      "/sys/font/default.kcgfont"
 #define SYS_FONT_DEFAULT_83   "/sys/font/default.kcg"
+#define SYS_FONT_83_FSTYPE    "fat"      /* 短い名前を許す FS (vfs_fstype の名前) */
 #define SYS_SHLIB_GUI         "/sys/lib/libos32gui.shlib"
                                                    /* GUI 共有ライブラリ (K3/C3)。
                                                     * MEM_SHLIB_BASE 常駐。無ければ

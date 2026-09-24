@@ -355,8 +355,11 @@ CD の MINIMAL とずれていた)。違いは `build/packages.yaml` の `fd:` �
 | `/VMKRNL.LZ4` | `/boot/vmkernel.lz4` | FAT ローダはルートから読む。install.bin が `/hd0/boot/` へ写す |
 | `/sys/boot_hdd.bin` | `/boot/boot_hdd.bin` (BOOT) | install.bin が LBA 0 へ書く元 |
 | `/sys/loader_h.bin` | `/boot/loader_hdd.bin` (BOOT) | 8.3。install.bin が LBA 2〜へ書く元 |
-| `/sys/font/default.kcg` | `/sys/font/default.kcgfont` | 8.3 (FatFs は LFN なし)。カーネルは長い名前が無ければ短い名前を読む (`include/config.h` `SYS_FONT_DEFAULT_83`) |
-| `/etc/filetype` | `/etc/filetypes` | 8.3。シェルの filer は長い名前が無ければ短い名前を読む |
+| `/sys/font/default.kcg` | `/sys/font/default.kcgfont` | 8.3 (FatFs は LFN なし)。カーネルは長い名前が読めず**ルートが FAT のときだけ**短い名前を読む (`kernel/boot_font.c`、判定は `vfs_fstype("/")`) |
+| `/etc/filetype` | `/etc/filetypes` | 8.3。シェルの filer は長い名前が無く**ルートが FD のときだけ**短い名前を読む (判定は KAPI `vfs_devname("/")`) |
+
+短い名前へ落ちるのは FD だけ — HDD で正規名が欠けたり壊れたりしても、残っている短い名前を
+黙って掴まない (ホスト試験: `test_packages.py` case 8、`test_sh_truncation.py` 25n〜25p)。
 
 FD 上のパスはすべて 8.3 に収まること (mkfat12 は収まらない名前を黙って切り詰めるので、
 mkpkg が先に断る)。**`core` / `base` に足した物は FD にも入る** — 空きは 2026-09-24 に
@@ -364,7 +367,8 @@ mkpkg が先に断る)。**`core` / `base` に足した物は FD にも入る** 
 先に尽きるので、MINIMAL に足すときは `make all` の FD の行 (`クラスタ使用: … 残り …KB`) を見る。
 以前 FD にだけあった試験用の `/bin/timetest.bin` / `/bin/pcmtest.bin` は外した (DEBUG の
 `/usr/bin/time_test.bin` / `pcm_test.bin`)。検査は `make check-packages-host` の case 7 が
-実物の 2 つのイメージを FAT12 として読み戻し、構成とバイト列で等しいことを見る。
+実物の 2 つのイメージを FAT12 として読み戻し、構成とバイト列で等しいことを見る。case 7b は
+配布物の `os32_boot.d88` のセクタを並べ直して `os32_boot.img` (RAW) と同じバイト列かを見る。
 
 #### `build/app.conf` (OS32X ヘッダ設定)
 
