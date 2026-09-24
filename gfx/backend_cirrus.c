@@ -593,5 +593,6 @@ GfxBackend gfx_backend_cirrus = {
     (u8 *)0,                  /* bb_base: init() が埋める (リニア窓の非表示面) */
     (u32)CIRRUS_PITCH,
     GFX_BB_PACKED8,
-    0                         /* bb_size: init() が埋める (300KB) */
+    0,                        /* bb_size: init() が埋める (300KB) */
+    (void (*)(void))0         /* prepare: 従来どおり init → shutdown */
 };

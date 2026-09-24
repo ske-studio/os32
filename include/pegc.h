@@ -82,6 +82,12 @@
 #define PEGC_HSYNC_24KHZ       0x00  /* 24.83kHz (640x400 の既定) */
 #define PEGC_HSYNC_31KHZ       0x01  /* 31.47kHz (640x480 に必須) */
 #define PEGC_HSYNC_MASK        0x03  /* 有効なのは bit1,0 */
+/* 読み戻し ([U] 同項 [READ/WRITE]、[B] §3-2 表3-1「リード 09A8H 水平同期周波数
+ * の読み出し」)。10b/11b は「設定禁止」なので、読めてそれが返ったら (open bus
+ * の FFh を含む) 読み戻しは信用しない。上位 bit7〜2 は未使用で 0 のはず。
+ * 起動時の値を記録し、480 ラインから戻るときにその値へ戻す (実機 Ra266 +
+ * 液晶の桁ズレ、TASK_FDC_REALHW §9-1)。 */
+#define PEGC_HSYNC_UNUSED_MASK 0xFC  /* bit7〜2: 未使用 (0 が返るはず) */
 
 /* ------------------------------------------------------------------------ */
 /*  4. メモリマップト I/O (E0000h セグメント)                                */
@@ -215,6 +221,12 @@
 #define PEGC_BIOS_CRT_480LINE  0x01   /* bit0: 1=640x480 */
 #define PEGC_BIOS_PRXDUPD      0x054DUL
 #define PEGC_BIOS_PRX_EXTGFX   0x80   /* bit7: 1=拡張グラフィックス (現在値) */
+/* 0000:054Ch PRXCRT bit5「水平走査周波数 [PC-9821(初代を除く), PC-H98]」
+ * 0=24.83kHz(640x400) / 1=31.47kHz(640x400 または 640x480)。
+ * ⚠ PC-9821 初代は 31kHz でも 0 のまま、対象外の機種は常に 0 ([US] 同項)。
+ * なので **診断表示と、09A8h が読めなかったときの代わり** にだけ使う。 */
+#define PEGC_BIOS_PRXCRT       0x054CUL
+#define PEGC_BIOS_PRXCRT_31KHZ 0x20   /* bit5: 1=31.47kHz */
 
 /* ------------------------------------------------------------------------ */
 /*  9. GDC の表示タイミング (SYNC / SCROLL) — 480 ライン化 (票 H2c)           */
@@ -255,6 +267,16 @@
 /* 24.83kHz / 640x400 (OS32 のテキストコンソールの前提) — 復帰用 */
 #define PEGC_GDC_MSYNC_400     { 0x10, 0x4E, 0x07, 0x25, 0x07, 0x07, 0x90, 0x65 }
 #define PEGC_GDC_SSYNC_400     { 0x02, 0x4E, 0x07, 0x25, 0x87, 0x07, 0x90, 0x65 }
+
+/* 31.47kHz / 640x400 — **起動時の 09A8h が 31kHz だった機種へ戻すときだけ** 使う。
+ * 出典は NP21/W bios/bios18.c gdcmastersync[2] "31" / gdcslavesync[5] "31-M"
+ * (INT 18h AH=30h/42h が 31kHz の 400 ラインで流す値)。
+ * ⚠ ミラー [B]/[U] にこの表は無い。uPD7220 の SYNC は書き込み専用で
+ * (I/O 0062h の READ 系は READ/LPEN/CSRR だけ、[U] io_disp.md)、BIOS ワーク
+ * エリアにも写しが無いので、実機の BIOS が入れた値を読み戻す手段が無い。
+ * 実機の ROM と一致するかは未確認 (エミュレータの再現値)。 */
+#define PEGC_GDC_MSYNC_400_31K { 0x10, 0x4E, 0x47, 0x0C, 0x07, 0x0D, 0x90, 0x89 }
+#define PEGC_GDC_SSYNC_400_31K { 0x02, 0x4E, 0x47, 0x0C, 0x87, 0x0D, 0x90, 0x89 }
 
 /* グラフィック GDC の表示開始・区間長。SAD=0、LEN は para[3] bit6 = 1024 ライン。
  * 400 ライン側は BIOS と同じ全 0 (LEN=0 = 無制限扱い)。 */

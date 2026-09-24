@@ -23,6 +23,7 @@ u32 irq_storm_masked = 0;
 u32 irq_line_quarantined = 0;
 u32 irq_ctx_violations = 0;
 volatile int irq_in_irq = 0;
+int irq_test_quiet = 0;   /* 試験専用 (irq.h の注記) */
 
 /* ------------------------------------------------------------------------ */
 /*  PIC のマスクは**登録数で持つ** (irq_save の中から呼ぶこと)               */
@@ -116,7 +117,7 @@ void irq_finish(unsigned int irq, int handled_any)
         outp(PIC1_CMD, OCW2_EOI);
     }
 
-    if (!handled_any) isr_unexpected_report((u32)irq);
+    if (!handled_any && !irq_test_quiet) isr_unexpected_report((u32)irq);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -139,8 +140,9 @@ void irq_dispatch(unsigned int irq)
             irq_disable(irq);
             if (!(irq_storm_masked & (u32)(1u << irq))) {
                 irq_storm_masked |= (u32)(1u << irq);
-                kprintf(0xC1, "[irq] storm on IRQ%d (>%d/tick unclaimed) -> masked\n",
-                        (int)irq, (int)IRQ_STORM_LIMIT);
+                if (!irq_test_quiet)
+                    kprintf(0xC1, "[irq] storm on IRQ%d (>%d/tick unclaimed) -> masked\n",
+                            (int)irq, (int)IRQ_STORM_LIMIT);
             }
         }
     }
@@ -168,8 +170,9 @@ int irq_quarantine_line(unsigned int irq)
         irq_line_quarantined |= (u32)(1u << irq);
         irq_disable(irq);
         irq_restore(saved);
-        kprintf(0xC1, "[irq] IRQ%d quarantined (%d registrant(s) fall back to their tick hook)\n",
-                (int)irq, (int)irq_lines[idx].count);
+        if (!irq_test_quiet)
+            kprintf(0xC1, "[irq] IRQ%d quarantined (%d registrant(s) fall back to their tick hook)\n",
+                    (int)irq, (int)irq_lines[idx].count);
         return 0;
     }
     irq_disable(irq);

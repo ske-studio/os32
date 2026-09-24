@@ -62,4 +62,14 @@ u32 irq_shared_dispatch(unsigned int irq);
  * (隔離が sticky であることの意味が消える)。 */
 void irq_test_reset_line(unsigned int irq);
 
+/* **試験専用**。1 の間、ストーム・隔離・誰も受けなかった IRQ の kprintf を
+ * 出さない (数え方もマスクも変わらない。黙るのは表示だけ)。kselftest の
+ * IRQ 試験は IRQ3 でわざとストームと隔離を起こすので、起動画面に
+ * 「[irq] storm on IRQ3」「IRQ3 quarantined」「[isr] unclaimed IRQ3」が
+ * 本物の障害と同じ形で出ていた (実機 Ra266、2026-09-24)。さらに
+ * isr_unexpected_report は線ごとに 1 回しか出さないので、試験が IRQ3 の
+ * 1 回を使い切ると、後で本物の装置 (82557 等) が IRQ3 を誰にも受けられず
+ * 上げても何も出なかった。これ以外から立ててはいけない。 */
+extern int irq_test_quiet;
+
 #endif /* __IRQ_H */

@@ -1021,17 +1021,86 @@ static void ksel_irq_reset_devs(void)
     ksel_irq_log_n = 0;
 }
 
-/* tick の変わり目まで **IF=1 で** 待つ。ストームの窓を「この tick の頭から」
- * に揃えるためだけに在る (上の注記)。PIT が止まっていると戻らないので、
- * 1 tick ぶんを大きく超える回数で打ち切る (そのときは窓が汚れるだけ)。 */
-static void ksel_storm_wait_tick(void)
+/* 試験の前後で見比べる IRQ3 の状態 (課題: 実機 Ra266 の 82557 が IRQ3)。 */
+struct ksel_irq_snap {
+    int  masked;        /* PIC の IMR (1 = マスク) */
+    int  quarantined;   /* irq_line_quarantined のビット */
+    int  storm;         /* irq_storm_masked のビット */
+    int  count;         /* 登録数 */
+    int  ln_q;          /* 表の quarantined / storm_masked */
+    int  ln_s;
+};
+
+static void ksel_irq_snap_take(struct ksel_irq_snap *s)
 {
-    u32 t = tick_count;
-    long spin = 500000L;   /* 0.6µs x 50 万 = 約 0.3 秒。1 tick の 30 倍 */
-    while (tick_count == t && spin-- > 0) __asm__ volatile("nop");
+    int idx = irq_dyn_index(KSEL_IRQ_LINE);
+    s->masked      = ksel_irq_masked(KSEL_IRQ_LINE);
+    s->quarantined = (irq_line_quarantined & (1u << KSEL_IRQ_LINE)) ? 1 : 0;
+    s->storm       = (irq_storm_masked & (1u << KSEL_IRQ_LINE)) ? 1 : 0;
+    s->count       = irq_lines[idx].count;
+    s->ln_q        = irq_lines[idx].quarantined;
+    s->ln_s        = irq_lines[idx].storm_masked;
 }
 
+static void test_irq_dynamic_body(void);
+
+/* ------------------------------------------------------------------------ */
+/*  IRQ3 は **本物の線** (実機 Ra266 では内蔵 LAN の 82557 が PCI Line 3 で   */
+/*  上げたままにしている)。この試験は PIC のマスクを登録数で持つことを見る   */
+/*  ので、途中で本当に IRQ3 の IMR を開ける。そこへ本物の IRQ3 が入ると:     */
+/*    - 偽の登録者が IRQ_NONE で断り、呼ばれた回数の判定が揺れる。          */
+/*    - 試験が終わった後の線の状態が、試験の前と同じだと言えなくなる。      */
+/*  そこで:                                                                  */
+/*    1. 試験の本体を **IF=0 で** 回す。`int $0x23` は IF に関係なく通るが、  */
+/*       PIC からの本物の IRQ3 は CPU が受け取らない (IMR を開けていても)。  */
+/*       本体の最後で登録数が 0 に戻り、irq_recount_locked が IMR を閉じて   */
+/*       から IF を戻す。                                                    */
+/*    2. 試験の前に線が「素」(未登録・未隔離・ストーム無し・マスク) でなけ   */
+/*       れば **試験しない** — 本物の登録者の線を試験で上書きしない。        */
+/*    3. 試験の後、線の状態 (IMR・隔離・ストーム・登録数) が試験の前と同じ   */
+/*       ことを **ここで検査する**。誰も受けなかった数 (irq_unexpected) も   */
+/*       試験の前の値へ戻す (実機の切り分けで kernel.map から読む数)。       */
+/*    4. 試験がわざと起こすストーム・隔離・unclaimed の表示は irq_test_quiet */
+/*       で黙らせる。起動画面に本物の障害と同じ文言で出ていたうえ、        */
+/*       unclaimed の表示は線ごと 1 回きりなので、試験が IRQ3 の 1 回を使い   */
+/*       切って本物の装置の unclaimed が出なくなっていた。                   */
+/* ------------------------------------------------------------------------ */
 static void test_irq_dynamic(void)
+{
+    struct ksel_irq_snap before, after;
+    u32 unexpected_before;
+    unsigned int saved;
+
+    ksel_irq_snap_take(&before);
+    if (before.count != 0 || before.quarantined || before.storm ||
+        before.ln_q || before.ln_s || !before.masked) {
+        kprintf(0xC1, "[selftest] irq: IRQ%d not pristine "
+                "(cnt=%d q=%d storm=%d masked=%d) -> skipped\n",
+                KSEL_IRQ_LINE, before.count, before.quarantined,
+                before.storm, before.masked);
+        check(0, "irq:line pristine b4 test");
+        return;
+    }
+
+    saved = irq_save();
+    unexpected_before = irq_unexpected;
+    irq_test_quiet = 1;
+    test_irq_dynamic_body();
+    irq_test_quiet = 0;
+    irq_unexpected = unexpected_before;
+    ksel_irq_snap_take(&after);
+    irq_restore(saved);
+
+    check(after.masked == before.masked &&
+          after.quarantined == before.quarantined &&
+          after.storm == before.storm &&
+          after.count == before.count &&
+          after.ln_q == before.ln_q && after.ln_s == before.ln_s,
+          "irq:line restored");
+}
+
+/* 本体は **IF=0 で** 呼ぶこと (上の注記)。 */
+static void test_irq_dynamic_body(void)
 {
     u32 ctx_before = irq_ctx_violations;
     u32 deferred_before;
@@ -1110,33 +1179,22 @@ static void test_irq_dynamic(void)
           "irq:rest still run");
     check(ksel_irq_masked(KSEL_IRQ_LINE) == 0, "irq:still unmasked");
 
-    /* --- ストーム: 1 tick の窓を作るため **IF=0 のまま**撃つ --- */
-    /* (tick_count が止まるので窓は 1 つ。`int 0x23` は IF に関係なく通る)
-     *
-     * **tick の頭まで待ってから撃つこと。** `irq_storm_step` は tick ごとに
-     * 数え直すので、ここまでの解除の試験で撃った「誰も受けない `int 0x23`」が
-     * 同じ tick に入っていると、その数だけ下駄を履いて 200 本目で閾値を
-     * 越える (2026-09-23 に NP21/W で FAIL した形)。待つのは **IF=1 で** —
-     * IF=0 では IRQ0 が止まって tick_count が進まない。
-     * 待ってから撃ち終わるまでのあいだに、受け手のいない `int 0x23` を
-     * 他から挟んではいけない。 */
-    ksel_storm_wait_tick();
-    {
-        unsigned int saved = irq_save();
-        ksel_irq_reset_devs();                  /* 全員 IRQ_NONE = 誰も受けない */
-        for (i = 0; i < IRQ_STORM_LIMIT; i++) ksel_raise_irq3();
-        irq_restore(saved);
-    }
+    /* --- ストーム: 本体は IF=0 なので tick_count が止まり、窓は 1 つ --- */
+    /* **撃つ前に窓を空にすること。** `irq_storm_step` は tick ごとに数え直す
+     * ので、ここまでの解除の試験で撃った「誰も受けない `int 0x23`」が同じ
+     * tick に入っていると、その数だけ下駄を履いて 200 本目で閾値を越える
+     * (2026-09-23 に NP21/W で FAIL した形)。以前は IF=1 で tick の頭を
+     * 待っていたが、その間は IRQ3 の IMR が開いていて本物の IRQ3 を受けて
+     * しまう (実機 Ra266 の 82557)。irq_test_reset_line (試験専用) は
+     * tick_hits を 0 にするので、それで窓を作り直す。登録は変わらない。 */
+    irq_test_reset_line(KSEL_IRQ_LINE);
+    ksel_irq_reset_devs();                      /* 全員 IRQ_NONE = 誰も受けない */
+    for (i = 0; i < IRQ_STORM_LIMIT; i++) ksel_raise_irq3();
     check(ksel_irq_masked(KSEL_IRQ_LINE) == 0 &&
           (irq_storm_masked & (1u << KSEL_IRQ_LINE)) == 0,
           "irq:200/tick no mask");
     irq_test_reset_line(KSEL_IRQ_LINE);         /* 窓を作り直す (試験専用) */
-    ksel_storm_wait_tick();
-    {
-        unsigned int saved = irq_save();
-        for (i = 0; i <= IRQ_STORM_LIMIT; i++) ksel_raise_irq3();
-        irq_restore(saved);
-    }
+    for (i = 0; i <= IRQ_STORM_LIMIT; i++) ksel_raise_irq3();
     check(ksel_irq_masked(KSEL_IRQ_LINE) == 1 &&
           (irq_storm_masked & (1u << KSEL_IRQ_LINE)) != 0,
           "irq:201/tick masks+bit");
