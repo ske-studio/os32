@@ -152,6 +152,8 @@ C_MUTATIONS = [
     ("drivers/pc98pt.c", "        return 1;\n    }\n    return 0;\n}\n\nint pc98pt_make_os32(",
      "        return 0;\n    }\n    return 0;\n}\n\nint pc98pt_make_os32(",
      "旧配置を検出しない (カーネルが移行の案内を出せない、M2)"),
+    ("fs/ext2_fmt.c", "    if (!ide_range_ok(ide_drive, base_lba, lay.total_blocks * 2UL))\n        return EXT2_ERR_INVAL;\n", "",
+     "ext2_format の頭打ちの後の範囲を ATA の上限と照合しない (ラリー 2 の 3)"),
     ("drivers/pc98pt.c", "            return 0;                       /* 標準配置で読める */",
      "            (void)0;", "標準配置の表を旧配置と誤認する"),
 ]
@@ -177,9 +179,20 @@ PY_MUTATIONS = [
      "カーネルの大きさを見ない (C1)"),
     ("tools/nhd_deploy.py", "        ok, reason = (stamp_check or verify_pull_stamp)()\n",
      "        ok, reason = True, ''\n", "push の来歴を書き込みの後で見る (C1)"),
-    ("tools/nhd_deploy.py", "    if plan['state'] != 'legacy':\n        return True\n    print(\"Error: {} の区画表は旧配置",
-     "    if True:\n        return True\n    print(\"Error: {} の区画表は旧配置",
+    ("tools/nhd_deploy.py", "    if state == 'standard':\n        return True\n    if state == 'not_nhd':",
+     "    if True:\n        return True\n    if state == 'not_nhd':",
      "旧配置の NHD へ v64 のカーネルを配る (M2)"),
+    ("tools/nhd_deploy.py", "    if state == 'standard':\n        return True\n    if state == 'not_nhd':",
+     "    if state == 'standard' or (state == 'legacy' and auto is not None):\n        return True\n    if state == 'not_nhd':",
+     "自動で移行できない旧配置を通す (ラリー 2 の 1)"),
+    ("tools/nhd_deploy.py", "    if state == 'standard':\n        return True\n    if state == 'not_nhd':",
+     "    if state in ('standard', 'broken', 'none'):\n        return True\n    if state == 'not_nhd':",
+     "OS32 の項目が無い・壊れている NHD へ配る"),
+    ("tools/nhd_deploy.py", "    if _GUARD_NEXT_MOUNT and not legacy_pt_guard():",
+     "    if False and not legacy_pt_guard():",
+     "取り込みの後の門を掛けない (ラリー 2 の 2)"),
+    ("tools/nhd_deploy.py", "        return legacy_pt_guard() and ensure_mounted()",
+     "        return ensure_mounted()", "マウント済みの NHD を門に通さない"),
 ]
 
 
@@ -503,6 +516,60 @@ def py_migrate_cases(pc98pt, nhd, tmp, quiet=False):
     junk = tmp / "junk.nhd"
     junk.write_bytes(bytes(4096))
     checks.append(("NHD でない → 通す (判定できない)", _silent_err(nhd.legacy_pt_guard, str(junk), 64) is True))
+    checks.append(("ファイルが無い → 通す (取り込みの後にもう一度見る)",
+                   _silent_err(nhd.legacy_pt_guard, str(tmp / "absent.nhd"), 64) is True))
+    # 旧配置 + 別の区画 → migrate-pt は断る (項目 2 個) が、門は**断る** (ラリー 2 の 1)
+    q2 = tmp / "guard2.nhd"
+    make_legacy_nhd(pc98pt, q2, extra_entry=True)
+    checks.append(("旧配置 + 別の区画 (自動の移行はできない) → 断る",
+                   _silent_err(nhd.legacy_pt_guard, str(q2), 64) is False))
+    # 旧配置で FS が区画より大きい (移行はできない) → 断る
+    q3 = tmp / "guard3.nhd"
+    make_legacy_nhd(pc98pt, q3, end_cyl=200)
+    checks.append(("旧配置 + 移行できない FS → 断る",
+                   _silent_err(nhd.legacy_pt_guard, str(q3), 64) is False))
+    # OS32 の項目が標準でも旧配置でも読めない → 断る
+    q4 = tmp / "guard4.nhd"
+    make_legacy_nhd(pc98pt, q4, end_cyl=400)
+    checks.append(("OS32 の項目が壊れている → 断る",
+                   _silent_err(nhd.legacy_pt_guard, str(q4), 64) is False))
+    # OS32 の項目が無い (FAT だけ) → 断る
+    q5 = tmp / "guard5.nhd"
+    make_legacy_nhd(pc98pt, q5, sid=0xA1)
+    checks.append(("OS32 の項目が無い → 断る",
+                   _silent_err(nhd.legacy_pt_guard, str(q5), 64) is False))
+    # 取り込みの後・マウントの前にも門が掛かる (ラリー 2 の 2)。NHD_LOCAL が無い
+    # 状態から ensure_local_nhd が旧配置の NHD を「取り込む」。losetup は呼ばれないこと
+    pulled = tmp / "pulled.nhd"
+    remote = tmp / "remote_legacy.nhd"        # 取り込み元 (subprocess を差し替える前に作る)
+    make_legacy_nhd(pc98pt, remote)
+    nhd.NHD_LOCAL = str(pulled)
+    real_eln, real_run, real_mounted = nhd.ensure_local_nhd, nhd.subprocess.run, nhd.is_mounted
+    runs = []
+
+    def fake_pull():
+        if not pulled.exists():
+            shutil.copyfile(remote, pulled)
+        return True
+    nhd.ensure_local_nhd = fake_pull
+    nhd.is_mounted = lambda: False
+    nhd.subprocess.run = lambda *a, **k: runs.append(a) or subprocess.CompletedProcess(a, 1, "", "")
+    try:
+        r1 = _silent_err(nhd.legacy_pt_guard)          # sync-from-hostdrv の最初の門 (無いので通る)
+        r2 = _silent_err(nhd.ensure_mounted_for_kernel)
+        checks.append(("取り込み前の門は通り、取り込み後・losetup の前で断る",
+                       r1 is True and r2 is False and not runs))
+        # 既にマウント済みでも断る
+        nhd.is_mounted = lambda: True
+        checks.append(("マウント済みの旧配置 NHD → 断る",
+                       _silent_err(nhd.ensure_mounted_for_kernel) is False))
+        # migrate-pt のカーネルの写し (通常の ensure_mounted) は門を通らない
+        nhd.is_mounted = lambda: False
+        del runs[:]
+        _silent_err(nhd.ensure_mounted)
+        checks.append(("通常の ensure_mounted は門を通らず losetup へ進む", bool(runs)))
+    finally:
+        nhd.ensure_local_nhd, nhd.subprocess.run, nhd.is_mounted = real_eln, real_run, real_mounted
     for name, ok in checks:
         say(f"  {'ok  ' if ok else 'FAIL'} legacy_pt_guard: {name}")
         bad += not ok
@@ -593,10 +660,27 @@ def _tally(counts, status, why):
     print(f"MUTATION {status}: {why}", flush=True)
 
 
+# 恒等変異 (対照、Opus ラリー 2 の a)。変異させるファイルごとに**意味を変えない**
+# 書き換えを 1 本当て、SURVIVED になることを確かめる。RED / ERROR になるなら
+# 変異の土台 (写し・インクルード・読み込み) が壊れていて、ほかの RED は信用できない。
+C_IDENTITY_TAIL = "\n/* identity mutation (control) */\n"
+PY_IDENTITY_TAIL = "\n# identity mutation (control)\n"
+
+
+def _controls(mutations):
+    seen = []
+    for m in mutations:
+        if m[0] not in seen:
+            seen.append(m[0])
+    return seen
+
+
 def mutate_c(counts):
     """C の変異。**ビルドが通って**試験が落ちたものだけを RED に数える。
     ビルドが通らない変異は ERROR (何も確かめていない — Opus M1)。"""
-    for rel, before, after, why in C_MUTATIONS:
+    plan = [(rel, None, None, "対照 (恒等): " + rel) for rel in _controls(C_MUTATIONS)]
+    plan += list(C_MUTATIONS)
+    for rel, before, after, why in plan:
         with tempfile.TemporaryDirectory(prefix="os32-hdd1-mut-") as tmp:
             troot = pathlib.Path(tmp) / "root"
             for m in MIRROR:
@@ -605,23 +689,35 @@ def mutate_c(counts):
                 shutil.copy2(ROOT / m, dst)
             path = troot / rel
             text = path.read_text(encoding="utf-8")
-            if before not in text:
+            control = before is None
+            if control:
+                text = text + C_IDENTITY_TAIL
+            elif before not in text:
                 _tally(counts, "NOT_APPLIED", why)
                 continue
-            path.write_text(text.replace(before, after, 1), encoding="utf-8")
+            else:
+                text = text.replace(before, after, 1)
+            path.write_text(text, encoding="utf-8")
             exe = build_pure(tmp, troot)
             pexe = build_part(tmp, troot)
             if exe is None or pexe is None:
-                _tally(counts, "ERROR", why + " (ビルドが通らない)")
-                continue
-            failed = run_cases(exe, PURE_CASES, quiet=True)
-            failed += run_cases(pexe, PART_CASES, quiet=True)
-            _tally(counts, "RED" if failed else "SURVIVED", why)
+                status = "ERROR"
+            else:
+                failed = run_cases(exe, PURE_CASES, quiet=True)
+                failed += run_cases(pexe, PART_CASES, quiet=True)
+                status = "RED" if failed else "SURVIVED"
+            if control:
+                _tally(counts, "CONTROL_OK" if status == "SURVIVED" else "CONTROL_BAD",
+                       why + " → " + status)
+            else:
+                _tally(counts, status, why + (" (ビルドが通らない)" if status == "ERROR" else ""))
 
 
 def mutate_py(c_exe, counts):
     """Python の変異。試験の失敗 (終了 1) だけを RED、読み込み・例外 (終了 3) は ERROR。"""
-    for rel, before, after, why in PY_MUTATIONS:
+    plan = [(rel, None, None, "対照 (恒等): " + rel) for rel in _controls(PY_MUTATIONS)]
+    plan += list(PY_MUTATIONS)
+    for rel, before, after, why in plan:
         with tempfile.TemporaryDirectory(prefix="os32-hdd1-pymut-") as tmp:
             tdir = pathlib.Path(tmp) / "tools"
             tdir.mkdir()
@@ -633,12 +729,22 @@ def mutate_py(c_exe, counts):
             shutil.copy2(ROOT / "sdk/include/os32/os32_kapi_shared.h", hdr)
             path = tdir / pathlib.Path(rel).name
             text = path.read_text(encoding="utf-8")
-            if before not in text:
+            control = before is None
+            if control:
+                text = text + PY_IDENTITY_TAIL
+            elif before not in text:
                 _tally(counts, "NOT_APPLIED", why)
                 continue
-            path.write_text(text.replace(before, after, 1), encoding="utf-8")
+            else:
+                text = text.replace(before, after, 1)
+            path.write_text(text, encoding="utf-8")
             rc = run_py(tdir, c_exe, quiet=True)
-            _tally(counts, "RED" if rc == 1 else ("SURVIVED" if rc == 0 else "ERROR"), why)
+            status = "RED" if rc == 1 else ("SURVIVED" if rc == 0 else "ERROR")
+            if control:
+                _tally(counts, "CONTROL_OK" if status == "SURVIVED" else "CONTROL_BAD",
+                       why + " → " + status)
+            else:
+                _tally(counts, status, why)
 
 
 def main(argv):
@@ -683,10 +789,13 @@ def main(argv):
             mutate_c(counts)
             mutate_py(exe, counts)
             red = counts.get("RED", 0)
-            print("MUTATIONS {}/{} RED (ERROR {}, SURVIVED {}, NOT_APPLIED {})".format(
-                red, n, counts.get("ERROR", 0), counts.get("SURVIVED", 0),
-                counts.get("NOT_APPLIED", 0)), flush=True)
-            if red != n:
+            nctl = len(_controls(C_MUTATIONS)) + len(_controls(PY_MUTATIONS))
+            print("MUTATIONS {}/{} RED (ERROR {}, SURVIVED {}, NOT_APPLIED {}); "
+                  "CONTROLS {}/{} SURVIVED (期待どおり)".format(
+                      red, n, counts.get("ERROR", 0), counts.get("SURVIVED", 0),
+                      counts.get("NOT_APPLIED", 0), counts.get("CONTROL_OK", 0), nctl),
+                  flush=True)
+            if red != n or counts.get("CONTROL_OK", 0) != nctl:
                 failed += 1
     return 1 if failed else 0
 

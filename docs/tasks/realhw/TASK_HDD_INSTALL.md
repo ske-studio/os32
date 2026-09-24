@@ -112,6 +112,11 @@
   BIOS 幾何で決められないときは書かない。マウントはどちらの幾何を使ったかを出し、旧配置の表を見つけたら
   「migrate-pt が要る」と出す。`fatfs_vfs.c` の区画走査も `bootinfo_part_geom` を使う。ホストの
   `deploy` / `sync-from-hostdrv` / `sync` は旧配置の NHD に v64 以降のカーネルを配らない (`legacy_pt_guard`)。
+- **ラリー 2 (Codex 1〜3 / Opus a・c)**: `legacy_pt_guard` は「旧配置か」(`classify_pt_layout`、カーネルと
+  同じく sid 0xE2 の最初の項目) と「自動で移行できるか」(`plan_migrate_pt`) を分け、旧配置・OS32 項目なし・
+  壊れた項目はどれも断る (NHD でない / 読めないファイルだけ警告して通す)。sync / sync-from-hostdrv の
+  マウントは `ensure_mounted_for_kernel` で、取り込みの後・losetup の前に門を通す。ext2 の書き込み範囲は
+  入口に関係なく `ext2_format_range` の入口で `ide_range_ok` と照合する。変異試験に恒等の対照を足した。
 - **組み合わせの危険** (08_build.md §8-4): 旧配置の NHD + v64 のカーネル (HostDrv + `hsync boot` で起きる) は
   `/` がマウントできない。v63 以前のカーネル + 標準配置の表は、OS32 項目 (シリンダ 12) を **LBA 12** と読み、
   `format 0` がローダと ext2 を壊す。

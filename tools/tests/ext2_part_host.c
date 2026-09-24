@@ -486,6 +486,13 @@ static void case_format_geom(void)
     CHECK(ext2_mount(&g_ctx, 0) == EXT2_OK);
     CHECK(g_ctx.num_groups == 32u && g_ctx.sb_info.total_blocks == 262145u);
     ext2_unmount(&g_ctx);
+    /* 頭打ちの後の範囲 (524,290 セクタ) が ATA の方式で指せなければ書かない
+     * (ext2_format の経路も ext2_format_range の入口で照合、Codex ラリー 2 の 3) */
+    g_ata_limit = 2016u + 400000u;
+    io_reset();
+    CHECK(ext2_format(0, 0xFFFFFFF0u) == EXT2_ERR_INVAL);
+    CHECK(g_wr == 0);
+    g_ata_limit = g_virtual_total;
     /* format_at は大きすぎる範囲を頭打ちにせず断る (hdprep は上限の内側で計画する) */
     io_reset();
     CHECK(ext2_format_at(0, 2016, 1008u * 608u) == EXT2_ERR_NOSPC);

@@ -230,7 +230,16 @@ CD から入れた HDD は区画が見つからず format で止まる (段 2 �
   (host: make nhd-migrate-pt) or reinstall` を出す)。ホスト側の `deploy` / `deploy-kernel`
   (`sync-from-hostdrv`) / `deploy-nhd` (`sync`) は、ローカルの NHD が旧配置でこのツリーの
   KAPI が v64 以上なら**配らずに断る** (`nhd_deploy.py` の `legacy_pt_guard`、`--force` でも
-  通さない)。`hsync` はゲスト側なので止められない — 先に `make nhd-migrate-pt`。
+  通さない)。「旧配置か」は自動で移行できるかと**別に**判定する — 旧配置の OS32 項目に別の区画が
+  並んでいて `migrate-pt` が断る NHD も断る (その理由も出す)。OS32 の項目が無い・どちらの配置でも
+  読めない NHD も断る。NHD でない / 読めないファイルは判定できないので警告だけ出して通す。
+  ローカルの NHD が無いときは、取り込み (`ensure_local_nhd`) の**後・マウントの前**にもう一度見る。
+  `hsync` はゲスト側なので止められない — 先に `make nhd-migrate-pt`。
+- **v64 の `format N` は、区画の位置を BIOS 幾何で決められないと書かない** (`EXT2_ERR_INVAL`、
+  `[EXT2] format: no BIOS geometry`)。当たる場面: DA 80h の HDD から起動して `format 1`
+  (HDD ローダは自分の DA しか AH=84h を聞かない)、段 0 より前のローダ (0x7E00 のブート情報域を
+  書かない) で起動した標準配置の NHD。FD から起動し直せば 80h / 81h の両方が得られる。
+  マウント (読むだけ) は IDENTIFY の幾何でも通る。
 - **逆の組み合わせ (v63 以前のカーネル + 標準配置の表) も危険**。旧カーネルは +6〜+9 を
   開始と読むので、標準配置の OS32 項目 (1632 = シリンダ 12) を **LBA 12** と解釈する。
   そのカーネルで `format 0` を打つと LBA 12 から書き、第二段ローダ (LBA 2〜17) と ext2 を

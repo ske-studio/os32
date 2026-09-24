@@ -69,6 +69,22 @@ MUTATIONS 47/47 RED (ERROR 0, SURVIVED 0, NOT_APPLIED 0)
 (マウント・コピー・push は贋物)、断るときに**コピーも push も呼ばれず NHD が 1 バイトも
 変わらない**ことを見る。写し (一時ディレクトリ) の上で変異させるので `check-par` で並列に回せる。
 
+### 3-3. ラリー 2 の修正後 (2026-09-24)
+
+```
+SUMMARY 25/25 PASS
+TARGET i386-elf GNU89 -Werror COMPILE PASS
+MUTATIONS 52/52 RED (ERROR 0, SURVIVED 0, NOT_APPLIED 0); CONTROLS 9/9 SURVIVED (期待どおり)
+```
+
+- 変異は C 38 本 + Python 14 本。足したもの: ext2_format の頭打ち後の範囲を ATA の上限と照合しない
+  (Codex 3)、自動で移行できない旧配置を通す (Codex 1)、OS32 の項目が無い / 壊れた NHD へ配る、
+  取り込みの後の門を掛けない (Codex 2)、マウント済みの NHD を門に通さない。
+- **対照 (恒等変異)** — 変異させるファイル 9 本それぞれに意味を変えない書き換え (末尾に注釈) を当て、
+  **SURVIVED になること**を `--mutate` の中で確かめる (Opus a)。対照が RED / ERROR なら変異の土台が
+  壊れているので失敗にする (ラリー 1 で見つかった「写しに ide.h が無く全部コンパイル失敗」の型を
+  ここで捕まえる)。
+
 ## 4. 見ていないこと
 
 - 実機・NP21/W での I/O (LBA28 のレジスタが実際に正しい物理セクタを指すか、`hdprep` の対話)。

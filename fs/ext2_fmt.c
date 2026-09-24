@@ -67,6 +67,12 @@ static int ext2_format_range(int ide_drive, u32 base_lba, u32 part_len,
 
     if (ext2_layout_plan(sectors, EXT2_MAX_GROUPS, &lay) != EXT2L_OK)
         return EXT2_ERR_NOSPC;
+    /* 書く範囲 (固定点で決まった大きさ) を ATA の指定の方式の上限と照合する。
+     * 入口 (ext2_format / ext2_format_at) に関係なく、最初の書き込みの前に
+     * **この 1 か所**で見る (Codex ラリー 2 の 3: ext2_format は 32 グループへの
+     * 頭打ちで、以前は大きすぎて断っていた入力もここへ来る)。 */
+    if (!ide_range_ok(ide_drive, base_lba, lay.total_blocks * 2UL))
+        return EXT2_ERR_INVAL;
 
     /* 一時コンテキストを初期化
      * ext2_read_block/ext2_write_block は ctx->dev (Device API) 経由で

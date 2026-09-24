@@ -321,6 +321,13 @@ def ensure_local_nhd():
     return True
 
 
+# ensure_mounted_for_kernel() が立てる。立っている間の do_mount は、NHD を
+# **取り込んだ後・マウントの前**に旧配置の門を通す (Codex ラリー 2 の 2)。
+# 引数にしないのは、試験が do_mount / ensure_mounted を引数なしの贋物に
+# 差し替えるため (tools/tests/test_deploy_protect.py ほか)。
+_GUARD_NEXT_MOUNT = False
+
+
 def do_mount():
     """ext2パーティションをマウント"""
     if is_mounted():
@@ -328,6 +335,8 @@ def do_mount():
         return True
 
     if not ensure_local_nhd():
+        return False
+    if _GUARD_NEXT_MOUNT and not legacy_pt_guard():
         return False
 
     # マウントポイント作成
@@ -407,6 +416,24 @@ def ensure_mounted():
         return True
     print("自動マウント中...")
     return do_mount()
+
+
+def ensure_mounted_for_kernel():
+    """v64 以降のカーネル・ユーザーランドを写す呼び手 (sync / sync-from-hostdrv) 用。
+
+    既にマウント済みならその NHD を門に通し、未マウントなら do_mount が取り込み
+    (ensure_local_nhd) の**後**・losetup の前に門を通す。migrate-pt の
+    カーネルの写し (do_copy) は旧配置の NHD へ書くのが目的なので通常の
+    ensure_mounted を使う。
+    """
+    global _GUARD_NEXT_MOUNT
+    if is_mounted():
+        return legacy_pt_guard() and ensure_mounted()
+    _GUARD_NEXT_MOUNT = True
+    try:
+        return ensure_mounted()
+    finally:
+        _GUARD_NEXT_MOUNT = False
 
 
 # === ディレクトリ構造定義 ===
@@ -948,30 +975,95 @@ def tree_kapi_version():
     return None
 
 
-def legacy_pt_guard(nhd_path=None, kapi=None):
-    """旧配置の NHD へ v64 以降のカーネルを配らない (Opus M2)。
+def classify_pt_layout(img):
+    """NHD の区画表が**カーネルから見て**どう読めるか (書かない)。
 
-    v64 のカーネルとローダは標準配置しか読まないので、旧配置のまま
-    deploy / sync-from-hostdrv / sync でカーネルだけ新しくすると `/` がマウント
-    できなくなる。区画表が読めない・OS32 の表でない NHD は判定できないので通す。
-    戻り値 True = 配ってよい。
+    「旧配置があるか」の判定。「自動で移行できるか」(plan_migrate_pt) とは分ける
+    (Codex ラリー 2 の 1)。カーネル (ext2_find_partition) と同じく、sid 0xE2 の
+    **最初の**項目だけを見る。戻り値 (状態, 理由):
+      'standard' … 標準配置で読める (v64 のカーネルが区画を見つける)
+      'legacy'   … 標準配置では読めず、旧配置 (v63 まで) なら読める
+      'broken'   … OS32 の項目はあるが、どちらでも範囲にならない
+      'none'     … OS32 の項目が無い (v64 のカーネルは hd0 を ext2 としてマウントしない)
+      'not_nhd'  … NHD のヘッダが無い・読めない (区画の位置を決められない)
+    """
+    try:
+        img.seek(0)
+        geom = pc98pt.nhd_geometry(img.read(512))
+    except (pc98pt.PtError, OSError, struct.error) as exc:
+        return 'not_nhd', str(exc)
+    img.seek(geom['header_size'] + pc98pt.PT_LBA * 512)
+    sector = img.read(512)
+    if len(sector) != 512:
+        return 'not_nhd', "LBA 1 を読めない"
+    heads, spt, total = geom['heads'], geom['spt'], geom['total']
+    for i in range(pc98pt.MAX_ENTRIES):
+        ent = pc98pt.entry_at(sector, i)
+        if ent[pc98pt.OFF_SID] != pc98pt.SID_OS32:
+            continue
+        try:
+            pc98pt.entry_range(ent, heads, spt, total)
+            return 'standard', "項目 {}".format(i)
+        except pc98pt.PtError:
+            pass
+        try:
+            pc98pt.legacy_entry_range(ent, heads, spt, total)
+            return 'legacy', "項目 {} は旧配置".format(i)
+        except pc98pt.PtError as exc:
+            return 'broken', "項目 {} は標準でも旧配置でも読めない: {}".format(i, exc)
+    return 'none', "sid 0xE2 (OS32) の項目が無い"
+
+
+def legacy_pt_guard(nhd_path=None, kapi=None):
+    """v64 以降のカーネルを、そのカーネルが区画を見つけられない NHD へ配らない (Opus M2)。
+
+    戻り値 True = 配ってよい。v64 のカーネルとローダは標準配置しか読まないので、
+    標準配置で読める ('standard') ときだけ通す。
+      'legacy'  … 断る。自動で移行できるか (plan_migrate_pt) も調べて、できなければ
+                  その理由を出す (移行できないからといって通さない — Codex ラリー 2 の 1)
+      'broken' / 'none' … 断る。v64 のカーネルは / も /hd0 もマウントできない
+      'not_nhd' / ファイルが無い … 通す (警告を出す)。区画の位置を決められない
+                  = ホストの NHD として扱えない物で、呼び手は NHD が要る処理
+                  (マウント・写し) の手前でもう一度この門を通る (取り込みの後)
     """
     path = nhd_path or NHD_LOCAL
     kapi = tree_kapi_version() if kapi is None else kapi
-    if kapi is None or kapi < PT_STANDARD_KAPI or not os.path.isfile(path):
+    if kapi is None or kapi < PT_STANDARD_KAPI:
+        return True
+    if not os.path.isfile(path):
         return True
     try:
         with open(path, 'rb') as img:
-            plan = plan_migrate_pt(img)
-    except (MigrateError, pc98pt.PtError, OSError):
+            state, why = classify_pt_layout(img)
+            if state == 'legacy':
+                try:
+                    plan_migrate_pt(img)
+                    auto = None
+                except (MigrateError, pc98pt.PtError) as exc:
+                    auto = str(exc)
+    except OSError as exc:
+        print("Warning: {} の区画表を読めない ({})。旧配置の検査を飛ばす".format(path, exc),
+              file=sys.stderr)
         return True
-    if plan['state'] != 'legacy':
+    if state == 'standard':
         return True
-    print("Error: {} の区画表は旧配置 (v63 まで)。KAPI v{} のカーネルは標準配置しか"
-          "読まないので、このまま配ると / がマウントできない。".format(path, kapi),
-          file=sys.stderr)
-    print("  先に 'make nhd-migrate-pt' (区画表・ローダ・カーネルを同時に移す) を。"
-          "docs/08_build.md §8-4", file=sys.stderr)
+    if state == 'not_nhd':
+        print("Warning: {} は NHD として読めない ({})。区画表の配置は検査していない"
+              .format(path, why), file=sys.stderr)
+        return True
+    if state == 'legacy':
+        print("Error: {} の区画表は旧配置 (v63 まで、{})。KAPI v{} のカーネルは標準配置しか"
+              "読まないので、このまま配ると / がマウントできない。".format(path, why, kapi),
+              file=sys.stderr)
+        if auto is None:
+            print("  先に 'make nhd-migrate-pt' (区画表・ローダ・カーネルを同時に移す) を。"
+                  "docs/08_build.md §8-4", file=sys.stderr)
+        else:
+            print("  自動の移行 (migrate-pt) もできない: {}。区画表を手で直すか "
+                  "'make nhd-init' で作り直す ([D2])".format(auto), file=sys.stderr)
+        return False
+    print("Error: {} の区画表を KAPI v{} のカーネルは読めない ({})。配らない"
+          .format(path, kapi, why), file=sys.stderr)
     return False
 
 
@@ -1169,7 +1261,7 @@ def do_sync(tag_filter=None):
     # === Phase 2: ext2 マウント + ディレクトリ作成 ===
     fs = cfg.get('filesystem', {})
 
-    if not ensure_mounted():
+    if not ensure_mounted_for_kernel():
         return False
     # 対象 0 件の `sync --tag` でも <root>/etc の異常で止める (往復 2 の 8)
     if not guard_root():
@@ -1281,11 +1373,11 @@ def do_sync_from_hostdrv():
               file=sys.stderr)
         return False
 
-    # 旧配置の NHD へ v64 以降のカーネルを配らない (Opus M2)。NHD が無ければ判定
-    # できないので通し、取り込みは従来どおり ensure_mounted に任せる
+    # 旧配置の NHD へ v64 以降のカーネルを配らない (Opus M2)。NHD が無ければここは
+    # 通り、ensure_mounted_for_kernel が**取り込んだ後・マウントの前**にもう一度見る
     if not legacy_pt_guard():
         return False
-    if not ensure_mounted():
+    if not ensure_mounted_for_kernel():
         return False
     # 宛先 (NHD) だけでなく **source の HostDrv ツリー**も検査する。
     # symlink を辿った先から写せば宛先の判定を素通りできる。
