@@ -9,7 +9,8 @@
   2. sdk/gen_kapi.py が関数表の容量 (func_capacity) を超えたら生成を拒否する。
   3. sdk/mkos32x.py がヘッダ v3 を焼き、kapi_data_off が ELF の
      .os32_kapi_layout と一致する。刻印が無い / 食い違う / .raw と .elf の
-     世代が違う / --elf が無い、は失敗する。min_api_ver は 63 に引き上がる。
+     世代が違う (大きさ、または同じ大きさで PT_LOAD の中身) / --elf が無い、
+     は失敗する。min_api_ver は 63 に引き上がる。
      刻印は平らなバイナリに入らない (非ロード)。
   4. tools/mkshlib.py (ビルド済みの libos32gui.elf があれば) も v3 を焼き、
      刻印を剥がした ELF は断る。無ければ SKIP と表示する。
@@ -119,9 +120,55 @@ def case_capacity(tmp):
     check("func_capacity" in r.stderr, "拒否の理由に func_capacity を出す")
     r = try_cap(0, drop=True)
     check(r.returncode != 0, "func_capacity が無ければ拒否する")
+    case_capacity_full(tmp, kj)
     check(kj["func_capacity"] == 300, "いまの容量は R = 300 (票の決定)")
     check(12 * kj["func_capacity"] + 272 <= 4096,
           "容量 R はトランポリン 1 ページに収まる (12R + 272 <= 4096)")
+
+
+KERNEL_CFLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
+                 "-fno-stack-protector", "-nostdlib", "-mno-red-zone", "-fcommon",
+                 "-fsigned-char", "-fno-short-enums", "-O2", "-Wall",
+                 "-D__KERNEL_BUILD__"]
+
+
+def case_capacity_full(tmp, kj):
+    """関数数 = 容量 (予約 0 本) で生成し、exec/exec.c がコンパイルできるか。
+
+    生成器は予約 0 本なら kapi_reserved を作らない。exec_kapi_layout_selftest が
+    それを無条件に参照していると 300 本目の追加でカーネルが作れなくなる
+    (実装レビュー R1)。本物の木は書き換えない — 生成器と exec.c を一時の木へ
+    写し、そこで生成して、その生成物を先に探す -I で exec.c を構文検査する。"""
+    n = len(kj["api"])
+    gk = tmp / "gk_full"
+    for d in ("sdk/include", "kapi", "exec"):
+        (gk / d).mkdir(parents=True, exist_ok=True)
+    shutil.copytree(ROOT / "sdk/include/os32", gk / "sdk/include/os32")
+    shutil.copy(ROOT / "sdk/gen_kapi.py", gk / "sdk/gen_kapi.py")
+    shutil.copy(ROOT / "exec/exec.c", gk / "exec/exec.c")
+    d = dict(kj)
+    d["func_capacity"] = n
+    (gk / "sdk/kapi.json").write_text(json.dumps(d), encoding="utf-8")
+    r = subprocess.run([sys.executable, "-B", "sdk/gen_kapi.py"], cwd=str(gk),
+                       capture_output=True, text=True)
+    check(r.returncode == 0, "容量 = 関数数 (%d) で生成できる" % n)
+    if r.returncode != 0:
+        print(r.stderr)
+        return
+    hdr = (gk / "sdk/include/os32/os32_kapi_generated.h").read_text(encoding="utf-8")
+    check("kapi_reserved[" not in hdr and "#define KAPI_FUNC_RESERVED 0\n" in hdr,
+          "予約 0 本なら kapi_reserved を作らず KAPI_FUNC_RESERVED は 0")
+    inc = ["-I" + str(gk / "sdk/include"), "-I" + str(gk / "sdk/include/os32"),
+           "-I" + str(gk / "exec")]
+    for rel in (".", "include", "arch/x86", "platform/pc98", "exec", "kapi", "fs",
+                "gfx", "drivers", "lib", "kernel"):
+        inc.append("-I" + str(ROOT / rel))
+    r = run([TCC, *KERNEL_CFLAGS, *inc, "-fsyntax-only", gk / "exec/exec.c"])
+    check(r.returncode == 0,
+          "予約 0 本の生成物で exec/exec.c がコンパイルできる "
+          "(kapi_reserved の参照は #if KAPI_FUNC_RESERVED > 0 の中)")
+    if r.returncode != 0:
+        print("\n".join(r.stderr.splitlines()[:8]))
 
 
 # --------------------------------------------------------------------------
@@ -136,11 +183,11 @@ void _start(void) { for (;;) { } }
 '''
 
 
-def build_elf(tmp, name, stamp=True, extra_asm=None, pad=0):
+def build_elf(tmp, name, stamp=True, extra_asm=None, pad=0, fill=1):
     src = tmp / (name + ".c")
     body = "OS32_KAPI_LAYOUT_STAMP();" if stamp else ""
     if pad:
-        body += "\nconst unsigned char pad_%s[%d] = {1};\n" % (name, pad)
+        body += "\nconst unsigned char pad_%s[%d] = {%d};\n" % (name, pad, fill)
         body += "const unsigned char *keep_%s(void) { return pad_%s; }\n" % (name, name)
     src.write_text(START_C % body, encoding="utf-8")
     objs = [tmp / (name + ".o")]
@@ -224,6 +271,31 @@ def case_mkos32x(tmp):
     r = mkos32x(raw5, tmp / "swap.bin", elf)
     check(r.returncode != 0, "別の ELF の .raw を渡したら失敗する")
 
+    # 同じ大きさで中身だけ違う .raw (旧配置を読む disp32 と新配置を読む
+    # disp32 は同じ長さ — 実装レビュー R1、Codex blocker 1) → 失敗
+    elf6, raw6 = build_elf(tmp, "same1", pad=256, fill=1)
+    elf7, raw7 = build_elf(tmp, "same2", pad=256, fill=2)
+    b6, b7 = raw6.read_bytes(), raw7.read_bytes()
+    check(len(b6) == len(b7) and b6 != b7,
+          "試験の前提: 2 つの .raw は同じ大きさで中身が違う")
+    r = mkos32x(raw6, tmp / "same_ok.bin", elf6)
+    check(r.returncode == 0, "同じ世代の .raw と .elf は通る")
+    r = mkos32x(raw7, tmp / "same_swap.bin", elf6)
+    check(r.returncode != 0, "同じ大きさで中身の違う .raw を渡したら失敗する")
+    check("PT_LOAD" in r.stderr, "理由に PT_LOAD の不一致を出す")
+    check(not (tmp / "same_swap.bin").exists(), "失敗したら出力を作らない")
+    # 末尾の 1 バイトだけ違う (範囲の終端まで比べているか)
+    flip = bytearray(b6)
+    flip[-1] ^= 0xFF
+    (tmp / "flip_last.raw").write_bytes(bytes(flip))
+    r = mkos32x(tmp / "flip_last.raw", tmp / "flip_last.bin", elf6)
+    check(r.returncode != 0, ".raw の最後の 1 バイトが違えば失敗する")
+    flip = bytearray(b6)
+    flip[0] ^= 0xFF
+    (tmp / "flip_first.raw").write_bytes(bytes(flip))
+    r = mkos32x(tmp / "flip_first.raw", tmp / "flip_first.bin", elf6)
+    check(r.returncode != 0, ".raw の最初の 1 バイトが違えば失敗する")
+
     # --elf が無い → 失敗
     r = mkos32x(raw, tmp / "noelf.bin", None)
     check(r.returncode != 0, "--elf が無ければ失敗する")
@@ -264,6 +336,19 @@ def case_mkshlib(tmp):
     r = run([sys.executable, "-B", "tools/mkshlib.py", rawtmp, tmp / "x.shlib",
              "--elf", stripped])
     check(r.returncode != 0, "刻印を剥がした ELF は断る")
+
+    # 同じ大きさで中身だけ違う .raw (ジャンプ表の番地・大きさが同じでも
+    # 本文が違う — 実装レビュー R1、Codex blocker 1) → 断る
+    body = bytearray(rawtmp.read_bytes())
+    body[-1] ^= 0xFF
+    body[len(body) // 2] ^= 0x01
+    swapped = tmp / "lib_swapped.raw"
+    swapped.write_bytes(bytes(body))
+    r = run([sys.executable, "-B", "tools/mkshlib.py", swapped, tmp / "sw.shlib",
+             "--elf", elf, "--api", "51"])
+    check(r.returncode != 0, "同じ大きさで中身の違う .raw は断る (shlib)")
+    check("PT_LOAD" in r.stderr, "理由に PT_LOAD の不一致を出す (shlib)")
+    check(not (tmp / "sw.shlib").exists(), "失敗したら出力を作らない (shlib)")
 
 
 # --------------------------------------------------------------------------
@@ -356,8 +441,17 @@ MUTATIONS = [
      "    return max(int(min_api), OS32X_HDR_V3_MIN_API)",
      "    return int(min_api)"),
     ("sdk/os32x_hdr.py", "raw_elf_mismatch_ignored",
-     "    if raw_len != want:",
+     "    if len(raw) != want:",
      "    if False:"),
+    ("sdk/os32x_hdr.py", "raw_elf_content_ignored",
+     "        if a != b:",
+     "        if False:"),
+    ("sdk/os32x_hdr.py", "raw_elf_segments_skipped",
+     "        if seg['type'] != PT_LOAD or seg['filesz'] == 0:",
+     "        if True:"),
+    ("exec/exec.c", "reserved_ref_unguarded",
+     "#if KAPI_FUNC_RESERVED > 0\n    for (i = 0; i < (u32)KAPI_FUNC_RESERVED; i++) {",
+     "#if 1\n    for (i = 0; i < (u32)KAPI_FUNC_RESERVED; i++) {"),
     ("sdk/gen_kapi.py", "crt_symbol_not_renamed",
      "#define kapi {CRT_KAPI_SYMBOL}",
      "#define os32_kapi_unused {CRT_KAPI_SYMBOL}"),

@@ -160,7 +160,7 @@ Makefile ターゲットとの対応 (`build/deploy.mk`)。**このリポジト�
 |-----------|------|
 | `make fd144` | **1.44MB フロッピーイメージ** `images/os32_boot144.img` (生イメージ、1,474,560 バイト)。2HD の `images/os32_boot.d88` とは別物で、既定は 2HD のまま。票 [`tasks/realhw/TASK_FD144.md`](tasks/realhw/TASK_FD144.md) |
 | `make deploy` | HostDrv (`C:\os32`) への同期 — 再起動不要 |
-| `make deploy-kernel` | HostDrv同期 + HostDrv→ext2同期 + NHDコピー — **要NP21/W再起動** |
+| `make deploy-kernel` | HostDrv同期 + HostDrv→ext2同期 + NHDコピー — **要NP21/W再起動**。名前に反して**カーネル単独ではなく一式** (ユーザーランド・`/sys` も NHD へ書く) |
 | `make deploy-boot` | ブートローダー (loader_hdd.bin) をNHDブート領域へ書き込み |
 | `make deploy-nhd` | deploy.yaml フルデプロイ + NHDコピー — **要NP21/W再起動** |
 | `make prune-stale` / `make prune-stale-delete` | 配備先 (HostDrv + NHD) に残ったマニフェストに無い *.bin を一覧 / 削除。deploy 系は既定で削除まで行う (`NO_PRUNE=1` で一覧のみ) |
@@ -195,8 +195,25 @@ v63 で KernelAPI のデータ欄を 0x4B8 に固定し、OS32X ヘッダを v3 
 
 **v64 以降は「カーネルを先、ユーザーランドを後」** (ユーザー決裁 2026-09-24)。
 データ欄が固定になったので、新しいカーネルは古いユーザーランドをそのまま動かせる。
-逆 (新しいユーザーランド + 古いカーネル) は、`min_api_ver` と `hsync` の
-「配備物の版 > カーネルの版」の拒否 (`reason=kapi_newer_than_kernel`) が止める。
+逆 (新しいユーザーランド + 古いカーネル) は、`min_api_ver` (exec と shlib ローダ) と
+`hsync` の「配備物の版 > カーネルの版」の拒否 (`reason=kapi_newer_than_kernel`) が止める。
+
+HostDrv 経由 (NP21/W を止めない) で v63 以降の稼働機を v64 以降へ上げる手順:
+
+1. ホストで `make all external` → `make deploy` (HostDrv に一式と名札 `kapi_version=64…`)
+2. ゲストで **`hsync boot`** — `/boot` だけに絞った同期は「版が新しい」の拒否から
+   外してある (`NOTE: /boot だけの同期なので…` が出る)。配置違い
+   (`kapi_layout_mismatch`) と名札の欠落・不正は `/boot` でも断る
+3. 再起動 (`NOTE: /boot を更新した -> 再起動が必要`)
+4. **`ver` の `API: v64` で版を確かめる** — 上がっていなければここで止まる
+   (次の `hsync` は `kapi_newer_than_kernel` で断るので、壊れはしない)
+5. `hsync` (ユーザーランド)、続けて `hsync sys` (常駐シェル・`libos32gui.shlib`)
+   → shlib を替えたらもう一度再起動
+
+`/boot` 以外 (`hsync bin`、全体同期、`/bootx` のような似た名前) は従来どおり断る。
+**`make deploy-kernel` はカーネル単独の配備ではない** — HostDrv 同期の後に
+HostDrv の中身 (ユーザーランド・`/sys` を含む一式) を NHD の ext2 へ書き、
+NP21/W の停止が要る ([D1])。停止できるならこちらで一式を入れても順序の問題は出ない。
 
 <a id="配備3経路"></a>
 #### 配備 3 経路の使い分け (正典)
@@ -242,6 +259,8 @@ v63 で KernelAPI のデータ欄を 0x4B8 に固定し、OS32X ヘッダを v3 
   どちらが意図した版かは分からないため。詳細は `docs/manpages/hsync.1`。
   調査で名札を書かせたくないときは `hostdrv_deploy.py sync --no-manifest`
   (このときと `--tag` の部分配備では、**古い名札も消す**)。
+  **名札が消えると、以後の `hsync` は KAPI の門で `manifest_absent` になり
+  `--force-kapi` 無しでは 1 件も書かない** — 戻すには `make deploy` を通しで打つ。
   なお**コピーと名札の更新は原子的ではない**: 全件コピーの後・名札を書く前に
   ホストが落ちると、配備元は新しいのに名札は古いままになる。`--expect-build` は
   そこで断る (安全側)。復旧は `make deploy` をもう一度打つだけ。

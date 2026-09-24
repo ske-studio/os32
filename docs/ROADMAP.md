@@ -20,7 +20,11 @@
 全バイナリの作り直し (v63 と同じ移行) になるので、足りなくなる前に計画する。
 トランポリン 1 ページの上限は R ≤ 318 (これを超えるにはスタブか写し場を別ページへ)。
 配備順は v63 の初回だけ「NHD 一式か FD / CD の入れ直し」、**v64 以降は「カーネルを先、
-ユーザーランドを後」** ([08_build.md](08_build.md#kapi-v63-移行))。
+ユーザーランドを後」**。HostDrv 経由なら `make deploy` → ゲストで `hsync boot` →
+再起動 → `ver` の `API: vNN` を確かめる → `hsync` と `hsync sys`
+(`/boot` だけの同期は「版が新しい」の拒否から外してある。`make deploy-kernel` は
+カーネル単独ではなく一式を NHD へ書く、[D1])。手順の正典は
+[08_build.md](08_build.md#kapi-v63-移行)。
 
 *v1.0 到達までの開発履歴は [archive/ROADMAP_v1.0.md](archive/ROADMAP_v1.0.md) を参照*
 

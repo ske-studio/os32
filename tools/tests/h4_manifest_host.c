@@ -1037,7 +1037,8 @@ static void case_limits(void)
 /*                                                                           */
 /*  名札の kapi= (配備物のデータ欄の配置) がカーネルと違う / kapi_version が  */
 /*  カーネルより新しい / 名札が無い・壊れている → **1 件も書かずに断る**。    */
-/*  絞り込み (`hsync sys`) でも断る。`--force-kapi` だけが越える (`-f` は      */
+/*  絞り込み (`hsync sys`) でも断る。ただし `/boot` だけの同期は「版が新しい」*/
+/*  だけを外す (カーネルを先)。`--force-kapi` だけが越える (`-f` は            */
 /*  別の意味の旗なので越えない)。                                             */
 /* ========================================================================= */
 
@@ -1057,6 +1058,47 @@ static void put_kapi_manifest(unsigned long off, unsigned long ver)
             off, ver,
             (unsigned long)g_a_size, (unsigned long)g_a_crc,
             (unsigned long)g_b_size, (unsigned long)g_b_crc);
+    put_manifest(buf);
+}
+
+/* /host/boot/vmkernel.lz4 を足した木 (K3b〜K3d: `hsync boot`) */
+static u32 g_k_size;
+static u32 g_k_crc;
+
+static void setup_boot_tree(void)
+{
+    u8 *k;
+    int n;
+
+    setup_tree();
+    fs_add_dir("/host/boot");
+    fs_add_dir("/boot");
+    g_k_size = 4000;
+    k = make_blob(g_k_size, 3);
+    g_k_crc = blob_crc(k, g_k_size);
+    n = fs_add_file("/host/boot/vmkernel.lz4", k, g_k_size);
+    fs_nodes[n].mtime = 333;
+    free(k);
+}
+
+static void put_kapi_manifest_boot(unsigned long off, unsigned long ver)
+{
+    char buf[4096];
+    sprintf(buf,
+            "format=2\n"
+            "build=K\n"
+            "generated=g\n"
+            "kapi=%lu\n"
+            "kapi_version=%lu\n"
+            "count=3\n"
+            "---\n"
+            "bin/a.bin %lu %08lx 111\n"
+            "bin/b.bin %lu %08lx 222\n"
+            "boot/vmkernel.lz4 %lu %08lx 333\n",
+            off, ver,
+            (unsigned long)g_a_size, (unsigned long)g_a_crc,
+            (unsigned long)g_b_size, (unsigned long)g_b_crc,
+            (unsigned long)g_k_size, (unsigned long)g_k_crc);
     put_manifest(buf);
 }
 
@@ -1117,6 +1159,43 @@ static void case_kapi(void)
     check(run0() != 0, "K3 版がカーネルより新しいなら非ゼロ終了");
     kapi_refused("K3 reason=kapi_newer_than_kernel", "reason=kapi_newer_than_kernel");
 
+    /* K3b: `/boot` だけの同期は「版が新しい」から外す (v64 以降のカーネルを
+     * 先に運ぶ HostDrv 経路 — Codex 実装レビュー R1 blocker 2) */
+    setup_boot_tree();
+    put_kapi_manifest_boot(off, ver + 1);
+    check(run1("boot") == 0, "K3b hsync boot は版が新しくても通す (カーネルを先)");
+    check(!log_has("reason=kapi"), "K3b KAPI の門で断らない");
+    check(log_has("NOTE: /boot"), "K3b 版が新しいまま進むことを表示する");
+    check(fs_find("/boot/vmkernel.lz4") >= 0, "K3b カーネルが届く");
+    check(fs_find("/bin/a.bin") < 0, "K3b ユーザーランドには触れない");
+    setup_boot_tree();
+    put_kapi_manifest_boot(off, ver + 1);
+    check(run1("/boot/") == 0, "K3b 正規化後に /boot なら同じ (\"/boot/\")");
+    /* K3c: /boot でも配置違い・名札の欠落は断る */
+    setup_boot_tree();
+    put_kapi_manifest_boot(off - 4, ver + 1);
+    check(run1("boot") != 0, "K3c hsync boot でも配置違いは断る");
+    kapi_refused("K3c reason=kapi_layout_mismatch", "reason=kapi_layout_mismatch");
+    check(fs_find("/boot/vmkernel.lz4") < 0, "K3c カーネルも書かない");
+    setup_boot_tree();
+    check(run1("boot") != 0, "K3c hsync boot でも名札が無ければ断る");
+    check(log_has("reason=manifest_absent"), "K3c reason=manifest_absent");
+    check(fs_find("/boot/vmkernel.lz4") < 0, "K3c 名札なしでカーネルを書かない");
+    /* K3d: /boot 以外の絞り込み (bin、/bootx) は版が新しければ断る */
+    setup_boot_tree();
+    put_kapi_manifest_boot(off, ver + 1);
+    check(run1("bin") != 0, "K3d hsync bin は版が新しければ断る");
+    kapi_refused("K3d reason=kapi_newer_than_kernel", "reason=kapi_newer_than_kernel");
+    setup_boot_tree();
+    put_kapi_manifest_boot(off, ver + 1);
+    check(run1("bootx") != 0 && log_has("reason=kapi_newer_than_kernel"),
+          "K3d /bootx は /boot ではない (接頭辞は要素単位)");
+    setup_boot_tree();
+    put_kapi_manifest_boot(off, ver + 1);
+    check(run0() != 0 && log_has("reason=kapi_newer_than_kernel"),
+          "K3d 全体同期は版が新しければ断る");
+    check(fs_find("/boot/vmkernel.lz4") < 0, "K3d 全体同期でカーネルも書かない");
+
     /* K4: 名札が無い → 確かめられない = 一致と扱わない */
     setup_tree();
     check(run0() != 0, "K4 名札が無ければ断る");
@@ -1147,14 +1226,18 @@ static void case_kapi(void)
     /* K8: 判定関数そのもの */
     g_man_present = 1; g_man_valid = 1;
     g_man_kapi = 1208; g_man_kapi_ver = 63;
-    check(man_kapi_check(1208, 63, &why) == 0 && why == 0, "K8 一致 → 通す");
-    check(man_kapi_check(1204, 63, &why) == 1 && why && strcmp(why, HR_KAPI_LAYOUT) == 0, "K8 配置違い → 断る");
-    check(man_kapi_check(1208, 62, &why) == 1 && why && strcmp(why, HR_KAPI_NEWER) == 0, "K8 版が新しい → 断る");
-    check(man_kapi_check(1208, 64, &why) == 0, "K8 版が古い → 通す");
+    check(man_kapi_check(1208, 63, 0, &why) == 0 && why == 0, "K8 一致 → 通す");
+    check(man_kapi_check(1204, 63, 0, &why) == 1 && why && strcmp(why, HR_KAPI_LAYOUT) == 0, "K8 配置違い → 断る");
+    check(man_kapi_check(1208, 62, 0, &why) == 1 && why && strcmp(why, HR_KAPI_NEWER) == 0, "K8 版が新しい → 断る");
+    check(man_kapi_check(1208, 64, 0, &why) == 0, "K8 版が古い → 通す");
+    check(man_kapi_check(1208, 62, 1, &why) == 0 && why == 0, "K8 /boot だけなら版が新しくても通す");
+    check(man_kapi_check(1204, 62, 1, &why) == 1 && why && strcmp(why, HR_KAPI_LAYOUT) == 0, "K8 /boot でも配置違い → 断る");
     g_man_valid = 0;
-    check(man_kapi_check(1208, 63, &why) == 1 && why && strcmp(why, HR_MANIFEST_INVALID) == 0, "K8 壊れた名札 → 断る");
+    check(man_kapi_check(1208, 63, 0, &why) == 1 && why && strcmp(why, HR_MANIFEST_INVALID) == 0, "K8 壊れた名札 → 断る");
+    check(man_kapi_check(1208, 63, 1, &why) == 1 && why && strcmp(why, HR_MANIFEST_INVALID) == 0, "K8 /boot でも壊れた名札 → 断る");
     g_man_present = 0;
-    check(man_kapi_check(1208, 63, &why) == 1 && why && strcmp(why, HR_MANIFEST_ABSENT) == 0, "K8 名札なし → 断る");
+    check(man_kapi_check(1208, 63, 0, &why) == 1 && why && strcmp(why, HR_MANIFEST_ABSENT) == 0, "K8 名札なし → 断る");
+    check(man_kapi_check(1208, 63, 1, &why) == 1 && why && strcmp(why, HR_MANIFEST_ABSENT) == 0, "K8 /boot でも名札なし → 断る");
 
     g_fake.version = saved_ver;
     g_inject_force_kapi = 1;

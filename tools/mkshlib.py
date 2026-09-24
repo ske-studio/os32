@@ -206,6 +206,9 @@ def main():
     elf = Elf32(elf_path)
     with open(in_path, 'rb') as f:
         raw = bytearray(f.read())
+    # ELF との内容照合は**穴埋め (fix) の前の**中身で行う (下で先頭 32B を
+    # 書き換えるので、書き換え後だと ELF と一致しなくなる)。
+    raw_as_read = bytes(raw)
     if len(raw) < OS32_SHLIB_HDR_SIZE:
         die(f"{in_path} が先頭ページ (4096B) より小さい: {len(raw)}B")
 
@@ -276,7 +279,7 @@ def main():
     bss = elf.bss_size()
     try:
         kapi_data_off = H.read_kapi_layout(elf)
-        H.check_raw_matches_elf(elf, len(raw), in_path)
+        H.check_raw_matches_elf(elf, raw_as_read, in_path)
         header = H.build_header(OS32X_FLAG_SHLIB, 0, len(raw), bss, 0,
                                 min_api, MEM_SHLIB_BASE, kapi_data_off)
     except H.HeaderError as e:

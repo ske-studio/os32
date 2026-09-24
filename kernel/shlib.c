@@ -110,6 +110,17 @@ int shlib_init(void)
         pgalloc_free_n(MEM_SHLIB_BASE, band_pages);
         return -1;
     }
+    /* ---- 要求する KAPI 版 (exec のヘッダ検査と同じ条件) ----
+     * このカーネルより新しい KAPI を要求するライブラリは、まだ無い関数
+     * (予約スロット = OS32_ERR_NOSYS / CPL=3 は kill) を呼び得るので載せない
+     * (実装レビュー R1、Codex 非 blocker)。 */
+    if (oh->min_api_ver > KAPI_VERSION) {
+        kprintf(0xC1, "[shlib] %s: needs KAPI v%u > kernel v%u - "
+                "update the kernel first (GUI shlib disabled)\n",
+                SYS_SHLIB_GUI, oh->min_api_ver, (u32)KAPI_VERSION);
+        pgalloc_free_n(MEM_SHLIB_BASE, band_pages);
+        return -1;
+    }
     /* ---- KAPI データ欄の配置 (票 TASK_KAPI_DATA_FIELDS、ヘッダ v3) ----
      * ライブラリの .data にある os32api が KernelAPI のデータ欄 (shm_base =
      * GUI スロットの番地) を読む。配置が違うライブラリを載せると GUI アプリが

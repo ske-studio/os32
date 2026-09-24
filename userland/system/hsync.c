@@ -795,29 +795,53 @@ static int man_gate(void)
  * 断るのは:
  *   - 配置が違う                    → kapi_layout_mismatch
  *   - 配備物の版 > カーネルの版     → kapi_newer_than_kernel (v64 以降は
- *     「カーネルを先、ユーザーランドを後」— 決裁 2026-09-24)
+ *     「カーネルを先、ユーザーランドを後」— 決裁 2026-09-24)。
+ *     **ただし `/boot` だけに絞った同期 (`hsync boot`) はこの 1 条件から外す**:
+ *     カーネルを先に運ぶ唯一の HostDrv 経路で、ここで断ると v64 の
+ *     カーネルがいつまでも入らない (Codex 実装レビュー R1 blocker 2)。
+ *     /boot にはユーザーランドが無いので、版の前後はこの同期に関係しない。
+ *     配置違い・名札の欠落/不正は /boot でも断る (配備元の一式が
+ *     このカーネル系列のものか確かめられない)。
  *   - 名札が無い / 壊れている / kapi が無い (format=1) → 確かめられない。
  *     **一致とは扱わない**。
  * `--force-kapi` で越える (理由を表示して続ける)。`-f` / `--force` は
  * 同一判定の省略で別の意味なので、この門は開けない。
  * 戻り値 0 = 続けてよい / 1 = **1 件も書かずに断る**。 */
-static int man_kapi_check(u32 kernel_off, u32 kernel_ver, const char **why)
+static int man_kapi_check(u32 kernel_off, u32 kernel_ver, int boot_only,
+                          const char **why)
 {
     if (!g_man_present) { *why = HR_MANIFEST_ABSENT;  return 1; }
     if (!g_man_valid)   { *why = HR_MANIFEST_INVALID; return 1; }
     if (g_man_kapi != kernel_off) { *why = HR_KAPI_LAYOUT; return 1; }
-    if (g_man_kapi_ver > kernel_ver) { *why = HR_KAPI_NEWER; return 1; }
+    if (!boot_only && g_man_kapi_ver > kernel_ver) {
+        *why = HR_KAPI_NEWER;
+        return 1;
+    }
     *why = 0;
     return 0;
 }
 
-static int man_kapi_gate(void)
+/* target = 正規化した絞り込み先 (`/boot` など)、全体同期なら NULL。
+ * `/boot` とその下だけが「カーネルを先に運ぶ」同期。 */
+static int man_kapi_gate(const char *target)
 {
     const char *why = 0;
     u32 koff = (u32)KAPI_DATA_FIELDS_OFF;
     u32 kver = (u32)api->version;
+    int boot_only = (target != 0 &&
+                     (str_cmp(target, "/boot") == 0 ||
+                      str_has_prefix(target, "/boot/")));
 
-    if (man_kapi_check(koff, kver, &why) == 0) return 0;
+    if (man_kapi_check(koff, kver, boot_only, &why) == 0) {
+        if (boot_only && g_man_valid && g_man_kapi_ver > kver) {
+            api->kprintf(ATTR_YELLOW,
+                         "NOTE: /boot だけの同期なので配備物の版 v%d > "
+                         "カーネル v%d でも続ける (カーネルを先)。\n"
+                         "  再起動して ver で版を確かめてから hsync / hsync sys\n",
+                         (int)g_man_kapi_ver, (int)kver);
+        }
+        return 0;
+    }
 
     if (g_force_kapi) {
         api->kprintf(ATTR_YELLOW,
@@ -832,7 +856,8 @@ static int man_kapi_gate(void)
                  "  配備元のユーザーランドがこのカーネルと合うか確かめられない。"
                  "**1 件も書かない**。\n"
                  "  配置違いは全部作り直し (make clean && make all) + NHD 一式か FD。\n"
-                 "  版が新しいならカーネルを先に配備する。承知の上なら --force-kapi\n");
+                 "  版が新しいならカーネルを先に: hsync boot → 再起動 → ver → hsync。\n"
+                 "  承知の上なら --force-kapi\n");
     return 1;
 }
 
@@ -2305,7 +2330,7 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
         return 1;
     }
     /* 票 TASK_KAPI_DATA_FIELDS: 配備物の KAPI 配置と版 (1 件も書く前) */
-    if (man_kapi_gate() != 0) {
+    if (man_kapi_gate(subdir ? norm : 0) != 0) {
         api->mem_free(file_buf);
         return 1;
     }

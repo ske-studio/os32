@@ -292,8 +292,12 @@ static AppSlot *g_cur_app = 0;
  * PM の V4 検証が emu_read_mem で読む。 */
 volatile u32 fault_kill_count = 0;
 
-/* 直前の起動が「KAPI データ欄の配置違い」で断られたか (票 TASK_KAPI_DATA_FIELDS)。
- * kernel.c のシェル起動ループが、常駐シェルを断ったときの案内に使う。 */
+/* 直前の**入れ子 0 段の**起動 (常駐シェル / gshell) が「KAPI データ欄の配置
+ * 違い」で断られたか (票 TASK_KAPI_DATA_FIELDS)。kernel.c のシェル起動ループが、
+ * 常駐シェルを断ったときの案内に使う。**入れ子 1 段以上 (シェルから起動した
+ * アプリ) の拒否では立てない** — 立てると、シェルが走っている間に古いアプリを
+ * 1 本断っただけで、後でシェルが負の値で戻ったときに「shell.bin を作り直せ」
+ * と誤って止まる (実装レビュー R1、Opus N2)。 */
 static int g_layout_reject = 0;
 
 int exec_layout_rejected(void)
@@ -376,11 +380,15 @@ u32 exec_kapi_layout_selftest(void)
         kapi->shm_base == 0) {
         bad |= 1u << 0;
     }
-    /* (1) 本物の表の予約スロットは NULL でなく「未実装」 (CPL=0 は NOSYS) */
+    /* (1) 本物の表の予約スロットは NULL でなく「未実装」 (CPL=0 は NOSYS)。
+     * 関数数 = 容量 (予約 0 本) のとき生成器は kapi_reserved を作らないので、
+     * 参照ごと外す (実装レビュー R1: 300 本目でコンパイルが落ちる)。 */
+#if KAPI_FUNC_RESERVED > 0
     for (i = 0; i < (u32)KAPI_FUNC_RESERVED; i++) {
         if (kapi->kapi_reserved[i] != kapi_reserved_nosys) bad |= 1u << 1;
     }
     if (kapi->kapi_reserved[0]() != OS32_ERR_NOSYS) bad |= 1u << 1;
+#endif
     /* (2) トランポリンの予約スロットは int 0x80 のスタブ (CPL=3 は kill) */
     for (i = (u32)KAPI_FUNC_COUNT; i < (u32)KAPI_FUNC_CAPACITY; i++) {
         const u8 *st = (const u8 *)(ring3_tramp_page + RING3_USTR_STUB_OFF + i * 8u);
@@ -1442,7 +1450,7 @@ static int exec_launch(const char *cmdline, int gui_arg)
 
     launcher_id = appslot_cur();
     is_shell = (exec_nest_level == 0);
-    g_layout_reject = 0;
+    if (is_shell) g_layout_reject = 0;   /* 0 段の起動ごとに消す (子では触らない) */
 
     /* ---- ID の池 (D3)。物理の勘定はヘッダを読んでから ---- */
     if (is_shell) {
@@ -1555,7 +1563,7 @@ static int exec_launch(const char *cmdline, int gui_arg)
     {
         int lrc = os32x_layout_check(hdr, (u32)sz, (u32)KAPI_DATA_FIELDS_OFF);
         if (lrc != OS32X_LAYOUT_OK) {
-            g_layout_reject = 1;
+            if (is_shell) g_layout_reject = 1;
             kprintf(0xC1, "[exec] %s: %s (bin=%x kernel=%x)\n", path,
                     os32x_layout_reason(lrc),
                     (lrc == OS32X_LAYOUT_MISMATCH) ? hdr->kapi_data_off : 0u,

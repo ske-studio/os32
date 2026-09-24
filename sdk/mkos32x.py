@@ -150,7 +150,7 @@ def main():
         # 入力ファイル読み込み。ELF と世代が違えば止める。
         with open(input_path, 'rb') as f:
             code_data = f.read()
-        H.check_raw_matches_elf(elf, len(code_data), input_path)
+        H.check_raw_matches_elf(elf, code_data, input_path)
 
         text_size = len(code_data)
         eff_api = H.effective_min_api(min_api_ver)

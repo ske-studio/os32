@@ -50,6 +50,7 @@ KAPI_LAYOUT_SECTION = '.os32_kapi_layout'
 
 SHT_NOBITS = 8
 SHF_ALLOC = 0x2
+PT_LOAD = 1
 
 
 class HeaderError(Exception):
@@ -69,10 +70,24 @@ class Elf32:
         if d[4] != 1 or d[5] != 1:
             raise HeaderError(f"{path} は 32bit LE の ELF ではない")
         (self.e_entry,) = struct.unpack_from('<I', d, 24)
+        (self.e_phoff,) = struct.unpack_from('<I', d, 28)
         (self.e_shoff,) = struct.unpack_from('<I', d, 32)
+        (self.e_phentsize,) = struct.unpack_from('<H', d, 42)
+        (self.e_phnum,) = struct.unpack_from('<H', d, 44)
         (self.e_shentsize,) = struct.unpack_from('<H', d, 46)
         (self.e_shnum,) = struct.unpack_from('<H', d, 48)
         (self.e_shstrndx,) = struct.unpack_from('<H', d, 50)
+        # プログラムヘッダ (PT_LOAD の中身を .raw と突き合わせる)
+        self.segments = []
+        for i in range(self.e_phnum):
+            off = self.e_phoff + i * self.e_phentsize
+            if off + 32 > len(d):
+                raise HeaderError(f"{path} のプログラムヘッダが切れている")
+            (ptype, poff, pvaddr, ppaddr, pfilesz, pmemsz, pflags, palign) = \
+                struct.unpack_from('<8I', d, off)
+            self.segments.append(dict(type=ptype, offset=poff, vaddr=pvaddr,
+                                      paddr=ppaddr, filesz=pfilesz,
+                                      memsz=pmemsz))
         self.sections = []
         for i in range(self.e_shnum):
             off = self.e_shoff + i * self.e_shentsize
@@ -177,19 +192,56 @@ def read_kapi_layout(elf):
     return uniq[0]
 
 
-def check_raw_matches_elf(elf, raw_len, what='raw'):
-    """平らなバイナリがこの ELF から作られたか (大きさで) 確かめる。
+def check_raw_matches_elf(elf, raw, what='raw'):
+    """平らなバイナリ (.raw) がこの ELF から作られたかを**内容で**確かめる。
 
     旧 .raw と新 ELF の取り違えを生成工程で止める (ヘッダは ELF から作るので、
-    本文だけが古いと配置の刻印が嘘になる)。"""
+    本文だけが古いと配置の刻印が嘘になる)。大きさだけでは足りない — 旧配置の
+    shm_base を読む命令と新配置を読む命令はどちらも disp32 で同じ長さなので、
+    同じ大きさで中身だけ違う .raw が通ってしまう (実装レビュー R1、Codex
+    blocker 1)。
+
+    `objcopy -O binary` はロードされるセクションを最小番地から並べ、隙間を 0 で
+    埋める。そこで ELF の PT_LOAD のうち**ファイルに実体のある部分**
+    (p_offset..p_offset+p_filesz) を、.raw の (p_paddr - 先頭番地) から
+    1 バイトずつ突き合わせる。セグメントがロード範囲の外 (ELF ヘッダ等) に
+    はみ出す部分は .raw に入らないので比べない。
+
+    raw は bytes (大きさだけの int は受けない — 内容を見ないと意味が無い)。"""
+    if not isinstance(raw, (bytes, bytearray)):
+        raise HeaderError(f"{what}: 内容の照合には .raw の中身が要る")
     ext = elf.loadable_extent()
     if ext is None:
         raise HeaderError(f"{elf.path}: ロードされるセクションが無い")
-    want = ext[1] - ext[0]
-    if raw_len != want:
+    base, end = ext
+    want = end - base
+    if len(raw) != want:
         raise HeaderError(
-            f"{what} の大きさ {raw_len} が ELF のロード範囲 {want} "
-            f"(0x{ext[0]:X}..0x{ext[1]:X}) と違う — .raw と .elf の世代が違う")
+            f"{what} の大きさ {len(raw)} が ELF のロード範囲 {want} "
+            f"(0x{base:X}..0x{end:X}) と違う — .raw と .elf の世代が違う")
+    compared = 0
+    for seg in elf.segments:
+        if seg['type'] != PT_LOAD or seg['filesz'] == 0:
+            continue
+        lo = max(seg['paddr'], base)
+        hi = min(seg['paddr'] + seg['filesz'], end)
+        if lo >= hi:
+            continue
+        foff = seg['offset'] + (lo - seg['paddr'])
+        n = hi - lo
+        if foff + n > len(elf.data):
+            raise HeaderError(f"{elf.path}: PT_LOAD がファイルの外を指す")
+        a = elf.data[foff:foff + n]
+        b = bytes(raw[lo - base:lo - base + n])
+        if a != b:
+            k = next(i for i in range(n) if a[i] != b[i])
+            raise HeaderError(
+                f"{what} の内容が ELF の PT_LOAD と違う (番地 0x{lo + k:X}、"
+                f".raw の +0x{lo - base + k:X}: raw=0x{b[k]:02X} elf=0x{a[k]:02X}) "
+                "— .raw と .elf の世代が違う。作り直す")
+        compared += n
+    if compared == 0:
+        raise HeaderError(f"{elf.path}: .raw と突き合わせる PT_LOAD が無い")
 
 
 def effective_min_api(min_api):

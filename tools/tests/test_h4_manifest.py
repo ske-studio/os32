@@ -237,16 +237,29 @@ MUTATIONS = [
     # ---- 票 TASK_KAPI_DATA_FIELDS (KAPI の門、case_kapi) ----
     # 変異 K1: KAPI の門を main に繋いでいない版。
     ("kapi_gate_not_wired",
-     "    if (man_kapi_gate() != 0) {",
-     "    if (0 && man_kapi_gate() != 0) {"),
+     "    if (man_kapi_gate(subdir ? norm : 0) != 0) {",
+     "    if (0 && man_kapi_gate(subdir ? norm : 0) != 0) {"),
     # 変異 K2: 配置違いを見逃す版 (この票の中心)。
     ("kapi_layout_ignored",
      "    if (g_man_kapi != kernel_off) { *why = HR_KAPI_LAYOUT; return 1; }",
      "    if (0 && g_man_kapi != kernel_off) { *why = HR_KAPI_LAYOUT; return 1; }"),
     # 変異 K3: 「host の版 > カーネルの版」を見逃す版 (決裁 2026-09-24)。
     ("kapi_newer_ignored",
-     "    if (g_man_kapi_ver > kernel_ver) { *why = HR_KAPI_NEWER; return 1; }",
-     "    if (0 && g_man_kapi_ver > kernel_ver) { *why = HR_KAPI_NEWER; return 1; }"),
+     "    if (!boot_only && g_man_kapi_ver > kernel_ver) {",
+     "    if (0 && boot_only && g_man_kapi_ver > kernel_ver) {"),
+    # 変異 K3b: /boot だけの同期も「版が新しい」で断る版 (カーネルを先に
+    #   運べなくなる — Codex 実装レビュー R1 blocker 2)。
+    ("kapi_boot_not_exempt",
+     "    if (!boot_only && g_man_kapi_ver > kernel_ver) {",
+     "    if ((boot_only || 1) && g_man_kapi_ver > kernel_ver) {"),
+    # 変異 K3c: /boot の除外が配置違いまで開けてしまう版。
+    ("kapi_boot_skips_layout",
+     "    if (g_man_kapi != kernel_off) { *why = HR_KAPI_LAYOUT; return 1; }",
+     "    if (!boot_only && g_man_kapi != kernel_off) { *why = HR_KAPI_LAYOUT; return 1; }"),
+    # 変異 K3d: `/boot` の接頭辞判定が緩い版 (`/bootx` まで除外する)。
+    ("kapi_boot_prefix_loose",
+     "                      str_has_prefix(target, \"/boot/\")));",
+     "                      str_has_prefix(target, \"/boot\")));"),
     # 変異 K4: 名札が無いのを一致と扱う版。
     ("kapi_absent_is_match",
      "    if (!g_man_present) { *why = HR_MANIFEST_ABSENT;  return 1; }",

@@ -119,9 +119,11 @@ u32 exec_kapi_layout_selftest(void);
  * ここは .bss の中なのでビルドごとに動き、定数では書けない。 */
 u32 exec_tramp_page_addr(void);
 
-/* 直前の起動 (exec_run 等) が KAPI データ欄の配置違い (OS32X ヘッダ v3 の
- * kapi_data_off、票 TASK_KAPI_DATA_FIELDS) で断られたなら 1。kernel.c が
- * 常駐シェルを断ったときの案内 (「/sys を作り直して配備せよ」) に使う。 */
+/* 直前の**入れ子 0 段の**起動 (常駐シェル / gshell の exec_run) が KAPI データ
+ * 欄の配置違い (OS32X ヘッダ v3 の kapi_data_off、票 TASK_KAPI_DATA_FIELDS) で
+ * 断られたなら 1。0 段の起動に入るたびに 0 へ戻し、シェルから起動したアプリの
+ * 拒否では立たない。kernel.c が常駐シェルを断ったときの案内
+ * (「/sys を作り直して配備せよ」) に使う。 */
 int exec_layout_rejected(void);
 
 /* ======================================================================== */
