@@ -182,3 +182,22 @@ NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `F
 現行のカーネル FDC ドライバは Read Data の R = EOT = 同じセクタ番号で **1 コマンド 1 セクタ** (2HD で 1KB)。次のコマンドが間に合わないと 1 回転 (360rpm で約 167ms) を待つので、最悪 6KB/s 前後になる (推定、未測定)。
 **v3 で 1 トラック (以上) を 1 コマンドで読む**: EOT = トラックの最終セクタ、MT=1 で同じシリンダのヘッド 1 まで続ける (2HD で最大 16KB)。根拠は Bible 2-9 の INT 1Bh データ読み出し (06h): BX = 転送バイト数、読み出しは指定シリンダ内、MT 指定でヘッド 0 → 1。**書き込みは MT 不可** (μPD765 が正しく動かない、同資料) なので 1 トラックずつ。DMA の受け皿は 16KB に広げ、64KB 境界 ([HW2]) と `0439h` (1MB 超の DMA、§4-51) を満たす場所に置く (DMA プール 0x2E8000 の span が候補、TASK_HAL_WIRING)。MS-DOS が BIOS を何バイト単位で呼んでいたかは資料に記述が無く未確認。
 着手前に実機で FD 起動の所要時間を測って効果を見積もる。
+
+### v3 の前倒し: トラック単位の読み出し (2026-09-24、ブランチ wt/fdc-multi)
+
+実機で既定フォント (`/sys/font/default.kcg`、LZ4 で 188KB) の読み込みが 1 分以上止まったので、上の予定のうち
+**トラック単位 (MT なし)** を先に入れた。**実機の速度はまだ測っていない** (机上の見積もり: 1 セクタ 1 回転なら
+1KB あたり約 190ms、188KB で約 36 秒)。
+
+| 件 | 内容 |
+|---|---|
+| シークの省略 | `drivers/fdc.c` がドライブごとに現在のシリンダを覚え、同じなら SEEK も 20ms の整定待ちも出さない (SIS の排水だけは出す)。**捨てる**: 読み書きの最終失敗・シークの失敗・まとめ読みの失敗・FDC リセット (回復を含む)・RECALIBRATE の失敗・`fdc_set_media` / `fdc_set_3mode`・前回と違うドライブを触ったとき。書き込みも同じ `fdc_seek` を通るので覚えた値を更新する。ずれていても READ / WRITE DATA が ID 部の C を照合するので別のシリンダは読み書きしない (WC で落ちて捨て、シークし直す) |
+| まとめ読み | `fdc_read_sectors(drv, cyl, head, sect, count, geom, buf)`: 1 回の READ DATA で EOT = sect+count-1、MT=0、DMA 長 = count×bps (TC と EOT が最後のバイトで揃う — 単発で実機が通っている形を伸ばしたもの)。**リトライしない 1 回きり**で、失敗したら DMA を閉じ、FDC をリセットして RECALIBRATE まで済ませる (単発のリトライの間の `fdc_recover` と同じ形。リセット後の PCN を信じて別のシリンダへシークしないため) |
+| 区切りと先読み | `drivers/fdc_track.c` (純粋な層) を `disk_read` (DRV_FDD) が呼ぶ。要求をトラックの境目で区切り、**要求したセクタから EOT までを読んで 1 トラック分持つ**。FatFs (`FF_FS_TINY=1`) の窓とフォントの 1024B ずつの読み (`kcg_read_chunked`、16B のヘッダの後なのでセクタに揃わない) は **count=1 で来る**ので、束ねるだけでは 1 セクタ 1 コマンドのまま変わらない。持っている中身は書き込みの前・`disk_initialize`・`diskio_set_fdd_drive` で捨て、ジオメトリが変われば当てない |
+| 失敗の扱い | まとめ読みが失敗したら、**要求した区間だけ**を従来の `fdc_read_sector_geom` で 1 セクタずつ読み直す (リトライ・`fdc_recover`・NR の早期終了・0439h・FRY はそのまま)。先読みの分は読み直さない。先読みが落ちたトラックは 1 本だけ覚え、以後そこでは要求の範囲だけを束ねて読む (要求の外の傷で毎回失敗を踏まない)。失敗行 `[fdc] multi-read n=… falls back to single` は最初の 4 回だけ出す (実機で毎回落ちて速度が戻っていないかを見るため)。回数は `fdc_get_multi_stats()` |
+| 時間上限 | `fdc_rw_timeout_ticks()` (`drivers/fdc_decide.c`): 2 × (2 回転 + ceil(count/spt) 回転 + HLT 10ms)、回転は 300rpm の 200ms。1 トラック全部で 1.22 秒、単発の 1 秒を下限。シークは別に 1.5 秒 |
+| DMA の受け皿 | `dma_buffer` を 1 セクタ (1KB) から **1 トラック分 9216B** (1.44MB の 18×512 が最大) に広げ、**16KB 境界に揃えた** (2 の冪の揃え ≧ 大きさ なので 64KB 境界をまたがない、`fdc.h` の STATIC_ASSERT)。DMA プール (0x2E8000) は使わない — `fdc_init()` が `dma_pool_init()` より前に走り、`kselftest_run()` がプールを作り直すため。カーネルの `__bss_end` は 0x179400 → 0x184800 (+45KB、揃えの詰め物を含む)、リンク時の上限 (`MEM_KERNEL_IMAGE_MAX`) の中 |
+| MT | 使わない (Bible 2-9 は読みの MT を許すが書き込みの MT を禁じる、読みの MT を実機で確かめた記録が無い、得はシリンダごとに最悪 1 回転)。上の v3 の予定として残す |
+| ローダ | `boot/` の FAT 版ローダは触っていない。`boot/loader_fat.asm` / `loader_fat_new.asm` の `read_sect16` は **INT 1Bh (AH=76h = SEEK あり・MT なし) を 1 セクタ (BX = 1 セクタ長) ずつ**呼んでいるので、カーネルの読み込みも 1 セクタ 1 回転に近い形の可能性がある (未測定、見直しは別件) |
+| 試験 | `make check-fdc-track-host` (`tools/tests/test_fdc_track.py --target --mutate`、記録 `tools/tests/fdc_track_tdd.md`)。本物の `fdc.c` を µPD765A の模型の上で回す。変異 21 本: RED 20 / ERROR 0 / SURVIVED 1 (対照) |
+| 未確認 | 実機の速度、NP21/W での FD 起動、実機で MT なしのまとめ読みが正常終了すること |

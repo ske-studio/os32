@@ -84,4 +84,15 @@ int fdc_sis_result_bytes(u8 st0);
  * 失敗ではなく **もう一度 RECALIBRATE を出す** 合図として返す。 */
 int fdc_classify_seek_end(u8 st0, u8 pcn, int want_cyl);
 
+/* まとめ読み (READ DATA で count セクタ) の IRQ 待ちの上限 (tick)。
+ * 機構の最悪値から引く (fdc.h の FDC_ROT_TICKS_WORST の注記):
+ *   FDC_TIMEOUT_MARGIN × (FDC_FIND_ROTATIONS 回転 + ceil(count / spt) 回転
+ *                         + ヘッドロード)
+ * ただし単発の上限 (floor_ticks) を下回らない。
+ * spt == 0 や count < 1 のときは floor_ticks を返す。
+ * 定数は呼び手が渡す — このファイルは fdc.h を引かない (I/O の定義を
+ * ホストへ持ち込まないため)。 */
+u32 fdc_rw_timeout_ticks(int spt, int count, u32 rot_ticks, u32 find_rot,
+                         u32 head_load_ticks, u32 margin, u32 floor_ticks);
+
 #endif /* FDC_DECIDE_H */

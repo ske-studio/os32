@@ -46,11 +46,72 @@ static u8  s_init_0439_after = 0;
 #define FDC_RC_NOT_READY  (-5)
 
 /* DMA バッファ。
- * 大きさは 1 セクタ分 (最大 1024B) で、**1024B 境界に揃える** ([HW2])。
- * 揃えておけば 64KB 境界をまたぎようがない。以前は揃え指定が無く、
- * またいでいないことが**リンク順のたまたま**に依存していた
- * (2026-09-22 時点の番地は 0x1555e0 で、たまたま無事だった)。 */
-static u8 dma_buffer[FDC_SECTOR_SIZE] __attribute__((aligned(FDC_DMA_ALIGN)));
+ * 大きさは **1 トラック分** (FDC_DMA_BUF_SIZE = 9216B) で、**16KB 境界に
+ * 揃える** ([HW2])。揃えの 2 の冪が大きさ以上なので 64KB 境界をまたぎ
+ * ようがない (fdc.h の STATIC_ASSERT)。以前は 1 セクタ分 (1024B / 1024B
+ * 揃え)。揃え指定が無かったころは、またいでいないことが**リンク順の
+ * たまたま**に依存していた (2026-09-22 時点の番地は 0x1555e0)。 */
+static u8 dma_buffer[FDC_DMA_BUF_SIZE] __attribute__((aligned(FDC_DMA_ALIGN)));
+
+/* ======================================================================== */
+/*  覚えている現在のシリンダ (2026-09-24、同じシリンダならシークを省く)     */
+/*                                                                          */
+/*  旧 fdc_read_sector_geom は 1 セクタごとに SEEK + 20ms 待ちを出していた。 */
+/*  同じシリンダなら SEEK も整定待ちも要らない。-1 = 知らない。             */
+/*                                                                          */
+/*  **捨てる時**: エラー (読み書きの最終失敗 / シーク失敗 / まとめ読みの    */
+/*  失敗)、FDC リセット (fdc_reset / fdc_abort_transfer — 回復も含む)、      */
+/*  RECALIBRATE の失敗、メディアの変更 (fdc_set_media / fdc_set_3mode)、    */
+/*  ドライブの切り替え (前回と違うドライブへ SEEK / RECALIBRATE するとき     */
+/*  全部)。RECALIBRATE が通れば 0、SEEK が通ればそのシリンダ。              */
+/*                                                                          */
+/*  覚えた値が実際とずれていても**別のシリンダを読み書きすることはない** —   */
+/*  READ / WRITE DATA は ID 部の C を照合するので、ずれていれば ND / WC で   */
+/*  失敗し、上の「エラーで捨てる」から次はシークし直す。                    */
+/* ======================================================================== */
+#define FDC_MAX_DRIVES   4          /* µPD765A の US1/US0 */
+#define FDC_CYL_UNKNOWN  (-1)
+static int s_known_cyl[FDC_MAX_DRIVES] = {
+    FDC_CYL_UNKNOWN, FDC_CYL_UNKNOWN, FDC_CYL_UNKNOWN, FDC_CYL_UNKNOWN
+};
+static int s_last_drv = -1;         /* 最後に SEEK / RECALIBRATE したドライブ */
+
+static void fdc_forget_all(void)
+{
+    int i;
+    for (i = 0; i < FDC_MAX_DRIVES; i++) s_known_cyl[i] = FDC_CYL_UNKNOWN;
+}
+
+static void fdc_forget_cyl(int drv)
+{
+    if (drv >= 0 && drv < FDC_MAX_DRIVES) s_known_cyl[drv] = FDC_CYL_UNKNOWN;
+}
+
+static void fdc_note_cyl(int drv, int cyl)
+{
+    if (drv >= 0 && drv < FDC_MAX_DRIVES) s_known_cyl[drv] = cyl;
+}
+
+/* 前回と違うドライブを触るなら、覚えている値を全部捨てる。 */
+static void fdc_note_drive(int drv)
+{
+    if (drv != s_last_drv) fdc_forget_all();
+    s_last_drv = drv;
+}
+
+int fdc_get_known_cyl(int drv)
+{
+    if (drv < 0 || drv >= FDC_MAX_DRIVES) return FDC_CYL_UNKNOWN;
+    return s_known_cyl[drv];
+}
+
+/* まとめ読みの成功 / 失敗の回数 (fdc_get_multi_stats)。 */
+static u32 s_multi_ok = 0;
+static u32 s_multi_fail = 0;
+/* まとめ読みの失敗は最終失敗ではない (1 セクタずつ読み直す) ので、
+ * 行は最初の数回だけ出す。**黙りはしない** — 実機で束ねた読みが毎回
+ * 失敗していると、速度が元に戻ったことが画面で分からない。 */
+#define FDC_MULTI_FAIL_REPORT_MAX  4
 
 /* ======================================================================== */
 /*  内部ユーティリティ                                                      */
@@ -332,6 +393,9 @@ static int fdc_wait_seek_end(int drv, u8 *st0, u8 *cyl, int want_cyl)
 /* ======================================================================== */
 static int fdc_reset(void)
 {
+    /* リセットの後は覚えているシリンダを信じない。 */
+    fdc_forget_all();
+
     /* FDCをリセット */
     outp(FDC_CTRL, CTRL_RST);
     fdc_delay();
@@ -377,7 +441,8 @@ static void fdc_abort_transfer(void)
      *    するので、ここではマスクしたままにしておいてよい。 */
     dma_chan_mask(FDC_DMA_CHANNEL);
 
-    /* 2. FDC をリセットして実行フェーズを畳む。 */
+    /* 2. FDC をリセットして実行フェーズを畳む。覚えているシリンダも捨てる。 */
+    fdc_forget_all();
     outp(FDC_CTRL, CTRL_RST);
     fdc_delay();
     fdc_delay();
@@ -412,6 +477,10 @@ static int fdc_recalibrate_st0(int drv, u8 *out_st0)
     st0 = 0;
     rc = FDC_SEEK_FAIL;
 
+    /* ヘッドが動く。通るまでは知らないことにする。 */
+    fdc_note_drive(drv);
+    fdc_forget_cyl(drv);
+
     for (attempt = 0; attempt < FDC_RECAL_ATTEMPTS; attempt++) {
         /* 前のコマンドの取りこぼしを片付けてから出す。 */
         (void)fdc_drain_interrupts();
@@ -429,6 +498,7 @@ static int fdc_recalibrate_st0(int drv, u8 *out_st0)
         rc = fdc_wait_seek_end(drv, &st0, &cyl, -1);
         if (rc == FDC_SEEK_OK) {
             if (out_st0) *out_st0 = st0;
+            fdc_note_cyl(drv, 0);
             return 0;
         }
         if (rc != FDC_SEEK_RETRY_EC) break;
@@ -478,8 +548,21 @@ static int fdc_seek(int drv, int cyl, int head)
     u8 st0, result_cyl;
     int rc;
 
-    /* 未回収の割り込みを片付けてから出す (上の fdc_drain_interrupts の注記)。 */
+    fdc_note_drive(drv);
+
+    /* 未回収の割り込みを片付けてから出す (上の fdc_drain_interrupts の注記)。
+     * シークを省くときも片付ける — 続く READ / WRITE DATA の完了も IRQ の
+     * エッジで待つので、INT 線が上がったままだと同じ形で失敗する。
+     * 排水は pending 無しなら SIS 1 回 (1 バイト応答) で終わる。 */
     (void)fdc_drain_interrupts();
+
+    /* 同じシリンダに居ると分かっていれば SEEK も整定待ちも出さない。
+     * ヘッド (表裏) の切り替えは READ / WRITE DATA の HD で選ぶので、
+     * シリンダが同じなら SEEK は要らない。 */
+    if (drv >= 0 && drv < FDC_MAX_DRIVES && s_known_cyl[drv] == cyl) {
+        return 0;
+    }
+    fdc_forget_cyl(drv);
 
     fdc_irq_fired = 0;
     if (fdc_send_byte(FDC_CMD_SEEK) != 0) return -1;
@@ -499,6 +582,7 @@ static int fdc_seek(int drv, int cyl, int head)
         while ((tick_count - start) < 2) { /* 何もしない */ }
     }
 
+    fdc_note_cyl(drv, cyl);
     return 0;
 }
 
@@ -619,6 +703,7 @@ int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
      * 判断は phase の文字列ではなく dma_armed で行う — コマンド送信が
      * 途中で失敗した場合も ch2 は既に開いている。 */
     if (dma_armed) fdc_abort_transfer();
+    fdc_forget_cyl(drv);
 
     fdc_report_fail("read", drv, cyl, head, sect, phase, have_results, results);
     return -1;
@@ -695,9 +780,125 @@ int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
     }
 
     if (dma_armed) fdc_abort_transfer();
+    fdc_forget_cyl(drv);
 
     fdc_report_fail("write", drv, cyl, head, sect, phase, have_results, results);
     return -1;
+}
+
+/* ======================================================================== */
+/*  同じトラックの複数セクタを 1 回の READ DATA で読む (2026-09-24)         */
+/*                                                                          */
+/*  EOT = sect + count - 1、DMA の転送長 = count × bps。µPD765A は R が     */
+/*  EOT に達するか DMA の TC が来るまで次のセクタへ進む。長さを EOT と揃え  */
+/*  てあるので、**最後のセクタの最後のバイトで TC と EOT が同時に来て正常   */
+/*  終了する** — 単発 (R = EOT、長さ = 1 セクタ) と同じ組み立てで、実機で   */
+/*  通っている形をセクタ数だけ伸ばしたもの。NP21/W も同じ (src/io/fdc.c の  */
+/*  FDC_ReadData は FDCEVENT_NEXTDATA で `R++ == eot` まで readsector を     */
+/*  繰り返し、fdc_dmafunc の DMAEXT_END で tc を立てる)。                    */
+/*                                                                          */
+/*  **MT (マルチトラック) は使わない。** Bible 2-9 の INT 1Bh READ DATA は   */
+/*  「MT を指定し開始ヘッドが 0 なら同じシリンダのヘッド 1 も読める」とし、  */
+/*  NP21/W も MT で H を 0→1 に進める。使えば 1 コマンドで 1 シリンダ       */
+/*  (2HD 16KB) 読めるが、今回は入れない:                                    */
+/*   - 受け皿が 1 トラック分 (9KB) で足りる (票の指示: 転送長 1 トラック以下)*/
+/*   - 同資料は書き込みの MT を禁じている (µPD765 が正しく動かない)。読みで */
+/*     実機の挙動を確かめた記録がまだ無い                                   */
+/*   - 得はヘッド 1 の先頭セクタの待ち (最悪 1 回転) をシリンダごとに 1 回  */
+/*     省くことだけで、1 セクタ 1 回転の今の損に比べて小さい                */
+/*  実機で速度を測ってから別の段で入れる (票 TASK_FDC_REALHW の v3 の節)。  */
+/*                                                                          */
+/*  **リトライしない**。失敗したら DMA を閉じ、覚えているシリンダを捨てて   */
+/*  -1 を返す。呼び手 (drivers/fdc_track.c) がその範囲を                    */
+/*  fdc_read_sector_geom で 1 セクタずつ読み直す (そちらは従来どおり        */
+/*  リトライ・回復・NR の早期終了を持つ)。                                  */
+/* ======================================================================== */
+int fdc_read_sectors(int drv, int cyl, int head, int sect, int count,
+                     const struct fdc_geom *g, void *buf)
+{
+    u8 results[7];
+    int n, eot;
+    u32 bytes, timeout;
+    u32 phys = (u32)dma_buffer;
+    const char *phase = "seek";
+    int have_results = 0;
+    int dma_armed = 0;
+
+    if (g == 0 || count < 1 || sect < 1) return -2;
+    eot = sect + count - 1;
+    if (eot > (int)g->spt) return -2;          /* トラックをまたぐ (MT 無し) */
+    bytes = (u32)count * (u32)g->bps;
+    if (bytes > FDC_DMA_BUF_SIZE) return -2;    /* 受け皿に入らない */
+
+    kmemset(results, 0, sizeof(results));
+    timeout = fdc_rw_timeout_ticks((int)g->spt, count, FDC_ROT_TICKS_WORST,
+                                   FDC_FIND_ROTATIONS, FDC_HEAD_LOAD_TICKS,
+                                   FDC_TIMEOUT_MARGIN, FDC_RW_TIMEOUT_TICKS);
+
+    /* 1. シーク (同じシリンダなら省かれる) */
+    if (fdc_seek(drv, cyl, head) != 0) goto fail;
+
+    /* 2. DMA (FDC→メモリ)。長さはちょうど count セクタ = EOT と揃える。
+     *    負なら ch2 は閉じたままなのでコマンドを出さない。 */
+    if (dma_setup(phys, (u16)bytes, 0) != 0) { phase = "dma"; goto fail; }
+    dma_armed = 1;
+    phase = "cmd";
+
+    /* 3. READ DATA (MT = 0) */
+    fdc_irq_fired = 0;
+    if (fdc_send_byte(FDC_OPT_MF | FDC_CMD_READ_DATA) != 0) goto fail;
+    if (fdc_send_byte((u8)((head << 2) | drv)) != 0) goto fail;
+    if (fdc_send_byte((u8)cyl) != 0) goto fail;      /* C */
+    if (fdc_send_byte((u8)head) != 0) goto fail;     /* H */
+    if (fdc_send_byte((u8)sect) != 0) goto fail;     /* R (1始まり) */
+    if (fdc_send_byte(g->sec_n) != 0) goto fail;     /* N */
+    if (fdc_send_byte((u8)eot) != 0) goto fail;      /* EOT */
+    if (fdc_send_byte(g->gap3) != 0) goto fail;      /* GPL */
+    if (fdc_send_byte(FDC_DTL_UNUSED) != 0) goto fail;  /* DTL */
+
+    /* 4. 完了の IRQ。上限は機構の最悪値 (fdc.h の FDC_ROT_TICKS_WORST)。 */
+    phase = "irq";
+    if (fdc_wait_irq(timeout) != 0) goto fail;
+
+    /* 5. リザルト */
+    phase = "result";
+    n = fdc_read_results(results, 7);
+    have_results = (n > 0);
+    if (n < 7) goto fail;
+    if ((results[0] & FDC_ST0_IC_MASK) != FDC_ST0_IC_NORMAL) goto fail;
+
+    kmemcpy((u8 *)buf, dma_buffer, bytes);
+    s_multi_ok++;
+    return 0;
+
+fail:
+    /* 実行フェーズの途中なら DMA を閉じて FDC を畳み、**RECALIBRATE まで
+     * 済ませる** (単発のリトライの間の fdc_recover と同じ形)。リセットの
+     * 後の µPD765A の PCN はヘッドの実際の位置と合っている保証が無く、
+     * そのまま次の単発が SEEK すると別のシリンダへ出て WC で 1 回ぶん
+     * 無駄にする。覚えている値は fdc_abort_transfer が全部捨て、
+     * RECALIBRATE が通れば 0 を覚え直す (ヘッドは実際に 0 に居る)。
+     * DMA を積む前に落ちた (シークの失敗 / DMA を積めない) ときは
+     * リセットを通らないので、ここで捨てる — 次の単発がシークし直す。 */
+    if (dma_armed) {
+        fdc_abort_transfer();
+        (void)fdc_recalibrate(drv);
+    } else {
+        fdc_forget_cyl(drv);
+    }
+    s_multi_fail++;
+    if (s_multi_fail <= FDC_MULTI_FAIL_REPORT_MAX) {
+        kprintf(0x07, "[fdc] multi-read n=%d falls back to single\n", count);
+        fdc_report_fail("read-multi", drv, cyl, head, sect, phase,
+                        have_results, results);
+    }
+    return -1;
+}
+
+void fdc_get_multi_stats(u32 *ok, u32 *fail)
+{
+    if (ok) *ok = s_multi_ok;
+    if (fail) *fail = s_multi_fail;
 }
 
 /* ======================================================================== */
@@ -727,7 +928,7 @@ int fdc_init(void)
     /* [HW2] DMA バッファが 64KB 境界をまたいでいないこと。
      * FDC_DMA_ALIGN の揃え指定があればまたぎようがないが、揃えが外れても
      * **黙って別の番地を壊さない** よう確かめて言う。 */
-    if ((((u32)dma_buffer & FDC_DMA_BANK_MASK) + FDC_SECTOR_SIZE)
+    if ((((u32)dma_buffer & FDC_DMA_BANK_MASK) + FDC_DMA_BUF_SIZE)
             > FDC_DMA_BANK_SIZE) {
         kprintf(0x07, "[fdc] dma buffer crosses 64KB boundary at %08x\n",
                 (u32)dma_buffer);
@@ -841,6 +1042,9 @@ int fdc_set_3mode(int drv, int on)
     }
     sel = (u8)((u8)drv << FDC_3M_DRV_SHIFT);
 
+    /* アクセスモードが変わる = 別のメディアとして扱う。 */
+    fdc_forget_cyl(drv);
+
     /* ドライブ指定 + モード指定を 1 回で書く (bit4=1 で bit0 が有効)。 */
     outp(FDC_IO_3MODE,
          (u8)(sel | FDC_3M_APPLY | (on ? FDC_3M_MODE_144 : 0)));
@@ -887,6 +1091,8 @@ int fdc_set_media(int drv, fdc_media_t media)
     default:                 return -1;
     }
     s_geom[drv] = g;
+    /* メディアが変わった。覚えているシリンダは信じない。 */
+    fdc_forget_cyl(drv);
 
     /* アクセスモードをメディアに合わせる。**1.44MB に入るときと、自分で
      * 入れたものを戻すときだけ** 04BEh に触る (上の s_3mode_on の注記)。 */

@@ -21,6 +21,7 @@
 #include "ide.h"    /* ide_drive_present, ide_get_info — 初期化/ioctl用 */
 #include "rtc.h"
 #include "fdc.h"
+#include "fdc_track.h"  /* FD の読みをトラック単位に束ねる (純粋な層) */
 #include "kstring.h"
 
 /* 物理ドライブ番号 */
@@ -47,9 +48,52 @@ static u16 hdd_ide_phys_size = 512;
 /* Device API ポインタ (diskio_set_hdd_drive時に取得) */
 static Device *hdd_dev = 0;
 
+/* ======================================================================== */
+/*  FD のトラック単位の読み出し (2026-09-24)                                */
+/*                                                                          */
+/*  1 セクタずつ SEEK + READ DATA を出していたころは 1 セクタごとにほぼ      */
+/*  1 回転待ち、実機でフォント (188KB) の読み込みが 1 分以上止まった。       */
+/*  要求をトラックの境目で区切り、要求したセクタからトラックの終わりまでを  */
+/*  1 回で読んで持っておく (drivers/fdc_track.h の注記)。                   */
+/*                                                                          */
+/*  **捨てる時**: 書き込み (disk_write) の前、disk_initialize、             */
+/*  diskio_set_fdd_drive。メディアの種類が変われば fdc_track_hit が          */
+/*  ジオメトリの違いで外す。                                                */
+/* ======================================================================== */
+static u8 fdd_track_buf[FDC_TRACK_MAX_BYTES];
+static struct fdc_track_cache fdd_track = {
+    0, 0, 0, 0, 0, 0, 0, fdd_track_buf, 0, 0, 0, 0, 0
+};
+
+static int fdd_ops_read_multi(void *ctx, int drv, int cyl, int head, int sect,
+                              int count, const struct fdc_geom *g, void *buf)
+{
+    (void)ctx;
+    return fdc_read_sectors(drv, cyl, head, sect, count, g, buf);
+}
+
+static int fdd_ops_read_one(void *ctx, int drv, int cyl, int head, int sect,
+                            const struct fdc_geom *g, void *buf)
+{
+    (void)ctx;
+    return fdc_read_sector_geom(drv, cyl, head, sect, g, buf);
+}
+
+static void fdd_ops_copy(void *dst, const void *src, u32 n)
+{
+    kmemcpy(dst, src, n);
+}
+
+static const struct fdc_track_ops fdd_track_ops = {
+    fdd_ops_read_multi, fdd_ops_read_one, fdd_ops_copy, 0
+};
+
 /* ドライブ番号設定 API (fatfs_vfs.c から呼ばれる)
  * ドライブ変更時はstatusとオフセットをリセットし、f_mountでの再初期化を促す */
-void diskio_set_fdd_drive(int drv) { fdd_drive = drv; fdd_status = STA_NOINIT; }
+void diskio_set_fdd_drive(int drv) {
+    fdd_drive = drv; fdd_status = STA_NOINIT;
+    fdc_track_invalidate(&fdd_track);
+}
 void diskio_set_hdd_drive(int drv) {
     char devname[8];
     hdd_drive = drv; hdd_status = STA_NOINIT;
@@ -87,7 +131,9 @@ DSTATUS disk_initialize(BYTE pdrv)
 {
     switch (pdrv) {
     case DRV_FDD:
-        /* FDCはカーネル起動時に fdc_init() で初期化済み */
+        /* FDCはカーネル起動時に fdc_init() で初期化済み。
+         * 持っているトラックは捨てる (マウントし直し = 媒体が替わったかも)。 */
+        fdc_track_invalidate(&fdd_track);
         fdd_status = 0;
         return fdd_status;
 
@@ -111,26 +157,17 @@ DSTATUS disk_initialize(BYTE pdrv)
 DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
 {
     int rc;
-    UINT i;
 
     switch (pdrv) {
     case DRV_FDD:
         if (fdd_status & STA_NOINIT) return RES_NOTRDY;
-        /* FDD: fdc_read_sector (CHS ネイティブ) を直接使用。
+        /* FDD: トラック単位に束ねて読む (上の fdd_track の注記)。
          * **ジオメトリはドライブから聞く** — FDC_SPT などのマクロは
          * 2HD 1232KB 固定で、1.44MB のディスクをゴミとして読む。 */
-        {
-            const struct fdc_geom *g = fdc_get_geom(fdd_drive);
-            for (i = 0; i < count; i++) {
-                int lba = (int)(sector + i);
-                int sect = (lba % g->spt) + 1;
-                int head = (lba / g->spt) % g->heads;
-                int cyl  = lba / ((int)g->spt * (int)g->heads);
-                rc = fdc_read_sector(fdd_drive, cyl, head, sect,
-                                     buff + i * g->bps);
-                if (rc != 0) return RES_ERROR;
-            }
-        }
+        rc = fdc_track_read(&fdd_track, &fdd_track_ops, fdd_drive,
+                            fdc_get_geom(fdd_drive), (u32)sector, (u32)count,
+                            (u8 *)buff);
+        if (rc != 0) return RES_ERROR;
         return RES_OK;
 
     case DRV_HDD:
@@ -179,7 +216,10 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
     case DRV_FDD:
         if (fdd_status & STA_NOINIT) return RES_NOTRDY;
         /* FDD: fdc_write_sector (CHS ネイティブ) を直接使用。
-         * 読み側と同じくジオメトリはドライブから聞く。 */
+         * 読み側と同じくジオメトリはドライブから聞く。
+         * **先に持っているトラックを捨てる** — 書いたセクタの古い中身を
+         * 次の読みに当てない (途中で失敗しても捨てたままでよい)。 */
+        fdc_track_invalidate(&fdd_track);
         {
             const struct fdc_geom *g = fdc_get_geom(fdd_drive);
             for (i = 0; i < count; i++) {
