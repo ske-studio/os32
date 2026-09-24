@@ -107,6 +107,18 @@ OSError は版に関係なく、deploy・sync 系のマウント・migrate-pt �
 not_nhd を通す、do_deploy が push の門を使わない、版が古いと読まずに通す、migrate-pt の検査が OSError で
 例外のまま落ちる。`test_deploy_protect.py` の来歴の試験の像は、本物の NHD の形 (標準配置の OS32 区画) にした。
 
+### 3-5. Codex 確認の minor (2026-09-24)
+
+```
+SUMMARY 25/25 PASS
+MUTATIONS 61/61 RED (ERROR 0, SURVIVED 0, NOT_APPLIED 0); CONTROLS 9/9 SURVIVED (期待どおり)
+```
+
+旧配置と決まった後の移行の調べで起きた**読み取りの失敗 (OSError)** は、版の分岐 (v63 以下 / 版が取れない
+ときは旧配置を通す) より前に断る。読めた旧配置を v63 以下で通す仕様は変えていない。試験: v63・push・
+版が取れないツリーのそれぞれで、移行の調べが OSError → 断る (読めた旧配置は v63 で通す)。変異 1 本:
+読み取りの失敗の判定を版の分岐の後に回す (C 38 本 + Python 23 本)。
+
 ## 4. 見ていないこと
 
 - 実機・NP21/W での I/O (LBA28 のレジスタが実際に正しい物理セクタを指すか、`hdprep` の対話)。

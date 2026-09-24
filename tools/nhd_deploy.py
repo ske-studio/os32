@@ -1044,6 +1044,7 @@ def legacy_pt_guard(nhd_path=None, kapi=None, push=False):
     if not os.path.isfile(path):
         return True
     auto = None
+    read_error = None
     try:
         with open(path, 'rb') as img:
             state, why = classify_pt_layout(img)
@@ -1052,9 +1053,17 @@ def legacy_pt_guard(nhd_path=None, kapi=None, push=False):
                     plan_migrate_pt(img)
                 except Exception as exc:  # noqa: BLE001 — 移行できない理由として出す
                     auto = "{}: {}".format(type(exc).__name__, exc)
+                    if isinstance(exc, OSError):
+                        read_error = auto
     except Exception as exc:  # noqa: BLE001 — 開けない・読めないは通さない (版を問わず)
         print("Error: {} の区画表を読めない ({}: {})。配置を確かめられないので配らない"
               .format(path, type(exc).__name__, exc), file=sys.stderr)
+        return False
+    # 移行の可否を調べる途中の**読み取りの失敗**は、下の版の分岐 (v63 以下は旧配置を
+    # 通す) より前に断る。旧配置を通すのは「読めた」ときだけ (Codex 確認の minor)
+    if read_error is not None:
+        print("Error: {} を読む途中で失敗した ({})。配置を確かめ切れないので配らない"
+              .format(path, read_error), file=sys.stderr)
         return False
     if state == 'not_nhd':
         if push:

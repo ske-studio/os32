@@ -216,6 +216,8 @@ PY_MUTATIONS = [
     ("tools/nhd_deploy.py", "    except (pc98pt.PtError, OSError) as exc:\n        # 読めない NHD も",
      "    except (pc98pt.PtError,) as exc:\n        # 読めない NHD も",
      "migrate-pt の検査が NHD の OSError で例外のまま落ちる"),
+    ("tools/nhd_deploy.py", "    if read_error is not None:\n", "    if False:\n",
+     "移行の調べの読み取りの失敗を版の分岐 (v63 は通す) の後に回す (Codex 確認の minor)"),
     ("tools/nhd_deploy.py", "        return legacy_pt_guard() and ensure_mounted()",
      "        return ensure_mounted()", "マウント済みの NHD を門に通さない"),
 ]
@@ -575,10 +577,31 @@ def py_migrate_cases(pc98pt, nhd, tmp, quiet=False):
                 raise _e
             nhd.plan_migrate_pt = boom
             rc, err = _capture_err(nhd.legacy_pt_guard, str(qe), 64)
-            checks.append(("旧配置 + 移行の調べが {} → 断り、移行できない理由に出す"
+            checks.append(("旧配置 + 移行の調べが {} → 断り、理由に例外を出す"
                            .format(type(exc).__name__),
-                           rc is False and "自動の移行" in err and type(exc).__name__ in err))
+                           rc is False and type(exc).__name__ in err))
+            if not isinstance(exc, OSError):
+                checks.append(("旧配置 + 移行の調べが {} → 「自動の移行もできない」と出す"
+                               .format(type(exc).__name__), "自動の移行" in err))
+        # 移行の調べの**読み取りの失敗**は版に関係なく断る (v63 以下は旧配置を通す仕様の
+        # 分岐より前、push でも。Codex 確認の minor)。読めた旧配置は v63 なら通す
+        def eio_plan(img):
+            raise OSError(5, "EIO (試験)")
+        nhd.plan_migrate_pt = eio_plan
+        checks.append(("v63 + 旧配置 + 移行の調べが OSError → 断る",
+                       _silent_err(nhd.legacy_pt_guard, str(qe), 63) is False))
+        checks.append(("v63 + 旧配置 + 移行の調べが OSError → push でも断る",
+                       _silent_err(nhd.legacy_pt_guard, str(qe), 63, True) is False))
+        real_tkv = nhd.tree_kapi_version
+        nhd.tree_kapi_version = lambda: None          # 版が取れないツリー
+        try:
+            checks.append(("版が取れない + 旧配置 + 移行の調べが OSError → 断る",
+                           _silent_err(nhd.legacy_pt_guard, str(qe)) is False))
+        finally:
+            nhd.tree_kapi_version = real_tkv
         nhd.plan_migrate_pt = real_plan
+        checks.append(("v63 + 読めた旧配置 → 通す (仕様どおり)",
+                       _silent_err(nhd.legacy_pt_guard, str(qe), 63) is True))
 
         class _EIOFile:
             def __init__(self, *a, **k):
