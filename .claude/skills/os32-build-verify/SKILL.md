@@ -54,8 +54,13 @@ ABI が変わっていない通常の変更で、習慣的に `make clean` を�
 - NHD 配備は NP21/W の**プロセス終了を確認**してから実行し、その後起動する。
   `emu_pause`、breakpoint 停止、HTTP 無応答は終了の証拠にならない。
   複数インスタンスがある場合は使用するイメージとプロセスを特定する。
-- 再起動補助を使う前に `tools/np21w_restart.py` の引数と副作用を読む。
-  通常の再起動のために FDD 設定変更を追加しない。
+- 停止と起動は `tools/np21w_ctl.py` で行う (`docs/POLICY_DEBUG.md` §5)。
+  `stop` はプロセスが消えるまで待ち、`start --ini <name> [--fd <name>] --wait-ready` は
+  媒体 (ini の HDD/CD/FDD と `--fd`) が続けて 5 秒開けるのを待ってから起動し、
+  プロセスの 10 秒生存と `/api/status` の応答まで確かめる。
+  `taskkill` → `Start-Process` を手で続けて打たない — ロックで起動が途中で止まる (§4-60)。
+  ini は書き換えない。FD は ini ではなく `--fd` で渡す。
+  旧 `tools/np21w_restart.py` は ini の `FDD1FILE` を書き換えるので使わない ([D2])。
 - 配備コマンドの終了コードだけで合格にしない。作業イメージ、コピー先、
   ゲストの起動媒体と実行ファイルが一致していることを確認する。
 
