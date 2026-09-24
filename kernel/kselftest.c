@@ -1337,6 +1337,13 @@ static void test_time_now(void)
      * cpu_calibrate の試験が持つ。ここは「時計が進むか」だけ)。 */
     check(t1hi == t0hi && t1lo > t0lo + 200 && t1lo < t0lo + 20000,
           "time:1ms delay plausible");
+    /* 外れたら測った値を出す (2026-09-24 の NP21/W で 1 回だけ FAIL。
+     * cpu_delay_us の校正がずれたのか、時計の補間がずれたのかを分ける)。 */
+    if (!(t1hi == t0hi && t1lo > t0lo + 200 && t1lo < t0lo + 20000)) {
+        kprintf(0x07, "[selftest] time: 1ms delay measured %u us (hi %u->%u)\n",
+                (unsigned int)(t1lo - t0lo), (unsigned int)t0hi,
+                (unsigned int)t1hi);
+    }
 
     /* --- 注入: p1/p2 の三分岐を全部踏む --- */
     time_branch_reset();

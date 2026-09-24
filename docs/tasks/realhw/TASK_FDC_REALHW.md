@@ -182,3 +182,62 @@ NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `F
 現行のカーネル FDC ドライバは Read Data の R = EOT = 同じセクタ番号で **1 コマンド 1 セクタ** (2HD で 1KB)。次のコマンドが間に合わないと 1 回転 (360rpm で約 167ms) を待つので、最悪 6KB/s 前後になる (推定、未測定)。
 **v3 で 1 トラック (以上) を 1 コマンドで読む**: EOT = トラックの最終セクタ、MT=1 で同じシリンダのヘッド 1 まで続ける (2HD で最大 16KB)。根拠は Bible 2-9 の INT 1Bh データ読み出し (06h): BX = 転送バイト数、読み出しは指定シリンダ内、MT 指定でヘッド 0 → 1。**書き込みは MT 不可** (μPD765 が正しく動かない、同資料) なので 1 トラックずつ。DMA の受け皿は 16KB に広げ、64KB 境界 ([HW2]) と `0439h` (1MB 超の DMA、§4-51) を満たす場所に置く (DMA プール 0x2E8000 の span が候補、TASK_HAL_WIRING)。MS-DOS が BIOS を何バイト単位で呼んでいたかは資料に記述が無く未確認。
 着手前に実機で FD 起動の所要時間を測って効果を見積もる。
+
+### v3 の前倒し: トラック単位の読み出し (2026-09-24、ブランチ wt/fdc-multi)
+
+実機で既定フォント (`/sys/font/default.kcg`、LZ4 で 188KB) の読み込みが 1 分以上止まったので、上の予定のうち
+**トラック単位 (MT なし)** を先に入れた。**実機の速度はまだ測っていない** (机上の見積もり: 1 セクタ 1 回転なら
+1KB あたり約 190ms、188KB で約 36 秒)。
+
+| 件 | 内容 |
+|---|---|
+| シークの省略 | `drivers/fdc.c` がドライブごとに現在のシリンダを覚え、同じなら SEEK も 20ms の整定待ちも出さない (SIS の排水だけは出す)。**捨てる**: 読み書きの最終失敗・シークの失敗・まとめ読みの失敗・FDC リセット (回復を含む)・RECALIBRATE の失敗・`fdc_set_media` / `fdc_set_3mode`・前回と違うドライブを触ったとき。書き込みも同じ `fdc_seek` を通るので覚えた値を更新する。ずれていても READ / WRITE DATA が ID 部の C を照合するので別のシリンダは読み書きしない (WC で落ちて捨て、シークし直す) |
+| まとめ読み | `fdc_read_sectors(drv, cyl, head, sect, count, geom, buf)`: 1 回の READ DATA で EOT = sect+count-1、MT=0、DMA 長 = count×bps (TC と EOT が最後のバイトで揃う — 単発で実機が通っている形を伸ばしたもの)。**リトライしない 1 回きり**で、失敗したら DMA を閉じ、FDC をリセットして RECALIBRATE まで済ませる (単発のリトライの間の `fdc_recover` と同じ形。リセット後の PCN を信じて別のシリンダへシークしないため) |
+| 区切りと先読み | `drivers/fdc_track.c` (純粋な層) を `disk_read` (DRV_FDD) が呼ぶ。要求をトラックの境目で区切り、**要求したセクタから EOT までを読んで 1 トラック分持つ**。FatFs (`FF_FS_TINY=1`) の窓とフォントの 1024B ずつの読み (`kcg_read_chunked`、16B のヘッダの後なのでセクタに揃わない) は **count=1 で来る**ので、束ねるだけでは 1 セクタ 1 コマンドのまま変わらない。持っている中身は書き込みの前・`disk_initialize`・`diskio_set_fdd_drive` で捨て、ジオメトリが変われば当てない |
+| 失敗の扱い | まとめ読みが失敗したら、**要求した区間だけ**を従来の `fdc_read_sector_geom` で 1 セクタずつ読み直す (リトライ・`fdc_recover`・NR の早期終了・0439h・FRY はそのまま)。先読みの分は読み直さない。先読みが落ちたトラックは 1 本だけ覚え、以後そこでは要求の範囲だけを束ねて読む (要求の外の傷で毎回失敗を踏まない)。失敗行 `[fdc] multi-read n=… falls back to single` は最初の 4 回だけ出す (実機で毎回落ちて速度が戻っていないかを見るため)。回数は `fdc_get_stats()` (当初の名前 `fdc_get_multi_stats` は廃止) |
+| 時間上限 | `fdc_rw_timeout_ticks()` (`drivers/fdc_decide.c`): 2 × (2 回転 + ceil(count/spt) 回転 + HLT 10ms)、回転は 300rpm の 200ms。1 トラック全部で 1.22 秒、単発の 1 秒を下限。シークは別に 1.5 秒 |
+| DMA の受け皿 | `dma_buffer` を 1 セクタ (1KB) から **1 トラック分 9216B** (1.44MB の 18×512 が最大) に広げ、**16KB 境界に揃えた** (2 の冪の揃え ≧ 大きさ なので 64KB 境界をまたがない、`fdc.h` の STATIC_ASSERT)。DMA プール (0x2E8000) は使わない — `fdc_init()` が `dma_pool_init()` より前に走り、`kselftest_run()` がプールを作り直すため。カーネルの `__bss_end` は 0x179400 → 0x184800 (+45KB、揃えの詰め物を含む)、リンク時の上限 (`MEM_KERNEL_IMAGE_MAX`) の中 |
+| MT | 使わない (Bible 2-9 は読みの MT を許すが書き込みの MT を禁じる、読みの MT を実機で確かめた記録が無い、得はシリンダごとに最悪 1 回転)。上の v3 の予定として残す |
+| ローダ | `boot/` の FAT 版ローダは触っていない。`boot/loader_fat.asm` / `loader_fat_new.asm` の `read_sect16` は **INT 1Bh (AH=76h = SEEK あり・MT なし) を 1 セクタ (BX = 1 セクタ長) ずつ**呼んでいるので、カーネルの読み込みも 1 セクタ 1 回転に近い形の可能性がある (未測定、見直しは別件) |
+| 試験 | `make check-fdc-track-host` (`tools/tests/test_fdc_track.py --target --mutate`、記録 `tools/tests/fdc_track_tdd.md`)。本物の `fdc.c` を µPD765A の模型の上で回す。変異 21 本: RED 20 / ERROR 0 / SURVIVED 1 (対照) |
+| 未確認 | 実機の速度、NP21/W での FD 起動、実機で MT なしのまとめ読みが正常終了すること |
+
+**9ed7c80 の NP21/W での結果と直し (2026-09-24 夕)**: フォントの読み込みは約 3 分のまま (4a8fad4 と同じ)、EIP は全部 `fdc_wait_seek_end` の IRQ 待ち。
+
+| 件 | 内容 |
+|---|---|
+| 主因 | FatFs (`FF_FS_TINY=1`) は FAT とデータで 1 つの窓を取り合い、クラスタ (2HD は 1 セクタ) を越えるたびに FAT のセクタ (シリンダ 0) を読み直す。1KB ずつ 16B ずれて読むフォントは毎回越えるので **1KB ごとにシーク 2 回**。先読み 1 本では FAT とデータのトラックが追い出し合って当たらなかった → **2 本 (LRU)** に |
+| 完了待ち | SIS が別ドライブの通知 / Ready 変化を返したとき 1 件で次のエッジを待っていた。INT 線は pending が尽きるまで上がったままなので、実機では自分の完了を 1.5 秒の期限まで待って救済で拾う形になる → 1 本のエッジで 80h まで読む。NP21/W は事象ごとに IRQ を出すので、エミュレータでの寄与は `[fdc] font:` の `tmo=` で見る |
+| IF=0 | 0x244 は IF=1 (0x200 + ZF + PF)。割り込み禁止の区間ではない |
+| 世代 | 先読みは `fdc_media_gen()` の世代で外す。書き込み全部 (FatFs / dev.c / KAPI の `dev_blk_write`)・Ready 変化・`fdc_set_media` で進む |
+| 受け皿 | 1 本の静的な領域 27KB (DMA の窓 1 + スロット 2)、窓の位置は `fdc_buf_layout()` が実行時に決めて 64KB をまたがない。揃えの詰め物は無くなり `__bss_end` 0x184800 → 0x180780 (4a8fad4 比 +29KB) |
+| NR | まとめ読みの失敗に数えず行も出さない (-3) |
+| 診断 | 起動時に `[fdc] font: seek= skip= recal= tmo= foreign= rdy= multi=ok/fail nr= single= retry= write=` を 1 行。`time:1ms` の FAIL には測った値を出す行を足した (原因は未特定、下) |
+| time:1ms | `cpu_delay_us(1000)` を `sys_time_now` で挟む試験。校正 (`cpu_calibrate`) は FDC より前に 1 回だけで、FD の新しいコードは割り込みを禁止しない。NP21/W の CPU 速度はホストの負荷で揺れるので校正と実測がずれた可能性があるが**未確認**。次の起動で `[selftest] time: 1ms delay measured` の値を見る |
+| 試験 | 21 ケース、変異 33 本: RED 32 / ERROR 0 / SURVIVED 1 (対照) |
+
+**6541ef1 の NP21/W での結果と直し (2026-09-24 夜)**: フォントの読み込み約 92 秒 (半分に)、kselftest 212/0、`[fdc] font: seek=751 skip=16 recal=2 tmo=0 foreign=0 rdy=0 multi=767/0`。
+
+| 件 | 内容 |
+|---|---|
+| 原因 | **VFS が 1 回の読みごとにファイルを開き直す** (`fatfs_vfs_read_stream` が毎回 `f_open` → `f_lseek` → `f_read` → `f_close`)。1KB ごとにルート (C0H0)・`/SYS` (C0H1)・`/SYS/FONT` (C62H0)・FAT (C0H0)・データの 4 本のトラックを巡回し、2 本の LRU は 1 回も当たらない。世代・ポインタ・範囲は無実 |
+| 直し | count=1 の読み (FatFs の窓) を覚える 8 セクタの LRU を足し、トラックのスロットは 1 本に。受け皿は 26KB (窓 9KB + トラック 9KB + セクタ 8KB)。VFS の開き直し自体は触っていない (別件にするなら、チャンクごとに FAT の鎖を先頭からたどる CPU の無駄もある) |
+| 再現 | `font_replay`: `images/os32_boot.d88` と実物の `ff.c` で、`kcg_load_font` と VFS の読み方のまま回す。6541ef1 の形では seek=752 / multi=769 (実測 751 / 767 と一致)、直した後は **seek=14 / multi=27 / single=0 / tmo=0**。試験で multi ≦ 27、seek ≦ 14 に固定 |
+| 見込み | NP21/W のシーク 1 回約 100ms なら、フォントのシーク待ちは 75 秒 → 1.4 秒程度 (机上。実測は PM) |
+| 表示 | `[fdc] font:` を 3 行に (シーク系 / 読み系 / キャッシュ)。どれも 80 桁以内 |
+| 試験 | 22 ケース、変異 35 本: RED 34 / ERROR 0 / SURVIVED 1 (対照) |
+
+**6fa2ec7 の結果とラリー 2 (2026-09-24 夜)**: NP21/W の FD 起動でフォントの読み込み 3 秒、seek=15、multi=28、kselftest 212/0。ラリー 2 は Codex・Fable とも Request changes (指摘は一致)。
+
+| 件 | 直し |
+|---|---|
+| RECALIBRATE の後の整定 [両者] | RECALIBRATE が通ったら `fdc_head_settle()` (SEEK と同じ 2 tick) を待ってから 0 を覚える。回復の直後の C=0 の READ が整定前に出ていた |
+| 同じ形式の媒体の差し替え [両者] | **2 秒規則**: `fdc_track_read` の入口で、最後の読みから 200 tick を超えていたらトラックとセクタの両方を捨てる (時計は `ops->now`、カーネルは `tick_count`)。pending の Ready 通知を SIS で読む前に当たる件 (Codex) もここで上限が付く。契約「媒体を替えたら umount / mount」を docs/06_filesystem.md §6-8 に書いた |
+| NR [Codex] | 単発の READ のリザルトに NR が立っていたら回復・リトライより前に打ち切る (DMA を閉じるだけ)。まとめ読みのリザルトの NR も回復せずに -3。`fdc_track` は -3 なら 1 セクタずつへ落とさない |
+| SIS の件数 [Fable] | 1 本のエッジで 4 件読んでも 80h が出ていなければ、エッジを待たずに読み続ける (時間で縛る) |
+| まとめ読みのシーク失敗 [Fable] | -2 / -4 は `fdc_recover` (リセット + RECALIBRATE) を通してから単発へ |
+| リザルトまで読めた失敗 | コマンドは終わっているので DMA を閉じるだけでリセットしない (覚えたシリンダは捨てる) |
+| `[fdc] font:` [Fable] | FD 起動 (boot_drive 0x90 / 0x30) のときだけ出す。キャッシュの行に `idle=` (2 秒規則で捨てた回数) |
+| extern [Fable] | `fs/fatfs/diskio_os32.h` を新設 (diskio.h は ff.h の型が要る FatFs の配布物のため)。kernel.c と fatfs_vfs.c の extern を移した |
+| 試験の依存 [Fable] | `check-fdc-track-host` を `images/os32_boot.d88` に依存させ、`--require-image` で無ければ FAIL (SKIP にしない) |
+| 試験 | 27 ケース、変異 41 本: RED 40 / ERROR 0 / SURVIVED 1 (対照) |

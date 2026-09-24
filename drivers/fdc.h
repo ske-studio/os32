@@ -166,6 +166,22 @@
  *   余裕 2 倍で 1 秒。 */
 #define FDC_RW_TIMEOUT_TICKS      100
 
+/* まとめ読み (READ DATA で EOT まで複数セクタ) の時間上限。
+ *   単発の上の見積もりと同じく機構の最悪値から引く (POLICY_DEBUG §4-51):
+ *     最初のセクタを探す      最悪 2 回転
+ *     count セクタを読む      count / spt 回転 (切り上げ)
+ *     ヘッドロード (HLT)       10ms
+ *   回転は遅い方の 300rpm (1 回転 200ms = 20 tick) で取る。
+ *   1 トラック全部 (count = spt) なら 2 + 1 = 3 回転 = 600ms + 10ms。
+ *   余裕 2 倍で 1.22 秒 (122 tick)。シークは fdc_seek が自分の上限
+ *   (FDC_SEEK_TIMEOUT_TICKS) で別に待つので、ここには入れない。
+ *   1 セクタなら 2 × (40 + 2 + 1) = 86 tick で、単発の 100 tick を
+ *   下回るので **単発の値を下限にする** (fdc.c の fdc_rw_multi_timeout)。 */
+#define FDC_ROT_TICKS_WORST       20   /* 300rpm の 1 回転 = 200ms */
+#define FDC_FIND_ROTATIONS        2    /* 目的セクタが直前に通過していた場合 */
+#define FDC_HEAD_LOAD_TICKS       1    /* HLT 10ms (FDC_SPECIFY_HLT_DMA) */
+#define FDC_TIMEOUT_MARGIN        2    /* 余裕 2 倍 */
+
 /* リセット完了の割り込み待ち。**ここは短くする**。
  *   - シークを伴わないので、実機ならリセット後の Ready-change 通知は
  *     µs〜ms のオーダーで来る。
@@ -211,11 +227,51 @@
 
 /* µPD8237A はアドレスの下位 16 ビットしか回さない。64KB 境界をまたぐ転送は
  * バンクの先頭へ巻き戻って別の番地を壊す。
- * **1024B 境界に揃えた 1024B は定義上 64KB 境界をまたげない** ので、
- * 揃え指定で塞ぐ。番地がリンク順に依存しているのをやめるため。 */
-#define FDC_DMA_ALIGN      1024
-#define FDC_DMA_BANK_SIZE  0x10000   /* DMA バンク = 64KB */
-#define FDC_DMA_BANK_MASK  0xFFFF    /* バンク内オフセットの取り出し */
+ *
+ * **受け皿は 1 本の静的な領域 (FDC_BUF_BYTES) で、DMA の窓と先読みの
+ * スロットを兼ねる** (2026-09-24 の見直し)。
+ *   - DMA の窓: 1 トラック分。既知のジオメトリで最大のものは 1.44MB の
+ *     18 × 512 = 9216B (2HD 1232KB は 8 × 1024 = 8192B)。MT (ヘッド 0 → 1)
+ *     は使わないので 1 シリンダ分は要らない (fdc.c の注記)。
+ *   - 先読みのスロット: 1 トラック分 × FDC_TRACK_SLOTS。CPU しか触らない
+ *     ので 64KB 境界をまたいでよい。
+ * 窓の位置は fdc_buf_layout() (fdc_decide.c) が**実行時に**決める: 領域は
+ * 64KB より短いので境界は高々 1 本で、窓は先頭か末尾のどちらかに必ず
+ * 取れる。**揃え指定に頼らない** — 16KB 揃えにしていたころは、その前に
+ * 最大 16KB の詰め物が出ていた (レビューの指摘)。
+ *
+ * DMA プール (0x2E8000) は使わない: fdc_init() は dma_pool_init() より前に
+ * 走り、kselftest_run() がプールを作り直す (kernel/kernel.c の注記)。 */
+#define FDC_TRACK_MAX_BYTES  (18 * 512)  /* 1.44MB の 1 トラック = 9216B */
+#define FDC_DMA_BUF_SIZE     FDC_TRACK_MAX_BYTES
+/* 先読みのスロット数と、1 セクタの読みを覚えるセクタキャッシュの数。
+ *
+ * 2026-09-24 夕の NP21/W の実測 (6541ef1、`[fdc] font:` の行) は
+ * multi=767 / seek=751 で、先読みがほとんど当たっていなかった。原因は
+ * **VFS が 1 回の読みごとにファイルを開き直す**こと —
+ * fs/fatfs_vfs.c の fatfs_vfs_read_stream は f_open → f_lseek → f_read →
+ * f_close を毎回回すので、1KB のチャンクごとにルートディレクトリ
+ * (シリンダ 0)、/sys と /sys/font のディレクトリ (データ域のどこか)、
+ * FAT (シリンダ 0)、データの 4〜5 本のトラックを巡回する。巡回の長さが
+ * スロットの数を超えると LRU は 1 回も当たらない。
+ *
+ * トラックのスロットを増やす (1 本 9KB) 代わりに、**1 セクタの読み
+ * (FatFs の窓の出し入れ) だけを覚える小さな LRU** を足した。毎回使う
+ * ディレクトリと FAT のセクタはここに居続け、データはトラックの先読みから
+ * 出る。FatFs は FF_FS_TINY=1 なので、窓の出し入れは全部 count=1 で来る。 */
+#define FDC_TRACK_SLOTS      1
+#define FDC_SECTOR_SLOTS     8
+#define FDC_SECTOR_SLOT_BYTES 1024       /* 既知のジオメトリで最大の bps */
+#define FDC_CACHE_BYTES      (FDC_TRACK_SLOTS * FDC_TRACK_MAX_BYTES + \
+                              FDC_SECTOR_SLOTS * FDC_SECTOR_SLOT_BYTES)
+#define FDC_BUF_BYTES        (FDC_DMA_BUF_SIZE + FDC_CACHE_BYTES)
+#define FDC_DMA_BANK_SIZE    0x10000     /* DMA バンク = 64KB */
+#define FDC_DMA_BANK_MASK    0xFFFF      /* バンク内オフセットの取り出し */
+STATIC_ASSERT(FDC_BUF_BYTES < FDC_DMA_BANK_SIZE, fdc_buf_shorter_than_bank);
+/* fdc_buf_layout は「境界が先頭の窓の中なら末尾の窓はまたがない」に頼る。
+ * それには領域が窓の 2 倍以上であること。 */
+STATIC_ASSERT(FDC_BUF_BYTES >= 2 * FDC_DMA_BUF_SIZE, fdc_buf_twice_window);
+STATIC_ASSERT(FDC_SECTOR_SIZE <= FDC_DMA_BUF_SIZE, fdc_dma_buf_holds_sector);
 
 /* ======================================================================== */
 /*  メディア種別 (FDI/実FDDのジオメトリ選択に使用)                          */
@@ -336,6 +392,58 @@ int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
 /* セクタ書き込み (ジオメトリ指定版) */
 int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
                           const struct fdc_geom *g, const void *buf);
+
+/* 同じトラック (cyl/head) の sect から count セクタを **1 回の READ DATA**
+ * で読む (EOT = sect + count - 1、MT = 0)。buf は count × bps バイト。
+ *   0 = 成功 / -1 = 失敗 / -2 = 引数がトラックや受け皿に収まらない
+ *   -3 = NR (媒体もドライブも無い。まとめ読みの失敗には数えず、失敗行も
+ *        出さない — 1 セクタずつの読みも NR で即座に終わる)
+ * **リトライしない 1 回きり**。失敗したら呼び手 (drivers/fdc_track.c) が
+ * その範囲を fdc_read_sector_geom で 1 セクタずつ読み直す。失敗の後は
+ * DMA を閉じ、覚えているシリンダを捨てて戻る (次の単発がシークし直す)。
+ * 最終失敗ではないので失敗行は最初の数回だけ出す (fdc.c)。 */
+int fdc_read_sectors(int drv, int cyl, int head, int sect, int count,
+                     const struct fdc_geom *g, void *buf);
+
+/* 診断の数 (起動時の 1 行と試験が読む)。
+ * 実機やエミュレータで「シークが何回出たか」「期限切れを何回待ったか」
+ * 「束ねた読みが落ちて 1 セクタずつに戻っていないか」を見るため。 */
+struct fdc_stats {
+    u32 seek_issued;    /* SEEK を出した */
+    u32 seek_skipped;   /* 同じシリンダなので SEEK を省いた */
+    u32 recal_issued;   /* RECALIBRATE を出した (試行ごと) */
+    u32 seek_timeout;   /* SEEK / RECALIBRATE の IRQ 待ちが期限切れになった */
+    u32 sis_foreign;    /* 完了待ちの SIS が別ドライブ / Ready 変化を返した */
+    u32 ready_change;   /* SIS で Ready 変化 (IC=11b) を見た */
+    u32 multi_ok;       /* まとめ読みの成功 */
+    u32 multi_fail;     /* まとめ読みの失敗 (NR を除く) */
+    u32 multi_nr;       /* まとめ読みが NR (媒体無し) で終わった */
+    u32 single_reads;   /* 1 セクタの読み (呼び出し回数) */
+    u32 single_retries; /* 1 セクタの読みのリトライ (回復を挟んだ回数) */
+    u32 writes;         /* 1 セクタの書き込み (呼び出し回数) */
+};
+void fdc_get_stats(struct fdc_stats *out);
+
+/* 数を 1 行で出す (tag は場面の名前。何も起きていなければ出さない)。 */
+void fdc_print_stats(const char *tag);
+
+/* ドライブの中身の世代。**書き込み (fdc_write_sector_geom を通るもの全部 —
+ * FatFs、dev.c の fd0/fd1、KAPI の dev_blk_write)、Ready 変化 (媒体の
+ * 入れ替え)、fdc_set_media のたびに増える**。先読み (drivers/fdc_track.c)
+ * はスロットを埋めたときの世代と比べ、違えば当てない。 */
+u32 fdc_media_gen(int drv);
+
+/* 先読みのスロット i (0 ≦ i < FDC_TRACK_SLOTS) の先頭。各
+ * FDC_TRACK_MAX_BYTES バイト。DMA の窓とは重ならない (同じ静的領域の中)。
+ * 範囲外は NULL。 */
+u8 *fdc_track_slot(int i);
+
+/* セクタキャッシュのスロット j (0 ≦ j < FDC_SECTOR_SLOTS) の先頭。各
+ * FDC_SECTOR_SLOT_BYTES バイト。範囲外は NULL。 */
+u8 *fdc_sector_slot(int j);
+
+/* 覚えている現在のシリンダ (診断と試験用)。-1 = 知らない (次はシークする)。 */
+int fdc_get_known_cyl(int drv);
 
 /* IRQ11完了フラグ (isr_handlers.cからセット) */
 extern volatile u32 fdc_irq_fired;

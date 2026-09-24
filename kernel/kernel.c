@@ -12,6 +12,7 @@
 #include "io.h"
 #include "kbd.h"
 #include "fdc.h"
+#include "fatfs/diskio_os32.h"   /* diskio_print_fdd_cache */
 #include "disk.h"
 #include "dev.h"
 #include "path.h"
@@ -520,6 +521,14 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         } else {
             tvram_print(6, 3, "NG ", TATTR_RED);
             kprintf(0x07, "[KCG] kernel-init load failed: %d\n", fret);
+        }
+        /* FD の読みの数 (シーク / 省略 / 期限切れ / まとめ読み)。FD から
+         * 起動したときフォントの読み込みが遅い件 (2026-09-24) の切り分け用。
+         * **FD 起動のときだけ出す** — HDD 起動でも /fd0 のサブマウントの
+         * 試行で数が付き、「font」と名乗るのは嘘になる (ラリー 2 の Fable)。 */
+        if (boot_drive == BOOT_DRIVE_FDD || boot_drive == BOOT_DRIVE_FDD_144) {
+            fdc_print_stats("font");
+            diskio_print_fdd_cache("font");
         }
     }
 

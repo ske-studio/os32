@@ -323,6 +323,12 @@ NP21/WエミュレータのHostDrv機能を利用し、ホストPC (Windows) の
 
 - **fatfs/ + fatfs_vfs.c** — ELM FatFs (elm-chan.org) の移植 + VfsOps 統合ラッパー。ext2_vfs.c と同じマルチインスタンスパターン (FatFsCtx を kmalloc/kfree)。FDD ブート時のルートFSでもある (`root_fs = "fat"`)
 - FatFs のボリュームは pdrv 0/1 (fd0/fd1) の2つ。`fatfs_vfs_mount` は pdrv 単位の busy フラグで二重マウントを弾く (fd1 の自動マウント試行が fd0 のマウントを壊す経路があったため)
+- **FD の媒体を差し替えたら umount / mount する (契約)**。FD の読みはトラックの先読みとセクタキャッシュを
+  持ち (`drivers/fdc_track.c`、票 [`tasks/realhw/TASK_FDC_REALHW.md`](tasks/realhw/TASK_FDC_REALHW.md))、FatFs も
+  マウント中は FAT とディレクトリを覚えている。捨てる合図は (1) `disk_initialize` (= マウント)、(2) 書き込みと
+  SIS で見た Ready 変化による世代、(3) **最後の読みから 2 秒 (200 tick) 空いたとき** (MS-DOS と同じ考え方の
+  「2 秒規則」)。FRY=1 では同じ形式の媒体の差し替えが Ready 変化にならず (io_fdd.md の 0094h)、NP21/W も
+  交換で IRQ を出さないので、**2 秒以内の差し替えと、FatFs が覚えている FAT・ディレクトリは保証しない**
 
 > **自作 FAT12 ドライバ (`fs/fat12.c`, 1,152行) は廃止済み。** FatFs と二重実装で
 > あるうえ、FAT を8セクタに切り詰める (1.44MB で読みはサイレント切断・書きは
