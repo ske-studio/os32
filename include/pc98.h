@@ -48,17 +48,31 @@
 #define SYSPORT_B_INT3      0x10    /* HDD割り込み発生中 */
 #define SYSPORT_B_CRTT      0x08    /* CRTタイプ (0:15KHz 1:24KHz) */
 
-/* PortC BSR (37H) 出力値 — 表2-3 */
+/* PortC BSR (37H) 出力値 — 表2-3
+ *
+ * **0035h (ポート C) は丸ごと書かない。** RS-232C の割り込み許可 (bit0-2) と
+ * 同じバイトに BUZ (bit3)・MCHKEN (bit4)・SHUT1 (bit5)・PSTBM (bit6)・
+ * SHUT0 (bit7) が同居していて、全体書きはこれらを巻き添えにする
+ * (実機 PC-9821Ra266 で rshell 中にビープが鳴り続けた、2026-09-24。
+ * docs/POLICY_DEBUG.md §4-59)。1 ビットずつ 0037h のこのコマンドで操作する。
+ *
+ * **BUZ の極性は資料どうしで食い違う。UNDOCUMENTED を採る**
+ * (docs/hw/undocumented/io_syste.md の I/O 0035h bit3 と I/O 0037h:
+ * bit3 = 1 で停止、06h = 鳴動、07h = 停止)。PC9800Bible §2-2 表2-3 は逆に
+ * 書いているが、NP21/W (sound/beepc.c `buz = (sysport.c & 8)?0:1`) も
+ * UNDOCUMENTED と同じ向き。2026-09-24 まではここが Bible の向き
+ * (BUZ_OFF = 06h) で、buz_off() が実機でブザーを鳴らしていた。
+ * ほかの行は UNDOCUMENTED と Bible で一致する (偶数 = 0、奇数 = 1)。 */
 #define BSR_RXRE_OFF        0x00    /* RS-232C 受信割り込み禁止 */
 #define BSR_RXRE_ON         0x01    /* RS-232C 受信割り込み許可 */
 #define BSR_TXEE_OFF        0x02    /* RS-232C TXEMPTY割り込み禁止 */
 #define BSR_TXEE_ON         0x03    /* RS-232C TXEMPTY割り込み許可 */
 #define BSR_TXRE_OFF        0x04    /* RS-232C 送信割り込み禁止 */
 #define BSR_TXRE_ON         0x05    /* RS-232C 送信割り込み許可 */
-#define BSR_BUZ_OFF         0x06    /* ブザーOFF */
-#define BSR_BUZ_ON          0x07    /* ブザーON */
-#define BSR_MCKEN_OFF       0x08    /* メモリチェック結果格納しない */
-#define BSR_MCKEN_ON        0x09    /* メモリチェック結果格納する */
+#define BSR_BUZ_ON          0x06    /* ブザー鳴動 (bit3 = 0) — UNDOCUMENTED */
+#define BSR_BUZ_OFF         0x07    /* ブザー停止 (bit3 = 1) — UNDOCUMENTED */
+#define BSR_MCKEN_OFF       0x08    /* RAM パリティチェック無効 (MCHKEN = 0) */
+#define BSR_MCKEN_ON        0x09    /* RAM パリティチェック有効 (MCHKEN = 1) */
 #define BSR_SHUT1_CLR       0x0A    /* SHUT1 = 0 */
 #define BSR_SHUT1_SET       0x0B    /* SHUT1 = 1 */
 #define BSR_PSTBM_OFF       0x0C    /* PSTB マスクなし */

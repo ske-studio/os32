@@ -14,7 +14,9 @@
 #define SER_DATA    0x30    /* [0] 送受信データ */
 #define SER_CMD     0x32    /* [1] コマンドライト / [2] ステータスリード */
 #define SER_SIGNAL  0x33    /* [3] モデム信号線 (CI/CS/CD) */
-#define SER_MASK    0x35    /* [4] 割り込みマスク */
+#define SER_MASK    0x35    /* [4] 割り込みマスク (8255 ポート C)。
+                                *     **読むだけ。書くのは 0037h の BSR** —
+                                *     bit3-7 に BUZ・SHUT0/1 などが同居 */
 
 /* PIT カウンタ#2 (ボーレート設定) */
 #define SER_TIMER_CNT   0x75    /* カウンタ#2 データ */
@@ -59,7 +61,8 @@
 #define MOD_STOP15  0x80
 #define MOD_STOP2   0xC0
 
-/* ======== 割り込みマスクビット (ポート0x35) ======== */
+/* ======== 割り込みマスクビット (ポート0x35 の bit0-2) ========
+ * 書くときは 0037h の BSR (pc98.h の BSR_RXRE_* / BSR_TXEE_* / BSR_TXRE_*)。 */
 #define IEN_RX      0x01    /* D0: 受信レディ割り込み */
 #define IEN_TXEMP   0x02    /* D1: 送信エンプティ割り込み */
 #define IEN_TX      0x04    /* D2: 送信レディ割り込み */
