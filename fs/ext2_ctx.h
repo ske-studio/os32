@@ -42,6 +42,10 @@ typedef struct Ext2Ctx_tag {
     int mounted;
     int drive_num;           /* 後方互換 (format等で使用) */
     u32 base_lba;
+    /* 区画の長さ (512B セクタ)。ブロック I/O はこの範囲の外を断る
+     * (票 TASK_HDD_INSTALL 段 1-5 / F12: 以前は範囲検査が無く、壊れた
+     * ブロック番号や大きすぎる format が区画の外を書けた)。 */
+    u32 part_len;
     u32 num_groups;
     struct _Device *dev;     /* Device API ポインタ */
     Ext2Super sb_info;

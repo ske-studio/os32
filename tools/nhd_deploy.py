@@ -22,6 +22,7 @@ NHD_LOCAL が無ければ Windows 側から自動で取り込む (NP21/W 停止�
   python3 nhd_deploy.py deploy             — umount + NHDをNP21/Wにコピー
   python3 nhd_deploy.py format             — ext2を再フォーマット (データ全消去)
   python3 nhd_deploy.py init               — Windows側NHDを/tmpにコピー+フォーマット+マウント
+  python3 nhd_deploy.py migrate-pt [--no-push] — 旧配置の区画表を標準配置へ + ローダ + カーネル
 """
 
 import sys
@@ -31,6 +32,7 @@ import hashlib
 import json
 import subprocess
 import shutil
+import struct
 import glob as globmod
 import yaml
 
@@ -38,6 +40,8 @@ import yaml
 # (票 S0-D / D0)。書く・消す・切り詰める直前に 1 か所で止める。
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import deploy_protect as protect
+# 区画表の読み書き (drivers/pc98pt.c のホスト側の写し。票 TASK_HDD_INSTALL 段 1-4)
+import pc98pt
 
 # === パス設定 ===
 # 作業用 NHD (ループマウントして書き込む側)。以前は /tmp/os32.nhd だったが、
@@ -687,40 +691,209 @@ def do_format():
 
 
 def update_partition_table(nhd_path):
-    """パーティションテーブル(LBA 1)のCHS開始位置を更新する
+    """区画表 (LBA 1) に OS32 の項目を **PC-98 標準配置**で書く (票 TASK_HDD_INSTALL 段 1-4)。
 
-    PC-98パーティションテーブルエントリ (32バイト):
-      offset 0: bootable flag (0x80=active)
-      offset 1: system type (0xE2=OS32)
-      offset 6: start sector
-      offset 7: start head
-      offset 8-9: start cylinder (little-endian)
-
-    ジオメトリ: 8 heads, 17 sectors/track
+    開始 = HDD_PARTITION_LBA (1632)、長さ = そこから NHD の終わりまでのシリンダ。
+    幾何は NHD ヘッダの値 (NP21/W は IDE の IDENTIFY も BIOS もこの値で見せる)。
+    配置と規則の正典は drivers/pc98pt.h、Python 側は tools/pc98pt.py。
+    2026-09-23 までの版は開始を +6/+7/+8-9 に書く独自配置だった (F10)。
     """
-    NHD_HEADER = 512
-    PT_OFFSET = NHD_HEADER + 512  # LBA 1
-
-    # シリンダ番号を計算 (HDD_PARTITION_LBA / (heads * spt))
-    heads = 8
-    spt = 17
-    start_cyl = HDD_PARTITION_LBA // (heads * spt)
-
     with open(nhd_path, 'r+b') as f:
-        f.seek(PT_OFFSET)
-        pt = bytearray(f.read(512))
+        geom = pc98pt.nhd_geometry(f.read(512))
+        hs = geom['header_size']
+        cyl = geom['heads'] * geom['spt']
+        start = HDD_PARTITION_LBA
+        length = ((geom['total'] - start) // cyl) * cyl
+        sector = bytearray(pc98pt.SECTOR_SIZE)
+        sector[0:pc98pt.ENTRY_SIZE] = pc98pt.make_os32(
+            start, length, geom['heads'], geom['spt'])
+        f.seek(hs + pc98pt.PT_LBA * pc98pt.SECTOR_SIZE)
+        f.write(sector)
 
-        # Entry 0のCHS開始位置を更新
-        pt[6] = 0                                    # start sector = 0
-        pt[7] = 0                                    # start head = 0
-        pt[8] = start_cyl & 0xFF                     # start cylinder low
-        pt[9] = (start_cyl >> 8) & 0xFF              # start cylinder high
+    print("パーティションテーブル更新 (標準配置): 開始 LBA {} 長さ {} (H={} S={})".format(
+        start, length, geom['heads'], geom['spt']))
+    return start, length
 
-        f.seek(PT_OFFSET)
-        f.write(pt)
 
-    print("パーティションテーブル更新: 開始シリンダ={} (LBA {})".format(
-        start_cyl, HDD_PARTITION_LBA))
+# === 区画表の移行 (旧配置 → 標準配置) ===
+# 票 TASK_HDD_INSTALL §1-v3 N3。新しいカーネル・ローダは**標準配置しか読まない**
+# (旧配置の互換は持たない)。旧配置の NHD を新しいカーネルで起動するには、
+# 区画表・第二段ローダ (LBA 2〜17)・/boot/vmkernel.lz4 の 3 つを**同時に**
+# 入れ替える必要がある。`make deploy-kernel` はカーネルしか替えないので移行しない。
+
+EXT2_MAGIC = 0xEF53
+LOADER_LBA = 2
+LOADER_MAX_SECTORS = 16   # 8KB (IPL が LBA 2 から 16 セクタを読む)
+
+
+class MigrateError(Exception):
+    """移行を断る理由 (NHD には何も書いていない)。"""
+
+
+def _ext2_blocks_at(img, hs, start):
+    """区画の先頭に ext2 のスーパーブロックがあれば s_blocks_count、無ければ None。"""
+    img.seek(hs + start * 512 + 1024)
+    sb = img.read(1024)
+    if len(sb) < 1024 or struct.unpack_from('<H', sb, 56)[0] != EXT2_MAGIC:
+        return None
+    return struct.unpack_from('<I', sb, 4)[0]
+
+
+def plan_migrate_pt(img):
+    """開いた NHD を調べて移行の計画を返す (書かない)。
+
+    戻り値 dict: state = 'legacy' (移行する) / 'standard' (もう標準配置)、
+    geom、idx、start、length、new_sector (legacy のときだけ)。
+    断るときは MigrateError。条件:
+      - 空でない項目が**ちょうど 1 つ**で sid = 0xE2 (OS32)
+      - 旧配置で読んだ範囲がディスクの中・シリンダ境界
+      - その先頭に ext2 があり、ファイルシステムが区画に収まる
+    """
+    img.seek(0)
+    geom = pc98pt.nhd_geometry(img.read(512))
+    hs = geom['header_size']
+    img.seek(hs + pc98pt.PT_LBA * 512)
+    sector = img.read(512)
+    if len(sector) != 512:
+        raise MigrateError("LBA 1 を読めない")
+
+    used = pc98pt.used_entries(sector)
+    if len(used) != 1:
+        raise MigrateError("区画項目が {} 個 (ちょうど 1 つの OS32 区画だけを移行する)"
+                           .format(len(used)))
+    idx = used[0]
+    ent = pc98pt.entry_at(sector, idx)
+    if ent[pc98pt.OFF_SID] != pc98pt.SID_OS32:
+        raise MigrateError("項目 {} の sid が 0x{:02X} (OS32 = 0xE2 ではない)"
+                           .format(idx, ent[pc98pt.OFF_SID]))
+
+    heads, spt, total = geom['heads'], geom['spt'], geom['total']
+
+    # もう標準配置か (標準で読めて、その先頭に ext2 がある)
+    try:
+        s_std, l_std = pc98pt.entry_range(ent, heads, spt, total)
+        blocks = _ext2_blocks_at(img, hs, s_std)
+        if blocks is not None and blocks * 2 <= l_std:
+            return {'state': 'standard', 'geom': geom, 'idx': idx,
+                    'start': s_std, 'length': l_std}
+    except pc98pt.PtError:
+        pass
+
+    try:
+        start, length = pc98pt.legacy_entry_range(ent, heads, spt, total)
+    except pc98pt.PtError as exc:
+        raise MigrateError("旧配置としても読めない: {}".format(exc))
+
+    blocks = _ext2_blocks_at(img, hs, start)
+    if blocks is None:
+        raise MigrateError("旧配置の開始 LBA {} に ext2 が無い".format(start))
+    if blocks * 2 > length:
+        raise MigrateError("ext2 ({} ブロック) が区画 ({} セクタ) より大きい"
+                           .format(blocks, length))
+
+    try:
+        new_ent = pc98pt.make_os32(start, length, heads, spt)
+    except pc98pt.PtError as exc:
+        raise MigrateError("標準配置で表せない: {}".format(exc))
+    new_sector = bytearray(sector)
+    new_sector[idx * 32:(idx + 1) * 32] = new_ent
+    # 書いたものを標準の読み手で読み戻して同じ範囲になること
+    found = pc98pt.find_os32(bytes(new_sector), heads, spt, total)
+    if found is None or found[1:] != (start, length):
+        raise MigrateError("変換後の読み戻しが一致しない: {}".format(found))
+    return {'state': 'legacy', 'geom': geom, 'idx': idx, 'start': start,
+            'length': length, 'new_sector': bytes(new_sector)}
+
+
+def migrate_pt_raw(nhd_path, loader_data):
+    """区画表とローダだけを書き換える (カーネルは呼び手)。書く前に全部検査する。
+
+    戻り値 plan。state が 'standard' なら何も書かない。
+    """
+    if len(loader_data) > LOADER_MAX_SECTORS * 512:
+        raise MigrateError("ローダが {}B を超える ({} bytes)".format(
+            LOADER_MAX_SECTORS * 512, len(loader_data)))
+    with open(nhd_path, 'r+b') as img:
+        plan = plan_migrate_pt(img)
+        if plan['state'] != 'legacy':
+            return plan
+        hs = plan['geom']['header_size']
+        # ローダ → 区画表の順 (区画表が最後。途中で落ちたら旧配置のまま残る)
+        img.seek(hs + LOADER_LBA * 512)
+        img.write(loader_data.ljust(LOADER_MAX_SECTORS * 512, b'\x00'))
+        img.seek(hs + pc98pt.PT_LBA * 512)
+        img.write(plan['new_sector'])
+        img.flush()
+        os.fsync(img.fileno())
+    # 読み戻し
+    with open(nhd_path, 'rb') as img:
+        img.seek(hs + pc98pt.PT_LBA * 512)
+        if img.read(512) != plan['new_sector']:
+            raise MigrateError("区画表の読み戻しが一致しない")
+        img.seek(hs + LOADER_LBA * 512)
+        if img.read(len(loader_data)) != loader_data:
+            raise MigrateError("ローダの読み戻しが一致しない")
+    return plan
+
+
+def do_migrate_pt(loader_bin, kernel_file, push=True):
+    """旧配置の NHD を標準配置へ移し、ローダとカーネルを同時に入れ替える (N3)。
+
+    [D1] NP21/W を**止めてから**実行する (push は NP21/W の NHD を上書きする)。
+    順序: 検査 → カーネルを ext2 の /boot へ → ローダ → 区画表 (最後) → push。
+    どこかで落ちたら push しない (ローカルの作業用 NHD だけが途中の状態になる)。
+    """
+    for path, what in ((loader_bin, 'ローダ'), (kernel_file, 'カーネル')):
+        if not os.path.isfile(path):
+            print("Error: {} {} が無い (make all を先に)".format(what, path),
+                  file=sys.stderr)
+            return False
+    if is_mounted() and not do_umount():
+        return False
+    if not ensure_local_nhd():
+        return False
+
+    with open(loader_bin, 'rb') as f:
+        loader_data = f.read()
+    try:
+        with open(NHD_LOCAL, 'rb') as img:
+            plan = plan_migrate_pt(img)
+    except (MigrateError, pc98pt.PtError) as exc:
+        print("Error: 移行を断る: {} (何も書いていない)".format(exc), file=sys.stderr)
+        return False
+    if plan['state'] == 'standard':
+        print("区画表は既に標準配置 (開始 LBA {} 長さ {})。移行は不要 — "
+              "カーネルは deploy-kernel、ローダは deploy-boot で".format(
+                  plan['start'], plan['length']))
+        return True
+    if plan['start'] != HDD_PARTITION_LBA:
+        # ホスト側のマウントは PARTITION_OFFSET (LBA 1632) 固定。違う位置の
+        # ext2 にカーネルを置く手段が無いので断る。
+        print("Error: 区画の開始 LBA {} が {} でない (このツールはマウントできない)"
+              .format(plan['start'], HDD_PARTITION_LBA), file=sys.stderr)
+        return False
+    print("移行: 旧配置 → 標準配置 (開始 LBA {} 長さ {}、H={} S={})".format(
+        plan['start'], plan['length'], plan['geom']['heads'], plan['geom']['spt']))
+
+    # 1. カーネル (ext2 の /boot/vmkernel.lz4)
+    if not do_copy([kernel_file], dest_dir='/boot', rename='vmkernel.lz4'):
+        return False
+    if not do_umount():
+        return False
+    # 2-3. ローダ → 区画表
+    try:
+        migrate_pt_raw(NHD_LOCAL, loader_data)
+    except (MigrateError, pc98pt.PtError, OSError) as exc:
+        print("Error: 区画表 / ローダの書き換えに失敗: {} (push しない)".format(exc),
+              file=sys.stderr)
+        return False
+    print("  loader: {} bytes -> LBA {}-{}".format(
+        len(loader_data), LOADER_LBA, LOADER_LBA + LOADER_MAX_SECTORS - 1))
+    print("  partition table: 標準配置で書いて読み戻し一致")
+    if not push:
+        print("完了 (--no-push: NP21/W 側へはまだ送っていない)")
+        return True
+    return do_deploy()
 
 
 def do_pull():
@@ -1234,6 +1407,8 @@ def main():
         print("  pull                   — NP21/W側NHDを取り込む (来歴を記録)")
         print("  format                 — ext2を再フォーマット (全消去)")
         print("  init                   — Windows側NHDをコピー+フォーマット+マウント")
+        print("  migrate-pt [--no-push] [--loader BIN] [--kernel LZ4]")
+        print("                         — 旧配置の区画表を標準配置へ + ローダ + カーネルを同時に (NP21/W 停止中)")
         print("")
         print("パス:")
         print("  NHDローカル:  {}".format(NHD_LOCAL))
@@ -1325,6 +1500,26 @@ def main():
 
     elif cmd == 'init':
         return do_init()
+
+    elif cmd == 'migrate-pt':
+        loader = os.path.join(PROJ_DIR, 'boot', 'loader_hdd.bin')
+        kernel = os.path.join(PROJ_DIR, 'build', 'out', 'vmkernel.lz4')
+        push = True
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == '--no-push':
+                push = False
+                i += 1
+            elif sys.argv[i] == '--loader' and i + 1 < len(sys.argv):
+                loader = sys.argv[i + 1]
+                i += 2
+            elif sys.argv[i] == '--kernel' and i + 1 < len(sys.argv):
+                kernel = sys.argv[i + 1]
+                i += 2
+            else:
+                print("Usage: migrate-pt [--no-push] [--loader BIN] [--kernel LZ4]")
+                return False
+        return do_migrate_pt(loader, kernel, push=push)
 
     elif cmd == 'sync':
         # --tag TAG オプションをパース

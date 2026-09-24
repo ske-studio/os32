@@ -17,15 +17,21 @@ CFLAGS_BOOT = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie \
               -Iboot
 
 BOOT_C_SRC = boot/boot_main.c boot/ext2_mini.c boot/lz4_mini.c
-BOOT_C_OBJ = $(BOOT_C_SRC:.c=.o)
+# 区画表の共有部 (drivers/pc98pt.c) を**写さずに**ローダにも組む
+# (票 TASK_HDD_INSTALL 段 1-4)。カーネル・シェル・nhd_deploy.py と同じ配置で読む。
+BOOT_PT_OBJ = boot/pc98pt_boot.o
+BOOT_C_OBJ = $(BOOT_C_SRC:.c=.o) $(BOOT_PT_OBJ)
 BOOT_ASM_OBJ = boot/loader_hdd.o
 BOOT_ALL_OBJ = $(BOOT_ASM_OBJ) $(BOOT_C_OBJ)
 
 boot/loader_hdd.o: boot/loader_hdd.asm
 	$(AS) -f elf32 -o $@ $<
 
-boot/boot_main.o: boot/boot_main.c boot/boot_defs.h
-	$(CC) $(CFLAGS_BOOT) -c -o $@ $<
+boot/boot_main.o: boot/boot_main.c boot/boot_defs.h drivers/pc98pt.h
+	$(CC) $(CFLAGS_BOOT) -Idrivers -c -o $@ $<
+
+$(BOOT_PT_OBJ): drivers/pc98pt.c drivers/pc98pt.h
+	$(CC) $(CFLAGS_BOOT) -Idrivers -c -o $@ $<
 
 boot/ext2_mini.o: boot/ext2_mini.c boot/boot_defs.h
 	$(CC) $(CFLAGS_BOOT) -c -o $@ $<
@@ -70,10 +76,10 @@ clean-boot:
 # === デバッグ版HDDローダー (ext2読み出しステップ確認用) ===
 BOOT_DBG_C_SRC = boot/boot_debug.c
 BOOT_DBG_C_OBJ = $(BOOT_DBG_C_SRC:.c=.o)
-BOOT_DBG_ALL_OBJ = $(BOOT_ASM_OBJ) $(BOOT_DBG_C_OBJ)
+BOOT_DBG_ALL_OBJ = $(BOOT_ASM_OBJ) $(BOOT_DBG_C_OBJ) $(BOOT_PT_OBJ)
 
-boot/boot_debug.o: boot/boot_debug.c boot/boot_defs.h
-	$(CC) $(CFLAGS_BOOT) -c -o $@ $<
+boot/boot_debug.o: boot/boot_debug.c boot/boot_defs.h drivers/pc98pt.h
+	$(CC) $(CFLAGS_BOOT) -Idrivers -c -o $@ $<
 
 boot/loader_hdd_debug.elf: $(BOOT_DBG_ALL_OBJ)
 	$(LD) -m elf_i386 -T boot/loader.ld -o $@ $^ \

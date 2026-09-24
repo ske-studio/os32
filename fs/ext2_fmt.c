@@ -1,4 +1,6 @@
 #include "ext2_priv.h"
+#include "ext2_layout.h"   /* 大きさの固定点 (票 TASK_HDD_INSTALL N7) */
+#include "ide.h"
 
 /*  ext2_format — ディスクにext2ファイルシステムを作成                       */
 /*                                                                          */
@@ -32,23 +34,18 @@ typedef struct {
     u32 inode_tbl_blocks;/* inodeテーブルのブロック数 */
 } GroupLayout;
 
-/* SPARSE_SUPER規則: 0, 1, 3^n, 5^n, 7^n のグループにSBバックアップを配置 */
 #define EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER  0x0001
 
-static int is_power_of(u32 n, u32 base)
-{
-    u32 v = base;
-    while (v < n) v *= base;
-    return (v == n) ? 1 : 0;
-}
+/* SPARSE_SUPER規則: 0, 1, 3^n, 5^n, 7^n のグループにSBバックアップを配置
+ * (規則の正典は fs/ext2_layout.c — 必要量の計算と同じ関数を使う) */
+#define is_sparse_group(g)  ext2_layout_is_sparse(g)
 
-static int is_sparse_group(u32 g)
-{
-    if (g <= 1) return 1;
-    return (is_power_of(g, 3) || is_power_of(g, 5) || is_power_of(g, 7)) ? 1 : 0;
-}
-
-int ext2_format(int ide_drive, u32 total_sectors)
+/* [base_lba, base_lba + part_len) の中に sectors 分の ext2 を作る。
+ * 呼び手 (ext2_format / ext2_format_at) が範囲を検証済みであること。
+ * 大きさは ext2_layout_plan の固定点 — 最終グループに全メタデータが
+ * 収まらなければそのグループを落として計算し直す (N7 / F12)。 */
+static int ext2_format_range(int ide_drive, u32 base_lba, u32 part_len,
+                             u32 sectors)
 {
     u32 total_blocks, inodes_count, num_groups;
     u32 inodes_per_group, inode_tbl_blocks_per_group;
@@ -56,6 +53,7 @@ int ext2_format(int ide_drive, u32 total_sectors)
     u32 g, i;
     int ret;
     GroupLayout gl;
+    Ext2Layout lay;
     /* フォーマット用一時コンテキスト。
      * static — Ext2Ctx は解決済み経路の記憶 (票 S6-P) で 1.7KB 余りあり、
      * 16KB のカーネルスタックへ丸ごと積みたくない。シングルタスクなので
@@ -63,38 +61,28 @@ int ext2_format(int ide_drive, u32 total_sectors)
     static Ext2Ctx fmt_ctx;
 
     if (!ide_drive_present(ide_drive)) return EXT2_ERR_IO;
+    if (sectors > part_len) sectors = part_len;
+
+    if (ext2_layout_plan(sectors, EXT2_MAX_GROUPS, &lay) != EXT2L_OK)
+        return EXT2_ERR_NOSPC;
 
     /* 一時コンテキストを初期化
      * ext2_read_block/ext2_write_block は ctx->dev (Device API) 経由で
-     * I/O するため、dev を必ず解決してから使うこと。 */
+     * I/O するため、dev を必ず解決してから使うこと。part_len で区画の
+     * 外への書き込みはブロック I/O の層でも断る。 */
     ext2_mem_zero(&fmt_ctx, sizeof(fmt_ctx));
     fmt_ctx.drive_num = ide_drive;
     fmt_ctx.dev = ext2_dev_for(ide_drive);
     if (!fmt_ctx.dev) return EXT2_ERR_IO;
-    fmt_ctx.base_lba = ext2_find_partition(ide_drive);
+    fmt_ctx.base_lba = base_lba;
+    fmt_ctx.part_len = part_len;
 
-    total_blocks = total_sectors / 2;  /* 512B→1KB */
-    if (total_blocks < 64) return EXT2_ERR_NOSPC;
-
-    /* グループ数を計算 (1KBブロック時、1グループ最大8192ブロック) */
-    num_groups = (total_blocks - 1 + EXT2_BLOCKS_PER_GROUP_MAX - 1) / EXT2_BLOCKS_PER_GROUP_MAX;
-    if (num_groups == 0) num_groups = 1;
-    if (num_groups > EXT2_MAX_GROUPS) return EXT2_ERR_NOSPC;
-
-    /* inodeの数: ブロック4個あたり1 inode (mkfs.ext2のデフォルトに近い) */
-    inodes_count = total_blocks / 4;
-    if (inodes_count < 16) inodes_count = 16;
-
-    /* inodes_per_groupはグループ数で均等割り (8の倍数に切り上げ) */
-    inodes_per_group = (inodes_count + num_groups - 1) / num_groups;
-    inodes_per_group = (inodes_per_group + 7) & ~7u;  /* 8の倍数 */
-    inodes_count = inodes_per_group * num_groups;
-
-    /* グループごとのinodeテーブルブロック数 */
-    inode_tbl_blocks_per_group = (inodes_per_group * 128 + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
-
-    /* GDTブロック数 (32B × num_groups) */
-    gdt_blocks = (num_groups * 32 + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
+    total_blocks = lay.total_blocks;
+    num_groups = lay.num_groups;
+    inodes_per_group = lay.inodes_per_group;
+    inodes_count = lay.inodes_count;
+    inode_tbl_blocks_per_group = lay.itable_blocks;
+    gdt_blocks = lay.gdt_blocks;
 
     /* ===== Block 0: ブートブロック (ゼロクリア) ===== */
     ext2_mem_zero(ext2_g_blk, EXT2_BLOCK_SIZE);
@@ -356,4 +344,39 @@ int ext2_format(int ide_drive, u32 total_sectors)
     }
 
     return EXT2_OK;
+}
+
+/* ======================================================================== */
+/*  入口                                                                    */
+/* ======================================================================== */
+
+int ext2_format(int ide_drive, u32 total_sectors)
+{
+    u32 start, len;
+    int ret;
+
+    if (!ide_drive_present(ide_drive)) return EXT2_ERR_IO;
+    /* 区画表の OS32 区画に作る。区画が無ければ作らない (以前は LBA 1088 を
+     * 仮定して書き始めた、F12)。長さは区画で頭打ち — インストーラは
+     * 「総数 - 1632」を渡すが、区画はシリンダ単位で切り下げてある。 */
+    ret = ext2_find_partition(ide_drive, &start, &len);
+    if (ret != EXT2_OK) return ret;
+    return ext2_format_range(ide_drive, start, len, total_sectors);
+}
+
+int ext2_format_at(int ide_drive, u32 start_lba, u32 length)
+{
+    IdeInfo info;
+
+    if (!ide_drive_present(ide_drive)) return EXT2_ERR_IO;
+    if (ide_get_info(ide_drive, &info) != IDE_OK) return EXT2_ERR_IO;
+    /* 範囲の検査。**どれか 1 つでも外れたら 1 バイトも書かない**。
+     *   - 長さ 0 / 開始が IPL・区画表・ローダ (LBA 0〜17) に掛かる
+     *   - 総数が分からない / 開始 + 長さがディスクの外 (足し算の桁あふれも) */
+    if (length == 0) return EXT2_ERR_INVAL;
+    if (start_lba < (u32)EXT2_FMT_MIN_LBA) return EXT2_ERR_INVAL;
+    if (info.total_sectors == 0) return EXT2_ERR_INVAL;
+    if (start_lba >= info.total_sectors) return EXT2_ERR_INVAL;
+    if (length > info.total_sectors - start_lba) return EXT2_ERR_INVAL;
+    return ext2_format_range(ide_drive, start_lba, length, length);
 }

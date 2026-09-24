@@ -34,7 +34,7 @@ SHELL_OBJ = $(SHELL_SRC:.c=.o)
 # 走査しないので userland の .d は読まれない。sh_launch.inc / sh_pipe.inc /
 # sh_redraw.inc を直しても .o が作り直されないと、直したつもりの sh.bin が
 # 出来上がる。常駐側にも同じ依存を足す (レシピは変えないので .o は不変)。
-SHELL_DEPS = userland/shell/shell.h $(wildcard userland/shell/*.inc)
+SHELL_DEPS = userland/shell/shell.h userland/shell/hdprep_plan.h drivers/pc98pt.h $(wildcard userland/shell/*.inc)
 
 userland/shell/%.o: userland/shell/%.c $(SHELL_DEPS)
 	$(CC) $(PROGRAM_FLAGS) -Iuserland/shell $(INC_libos32filer) -c $< -o $@
@@ -48,8 +48,15 @@ PCI_DECODE_USER_OBJ = userland/shell/pci_decode_user.o
 $(PCI_DECODE_USER_OBJ): drivers/pci_decode.c drivers/pci_decode.h
 	$(CC) $(PROGRAM_FLAGS) -Idrivers -c drivers/pci_decode.c -o $@
 
-userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(PCI_DECODE_USER_OBJ) $(FILER_DRAW_OBJ)
-	$(LD) -m elf_i386 -T sdk/link/app_sys.ld -nostdlib --nmagic --gc-sections -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(PCI_DECODE_USER_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
+# 区画表の共有部 (drivers/pc98pt.c) も同じ扱い — `hdprep` が書く区画表は
+# カーネル・ローダ・nhd_deploy.py と 1 バイトも違ってはいけない
+# (票 TASK_HDD_INSTALL 段 1-4)。
+PC98PT_USER_OBJ = userland/shell/pc98pt_user.o
+$(PC98PT_USER_OBJ): drivers/pc98pt.c drivers/pc98pt.h
+	$(CC) $(PROGRAM_FLAGS) -Idrivers -c drivers/pc98pt.c -o $@
+
+userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(PCI_DECODE_USER_OBJ) $(PC98PT_USER_OBJ) $(FILER_DRAW_OBJ)
+	$(LD) -m elf_i386 -T sdk/link/app_sys.ld -nostdlib --nmagic --gc-sections -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(PCI_DECODE_USER_OBJ) $(PC98PT_USER_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
 
 # === sh — 同じシェルのソースを CPL=3 の外部アプリとして (票 T9 D1) ===
 # 常駐 shell.bin (app_sys.ld = 0x300000) の規則は上のまま一切変えない。同じ
@@ -72,6 +79,11 @@ $(SH_PCI_DECODE_OBJ): drivers/pci_decode.c drivers/pci_decode.h
 	@mkdir -p $(SH_OBJDIR)
 	$(CC) $(PROGRAM_FLAGS) -DSHELL_AS_APP -Idrivers -c drivers/pci_decode.c -o $@
 
+SH_PC98PT_OBJ = $(SH_OBJDIR)/pc98pt_user.o
+$(SH_PC98PT_OBJ): drivers/pc98pt.c drivers/pc98pt.h
+	@mkdir -p $(SH_OBJDIR)
+	$(CC) $(PROGRAM_FLAGS) -DSHELL_AS_APP -Idrivers -c drivers/pc98pt.c -o $@
+
 # main.c だけが #include する .inc の明示依存 (レシピ無し = 上のパターン規則に
 # 前提だけを足す)。$(SHELL_DEPS) の wildcard でも拾えるが、wildcard は
 # Makefile 読み込み時の 1 度しか評価されないので、新しく足した .inc が
@@ -80,8 +92,8 @@ $(SH_PCI_DECODE_OBJ): drivers/pci_decode.c drivers/pci_decode.h
 userland/shell/main.o:    userland/shell/sh_exec.inc
 $(SH_OBJDIR)/main.o:      userland/shell/sh_exec.inc
 
-userland/sh.elf: sdk/link/app.ld $(CRT0_OBJ) $(SH_OBJ) $(SH_PCI_DECODE_OBJ) $(FILER_DRAW_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(SH_OBJ) $(SH_PCI_DECODE_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
+userland/sh.elf: sdk/link/app.ld $(CRT0_OBJ) $(SH_OBJ) $(SH_PCI_DECODE_OBJ) $(SH_PC98PT_OBJ) $(FILER_DRAW_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(SH_OBJ) $(SH_PCI_DECODE_OBJ) $(SH_PC98PT_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
 
 sh: $(CRT0_OBJ) userland/sh.bin
 

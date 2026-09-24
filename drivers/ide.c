@@ -1,12 +1,15 @@
 /* ======================================================================== */
-/*  IDE.C — PC-98 IDE/ATA PIOドライバ実装 (CHS専用)                        */
+/*  IDE.C — PC-98 IDE/ATA PIOドライバ実装                                   */
 /*                                                                          */
-/*  PIOモードによるセクタ読み書き。APIはCHS値を直接受け取る。                  */
-/*  LBAアクセスは dev.c の dev_blk_read_lba ラッパーがCHSに変換する。        */
+/*  PIOモードによるセクタ読み書き。LBA の API (ide_read_sector ほか) は      */
+/*  drivers/ide_addr.c が IDENTIFY から選んだ方式 (LBA28 / 現在の CHS /      */
+/*  既定の CHS) でレジスタ値を作る (票 TASK_HDD_INSTALL 段 1、F8 / F13)。     */
+/*  drivers/dev.c の hd0-3 もこの LBA の API を通る。                        */
 /*  NP21/W + DOSBox-X + FreeBSD/pc98 wdc を参考に実装。                     */
 /* ======================================================================== */
 
 #include "ide.h"
+#include "ide_addr.h"
 #include "io.h"
 #include "pc98.h"
 #include "kprintf.h"
@@ -105,16 +108,92 @@ static void ide_select_drive(int drive)
 }
 
 
-/* CHS レジスタ直接設定 (LBA→CHS 変換なし) */
-static void ide_set_chs_direct(int drive, u16 cyl, u8 head, u8 sect,
-                               u8 count)
+/* セクタ指定のレジスタを書く。DRV/HEAD は ide_addr_make が作った値
+ * (LBA28 なら bit6 と LBA[27:24]、CHS ならヘッド) をそのまま出す。 */
+static void ide_set_addr(const IdeAddr *a, u8 count)
 {
     outp(IDE_SECT_CNT, (unsigned)count);
-    outp(IDE_SECT_NUM, (unsigned)sect);
-    outp(IDE_CYL_LO,   (unsigned)(cyl & 0xFF));
-    outp(IDE_CYL_HI,   (unsigned)((cyl >> 8) & 0xFF));
-    outp(IDE_DRV_HEAD, (unsigned)(IDE_DRV_SEL_CHS | (head & 0x0F)
-                                  | ((drive % 2) ? 0x10 : 0x00)));
+    outp(IDE_SECT_NUM, (unsigned)a->sect_num);
+    outp(IDE_CYL_LO,   (unsigned)a->cyl_lo);
+    outp(IDE_CYL_HI,   (unsigned)a->cyl_hi);
+    outp(IDE_DRV_HEAD, (unsigned)a->drv_head);
+}
+
+/* CHS をそのまま IdeAddr にする (ide_read_sector_chs 系の入口) */
+static void ide_chs_addr(int drive, u16 cyl, u8 head, u8 sect, IdeAddr *a)
+{
+    a->mode     = IDE_AMODE_CHS_DEF;
+    a->sect_num = sect;
+    a->cyl_lo   = (u8)(cyl & 0xFF);
+    a->cyl_hi   = (u8)((cyl >> 8) & 0xFF);
+    a->drv_head = (u8)(IDE_DRV_SEL_CHS | (head & 0x0F)
+                       | ((drive % 2) ? 0x10 : 0x00));
+}
+
+/* 1 セクタ読み / 書き (指定は呼び手が作る) */
+static int ide_pio_read(int drive, const IdeAddr *a, void *buf)
+{
+    int ret;
+
+    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
+
+    ide_select_drive(drive);
+    ret = ide_wait_bsy();
+    if (ret != IDE_OK) return ret;
+
+    ide_set_addr(a, 1);
+
+    outp(IDE_COMMAND, IDE_CMD_READ);
+
+    ret = ide_wait_drq();
+    if (ret != IDE_OK) return ret;
+
+    {
+        u16 *dst = (u16 *)buf;
+        int w;
+        for (w = 0; w < 256; w++) {
+            dst[w] = (u16)inpw(IDE_DATA);
+        }
+    }
+
+    { u8 st = (u8)inp(IDE_STATUS); (void)st; }
+    ide_wait_bsy();
+
+    return IDE_OK;
+}
+
+static int ide_pio_write(int drive, const IdeAddr *a, const void *buf)
+{
+    int ret;
+    const u16 *data = (const u16 *)buf;
+    int i;
+
+    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
+
+    ide_select_drive(drive);
+    ret = ide_wait_bsy();
+    if (ret != IDE_OK) return ret;
+
+    ide_set_addr(a, 1);
+
+    outp(IDE_COMMAND, IDE_CMD_WRITE);
+
+    ret = ide_wait_drq();
+    if (ret != IDE_OK) return ret;
+
+    for (i = 0; i < 256; i++) {
+        outpw(IDE_DATA, (unsigned)data[i]);
+    }
+
+    ret = ide_wait_bsy();
+    if (ret != IDE_OK) return ret;
+
+    {
+        u8 st = (u8)inp(IDE_STATUS);
+        if (st & IDE_ST_ERR) return IDE_ERR_IO;
+    }
+
+    return IDE_OK;
 }
 
 /* ============================================================ */
@@ -173,7 +252,9 @@ int ide_identify(int drive, IdeInfo *info)
     u16 buf[256];
     int i, ret;
 
-    drive_geom[drive & 3].valid = 0;   /* 答えなければ古い値を残さない */
+    /* drive_geom は I/O の方式 (ide_addr.c) の元なので、**成功したときだけ**
+     * 書き換える。KAPI の ide_identify (シェルの `ide N`) が一時的に失敗しても、
+     * 起動時に得た値で読み書きが続けられる。起動時の初期値は 0 (valid = 0)。 */
     ide_select_drive(drive & 3);
     ret = ide_wait_bsy();
     if (ret != IDE_OK) return ret;
@@ -197,8 +278,8 @@ int ide_identify(int drive, IdeInfo *info)
     { u8 st = (u8)inp(IDE_STATUS); (void)st; }
     ide_wait_bsy();
 
-    /* 幾何の生の語 (段 0 の計測。CHS 変換はまだ既定の word 1/3/6 を使う —
-     * LBA28 / 現在の変換への切り替えは段 1 の範囲)。 */
+    /* 幾何の生の語。I/O の指定の方式 (LBA28 / 現在の CHS / 既定の CHS) は
+     * drivers/ide_addr.c がこの値から決める (票 TASK_HDD_INSTALL 段 1)。 */
     {
         IdeGeom *g = &drive_geom[drive & 3];
         g->def_cyl   = buf[1];
@@ -284,68 +365,17 @@ int ide_identify(int drive, IdeInfo *info)
 int ide_read_sector_chs(int drive, u16 cyl, u8 head, u8 sect,
                         void *buf)
 {
-    int ret;
-
-    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
-
-    ide_select_drive(drive);
-    ret = ide_wait_bsy();
-    if (ret != IDE_OK) return ret;
-
-    ide_set_chs_direct(drive, cyl, head, sect, 1);
-
-    outp(IDE_COMMAND, IDE_CMD_READ);
-
-    ret = ide_wait_drq();
-    if (ret != IDE_OK) return ret;
-
-    {
-        u16 *dst = (u16 *)buf;
-        int w;
-        for (w = 0; w < 256; w++) {
-            dst[w] = (u16)inpw(IDE_DATA);
-        }
-    }
-
-    { u8 st = (u8)inp(IDE_STATUS); (void)st; }
-    ide_wait_bsy();
-
-    return IDE_OK;
+    IdeAddr a;
+    ide_chs_addr(drive, cyl, head, sect, &a);
+    return ide_pio_read(drive, &a, buf);
 }
 
 int ide_write_sector_chs(int drive, u16 cyl, u8 head, u8 sect,
                          const void *buf)
 {
-    int ret;
-    const u16 *data = (const u16 *)buf;
-    int i;
-
-    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
-
-    ide_select_drive(drive);
-    ret = ide_wait_bsy();
-    if (ret != IDE_OK) return ret;
-
-    ide_set_chs_direct(drive, cyl, head, sect, 1);
-
-    outp(IDE_COMMAND, IDE_CMD_WRITE);
-
-    ret = ide_wait_drq();
-    if (ret != IDE_OK) return ret;
-
-    for (i = 0; i < 256; i++) {
-        outpw(IDE_DATA, (unsigned)data[i]);
-    }
-
-    ret = ide_wait_bsy();
-    if (ret != IDE_OK) return ret;
-
-    {
-        u8 st = (u8)inp(IDE_STATUS);
-        if (st & IDE_ST_ERR) return IDE_ERR_IO;
-    }
-
-    return IDE_OK;
+    IdeAddr a;
+    ide_chs_addr(drive, cyl, head, sect, &a);
+    return ide_pio_write(drive, &a, buf);
 }
 
 int ide_drive_present(int drive)
@@ -379,45 +409,50 @@ int ide_get_info(int drive, IdeInfo *info)
 }
 
 /* ======================================================================== */
-/*  LBA互換ラッパー (KAPI ABI維持用)                                        */
-/*  旧 ide_read_sector/ide_write_sector 系のLBAインターフェースを           */
-/*  drive_info のジオメトリで CHS に変換して _chs 系へ委譲する。            */
-/*  KernelAPI スロット (append-only 規約) と install/cdinst の利用を維持。  */
+/*  LBA の読み書き (KAPI の ide_read_sector 系と dev.c の hd0-3)             */
+/*                                                                          */
+/*  指定の方式と範囲は drivers/ide_addr.c が決める。**範囲外は 1 セクタも    */
+/*  出さない** — 複数セクタは先に全体の範囲を見てから回す (前半だけ書いて    */
+/*  後半で断ると、呼び手には失敗なのに媒体は変わっている)。                   */
 /* ======================================================================== */
-static void ide_lba_to_chs(int drive, u32 lba, u16 *cyl, u8 *head, u8 *sect)
+
+int ide_addr_mode_of(int drive)
 {
-    u16 heads = drive_info[drive & 3].heads;
-    u16 spt   = drive_info[drive & 3].sectors;
-    u32 temp;
-
-    /* ジオメトリ未取得時のフォールバック (旧実装と同一) */
-    if (heads == 0) heads = 8;
-    if (spt == 0)   spt   = 17;
-
-    *sect = (u8)((lba % spt) + 1);      /* 1ベース */
-    temp  = lba / spt;
-    *head = (u8)(temp % heads);
-    *cyl  = (u16)(temp / heads);
+    if (drive < 0 || drive >= IDE_MAX_DRIVES) return IDE_AMODE_NONE;
+    if (!drive_present[drive]) return IDE_AMODE_NONE;
+    return ide_addr_mode(&drive_geom[drive], (u16 *)0, (u16 *)0, (u32 *)0);
 }
 
 int ide_read_sector(int drive, u32 lba, void *buf)
 {
-    u16 cyl; u8 head, sect;
-    ide_lba_to_chs(drive, lba, &cyl, &head, &sect);
-    return ide_read_sector_chs(drive, cyl, head, sect, buf);
+    IdeAddr a;
+    int ret;
+
+    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
+    ret = ide_addr_make(&drive_geom[drive & 3], drive & 3, lba, &a);
+    if (ret != IDE_OK) return ret;
+    return ide_pio_read(drive & 3, &a, buf);
 }
 
 int ide_write_sector(int drive, u32 lba, const void *buf)
 {
-    u16 cyl; u8 head, sect;
-    ide_lba_to_chs(drive, lba, &cyl, &head, &sect);
-    return ide_write_sector_chs(drive, cyl, head, sect, buf);
+    IdeAddr a;
+    int ret;
+
+    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
+    ret = ide_addr_make(&drive_geom[drive & 3], drive & 3, lba, &a);
+    if (ret != IDE_OK) return ret;
+    return ide_pio_write(drive & 3, &a, buf);
 }
 
 int ide_read_sectors(int drive, u32 lba, u32 count, void *buf)
 {
     u32 i;
     u8 *dst = (u8 *)buf;
+
+    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
+    if (!ide_addr_range_ok(&drive_geom[drive & 3], lba, count))
+        return IDE_ERR_RANGE;
     for (i = 0; i < count; i++) {
         int ret = ide_read_sector(drive, lba + i, dst + i * 512);
         if (ret != IDE_OK) return ret;
@@ -429,6 +464,10 @@ int ide_write_sectors(int drive, u32 lba, u32 count, const void *buf)
 {
     u32 i;
     const u8 *src = (const u8 *)buf;
+
+    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
+    if (!ide_addr_range_ok(&drive_geom[drive & 3], lba, count))
+        return IDE_ERR_RANGE;
     for (i = 0; i < count; i++) {
         int ret = ide_write_sector(drive, lba + i, src + i * 512);
         if (ret != IDE_OK) return ret;

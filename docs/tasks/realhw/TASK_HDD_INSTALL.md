@@ -79,6 +79,36 @@
 
 ### 段 1 — 一時置き場 (FD 起動のまま)
 
+#### 段 1 の実装メモ (2026-09-24、wt/hdd-stage1、KAPI v64)
+
+- **区画表の共有部**: `drivers/pc98pt.h` / `pc98pt.c` (純粋関数、型は C の素の型でローダでも組める)。
+  標準配置 (+8/+9/+10-11 開始、+12/+13/+14-15 終了)、区画はシリンダ単位 (終わり = (終了シリンダ + 1) ×
+  heads × spt、終了ヘッド・セクタは読まない)。OS32 の区画 = sid 0xE2 の最初の項目。読み手は
+  `fs/ext2_super.c` (`ext2_find_partition`)・`boot/boot_main.c` (+ `boot_debug.c`)・`fs/fatfs_vfs.c`
+  (`PC98PartEntry` を共有、`pc98pt_get` で読む)・`userland/shell/cmd_hdprep.c`。ホスト側は
+  `tools/pc98pt.py` (C と 1 バイトずつ突き合わせる)。**cdinst / install の書き手は段 2 まで旧配置のまま**
+  (並行作業との分担) — v64 のカーネルで CD インストールすると format が `EXT2_ERR_NOPART` で止まる。
+- **`ext2_find_partition(drive, &start, &len)`**: 失敗 (`EXT2_ERR_IO` / `EXT2_ERR_NOPART` = -13) を返す。
+  1088 のフォールバックは廃止。CHS → LBA は `bootinfo_part_geom` (DA 80h/81h の BIOS 幾何、無ければ
+  IDENTIFY の既定)、終わりは IDENTIFY の総数の内側。マウントは FS が区画より大きければ断り、
+  `Ext2Ctx.part_len` でブロック I/O が区画の外を断る。`ext2_format` は区画の長さで頭打ち。
+- **ATA**: `drivers/ide_addr.c` が方式を決める (word 49 bit9 → LBA28、word 53 bit0 → 現在の CHS、
+  どちらも無ければ既定の CHS)。範囲外は `IDE_ERR_RANGE` (-4)。`drivers/dev.c` の hd0-3 は LBA の
+  API (`ide_read_sectors`) へ委譲し、CHS の変換はここに無くなった。`dev_blk_*_lba` は `lba + count` の
+  桁あふれを断る。
+- **KAPI v64** (slot 230〜233): `ext2_format_at` / `dev_mount_count` / `sys_umount_checked` /
+  `hdd_geom_info` (表示と断る条件に BIOS 幾何と ATA の申告が要るので 4 本目を足した)。
+- **固定点**: `fs/ext2_layout.c`。最終グループの必要量 = sparse の SB + GDT + bitmap 2 + inode 表
+  (+ group 0 のルート 1)。lost+found は formatter が作らないので数えない。
+- **hdprep**: `userland/shell/cmd_hdprep.c` + `hdprep_plan.c` (純粋)。開始 = 1632 以上の最初の BIOS
+  シリンダ境界、長さ = 指定 (既定 256MiB) をシリンダへ切り下げ、上限は BIOS の CX × シリンダと IDENTIFY の
+  総数の小さい方。`yes` は打鍵で読む (rshell の `/api/cmd` からは答えられない)。
+- **migrate-pt**: `tools/nhd_deploy.py migrate-pt` / `make nhd-migrate-pt` (08_build.md §8-4)。
+- 試験: `make check-hdd-stage1-host` (`tools/tests/test_hdd_stage1.py`、記録 `tools/tests/hdd_stage1_tdd.md`)。
+  既存の ext2 の RAM ディスク試験 5 本は LBA 1 に区画表を置く足場 `tools/tests/hdd_pt_fake.h` に乗せた。
+
+
+
 4. **区画表の読み書きを 1 つの共有部に集約**し、標準配置で読み書きする: `ext2_find_partition`、`boot/boot_main.c`、cdinst、install、`tools/nhd_deploy.py`、fatfs の読み手と同じ struct を使う。**同じコミット**で揃える。既存 NHD は `make deploy-kernel` の区画表書き直しで移行する (H2 で確認)。旧配置を読む互換はしない (実機に OS32 の旧配置の区画は存在しない)。
 5. **区画の探索は失敗を返す**: `ext2_find_partition` の 1088 フォールバックを廃止し、(start, length) を返す。format は検証済みの (start, length) だけを受け、その範囲外に書かない。
 6. **大きさは既存の上限内**: 段 1 の既定は **256MiB 以下** (ext2 32 グループ)。最終グループがメタデータ (bitmap 2 + inode 表) を収められない長さは切り下げる。2GB への拡張 (`EXT2_MAX_GROUPS` を上げる、format の進捗表示) は**別票**。

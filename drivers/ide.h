@@ -10,8 +10,10 @@
 /*                                                                          */
 /*  バンク切替: 0x430/0x432 でプライマリ/セカンダリ選択                      */
 /*                                                                          */
-/*  PC-98ではLBAアドレッシングは使用しない (UNDOCUMENTED io_ide.md)。         */
-/*  本ドライバはCHSモード専用。APIはLBA値で受け取り内部でCHS変換を行う。     */
+/*  APIはLBA値で受け取る。レジスタへの指定は drivers/ide_addr.c が決める:    */
+/*  IDENTIFY word 49 bit9 なら LBA28、無ければ現在の CHS (word 53 bit0)、    */
+/*  それも無ければ既定の CHS (票 TASK_HDD_INSTALL 段 1、F13)。               */
+/*  UNDOCUMENTED io_ide.md の「PC-9800 では LBA を使わない」は BIOS の話。     */
 /*                                                                          */
 /*  出典: NP21/W (ideio.c), DOSBox-X (ide.cpp), PC9800Bible §2-9,           */
 /*        UNDOCUMENTED 9801/9821 Vol.2 io_ide.md                             */
@@ -74,6 +76,8 @@
 #define IDE_ERR_TIMEOUT    -1
 #define IDE_ERR_NO_DRIVE   -2
 #define IDE_ERR_IO         -3
+#define IDE_ERR_RANGE      -4    /* 指定の方式で指せないセクタ (LBA28 上限・総数・
+                                  * シリンダ 16 ビット・lba + count の桁あふれ) */
 
 /* IDENTIFY DEVICE情報 */
 typedef struct {
@@ -120,11 +124,15 @@ int ide_read_sector_chs(int drive, u16 cyl, u8 head, u8 sect, void *buf);
 int ide_write_sector_chs(int drive, u16 cyl, u8 head, u8 sect,
                          const void *buf);
 
-/* LBA互換ラッパー (KAPI ABI維持用 — 内部でCHSに変換して委譲) */
+/* LBA の読み書き (KAPI slot ide_read_sector / ide_write_sector(s) と
+ * drivers/dev.c の hd0-3)。範囲外は 1 セクタも読み書きせずに IDE_ERR_RANGE。 */
 int ide_read_sector(int drive, u32 lba, void *buf);
 int ide_write_sector(int drive, u32 lba, const void *buf);
 int ide_read_sectors(int drive, u32 lba, u32 count, void *buf);
 int ide_write_sectors(int drive, u32 lba, u32 count, const void *buf);
+
+/* そのドライブのセクタ指定の方式 (IDE_AMODE_*、drivers/ide_addr.h)。 */
+int ide_addr_mode_of(int drive);
 
 /* ドライブ存在チェック */
 int ide_drive_present(int drive);

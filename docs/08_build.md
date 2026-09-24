@@ -161,6 +161,7 @@ Makefile ターゲットとの対応 (`build/deploy.mk`)。**このリポジト�
 | `make fd144` | **1.44MB フロッピーイメージ** `images/os32_boot144.img` (生イメージ、1,474,560 バイト)。2HD の `images/os32_boot.d88` とは別物で、既定は 2HD のまま。票 [`tasks/realhw/TASK_FD144.md`](tasks/realhw/TASK_FD144.md) |
 | `make deploy` | HostDrv (`C:\os32`) への同期 — 再起動不要 |
 | `make deploy-kernel` | HostDrv同期 + HostDrv→ext2同期 + NHDコピー — **要NP21/W再起動**。名前に反して**カーネル単独ではなく一式** (ユーザーランド・`/sys` も NHD へ書く) |
+| `make nhd-migrate-pt` | 旧配置の区画表を PC-98 標準配置へ + ローダ + カーネルを同時に (KAPI v64 への初回だけ、[下の節](#区画表の移行-v64))。NP21/W 停止中 ([D1]) |
 | `make deploy-boot` | ブートローダー (loader_hdd.bin) をNHDブート領域へ書き込み |
 | `make deploy-nhd` | deploy.yaml フルデプロイ + NHDコピー — **要NP21/W再起動** |
 | `make prune-stale` / `make prune-stale-delete` | 配備先 (HostDrv + NHD) に残ったマニフェストに無い *.bin を一覧 / 削除。deploy 系は既定で削除まで行う (`NO_PRUNE=1` で一覧のみ) |
@@ -200,6 +201,28 @@ v63 で KernelAPI のデータ欄を 0x4B8 に固定し、OS32X ヘッダを v3 
 shlib ローダが要求版で断ったときは、GUI を選んでいても CUI shell で起動し
 `GUI shlib: needs a newer kernel -> CUI shell` (カーネルを先に更新する案内) を出す —
 配置違いの `rebuild required (KAPI data layout)` とは直し方が逆なので案内を分けてある。
+
+<a id="区画表の移行-v64"></a>
+**v64 の区画表の移行 (NHD、票 [TASK_HDD_INSTALL](tasks/realhw/TASK_HDD_INSTALL.md) N3)**:
+v64 のカーネルとローダは区画表 (LBA 1) を **PC-98 標準配置**でしか読まない
+(開始 = +8/+9/+10-11。2026-09-23 までの OS32 は +6/+7/+8-9 の独自配置で書いていた)。
+旧配置の NHD を新しいカーネルで起動すると `/` (hd0) がマウントできず、新しいローダは
+`No OS32 partition in LBA 1` で止まる。**`make deploy-kernel` だけでは移行しない**
+(カーネルと ext2 の中身しか替えない)。NP21/W を止めて ([D1])、次の 1 操作で
+区画表・第二段ローダ (LBA 2〜17)・`/boot/vmkernel.lz4` を**同時に**入れ替える:
+
+```bash
+make all                      # boot/loader_hdd.bin と build/out/vmkernel.lz4
+make nhd-migrate-pt           # = python3 tools/nhd_deploy.py migrate-pt (push まで)
+```
+
+`migrate-pt` は空でない項目が**ちょうど 1 つ**の OS32 区画 (sid 0xE2) で、旧配置で読んだ
+範囲の先頭に ext2 があり FS が区画に収まるときだけ、**同じ開始 LBA・長さ**を標準配置で
+書き直す (カーネル → ローダ → 区画表の順、区画表は読み戻して比較)。それ以外は NHD を
+1 バイトも変えずに断る。既に標準配置なら何も書かない。`--no-push` で NP21/W 側へ送らずに
+止められる。確認は起動 → `/` のマウント → 既存ファイルの md5 (受入 H2)。
+CD インストーラ (`cdinst` / `install`) は段 2 まで**旧配置で書く**ので、v64 のカーネルで
+CD から入れた HDD は区画が見つからず format で止まる (段 2 で直す)。
 
 HostDrv 経由 (NP21/W を止めない) で v63 以降の稼働機を v64 以降へ上げる手順:
 

@@ -12,6 +12,9 @@
 #include "memmap.h"
 #include "ide.h"
 #include "kprintf.h"
+#include "ide_addr.h"
+#include "kstring.h"
+#include "os32_kapi_shared.h"   /* HddGeom (KAPI v64) */
 
 /* 構造体の並びが NASM 側 (boot/bootinfo.inc) と同じオフセットか。
  * ホストでは u32 が 64bit なのでここ (i386 のカーネルビルド) でだけ見る。 */
@@ -30,6 +33,12 @@ STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire_drive, cx) == BI_DRV_CX, bi_drv_c
 STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire_drive, dh) == BI_DRV_DH, bi_drv_dh);
 STATIC_ASSERT(BI_OFFSETOF(struct bootinfo_wire_drive, queried) == BI_DRV_QUERIED,
               bi_drv_queried);
+/* hdd_geom_info の出力は KAPI の契約 (32 バイト、os32_kapi_shared.h) */
+STATIC_ASSERT(sizeof(HddGeom) == 32, hdd_geom_size);
+STATIC_ASSERT(BI_OFFSETOF(HddGeom, ata_total) == 24, hdd_geom_total);
+STATIC_ASSERT(HDD_AMODE_LBA28 == IDE_AMODE_LBA28 &&
+              HDD_AMODE_CHS_CUR == IDE_AMODE_CHS_CUR &&
+              HDD_AMODE_CHS_DEF == IDE_AMODE_CHS_DEF, hdd_amode_same);
 /* 域はブート情報域の予約 (256B) に収まる。 */
 STATIC_ASSERT(BOOTINFO_WIRE_SIZE <= MEM_BOOTINFO_SIZE, bi_fits);
 
@@ -113,4 +122,79 @@ void bootinfo_report(void)
         bootinfo_format_ata(&a, i, line, (int)sizeof(line));
         kprintf(0x07, "%s\n", line);
     }
+}
+
+/* ======================================================================== */
+/*  区画表の幾何 (票 TASK_HDD_INSTALL 段 1)                                  */
+/* ======================================================================== */
+
+/* IDE ドライブ番号 → BIOS の DA。バンク 0 のマスタ = 80h、スレーブ = 81h。
+ * バンク 1 (ドライブ 2/3) は BIOS の HDD として数えない (0 = 無し)。 */
+static int bootinfo_da_of(int ide_drive)
+{
+    if (ide_drive == 0) return BOOTINFO_DA_HDD0;
+    if (ide_drive == 1) return BOOTINFO_DA_HDD0 + 1;
+    return 0;
+}
+
+int bootinfo_part_geom(int ide_drive, u16 *heads, u16 *spt)
+{
+    u8 h, s;
+    int da = bootinfo_da_of(ide_drive);
+    IdeInfo info;
+
+    if (da != 0 && bootinfo_hdd_geom(da, (u16 *)0, &h, &s, (u16 *)0) == 0) {
+        if (heads) *heads = h;
+        if (spt)   *spt = s;
+        return BOOTINFO_GEOM_BIOS;
+    }
+    /* BIOS 幾何が無い (FD 起動で問い合わせなかった / 規則に外れる) ときは
+     * IDENTIFY の既定。NP21/W の NHD はどちらも同じ値なので従来どおり。 */
+    if (ide_get_info(ide_drive, &info) != IDE_OK) return -1;
+    if (info.heads == 0 || info.sectors == 0) return -1;
+    if (heads) *heads = info.heads;
+    if (spt)   *spt = info.sectors;
+    return BOOTINFO_GEOM_IDENTIFY;
+}
+
+int hdd_geom_info(int drive, void *out_v)
+{
+    HddGeom *out = (HddGeom *)out_v;
+    IdeGeom g;
+    int da, i;
+
+    if (!out) return OS32_ERR_INVAL;
+    if (drive < 0 || drive > 3) return OS32_ERR_INVAL;
+    kmemset(out, 0, sizeof(*out));
+
+    da = bootinfo_da_of(drive);
+    out->bios_da = (u8)da;
+    if (da != 0 && s_bootinfo.status == BOOTINFO_OK) {
+        for (i = 0; i < (int)BOOTINFO_NDRIVES; i++) {
+            const struct bootinfo_drive *d = &s_bootinfo.drive[i];
+            if (!d->queried || (int)d->da != da) continue;
+            out->bios_queried = 1;
+            out->bios_valid   = d->valid;
+            out->bios_heads   = d->heads;
+            out->bios_spt     = d->spt;
+            out->bios_cyl     = d->cyl;
+            out->bios_seclen  = d->seclen;
+            break;
+        }
+    }
+
+    if (ide_get_geom(drive, &g) == IDE_OK && ide_drive_present(drive)) {
+        out->ata_present   = 1;
+        out->ata_def_cyl   = g.def_cyl;
+        out->ata_def_heads = g.def_heads;
+        out->ata_def_spt   = g.def_spt;
+        out->ata_cur_cyl   = g.cur_cyl;
+        out->ata_cur_heads = g.cur_heads;
+        out->ata_cur_spt   = g.cur_spt;
+        out->ata_w49       = g.w49;
+        out->ata_w53       = g.w53;
+        out->ata_total     = g.total;
+        out->addr_mode     = (u8)ide_addr_mode_of(drive);
+    }
+    return 0;
 }

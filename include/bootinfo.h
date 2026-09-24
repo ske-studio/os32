@@ -184,6 +184,18 @@ const struct bootinfo *bootinfo_get(void);
  * 使えるなら 0、情報域が無効・問い合わせていない・規則に外れるなら負。 */
 int bootinfo_hdd_geom(int da, u16 *cyl, u8 *heads, u8 *spt, u16 *seclen);
 
+/* 区画表の CHS → LBA に使う幾何 (票 TASK_HDD_INSTALL 段 1)。
+ * IDE ドライブ 0 / 1 は DA 80h / 81h の BIOS 幾何を優先し、無ければ IDENTIFY の
+ * 既定 (word 3/6)。戻り値 BOOTINFO_GEOM_BIOS / BOOTINFO_GEOM_IDENTIFY / 負。 */
+#define BOOTINFO_DA_HDD0        0x80
+#define BOOTINFO_GEOM_BIOS      1
+#define BOOTINFO_GEOM_IDENTIFY  2
+int bootinfo_part_geom(int ide_drive, u16 *heads, u16 *spt);
+
+/* KAPI hdd_geom_info (v64) の実体。out は HddGeom (os32_kapi_shared.h、32 B)。
+ * 0 / -9 (OS32_ERR_INVAL: out が NULL か drive が 0〜3 の外)。 */
+int hdd_geom_info(int drive, void *out);
+
 /* 起動画面へ [hdd] 行を出す (ide_init の後)。 */
 void bootinfo_report(void);
 

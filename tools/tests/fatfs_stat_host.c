@@ -170,6 +170,7 @@ char *kstrncat(char *dst, const char *src, u32 n)
     return dst;
 }
 
+#include "../../drivers/pc98pt.c"   /* fatfs_vfs.c の PC98PartEntry 読み (票 TASK_HDD_INSTALL 段 1-4) */
 #include "../../fs/fatfs_vfs.c"
 
 /* ---- 試験用コンテキスト (mount を通さず直接組む) ---- */

@@ -1,0 +1,53 @@
+# HDD の一時置き場 (段 1) — RED→GREEN の記録
+
+- 票: [docs/tasks/realhw/TASK_HDD_INSTALL.md](../../docs/tasks/realhw/TASK_HDD_INSTALL.md) 段 1 / §1-v3 (N3〜N7、R3-1)
+- 実行: `python3 -B tools/tests/test_hdd_stage1.py --target --mutate` (`make check-hdd-stage1-host`)
+- ハーネス: `tools/tests/hdd_stage1_host.c` (純粋関数、ホスト 64 ビット + libc)、
+  `tools/tests/ext2_part_host.c` (ext2 の区画探索と format_at、ILP32 -nostdlib)
+
+## 1. 対象と見るもの
+
+| 対象 | ケース | 見るもの |
+|---|---|---|
+| `drivers/pc98pt.c` | `pt_offsets` / `pt_817` / `pt_1663` / `pt_reject` | 標準配置 (+8/+9/+10-11) と `PC98PartEntry` (fatfs と共有) の一致、8/17 (NHD の 1632〜) と 16/63 (2016〜) のバイト列、境界に無い区画・16 ビット超のシリンダ (F3)・幾何 0・終わり <= 開始・ディスクの外・FAT の項目・**旧配置のバイト列を別の場所として読まない** |
+| `drivers/ide_addr.c` | `ata_lba28` / `ata_range` / `ata_chs` | word 49 bit9 → LBA28 (DRV/HEAD bit6、LBA[27:24])、総数と 2^28 の上限 (`lba=268435456` が LBA 0 に化けない)、`lba + count` の桁あふれ、word 53 bit0 の現在の幾何を既定より優先 (F13)、既定 0 → 8/17・シリンダ 16 ビット、ヘッド 17 以上は使わない |
+| `fs/ext2_layout.c` | `layout` | Codex の 16,652 セクタ (最終グループ 133 < 必要 135 → 1 グループ 8,193 ブロック)、32/33 グループ境界 (262,145 / 262,146 ブロック)、g=2 (非スパース) と g=3 (スパース) の境目を 1 ブロックずつ掃いて「落とした大きさは素朴な配置が本当に足りない」「落とさなかった大きさは足りる」の両方が出る、128〜524,288 セクタの全長で最終グループが収まり長さを超えない |
+| `userland/shell/hdprep_plan.c` | `hdprep_geom` / `hdprep_disk` / `hdprep_mounts` / `hdprep_plan` | 断る条件の全部 (ATA 無し・BIOS 幾何なし / 無効・BX≠512・LBA も現在の CHS も無い・LBA 1 の項目 (どの添字でも、OS32 自身でも)・LBA 0 の 55AA・ルートの hd0・大きさ 8〜256 の外)、マウント中は umount が要る、16/63 で開始 2016・256MiB をシリンダへ切り下げ、BIOS の CX と IDENTIFY の総数の小さい方で頭打ち、計画した区画が共有部の書き手と固定点をそのまま通る |
+| `fs/ext2_super.c` / `ext2_fmt.c` | `find_bios` / `find_fail` / `format_clamp` / `format_at_16652` / `format_at_refuse` / `mount_bounds` | 区画表の CHS を **BIOS 幾何**で LBA にする (IDENTIFY 8/17 なら 272 に化ける表が 2016 を指す)、空 / 読めない / 幾何なし / ディスクの外 / 旧配置 / FAT だけ → 失敗し **format は 1 セクタも書かずマウントもしない**、`ext2_format` は区画で頭打ち、`ext2_format_at` は範囲の外を書かず区画表も触らない、長さ 0・LBA 0〜17・ディスクの外・桁あふれ・総数 0 は 1 セクタも書かずに断る、FS が区画より大きいとマウントしない、ブロック I/O は区画の外 (×2 の桁あふれを含む) をデバイスに出さない |
+| format_at の像 | e2fsck | 16,652 / 20,160 / 36,000 / 62,496 セクタを `e2fsck -fn` → clean |
+| `tools/pc98pt.py` | 突き合わせ | C の `pc98pt_make_os32` と Python の `make_os32` が 8 組 (エラーを含む) で 1 バイトも違わない |
+| `tools/nhd_deploy.py` | migrate-pt | 旧配置 (cdinst が書いた形) + mkfs.ext2 の NHD を作って変換 → 開始 LBA 1632 不変・長さ不変・項目 = `make_os32`・ローダが LBA 2〜・FS のバイト列不変・**e2fsck -fn clean**、2 回目は standard で何も書かない、断る 6 通り (項目 2 つ・sid 違い・ext2 無し・FS > 区画・ディスクの外・ローダ 8193B) は NHD が 1 バイトも変わらない、`update_partition_table` (init の書き手) が標準配置を書く |
+
+## 2. RED
+
+- 新しい純粋関数 (`pc98pt.c` / `ide_addr.c` / `ext2_layout.c` / `hdprep_plan.c`) はこの票で作った。
+  **実装と試験は同じ作業の中で書いた (試験先行ではない)**。試験が実装の誤りを捕まえることは
+  §3 の変異 (各判定を 1 つずつ外す・旧動作に戻す) で確かめた。
+- 旧動作は**変異で再現して RED を確かめた** (関数の形が変わったので HEAD のソースを
+  そのまま新しいハーネスに載せることはできない):
+  - 区画表を旧配置 (+6) で読む・見つからないとき LBA 1088 にフォールバック・区画表の CHS を
+    IDENTIFY の幾何で LBA にする (F4)・範囲検査なし (F12)・最終グループを落とさない (F12)・
+    LBA28 の上限なし・現在の幾何を無視 (F13) — どれも RED (§3)。
+- 既存の ext2 の RAM ディスク試験 5 本 (`ext2_write_io` / `b8_open` / `ext2_empty_name` /
+  `vfs_fd_path` / `fatfs_stat`) は 1088 のフォールバックに寄りかかっていたので、変更直後に
+  リンク失敗・マウント失敗で RED になった。LBA 1 に本物の共有部で区画表を置く足場
+  `tools/tests/hdd_pt_fake.h` に乗せて GREEN (ディスクは FS をシリンダへ切り上げた分だけ広げ、
+  FS の大きさ・配置は変えていない)。
+
+## 3. GREEN と変異 (2026-09-24)
+
+```
+SUMMARY 23/23 PASS
+TARGET i386-elf GNU89 -Werror COMPILE PASS
+MUTATIONS 34/34 RED
+```
+
+変異 (C 29 本 + Python 5 本) の一覧は `tools/tests/test_hdd_stage1.py` の `C_MUTATIONS` /
+`PY_MUTATIONS`。写し (一時ディレクトリ) の上で変異させるので `check-par` で並列に回せる。
+
+## 4. 見ていないこと
+
+- 実機・NP21/W での I/O (LBA28 のレジスタが実際に正しい物理セクタを指すか、`hdprep` の対話)。
+  NP21/W の `ideio.c` の LBA の解釈 (`sn | cy << 8 | hd << 24`) はソースで確かめただけ。
+- BIOS (INT 1Bh AH=84h) が 8GB ディスクをどの幾何で見せるか (受入 H3)。
+- `cmd_hdprep.c` (KAPI を呼ぶ側) はホストでは回していない — 判定と計画だけが試験の対象。
