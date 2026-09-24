@@ -162,6 +162,35 @@ static void case_classify1663(void)
     CHECK(cls(16, 63, 16514063, 2016, &mode) == INST_E_START);
 }
 
+static void case_paths(void)
+{
+    char buf[128];
+    int i;
+
+    CHECK(inst_check_path("/a") == 0);
+    CHECK(inst_check_path("/boot/vmkernel.lz4") == 0);
+    CHECK(inst_check_path("/a/.b/..c/...") == 0);          /* 名前の一部の '.' は可 */
+    CHECK(inst_check_path("") == INST_E_PATH);
+    CHECK(inst_check_path("/") == INST_E_PATH);
+    CHECK(inst_check_path("a/b") == INST_E_PATH);
+    CHECK(inst_check_path("ab") == INST_E_PATH);
+    CHECK(inst_check_path("//a") == INST_E_PATH);
+    CHECK(inst_check_path("/a//b") == INST_E_PATH);
+    CHECK(inst_check_path("/a/") == INST_E_PATH);
+    CHECK(inst_check_path("/.") == INST_E_PATH);
+    CHECK(inst_check_path("/..") == INST_E_PATH);
+    CHECK(inst_check_path("/a/./b") == INST_E_PATH);
+    CHECK(inst_check_path("/../hd1/x") == INST_E_PATH);
+    CHECK(inst_check_path("/a/b/..") == INST_E_PATH);
+    CHECK(inst_check_path(NULL) == INST_E_PATH);
+    /* 深さ: "/hd0" を足して 32 要素まで */
+    for (i = 0; i < 31; i++) { buf[i * 2] = '/'; buf[i * 2 + 1] = 'x'; }
+    buf[62] = '\0';
+    CHECK(inst_check_path(buf) == 0);
+    buf[62] = '/'; buf[63] = 'y'; buf[64] = '\0';
+    CHECK(inst_check_path(buf) == INST_E_DEPTH);
+}
+
 static void case_bootfiles(void)
 {
     CHECK(inst_check_boot_files(512, 8192, 508UL * 1024UL) == 0);
@@ -204,12 +233,25 @@ static void case_space(void)
     CHECK(inst_check_space(407864, &n, &r) == 0);
     n.blocks++;
     CHECK(inst_check_space(407864, &n, &r) == INST_E_SPACE);
-    /* inode が足りない (0 バイトのファイルばかり) */
+    /* inode が足りない (0 バイトのファイルばかり)。自動で作る親ディレクトリの
+     * 余白 INST_SPACE_MARGIN_INODES を残す */
     inst_need_init(&n);
-    n.files = r.free_inodes + 1;
+    n.files = r.free_inodes - INST_SPACE_MARGIN_INODES + 1;
     CHECK(inst_check_space(407864, &n, &r) == INST_E_INODES);
-    n.files = r.free_inodes;
+    n.files--;
     CHECK(inst_check_space(407864, &n, &r) == 0);
+    CHECK(r.need_inodes == r.free_inodes);
+    /* 失敗でも room は 0 で埋まる */
+    r.free_blocks = r.free_inodes = 12345;
+    CHECK(inst_check_space(100, &n, &r) == INST_E_LAYOUT);
+    CHECK(r.free_blocks == 0 && r.free_inodes == 0 && r.need_blocks == 0);
+    /* 1 ファイルの上限 (二重間接まで) ちょうどは通り、+1 は断る */
+    CHECK(INST_EXT2_MAX_FILE == 67383296UL);
+    inst_need_init(&n);
+    inst_need_file(&n, INST_EXT2_MAX_FILE);
+    CHECK(inst_check_space(524160, &n, &r) == 0);
+    inst_need_file(&n, INST_EXT2_MAX_FILE + 1UL);
+    CHECK(inst_check_space(524160, &n, &r) == INST_E_FILE_SIZE);
     /* 配置が成り立たない大きさ */
     inst_need_init(&n);
     CHECK(inst_check_space(100, &n, &r) == INST_E_LAYOUT);
@@ -219,7 +261,7 @@ static void case_space(void)
     inst_need_dir(&n);
     CHECK(n.files == 1 && n.dirs == 1 && n.blocks == inst_file_blocks(470000) + 1);
     CHECK(inst_check_space(524160, &n, &r) == 0);
-    CHECK(r.need_inodes == 2);
+    CHECK(r.need_inodes == 2 + INST_SPACE_MARGIN_INODES);
 }
 
 /* 区画表と IPL の幾何が一致する (8/17・16/63)、計画は hdprep と同じ */
@@ -276,10 +318,18 @@ int main(int argc, char **argv)
                INST_EXT2_MAX_GROUPS, INST_IPL_OFF_HEADS, INST_IPL_OFF_SPT);
         return 0;
     }
+    if (argc >= 2 && !strcmp(argv[1], "pathok")) {    /* 実物の PKG のパスを並べて渡す */
+        int i;
+        for (i = 2; i < argc; i++)
+            if (inst_check_path(argv[i]) != 0) { printf("BAD %s\n", argv[i]); return 1; }
+        printf("PASS pathok (%d paths)\n", argc - 2);
+        return 0;
+    }
     if (argc != 2) return 2;
     if (!strcmp(argv[1], "classify817")) case_classify817();
     else if (!strcmp(argv[1], "classify1663")) case_classify1663();
     else if (!strcmp(argv[1], "bootfiles")) case_bootfiles();
+    else if (!strcmp(argv[1], "paths")) case_paths();
     else if (!strcmp(argv[1], "blocks")) case_blocks();
     else if (!strcmp(argv[1], "space")) case_space();
     else if (!strcmp(argv[1], "iplpt")) case_iplpt();

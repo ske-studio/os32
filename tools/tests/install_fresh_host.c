@@ -166,6 +166,7 @@ static int  rec_wr_n;
 
 static int  inj_ide_write_fail_lba = -1;
 static int  inj_readback_bad_lba = -1; /* この LBA の読み戻しを 1 バイト違える */
+static int  inj_write_corrupt_lba = -1;/* この LBA へは 1 バイト違えて書く (媒体に残る) */
 static int  inj_format_fail;
 static const char *inj_ls_size_name;  /* 列挙がこの名前に名乗らせる長さ */
 static u32  inj_ls_size;
@@ -203,6 +204,7 @@ static void rec_reset(void)
     rec_open_n = rec_stat_n = rec_mkdir_n = rec_wr_n = 0;
     inj_ide_write_fail_lba = -1;
     inj_readback_bad_lba = -1;
+    inj_write_corrupt_lba = -1;
     inj_format_fail = 0;
     inj_ls_size_name = NULL;
     inj_ls_size = 0;
@@ -356,6 +358,8 @@ static int fake_ide_write_sector(int drv, u32 lba, const void *buf)
     }
     CHECK(lba < DISK_MODEL_SECTS);            /* 区画の中へは ext2_format_at だけ */
     memcpy(disk[lba], buf, 512);
+    if (inj_write_corrupt_lba >= 0 && (u32)inj_write_corrupt_lba == lba)
+        disk[lba][16] ^= 0x20;                  /* 区画表なら名前 'O' → 'o' */
     sprintf(e, "W%u", (unsigned)lba);
     ev_add(e);
     return 0;
@@ -379,9 +383,11 @@ static int fake_ide_read_sector(int drv, u32 lba, void *buf)
     return 0;
 }
 
+static int inj_geom_fail;
 static int fake_hdd_geom_info(int drv, HddGeom *out)
 {
     CHECK(drv == 0);
+    if (inj_geom_fail) return -1;
     *out = geom;
     return 0;
 }
@@ -433,7 +439,11 @@ static int fake_sys_is_mounted(const char *pre)
 static int fake_dev_mount_count(int drv) { CHECK(drv == 0); return hd0_mounts; }
 
 static const char *fake_vfs_devname(const char *pre)
-{ (void)pre; return inj_root_hd0 ? "hd0" : "fd0"; }
+{
+    if (!strcmp(pre, "/")) return inj_root_hd0 ? "hd0" : "fd0";
+    if (!strcmp(pre, "/hd0")) return hd0_at_hd0 ? "hd0" : NULL;
+    return NULL;
+}
 
 static int fake_sys_mkdir(const char *path)
 {
@@ -634,6 +644,7 @@ static void setup(void)
 {
     api_init();
     rec_reset();
+    inj_geom_fail = 0;
     geom_817();
     media_fixture();
 }
@@ -1227,6 +1238,15 @@ static void case_preflight(void)
     inj_ls_size = 300u * 1024u * 1024u;
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
+    CHECK_STR("larger than ext2 can hold");     /* 1 ファイルの上限 (P2-4) が先 */
+
+    /* 容量: 13MB の区画 (1632 + 200 シリンダ) に 30MB を名乗る 1 本 */
+    setup();
+    geom.ata_total = 1632u + 136u * 200u;
+    inj_ls_size_name = "/BIN/LS.BIN";
+    inj_ls_size = 30u * 1024u * 1024u;
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
     CHECK_STR("do not fit");
 
     /* 列挙の失敗は書く前に分かる (容量を数えられない) */
@@ -1263,12 +1283,52 @@ static void case_preflight(void)
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("root file system");
 
-    /* 別の場所にマウントされている (/hd0 ではない) → 外せないので断る */
+    /* 別の場所にマウントされている (/hd0 ではない) → 承認の前に断る */
     setup();
     hd0_mounts = 1; hd0_at_hd0 = 0;
     CHECK(run() == 1);
-    CHECK(rec_wr_n == 0 && fmt_calls == 0);
-    CHECK_STR("still mounted");
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("mounted somewhere other than /hd0");
+    CHECK_NOSTR("will be unmounted");
+
+    /* /hd0 と別の場所の両方 (2 つ) → 断る */
+    setup();
+    hd0_mounts = 2; hd0_at_hd0 = 1;
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("mounted somewhere other than /hd0");
+
+    /* 必須のファイル (/sys/shell.bin) が無い・空・ディレクトリ → 何も書かない
+     * (Codex 往復 1 P1-3: 以前は shell の無い HDD が「完了」になった) */
+    setup();
+    fx_rm("/SYS/SHELL.BIN");
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("Missing /sys/shell.bin");
+    setup();
+    fx_put("/SYS/SHELL.BIN", 0);
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("Empty /sys/shell.bin");
+    setup();
+    fx_rm("/SYS/SHELL.BIN");
+    fx_dir("/SYS/SHELL.BIN");
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("not a regular file");
+    setup();
+    fx_rm("/SYS/LOADER_H.BIN");
+    fx_dir("/SYS/LOADER_H.BIN");
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("not a regular file");
+
+    /* hdd_geom_info が失敗 → 分かる文言で断る */
+    setup();
+    inj_geom_fail = 1;
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("did not return the geometry of hd0");
 
     /* umount_checked が失敗 (sync の失敗など) */
     setup();
@@ -1348,8 +1408,17 @@ static void case_incomplete(void)
     setup();
     inj_sync_fail = 1;
     CHECK(run() == 1);
-    CHECK_STR("INCOMPLETE");
+    CHECK_STR("INCOMPLETE: sync failed");
     CHECK_NOSTR("Installation complete");
+    /* INCOMPLETE は 1 回だけ出す、再起動してから入れ直すよう案内する */
+    CHECK(strstr(strstr(cap_buf, "INCOMPLETE") + 1, "INCOMPLETE") == NULL);
+    CHECK_STR("REBOOT, then run the installer again");
+
+    setup();
+    inj_readback_bad_lba = 5;
+    CHECK(run() == 1);
+    CHECK(strstr(strstr(cap_buf, "INCOMPLETE") + 1, "INCOMPLETE") == NULL);
+    CHECK_STR("REBOOT");
 }
 
 /* 途中で止まった hd0 は次の実行で入れ直せる (空 / 再作成のどちらかになる) */
@@ -1377,6 +1446,23 @@ static void case_rerun(void)
     memcpy(disk, keep, sizeof(keep));
     CHECK(run() == 0);
     CHECK_STR("empty disk");
+
+    /* 区画表が媒体の上で壊れた (書いたものと違う) → INCOMPLETE と、ゲストでは
+     * 直せない旨とホスト側の手当てを出す。次の実行は 1 セクタも書かずに断り、
+     * 同じ案内を出す */
+    setup();
+    inj_write_corrupt_lba = 1;
+    CHECK(run() == 1);
+    CHECK_STR("INCOMPLETE: partition table");
+    CHECK_STR("cannot be repaired");
+    CHECK_STR("nhd-init");
+    memcpy(keep, disk, sizeof(keep));
+    setup();
+    memcpy(disk, keep, sizeof(keep));
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("OS32 did not create");
+    CHECK_STR("nhd-init");
 
     /* 完了した hd0 をもう一度入れ直す (再作成) */
     setup();

@@ -40,3 +40,30 @@ RED、ビルドが通らないものは ERROR (何も確かめていない) と�
   dumpe2fs との突き合わせを変異のたびにも回すようにして RED にした。もう 1 本 (`inst_hdd_check` の
   `hdprep_check_geom` を外す) は `hdprep_plan` が同じ検査を中でもう一度するので**等価変異**。外して、
   「検査でマウントを数えない」に置き換えた。
+
+## 4. 実装レビュー往復 1 (2026-09-24、Codex P1-1〜3・P2-4〜6 / Fable minor) と NP21/W の落ち
+
+足したケース:
+
+- `cdinst_host.c` `preflight`: データ部が 10 バイト足りない NORMAL.PKG / 1 バイト足りない BOOT.PKG /
+  orig_size = 0 の MINIMAL.PKG と BOOT.PKG / 空の shell.bin / 1 ファイルの上限 + 1 (67,383,297 B) /
+  13MB の区画に 30MB (Minimal なら数えない) / ルートが hd0 / umount_checked の失敗 / 別の prefix にも
+  マウント — どれも 1 セクタも書かない。`paths`: `/../hd1/evil.bin`・`/usr/../../hd1/x`・`/usr/./x`・
+  `//x`・`/x/`・`x/y`・`/.`・`/..` と MINIMAL の中の `..` は断り、`/hd0` の外に 1 つも作らない。
+  深さ 31 要素 (`/hd0` と合わせて 32) は入り、32 要素は断る。`incomplete`: REBOOT の案内。
+- `install_fresh_host.c`: `/sys/shell.bin` が無い・空・ディレクトリ、ローダがディレクトリ、hdd_geom_info の
+  失敗、別の prefix / 2 か所のマウント、INCOMPLETE は 1 回だけ、区画表が媒体の上で壊れた場合
+  (INCOMPLETE + ホスト側の手当て → 次の実行は 1 セクタも書かずに断り、同じ案内) を足した。
+- `hdd_stage2_host.c` `paths` / `space`: パスの規則の表、inode の余白の境界、失敗でも room が 0 で埋まる、
+  上限ちょうど / +1。
+- 実物の `packages/*.PKG` の全 209 項目のパスが `inst_check_path` を通る (real PKG paths)。
+- `boot_hdd.asm` の `mov cx, 16` × 512 = `INST_LOADER_MAX` (consts)。
+- **str-return guard**: インストーラ (CPL=3) が呼ぶ `const char *` の KAPI は、どれも CPL=3 に写しを返す実体に
+  つながる (`vfs_devname` → `vfs_devname_user`)。628c61f は NP21/W で cdinst が `vfs_devname("/")` の返り値
+  (カーネルのマウント表) を読んで fault kill された。ホスト試験の贋物は利用者の文字列を返し、ページの保護も
+  無いので見えなかった — この種類はホストのハーネスでは再現できないので、kapi.json の target と生成物を見る。
+
+変異は 21 本を足して **62/62 RED (ERROR 0、SURVIVED 0)、対照 5/5 SURVIVED**。足した直後は「BOOT.PKG の
+データ部を見ない」が SURVIVED だった (切れた BOOT.PKG は comp_size 分の読みで別に断れるので同じ結果になる)。
+orig_size が表と食い違う BOOT.PKG のケースを足して RED にした。展開の直前のパスの検査 (事前検査と同じ規則の
+2 回目) だけを外す変異は、事前検査が先に断るので区別できない — 変異の表には入れていない。

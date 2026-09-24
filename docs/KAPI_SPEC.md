@@ -225,6 +225,12 @@ v62 以前にコンパイルしたオブジェクトは `kapi` を参照した�
 > バッファへ写す)。CPL=0 の呼び手 (常駐シェル) には従来どおり static `cwd` が
 > そのまま返る。スロット・引数・戻り型は不変で、KAPI の版も上げていない
 > (`sdk/kapi.json` の target を `vfs_cwd` → `vfs_cwd_user` に差し替えただけ)。
+>
+> **`vfs_devname` (0x80) も同じ** (票 TASK_HDD_INSTALL 段 2、2026-09-24): 返す
+> `dev_name` はカーネル帯のマウント表にあり、CPL=3 の cdinst が読んで fault kill
+> された。target を `vfs_devname` → `vfs_devname_user` に差し替え、CPL=3 には
+> **`sys_getcwd` と同じ 1 本の写し**を返す (どちらを呼んでももう一方の返り値は
+> 上書きされる — 次の KAPI 呼び出しより前に読み切る)。スロット・引数・戻り型・版は不変。
 
 | Offset | フィールド | プロトタイプ |
 |--------|-----------|------|

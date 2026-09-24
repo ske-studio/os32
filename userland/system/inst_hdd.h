@@ -41,6 +41,7 @@ typedef struct {
     HdprepPlan plan;
     int        mode;          /* INST_MODE_* */
     int        mounts;        /* 検査の時点の dev_mount_count(0) */
+    int        umount_hd0;    /* hd0 は /hd0 に 1 つだけマウントされている (外す) */
 } InstTarget;
 
 int  inst_hdd_check(KernelAPI *api, InstTarget *t);

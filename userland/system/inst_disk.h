@@ -48,6 +48,14 @@
 #define INST_SPACE_MARGIN_BLOCKS 256UL
 /* ext2 の予約 inode (1〜10。ルートは 2 で予約の内側) */
 #define INST_EXT2_RESERVED_INODES 10UL
+/* 展開が自動で作る親ディレクトリ (項目表に無いもの) の分の inode の余白 */
+#define INST_SPACE_MARGIN_INODES 128UL
+/* ext2 (1KiB ブロック) で OS32 が書ける 1 ファイルの上限: 直接 12 + 単一間接
+ * 256 + 二重間接 256 × 256 ブロック = 67,383,296 B (三重間接は書かない) */
+#define INST_EXT2_MAX_FILE  ((12UL + 256UL + 256UL * 256UL) * 1024UL)
+/* fs/vfs.h VFS_MAX_PATH_DEPTH。展開先の前置 "/hd0" の 1 要素を足して収まること */
+#define INST_VFS_MAX_DEPTH  32UL
+#define INST_PREFIX_DEPTH   1UL
 
 /* ---- モード --------------------------------------------------------------- */
 #define INST_MODE_EMPTY         1   /* 区画項目が無い */
@@ -66,6 +74,10 @@
 #define INST_E_INODES       (-48)   /* 展開先の inode が足りない */
 #define INST_E_LAYOUT       (-49)   /* 区画に ext2 の配置が成り立たない */
 #define INST_E_ARG          (-50)
+#define INST_E_PATH         (-51)   /* パスが絶対でない / 空・"."・".." の要素 */
+#define INST_E_DEPTH        (-52)   /* "/hd0" を付けると要素が 32 を超える */
+#define INST_E_FILE_SIZE    (-53)   /* 1 ファイルが ext2 の上限 (二重間接まで) を超える */
+#define INST_E_GEOM         (-54)   /* hdd_geom_info が hd0 の幾何を返さない */
 
 /* 区画表と LBA 0 からモードを決める。heads / spt は BIOS 幾何、disk_total は
  * IDENTIFY の総数、expect_start は計画の開始 (hdprep_plan の start)。
@@ -84,6 +96,7 @@ typedef struct {
     unsigned long files;
     unsigned long dirs;
     unsigned long blocks;      /* データ + 間接ブロック + ディレクトリ */
+    unsigned long too_big;     /* INST_EXT2_MAX_FILE を超えるファイルの数 */
 } InstNeed;
 
 typedef struct {
@@ -99,9 +112,15 @@ void inst_need_dir(InstNeed *n);
 /* 1 ファイルが使うブロック数 (データ + 間接) */
 unsigned long inst_file_blocks(unsigned long size);
 
-/* part_sectors の区画に ext2 を作ったとき、n が収まるか。out は NULL 可。
- * 0 = 収まる / INST_E_SPACE / INST_E_INODES / INST_E_LAYOUT */
+/* part_sectors の区画に ext2 を作ったとき、n が収まるか。out は NULL 可
+ * (失敗でも 0 で埋めてから返す)。
+ * 0 = 収まる / INST_E_FILE_SIZE / INST_E_SPACE / INST_E_INODES / INST_E_LAYOUT */
 int inst_check_space(unsigned long part_sectors, const InstNeed *n, InstRoom *out);
+
+/* 展開するパス (パッケージの項目、"/hd0" を付ける前) の検査。/hd0 の外へ出ない
+ * ことを要素ごとに見る: 先頭が '/'、どの要素も空・"."・".." でない、要素数 +
+ * INST_PREFIX_DEPTH が INST_VFS_MAX_DEPTH 以下。0 / INST_E_PATH / INST_E_DEPTH */
+int inst_check_path(const char *path);
 
 /* IPL (512 B) に BIOS 幾何を書き、末尾に 55AA を置く */
 void inst_patch_ipl(unsigned char *ipl, unsigned long heads, unsigned long spt);

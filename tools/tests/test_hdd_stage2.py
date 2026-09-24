@@ -40,8 +40,8 @@ CDI = ROOT / "tools/tests/cdinst_host.c"
 INS = ROOT / "tools/tests/install_fresh_host.c"
 MINI = ROOT / "tools/tests/ext2_mini_host.c"
 
-PURE_CASES = ["classify817", "classify1663", "bootfiles", "blocks", "space", "iplpt"]
-CDI_CASES = ["ok817", "ok1663", "modes", "preflight", "incomplete"]
+PURE_CASES = ["classify817", "classify1663", "paths", "bootfiles", "blocks", "space", "iplpt"]
+CDI_CASES = ["ok817", "ok1663", "modes", "preflight", "incomplete", "paths"]
 INS_CASES = ["nokernel", "precheck", "boot_fail", "sync_fail", "geom817", "geom1663",
              "modes", "preflight", "incomplete", "rerun"]
 MAX_IMAGE = 508 * 1024
@@ -207,6 +207,10 @@ def consts_cross_check(pure_exe):
     nhd = (ROOT / "tools/nhd_deploy.py").read_text(encoding="utf-8")
     m = re.search(r"^LOADER_MAX_SECTORS\s*=\s*(\d+)", nhd, re.M)
     bad += not (m and int(m.group(1)) * 512 == lmax)
+    # IPL がローダを読むセクタ数 (boot_hdd.asm の「LBA 2 から」の mov cx) × 512
+    asm = (ROOT / "boot/boot_hdd.asm").read_text(encoding="utf-8")
+    m = re.search(r"mov\s+ax,\s*2\s*;;[^\n]*\n\s*mov\s+cx,\s*(\d+)", asm)
+    bad += not (m and int(m.group(1)) * 512 == lmax)
     ipl = ROOT / "boot/boot_hdd.bin"
     if ipl.is_file():
         b = ipl.read_bytes()
@@ -217,6 +221,73 @@ def consts_cross_check(pure_exe):
     print(f"  consts: kernel {kmax} loader {lmax} groups {groups} ipl [{off_h}]/[{off_s}] "
           f"{'ok' if bad == 0 else 'MISMATCH'}", flush=True)
     return bad
+
+
+def real_pkg_paths(pure_exe):
+    """packages/*.PKG (make all の成果物) の全項目のパスが inst_check_path を通る。"""
+    import struct
+    paths = []
+    for f in sorted((ROOT / "packages").glob("*.PKG")):
+        b = f.read_bytes()
+        off = 32
+        while b[off]:
+            n = b[off]
+            paths.append(b[off + 1:off + 1 + n].decode("utf-8"))
+            off += 1 + n + 5
+    if not paths:
+        print("  real PKG paths: packages/*.PKG が無い (make all の前) — 見ない")
+        return 0
+    r = run([str(pure_exe), "pathok", *paths], capture_output=True, text=True)
+    print(f"  real PKG paths: {r.stdout.strip()}", flush=True)
+    return r.returncode != 0
+
+
+# CPL=3 が読んでよい文字列の返り先 (カーネル帯の static を返さない実体)。
+# 2026-09-24、NP21/W で cdinst が vfs_devname の返り値 (カーネルのマウント表) を
+# 読んで fault kill された — ホスト試験の贋物は利用者の文字列を返すので見えない。
+USER_SAFE_STR_TARGETS = {"vfs_cwd_user", "vfs_devname_user", "kapi_db_last_error",
+                         "kapi_db_column_text"}
+INSTALLER_SRCS = ["userland/system/cdinst.c", "userland/system/install.c",
+                  "userland/system/inst_hdd.c", "userland/system/inst_disk.c",
+                  "userland/lib/rt/pkg.c", "userland/system/install_recover.inc"]
+
+
+def str_return_guard():
+    """インストーラ (CPL=3) が呼ぶ `const char *` を返す KAPI は、どれも CPL=3 に
+    写しを返す実体につながっている。vfs_devname は vfs_devname_user を通る。"""
+    import json
+
+    def walk(o):
+        if isinstance(o, dict):
+            if "name" in o and "args" in o:
+                yield o
+            for v in o.values():
+                yield from walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                yield from walk(v)
+
+    k = json.load(open(ROOT / "sdk/kapi.json", encoding="utf-8"))
+    strfn = {f["name"]: f.get("target", f["name"]) for f in walk(k)
+             if "char" in f["ret"] and "*" in f["ret"]}
+    bad = []
+    for rel in INSTALLER_SRCS:
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        for name in re.findall(r"(?:api|g_api|ops)\s*->\s*(\w+)\s*\(", src):
+            if name in strfn and strfn[name] not in USER_SAFE_STR_TARGETS:
+                bad.append(f"{rel}: {name} -> {strfn[name]}")
+    gen = (ROOT / "kapi/kapi_generated.c").read_text(encoding="utf-8")
+    if "return vfs_devname_user(prefix);" not in gen:
+        bad.append("kapi/kapi_generated.c: wrap_vfs_devname が vfs_devname_user を通らない (make all の前?)")
+    exe = (ROOT / "exec/exec.c").read_text(encoding="utf-8")
+    m = re.search(r"const char \*vfs_devname_user\(const char \*prefix\)\n\{(.*?)\n\}", exe, re.S)
+    if not m or "ring3_user_str(ring3_in_syscall" not in m.group(1):
+        bad.append("exec/exec.c: vfs_devname_user がトランポリンの写しを返さない")
+    for b in bad:
+        print("  str-return: " + b)
+    print(f"  str-return guard: {'ok' if not bad else 'NG'} "
+          f"({len(strfn)} string KAPIs, installer sources {len(INSTALLER_SRCS)})", flush=True)
+    return 1 if bad else 0
 
 
 def build_target(tmp):
@@ -331,8 +402,54 @@ MUTATIONS = [
      "install が hd0 を外さずに書く"),
     ("userland/system/install.c", "    if (inst_hdd_check_media(api, &tgt, sizes[MEDIA_IPL]",
      "    if (0 && inst_hdd_check_media(api, &tgt, sizes[MEDIA_IPL]", "install が大きさと容量を見ない"),
-    ("userland/system/install.c", "        if (written)\n", "        if (written && 0)\n",
-     "install の展開・sync の失敗を INCOMPLETE と出さない"),
+    ("userland/system/install.c", "        inst_hdd_incomplete(api, \"sync failed\", ret);\n", "",
+     "install の sync の失敗を INCOMPLETE と出さない"),
+    # ---- 実装レビュー往復 1 (Codex P1-1〜3・P2-4〜6、Fable minor) ----
+    ("userland/system/cdinst.c", "    if (sum != info->header.orig_size) {", "    if (0) {",
+     "P1-1 項目の和と orig_size を比べない (orig_size 0 のヘッダを通す)"),
+    ("userland/system/cdinst.c",
+     "        st.st_size != info->data_offset + info->header.comp_size) {",
+     "        0) {", "P1-1 PKG の長さを見ない (データ部が切れた媒体を通す)"),
+    ("userland/system/cdinst.c", "            if (!pkg_data_ok(path, &info)) return PKG_ERR_CORRUPT;\n", "",
+     "P1-1 追加パッケージのデータ部を書く前に見ない"),
+    ("userland/system/cdinst.c", "    if (!pkg_data_ok(PKG_BOOT, &info)) return PKG_ERR_CORRUPT;\n", "",
+     "P1-1 BOOT.PKG のデータ部を見ない"),
+    ("userland/system/cdinst.c", "PKG_NEED_SHELL) && ent->size > 0) have_shell = 1;",
+     "PKG_NEED_SHELL)) have_shell = 1;", "P1-1 空の shell.bin を必須として通す"),
+    ("userland/system/cdinst.c",
+     "            if (pkg_paths_ok(path, &info) != 0) return PKG_ERR_CORRUPT;\n            if (!pkg_data_ok",
+     "            if (!pkg_data_ok", "P1-2 パスを書く前に見ない (展開の途中で気付く)"),
+    ("userland/system/inst_disk.c",
+     "        if (len == 2 && c[0] == '.' && c[1] == '.') return INST_E_PATH;\n", "",
+     "P1-2 '..' を通す (/hd0 の外へ書く)"),
+    ("userland/system/inst_disk.c", "        if (len == 1 && c[0] == '.') return INST_E_PATH;\n", "",
+     "P1-2 '.' を通す"),
+    ("userland/system/inst_disk.c", "        if (len == 0) return INST_E_PATH;", "        (void)0;",
+     "P1-2 空の要素 ('//'・末尾 '/') を通す"),
+    ("userland/system/inst_disk.c", "    if (!path || path[0] != '/') return INST_E_PATH;",
+     "    if (!path || !path[0]) return INST_E_PATH;", "P1-2 絶対でないパスを通す"),
+    ("userland/system/inst_disk.c", "        if (depth + INST_PREFIX_DEPTH > INST_VFS_MAX_DEPTH) return INST_E_DEPTH;",
+     "        if (depth > INST_VFS_MAX_DEPTH) return INST_E_DEPTH;", "P2-5 前置 /hd0 の 1 要素を数えない"),
+    ("userland/system/install.c", "    for (i = 0; i < MEDIA_COUNT; i++) {",
+     "    for (i = 0; i < MEDIA_COUNT - 1; i++) {", "P1-3 FD の /sys/shell.bin を見ない"),
+    ("userland/system/install.c", "        if ((st.st_mode & OS_S_IFMT) != OS_S_IFREG) {", "        if (0) {",
+     "P1-3 FD の必須の種別 (通常のファイル) を見ない"),
+    ("userland/system/inst_disk.c", "    if (size > INST_EXT2_MAX_FILE) n->too_big++;\n", "",
+     "P2-4 1 ファイルの上限を数えない"),
+    ("userland/system/inst_disk.c", "    if (n->too_big) return INST_E_FILE_SIZE;\n", "",
+     "P2-4 1 ファイルの上限で断らない"),
+    ("userland/system/inst_hdd.c", "REBOOT, then run the installer again", "Run the installer again",
+     "P2-6 再起動を案内しない"),
+    ("userland/system/inst_hdd.c", "        ih_refuse(api, rc);\n        ih_host_hint(api);\n", "        ih_refuse(api, rc);\n",
+     "P2-6 直せない表にホスト側の手当てを案内しない"),
+    ("userland/system/inst_hdd.c", "        if (t->mounts == 1 && dev && ih_streq(dev, INST_DEV)) {",
+     "        if (dev && ih_streq(dev, INST_DEV)) {", "Fable 別の prefix にもマウントされた hd0 を承認後に外しに行く"),
+    ("userland/system/inst_hdd.c", "        ih_refuse(api, INST_E_GEOM);", "        ih_refuse(api, INST_E_ARG);",
+     "Fable hdd_geom_info の失敗を bad argument と出す"),
+    ("userland/system/inst_disk.c", "    need_inodes = n->files + n->dirs + INST_SPACE_MARGIN_INODES;",
+     "    need_inodes = n->files + n->dirs;", "Fable 自動で作る親ディレクトリの inode の余白を持たない"),
+    ("userland/system/inst_disk.c", "        out->free_blocks = 0;\n", "",
+     "Fable 失敗のとき room を埋めない"),
     ("boot/ext2_mini.c", "    if (file_size > max_size) return EXT2M_ERR_TOO_BIG;",
      "    if (file_size > max_size) file_size = max_size;", "上限で切り詰める (旧動作)"),
     ("boot/ext2_mini.c", "    if (file_size > max_size) return EXT2M_ERR_TOO_BIG;\n", "",
@@ -400,8 +517,10 @@ def main(argv):
         failed += run_cases(exes, img)
         failed += room_cross_check(exes["pure"], tmp)
         failed += consts_cross_check(exes["pure"])
+        failed += real_pkg_paths(exes["pure"])
+        failed += str_return_guard()
         total = len(PURE_CASES) + len(CDI_CASES) + len(INS_CASES) + len(MINI_FILES) + \
-            len(ROOM_SIZES) + 1
+            len(ROOM_SIZES) + 3
         print(f"SUMMARY {total - failed}/{total} PASS", flush=True)
 
         if "--target" in argv:

@@ -345,6 +345,29 @@ const char *vfs_cwd_user(void)
 }
 
 /* ======================================================================== */
+/*  vfs_devname_user — vfs_devname の実体 (票 TASK_HDD_INSTALL 段 2、        */
+/*  KAPI の追加はしない)                                                     */
+/*                                                                          */
+/*  sys_getcwd と同じ理由・同じ手: fs/vfs.c の vfs_devname はマウント表      */
+/*  (カーネル帯の static、USER ビット無し) の dev_name をそのまま返すので、   */
+/*  CPL=3 の呼び手が読むと #PF → fault kill になる。2026-09-24 の NP21/W で   */
+/*  cdinst (CPL=3) が hd0 の検査の `vfs_devname("/")` で落ちた (sh.bin の     */
+/*  hdprep と filer も同じ経路)。`sdk/kapi.json` の target を差し替え、CPL=3 */
+/*  にはトランポリンページ内の写し (sys_getcwd と共用の 1 本、次の KAPI 呼び */
+/*  出しより前に読み切ること) を返す。スロット・引数・戻り型は不変で、版も  */
+/*  上げない。CPL=0 の呼び手 (常駐シェル) には従来どおりの番地が返る。       */
+/* ======================================================================== */
+const char *vfs_devname_user(const char *prefix)
+{
+    char *scratch = 0;
+    if (ring3_tramp_page != 0) {
+        scratch = (char *)(ring3_tramp_page + RING3_USTR_OFF);
+    }
+    return ring3_user_str(ring3_in_syscall, scratch, RING3_USTR_CAP,
+                          vfs_devname(prefix));
+}
+
+/* ======================================================================== */
 /*  exec_tramp_user_selftest — 写し場の番地とページ属性 (票 T9 §12 R1)       */
 /*                                                                          */
 /*  kselftest_run() は exec_init() より **前** に走るのでトランポリンページが */

@@ -53,6 +53,7 @@ typedef struct {
 #define SRC_KERNEL_LZ4  "/VMKRNL.LZ4"
 #define SRC_BOOT_HDD    "/sys/boot_hdd.bin"
 #define SRC_LOADER_H    "/sys/loader_h.bin"
+#define SRC_SHELL       "/sys/shell.bin"    /* HDD 起動の常駐シェル (cdinst の MINIMAL と同じ必須) */
 #define DST_BOOT_DIR    "/hd0/boot"
 #define DST_KERNEL_LZ4  "/hd0/boot/vmkernel.lz4"
 
@@ -429,26 +430,33 @@ static const RecoverOps recover_kapi_ops = {
 
 /* ======== メイン ======== */
 
-/* Phase 0 (承認前): 媒体に要る 3 つが在って空でないことを確かめる。
- * 1 つでも欠ければ **1 バイトも書かずに** 中止する (票 S3I2-I §1)。
- * 戻り値 0 = 揃っている。sizes[] に 3 つの大きさ (VMKRNL.LZ4 / IPL / ローダの
+/* Phase 0 (承認前): 媒体に要る 4 つが在り、通常のファイルで、空でないことを
+ * 確かめる。1 つでも欠ければ **1 バイトも書かずに** 中止する (票 S3I2-I §1、
+ * TASK_HDD_INSTALL 段 2 の Codex 往復 1 P1-3 — cdinst の必須と同じ規則)。
+ * 戻り値 0 = 揃っている。sizes[] に大きさ (VMKRNL.LZ4 / IPL / ローダ / shell の
  * 順) を返す。大きさの上限は inst_hdd_check_media が見る (段 2-11、N8)。 */
 #define MEDIA_KERNEL 0
 #define MEDIA_IPL    1
 #define MEDIA_LOADER 2
+#define MEDIA_SHELL  3
+#define MEDIA_COUNT  4
 static int precheck_media(u32 *sizes)
 {
-    static const char *const need[3] = {
-        SRC_KERNEL_LZ4, SRC_BOOT_HDD, SRC_LOADER_H
+    static const char *const need[MEDIA_COUNT] = {
+        SRC_KERNEL_LZ4, SRC_BOOT_HDD, SRC_LOADER_H, SRC_SHELL
     };
     OS32_Stat st;
     int i, rc;
 
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < MEDIA_COUNT; i++) {
         sizes[i] = 0;
         rc = g_api->sys_stat(need[i], &st);
         if (rc != 0) {
             g_api->kprintf(0x4F, "Error: Missing %s (stat %d)\n", need[i], rc);
+            return -1;
+        }
+        if ((st.st_mode & OS_S_IFMT) != OS_S_IFREG) {
+            g_api->kprintf(0x4F, "Error: %s is not a regular file\n", need[i]);
             return -1;
         }
         if (st.st_size == 0) {
@@ -507,8 +515,7 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
     static u8 ipl_buf[512];
     int ret, i;
     int rc = 1;                 /* 失敗を既定にする (票 S3I2-I §1) */
-    int written = 0;            /* hd0 に 1 セクタでも書いたか */
-    u32 sizes[3];
+    u32 sizes[MEDIA_COUNT];
     int copied;
 
     g_api = api;
@@ -581,7 +588,6 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
     /* === Phase 1: ext2 → 区画表 → 読み戻し → マウント (R3-1) === */
     api->kprintf(ATTR_YELLOW, "%s", "[1/3] Preparing the OS32 area on hd0...\n");
     if (inst_hdd_release(api, &tgt) != 0) goto end;
-    written = 1;
     if (inst_hdd_prepare(api, &tgt) != 0) goto end;
 
     /* === Phase 2: ローダ (LBA 2〜) → IPL (LBA 0) === */
@@ -609,6 +615,7 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
     for (i = 0; i < INIT_DIRS; i++) {
         if (api->sys_mkdir(init_dirs[i]) != 0) {
             api->kprintf(0x4F, "Error: Failed to create %s\n", init_dirs[i]);
+            inst_hdd_incomplete(api, "cannot create the directories", -1);
             goto end;
         }
     }
@@ -619,6 +626,7 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
     if (copied < 0 || (u32)copied != sizes[MEDIA_KERNEL]) {
         api->kprintf(0x4F, "  [FAIL] %s -> %s (code: %d, want %u bytes)\n",
                      SRC_KERNEL_LZ4, DST_KERNEL_LZ4, copied, sizes[MEDIA_KERNEL]);
+        inst_hdd_incomplete(api, "cannot copy vmkernel.lz4", copied);
         goto end;
     }
     api->kprintf(0x0A, "  vmkernel.lz4 -> /boot (%d bytes)\n", copied);
@@ -633,6 +641,7 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
 
     if (ret != 0) {
         api->kprintf(0x4F, "  %d file(s) failed to copy.\n", ret);
+        inst_hdd_incomplete(api, "files failed to copy", ret);
         goto end;
     }
 
@@ -641,6 +650,7 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
     ret = api->vfs_sync();
     if (ret != 0) {
         api->kprintf(0x4F, "  sync failed (code: %d)\n", ret);
+        inst_hdd_incomplete(api, "sync failed", ret);
         goto end;
     }
 
@@ -653,11 +663,7 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
 end:
     api->mem_free(file_buf);
     file_buf = 0;
-    if (rc != 0) {
+    if (rc != 0)
         api->kprintf(ATTR_RED, "%s", "\n[FAIL] Installation did not complete.\n");
-        if (written)
-            api->kprintf(ATTR_RED, "%s",
-                         "INCOMPLETE: hd0 is not bootable. Run install again.\n");
-    }
     return rc;
 }

@@ -281,7 +281,8 @@
       "ret": "const char *",
       "args": [
         "const char *prefix"
-      ]
+      ],
+      "target": "vfs_devname_user"
     },
     {
       "name": "vfs_sync",

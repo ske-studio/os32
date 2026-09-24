@@ -747,7 +747,7 @@ const char * __cdecl wrap_sys_getcwd(void)
 const char * __cdecl wrap_vfs_devname(const char *prefix)
 {
     KAPI_HIT(30);
-    return vfs_devname(prefix);
+    return vfs_devname_user(prefix);
 }
 
 int __cdecl wrap_vfs_sync(void)

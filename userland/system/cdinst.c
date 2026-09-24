@@ -189,6 +189,8 @@ static void boot_img_free(BootImg *b)
     b->data = 0;
 }
 
+static int pkg_data_ok(const char *path, const PkgInfo *info);
+
 /* 戻り値 0 = IPL とローダが揃った。失敗は表示して負 (何も書いていない) */
 static int load_boot_pkg(BootImg *b)
 {
@@ -221,6 +223,7 @@ static int load_boot_pkg(BootImg *b)
         println(COL_RED, "  BOOT.PKG has no data");
         return PKG_ERR_CORRUPT;
     }
+    if (!pkg_data_ok(PKG_BOOT, &info)) return PKG_ERR_CORRUPT;
     b->data = (u8 *)api->mem_alloc(comp_size);
     if (!b->data) {
         println(COL_RED, "  out of memory (BOOT.PKG)");
@@ -276,6 +279,59 @@ static int path_eq(const char *a, const char *b)
     return *a == *b;
 }
 
+/* PKG のデータ部が表と一致するか (Codex 往復 1 の P1-1)。事前検査はヘッダと
+ * 表しか読まないので、データ部が切れた媒体や orig_size = 0 のヘッダは展開の
+ * 途中 (か黙って空のファイル) で初めて分かっていた。書く前に:
+ *   ファイルの項目の大きさの和 = orig_size、無圧縮なら comp_size = orig_size、
+ *   PKG の長さ = データ部の先頭 + comp_size */
+static int pkg_data_ok(const char *path, const PkgInfo *info)
+{
+    OS32_Stat st;
+    u32 sum = 0;
+    int i;
+
+    for (i = 0; i < info->entry_count; i++) {
+        if (info->entries[i].type != PKG_TYPE_FILE) continue;
+        if (info->entries[i].size > 0xFFFFFFFFUL - sum) return 0;   /* 桁あふれ */
+        sum += info->entries[i].size;
+    }
+    if (sum != info->header.orig_size) {
+        api->kprintf(COL_RED, "  %s: files add up to %u bytes, header says %u\n",
+                     path, sum, info->header.orig_size);
+        return 0;
+    }
+    if (!(info->header.flags & PKG_FLAG_LZSS) && info->header.comp_size != sum) {
+        api->kprintf(COL_RED, "  %s: stored size %u != %u\n", path,
+                     info->header.comp_size, sum);
+        return 0;
+    }
+    if (api->sys_stat(path, &st) != 0 ||
+        info->header.comp_size > 0xFFFFFFFFUL - info->data_offset ||
+        st.st_size != info->data_offset + info->header.comp_size) {
+        api->kprintf(COL_RED, "  %s: file is %u bytes, table says %u (truncated media?)\n",
+                     path, st.st_size, info->data_offset + info->header.comp_size);
+        return 0;
+    }
+    return 1;
+}
+
+/* 項目のパスが /hd0 の外へ出ないか (Codex 往復 1 の P1-2、P2-5)。
+ * 0 = 通る。断るときは表示して負 */
+static int pkg_paths_ok(const char *path, const PkgInfo *info)
+{
+    int i, rc;
+
+    for (i = 0; i < info->entry_count; i++) {
+        rc = inst_check_path(info->entries[i].path);
+        if (rc != 0) {
+            api->kprintf(COL_RED, "  %s: %s: %s\n", path, inst_reason(rc),
+                         info->entries[i].path);
+            return rc;
+        }
+    }
+    return 0;
+}
+
 static int measure_packages(int choice, InstNeed *need, u32 *kernel_len)
 {
     static const char *const bases[4] = {
@@ -303,6 +359,8 @@ static int measure_packages(int choice, InstNeed *need, u32 *kernel_len)
                              info.entries[i].path);
                 return PKG_ERR_TOOLONG;
             }
+            if (pkg_paths_ok(path, &info) != 0) return PKG_ERR_CORRUPT;
+            if (!pkg_data_ok(path, &info)) return PKG_ERR_CORRUPT;
             for (i = 0; i < info.entry_count; i++) {
                 const PkgEntry *ent = &info.entries[i];
                 if (ent->type == PKG_TYPE_DIR) {
@@ -312,12 +370,12 @@ static int measure_packages(int choice, InstNeed *need, u32 *kernel_len)
                 inst_need_file(need, ent->size);
                 if (b != 0) continue;
                 if (path_eq(ent->path, PKG_NEED_KERNEL)) *kernel_len = ent->size;
-                if (path_eq(ent->path, PKG_NEED_SHELL)) have_shell = 1;
+                if (path_eq(ent->path, PKG_NEED_SHELL) && ent->size > 0) have_shell = 1;
             }
         }
     }
     if (*kernel_len == 0 || !have_shell) {
-        api->kprintf(COL_RED, "  MINIMAL.PKG lacks %s\n",
+        api->kprintf(COL_RED, "  MINIMAL.PKG lacks %s (missing or empty)\n",
                      *kernel_len == 0 ? PKG_NEED_KERNEL : PKG_NEED_SHELL);
         return PKG_ERR_CORRUPT;
     }
@@ -352,6 +410,9 @@ static int install_package_hd(const char *path, const char *label)
         api->kprintf(COL_RED, " PATH TOO LONG: %s\n", info.entries[i].path);
         return PKG_ERR_TOOLONG;
     }
+
+    /* /hd0 の外へ出るパスは展開の前に断る (事前検査と同じ規則をもう一度) */
+    if (pkg_paths_ok(path, &info) != 0) return PKG_ERR_CORRUPT;
 
     /* パスに /hd0 プレフィックスを追加 */
     for (i = 0; i < info.entry_count; i++) {
@@ -474,7 +535,7 @@ static int install_packages(int choice)
     /* 完了 */
     print(COL_NORMAL, "\n");
     println(COL_GREEN, "=== Installation Complete ===");
-    println(COL_NORMAL, "Remove the floppy disk and reboot from HDD.");
+    println(COL_NORMAL, "Remove the CD and the boot floppy, then reboot from the HDD.");
     return PKG_OK;
 }
 

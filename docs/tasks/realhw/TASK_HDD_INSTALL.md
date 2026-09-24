@@ -172,6 +172,27 @@
   `sys_umount` (void) を呼ばない。HDD の自動検出 (`dev_get_info` の hd*) もやめ、hd0 = DA 80h だけを扱う。
 - 試験: `make check-hdd-stage2-host` (`tools/tests/test_hdd_stage2.py`、記録 `tools/tests/hdd_stage2_tdd.md`)、
   `make check-install-fresh-host` (install.c の段 2 のケース 6 本)。
+- **実装レビュー往復 1 (Codex P1-1〜3・P2-4〜6 / Fable minor) で足したもの**:
+  - cdinst は書く前に各 PKG の**データ部**を表と突き合わせる (項目の大きさの和 = orig_size、無圧縮なら
+    comp_size = orig_size、PKG の長さ = データ部の先頭 + comp_size)。必須 (vmkernel.lz4・shell.bin) は空でも断る。
+  - パスは要素ごとに見る (`inst_check_path`): 絶対パス・空 / `.` / `..` の要素なし・`/hd0` と合わせて
+    32 要素 (VFS_MAX_PATH_DEPTH) 以内。事前検査と展開の直前の 2 か所。
+  - install は FD の `/sys/shell.bin` も必須にし、4 本とも「通常のファイル・空でない」を見る (cdinst と同じ規則)。
+  - 1 ファイルの上限 (ext2 1KiB ブロックで二重間接まで、67,383,296 B) を超える項目は容量の検査で断る。
+    自動で作る親ディレクトリの分として inode に 128 の余白を持つ。
+  - hd0 を外すのは `/hd0` に hd0 が 1 つだけマウントされているときだけ。別の prefix にもあれば**承認の前に**断る。
+  - **INCOMPLETE の後は再起動してから入れ直す** (同じ起動のまま再実行すると ext2 の fs_error などで通らない
+    ことがある)。区画表の読み戻しが違った場合と、次の実行が区画表を断った場合は、**ゲストからは直せない**
+    旨とホスト側の手当てを出す: NP21/W は NP21/W を止めて `make nhd-init` (`tools/nhd_deploy.py init`、
+    NHD を作り直す)、実機は OS32 の外の道具で LBA 1 を消す。
+- **NP21/W で見つかった落ち (628c61f、2026-09-24)**: cdinst が hd0 の検査の `vfs_devname("/")` の返り値を読んで
+  CPL=3 の fault kill。`fs/vfs.c` の `vfs_devname` はカーネル帯のマウント表の `dev_name` をそのまま返し、
+  そこに USER ビットは無い。常駐シェル (CPL=0) の hdprep では出ず、ホスト試験の贋物は利用者の文字列を返すので
+  見えなかった。`sys_getcwd` と同じ手で直した: `sdk/kapi.json` の target を `vfs_devname_user` (exec/exec.c、
+  トランポリンページの写しを返す) に差し替え。スロット・引数・戻り型・版は不変 (KAPI_SPEC.md に注記)。
+  `sh.bin` の hdprep / filer も同じ経路で直る。あわせて `build/app.conf` の cdinst / install の版を 64 にした
+  (v63 以前のカーネルで予約スロットを呼ばない)。`path_get_drive` / `path_get_cwd` も target が素のままで、
+  同じ種類の潜在不具合の疑いがある (インストーラは呼ばない。未確認・未修正)。
 
 ### 段 3 — CD インストール → HDD 起動
 
