@@ -22,6 +22,7 @@
 #include "../../drivers/fdc_decide.c"
 #include "../../drivers/fdc_track.c"
 #include "../../drivers/fdc.c"
+#include "../../fs/fatfs/diskio.c"
 
 #define CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #x); failed++; \
@@ -55,6 +56,16 @@ void kprintf(u8 attr, const char *fmt, ...)
 void *kmemcpy(void *dst, const void *src, u32 n) { return memcpy(dst, src, n); }
 void *kmemset(void *dst, int val, u32 n) { return memset(dst, val, n); }
 
+/* diskio.c の HDD 側の下請け (FD の試験では呼ばれない) */
+int ide_drive_present(int drive) { (void)drive; return 0; }
+int ide_get_info(int drive, IdeInfo *info) { (void)drive; (void)info; return -1; }
+Device *dev_find(const char *name) { (void)name; return (Device *)0; }
+int dev_blk_read_lba(Device *dev, u32 lba, int count, void *buf)
+{ (void)dev; (void)lba; (void)count; (void)buf; return -1; }
+int dev_blk_write_lba(Device *dev, u32 lba, int count, const void *buf)
+{ (void)dev; (void)lba; (void)count; (void)buf; return -1; }
+void rtc_read(RTC_Time *t) { memset(t, 0, sizeof(*t)); }
+
 /* ======================================================================== */
 /*  DMA (µPD8237A) の模型: マスクと積んだ番地・長さだけ覚える              */
 /* ======================================================================== */
@@ -83,9 +94,12 @@ void dma_above_1mb_raw(u8 *pre, u8 *post) { *pre = 0; *post = 0; }
 /* ======================================================================== */
 /*  ディスクの中身: (drv, C, H, R, off) から決まるバイト + 書いたセクタ      */
 /* ======================================================================== */
+/* 媒体の入れ替えを模す (値を変えると全セクタの中身が変わる) */
+static int s_media_seed;
+
 static u8 disk_byte(int drv, int c, int h, int r, int off)
 {
-    return (u8)(c * 7 + h * 31 + r * 13 + off + drv * 101);
+    return (u8)(c * 7 + h * 31 + r * 13 + off + drv * 101 + s_media_seed * 57);
 }
 
 #define WR_MAX 16
@@ -104,7 +118,7 @@ static void disk_sector(int drv, int c, int h, int r, int bps, u8 *out)
     for (i = 0; i < bps; i++) out[i] = disk_byte(drv, c, h, r, i);
 }
 
-static void disk_write(int drv, int c, int h, int r, int bps, const u8 *in)
+static void disk_put(int drv, int c, int h, int r, int bps, const u8 *in)
 {
     int i, slot = -1;
     for (i = 0; i < WR_MAX; i++) {
@@ -140,9 +154,29 @@ static struct {
     int bad_c, bad_h, bad_r;        /* 読めないセクタ (bad_r = 0 で無し) */
     int drop_irq_reads;             /* READ の完了 IRQ を出さない回数 */
     int fail_seeks;                 /* SEEK を異常終了させる回数 */
+    /* INT 線 (レベル) とエッジトリガの PIC。**pending の SIS 結果が残って
+     * いるか、READ / WRITE のリザルトが読み終わっていないあいだ線は上がった
+     * まま**で、立ち上がりでしか fdc_irq_fired は立たない (実機の形)。 */
+    int line;
+    int rw_int;
+    int np21_irq;                   /* 1 = NP21/W の形 (事象ごとに IRQ) */
+    int nr_on_seek;                 /* 媒体の無いドライブへの SEEK を NR で返す */
+    int foreign_on_seek;            /* SEEK 完了の前に別の通知を積む: 1=drv1 SE, 2=自 Ready 変化 */
 } M;
 
-static void model_irq(void) { fdc_irq_fired = 1; }
+static void model_line(void)
+{
+    int up = (M.pend_n > 0) || M.rw_int;
+    if (up && !M.line) fdc_irq_fired = 1;
+    M.line = up;
+}
+
+/* 完了の通知。NP21/W の形なら線に関係なく毎回 IRQ を出す。 */
+static void model_irq(void)
+{
+    if (M.np21_irq) fdc_irq_fired = 1;
+    model_line();
+}
 
 static void model_pend(u8 st0, u8 pcn)
 {
@@ -183,7 +217,7 @@ static void model_rw(int is_write)
     int bps = 128 << N;
     int nsec = EOT - R + 1;
     u32 want = (u32)nsec * (u32)bps;
-    int i, err = 0;
+    int i, err = 0, nr = 0;
     u8 st1 = 0, st2 = 0;
 
     memcpy(M.last_rw, M.cmd, 9);
@@ -196,7 +230,7 @@ static void model_rw(int is_write)
     (void)model_geom;
 
     if (nsec < 1) { err = 1; st1 = 0x80; }                  /* EN */
-    else if (!M.present[drv]) { err = 1; }
+    else if (!M.present[drv]) { err = 1; nr = 1; }
     else if (M.pcn[drv] != C) { err = 1; st1 = 0x04; st2 = 0x10; } /* ND / WC */
     else if (!is_write && M.fail_multi && nsec > 1) { err = 1; st1 = 0x20; }
     else if (!is_write && M.bad_r && M.bad_c == C && M.bad_h == H
@@ -205,15 +239,16 @@ static void model_rw(int is_write)
     if (!err) {
         u8 *mem = (u8 *)(unsigned long)D.phys;
         for (i = 0; i < nsec && (u32)(i + 1) * (u32)bps <= D.bytes; i++) {
-            if (is_write) disk_write(drv, C, H, R + i, bps, mem + i * bps);
+            if (is_write) disk_put(drv, C, H, R + i, bps, mem + i * bps);
             else          disk_sector(drv, C, H, R + i, bps, mem + i * bps);
         }
     }
-    r[0] = (u8)((err ? 0x40 : 0x00) | (hd << 2) | drv);
+    r[0] = (u8)((err ? 0x40 : 0x00) | (nr ? 0x08 : 0x00) | (hd << 2) | drv);
     r[1] = st1; r[2] = st2;
     r[3] = (u8)C; r[4] = (u8)H; r[5] = (u8)(err ? R : EOT); r[6] = (u8)N;
     model_result(r, 7);
     if (!is_write && M.drop_irq_reads > 0) { M.drop_irq_reads--; return; }
+    M.rw_int = 1;
     model_irq();
 }
 
@@ -233,6 +268,7 @@ static void model_exec(void)
             memmove(M.pend_pcn, M.pend_pcn + 1, 7);
             M.pend_n--;
             model_result(r, 2);
+            model_line();
         } else {
             r[0] = 0x80;
             model_result(r, 1);
@@ -246,6 +282,11 @@ static void model_exec(void)
         break;
     case 0x0F:
         M.seeks++;
+        if (!M.present[drv] && M.nr_on_seek) {
+            model_pend((u8)(0x68 | (hd << 2) | drv), (u8)M.pcn[drv]);  /* IC=01 SE NR */
+            model_irq();
+            break;
+        }
         if (M.fail_seeks > 0) {
             /* 途中で止まった: ヘッドは目的と違うシリンダに居る */
             M.fail_seeks--;
@@ -255,6 +296,8 @@ static void model_exec(void)
             break;
         }
         M.pcn[drv] = M.cmd[2];
+        if (M.foreign_on_seek == 1) model_pend(0x21, 0);            /* drv1 */
+        if (M.foreign_on_seek == 2) model_pend((u8)(0xC0 | drv), (u8)M.pcn[drv]);
         model_pend((u8)(0x20 | (hd << 2) | drv), (u8)M.pcn[drv]);
         model_irq();
         break;
@@ -277,7 +320,11 @@ unsigned int fdc_shim_inp(unsigned int port)
     if (port == 0x92) {
         u8 v = 0xFF;
         if (M.rpos < M.nres) v = M.res[M.rpos++];
-        if (M.rpos >= M.nres) { M.nres = 0; M.rpos = 0; }
+        if (M.rpos >= M.nres) {
+            M.nres = 0; M.rpos = 0;
+            M.rw_int = 0;       /* リザルトを読み終えたら READ/WRITE の INT は下りる */
+            model_line();
+        }
         return v;
     }
     return 0xFF;
@@ -296,6 +343,7 @@ void fdc_shim_outp(unsigned int port, unsigned int value)
         if (v & 0x80) {
             M.in_reset = 1;
             M.ncmd = 0; M.nres = 0; M.rpos = 0; M.pend_n = 0;
+            M.rw_int = 0; M.line = 0;
             M.resets++;
         } else if (M.in_reset) {
             int d;
@@ -314,6 +362,8 @@ static void model_boot(int drv1_present)
     memset(&M, 0, sizeof(M));
     memset(&D, 0, sizeof(D));
     memset(s_written, 0, sizeof(s_written));
+    s_media_seed = 0;
+    memset(&s_stats, 0, sizeof(s_stats));
     M.present[0] = 1;
     M.present[1] = drv1_present;
     M.pcn[0] = 33;              /* ローダの後でヘッドは奥に居る */
@@ -321,6 +371,7 @@ static void model_boot(int drv1_present)
     fdc_set_media(1, FDC_MEDIA_2HD_1232);
     if (fdc_init() != 0) { fprintf(stderr, "model: fdc_init failed\n"); exit(2); }
     s_kprintf_lines = 0;
+    memset(&s_stats, 0, sizeof(s_stats));
 }
 
 static int check_bytes(const u8 *p, int drv, int c, int h, int r, int bps)
@@ -391,16 +442,29 @@ static int fake_one(void *ctx, int drv, int cyl, int head, int sect,
 
 static void fake_copy(void *d, const void *s, u32 n) { memcpy(d, s, n); }
 
-static const struct fdc_track_ops FAKE_OPS = { fake_multi, fake_one, fake_copy, 0 };
+static u32 s_fake_gen;
+static u32 fake_gen(void *ctx, int drv) { (void)ctx; (void)drv; return s_fake_gen; }
 
-static u8 s_cache_buf[FDC_TRACK_MAX_BYTES];
+static const struct fdc_track_ops FAKE_OPS = {
+    fake_multi, fake_one, fake_copy, fake_gen, 0
+};
+
+static u8 s_cache_buf[FDC_TRACK_SLOTS][FDC_TRACK_MAX_BYTES];
 static struct fdc_track_cache s_cache;
 
-static void cache_reset(void)
+/* nslots 本だけ受け皿を渡す (残りは NULL = 使わない)。区切りと読み直しの
+ * 試験は 1 本で、FAT とデータの取り合いの試験は 2 本で回す。 */
+static void cache_setup(int nslots)
 {
+    int i;
     memset(&s_cache, 0, sizeof(s_cache));
-    s_cache.buf = s_cache_buf;
+    for (i = 0; i < FDC_TRACK_SLOTS; i++) {
+        fdc_track_init(&s_cache, i, i < nslots ? s_cache_buf[i] : (u8 *)0);
+    }
+    s_fake_gen = 0;
 }
+
+static void cache_reset(void) { cache_setup(1); }
 
 /* 要求 [lba, lba+count) を読み、中身が正しいことと、その外に書いていない
  * ことを確かめる。 */
@@ -570,7 +634,7 @@ static void fallback_single(void)
     CHECK(!F.c[2].multi && F.c[2].sect == 4);
     CHECK(!F.c[3].multi && F.c[3].sect == 5);
     /* 失敗した中身は持たない — 次の読みもコマンドを出す */
-    CHECK(s_cache.valid == 0);
+    CHECK(s_cache.slot[0].valid == 0);
     F.fail_multi_all = 0;
     CHECK(read_and_verify(0, g, 5, 1) == 0);
     CHECK(F.n == 5 && F.c[4].multi);
@@ -821,7 +885,7 @@ static void fdc_forget_rules(void)
     CHECK(fdc_get_known_cyl(0) == 3);
     M.fail_multi = 1;
     M.present[0] = 0;
-    CHECK(fdc_read_sectors(0, 3, 0, 1, 8, &fdc_geom_2hd, buf) == -1);
+    CHECK(fdc_read_sectors(0, 3, 0, 1, 8, &fdc_geom_2hd, buf) != 0);
     CHECK(fdc_get_known_cyl(0) == -1);
     M.present[0] = 1;
     M.fail_multi = 0;
@@ -857,7 +921,10 @@ static int real_one(void *ctx, int drv, int cyl, int head, int sect,
     (void)ctx;
     return fdc_read_sector_geom(drv, cyl, head, sect, g, buf);
 }
-static const struct fdc_track_ops REAL_OPS = { real_multi, real_one, fake_copy, 0 };
+static u32 real_gen(void *ctx, int drv) { (void)ctx; return fdc_media_gen(drv); }
+static const struct fdc_track_ops REAL_OPS = {
+    real_multi, real_one, fake_copy, real_gen, 0
+};
 
 static void fdc_end_to_end(void)
 {
@@ -887,6 +954,247 @@ static void fdc_end_to_end(void)
     CHECK(M.pcn[0] == 2);
 }
 
+
+/* ======================================================================== */
+/*  (3) 2026-09-24 の NP21/W の結果とレビューを受けて足したもの            */
+/* ======================================================================== */
+
+/* FatFs (FF_FS_TINY=1) の読み方: 1KB ずつ 16B ずれて読むと、セクタを
+ * 越えるたびに FAT のセクタ (C0 H0 の LBA 1) とデータのセクタが交互に来る。
+ * 2 本持てば FAT のトラックは居続け、データはトラックごとに 1 回で済む。 */
+static void fat_data_interleave(void)
+{
+    const struct fdc_geom *g = &fdc_geom_2hd;
+    u32 l;
+    int i, fat_reads = 0;
+
+    fake_reset(); cache_setup(2);
+    for (l = 100; l < 132; l++) {               /* データ 32 セクタ = 4 トラック */
+        CHECK(read_and_verify(0, g, 1, 1) == 0);    /* FAT */
+        CHECK(read_and_verify(0, g, l, 1) == 0);    /* データ */
+    }
+    for (i = 0; i < F.n && i < CALL_MAX; i++) {
+        CHECK(F.c[i].multi);
+        if (F.c[i].cyl == 0 && F.c[i].head == 0) fat_reads++;
+    }
+    CHECK(fat_reads == 1);                      /* FAT のトラックは 1 回だけ */
+    /* データ: lba 100 = C6 H0 R5 から R8 (1 回)、C6 H1、C7 H0、C7 H1、
+     * C8 H0 (lba 128..131) の 5 回 + FAT 1 回 */
+    CHECK(F.n == 6);
+
+    /* 本物の fdc.c で同じ読み方をしたときのシーク: FAT (C0) 1 回、
+     * データ C6 / C7 / C8 で 3 回。期限切れは 0。 */
+    {
+        static u8 one[1024];
+        struct fdc_stats st;
+        int ok = 1;
+
+        model_boot(0);
+        cache_setup(2);
+        for (l = 100; l < 132; l++) {
+            if (fdc_track_read(&s_cache, &REAL_OPS, 0, g, 1, 1, one) != 0) ok = 0;
+            if (fdc_track_read(&s_cache, &REAL_OPS, 0, g, l, 1, one) != 0) ok = 0;
+            else if (!check_bytes(one, 0, (int)(l / 16), (int)((l / 8) % 2),
+                                  (int)(l % 8) + 1, 1024)) ok = 0;
+        }
+        fdc_get_stats(&st);
+        CHECK(ok);
+        CHECK(st.seek_issued == 4);
+        CHECK(st.seek_timeout == 0);
+        CHECK(M.reads == 6);
+    }
+
+    /* 1 本だけなら取り合って毎回読む (直す前の姿を記録しておく) */
+    fake_reset(); cache_setup(1);
+    for (l = 100; l < 104; l++) {
+        CHECK(read_and_verify(0, g, 1, 1) == 0);
+        CHECK(read_and_verify(0, g, l, 1) == 0);
+    }
+    CHECK(F.n == 8);
+}
+
+/* 世代が進んだら (書き込み・Ready 変化・メディアの変更) 当てない。
+ * 使ったばかりのスロットは追い出さない (LRU)。 */
+static void gen_and_lru(void)
+{
+    const struct fdc_geom *g = &fdc_geom_2hd;
+
+    fake_reset(); cache_setup(2);
+    CHECK(read_and_verify(0, g, 0, 1) == 0);    /* A = C0 H0 */
+    CHECK(read_and_verify(0, g, 8, 1) == 0);    /* B = C0 H1 */
+    CHECK(F.n == 2);
+    s_fake_gen++;
+    CHECK(read_and_verify(0, g, 1, 1) == 0);    /* 世代が違う → 読み直す */
+    CHECK(F.n == 3);
+    CHECK(read_and_verify(0, g, 2, 1) == 0);    /* 新しい世代の A は当たる */
+    CHECK(F.n == 3);
+    /* LRU: A を使った直後に C を読むと B が追い出され、A は残る */
+    CHECK(read_and_verify(0, g, 16, 1) == 0);   /* C = C1 H0 (B は古い世代) */
+    CHECK(read_and_verify(0, g, 24, 1) == 0);   /* D = C1 H1 → A か C の古い方 = A */
+    CHECK(F.n == 5);
+    CHECK(read_and_verify(0, g, 17, 1) == 0);   /* C は残っている */
+    CHECK(F.n == 5);
+    CHECK(read_and_verify(0, g, 3, 1) == 0);    /* A は追い出された */
+    CHECK(F.n == 6);
+}
+
+/* SEEK の完了の前に別ドライブの通知 / 自ドライブの Ready 変化が積まれて
+ * いても、**1 本のエッジで全部読む**ので期限切れを待たない。 */
+static void seek_edge_foreign(void)
+{
+    static u8 buf[8 * 1024];
+    struct fdc_stats st;
+
+    model_boot(1);
+    M.foreign_on_seek = 1;
+    CHECK(fdc_read_sectors(0, 5, 0, 1, 8, &fdc_geom_2hd, buf) == 0);
+    fdc_get_stats(&st);
+    CHECK(st.seek_timeout == 0);
+    CHECK(st.sis_foreign >= 1);
+    CHECK(check_bytes(buf, 0, 5, 0, 1, 1024));
+
+    model_boot(0);
+    M.foreign_on_seek = 2;
+    {
+        u32 g0 = fdc_media_gen(0);
+        CHECK(fdc_read_sectors(0, 6, 0, 1, 8, &fdc_geom_2hd, buf) == 0);
+        fdc_get_stats(&st);
+        CHECK(st.seek_timeout == 0);
+        CHECK(fdc_media_gen(0) != g0);          /* Ready 変化で世代が進む */
+    }
+}
+
+/* 同じシリンダでシークを省くときも、**先に排水する**。取り残しの通知で
+ * INT 線が上がったままだと、READ の完了にエッジが来ない。 */
+static void drain_before_skip(void)
+{
+    static u8 buf[8 * 1024];
+    struct fdc_stats st;
+
+    model_boot(1);
+    CHECK(fdc_read_sectors(0, 3, 0, 1, 8, &fdc_geom_2hd, buf) == 0);
+    model_pend(0x21, 0);                        /* 取り残し (drv1 の完了) */
+    model_line();
+    CHECK(fdc_read_sectors(0, 3, 1, 1, 8, &fdc_geom_2hd, buf) == 0);
+    fdc_get_stats(&st);
+    CHECK(st.seek_skipped >= 1);
+    CHECK(st.multi_fail == 0);
+    CHECK(check_bytes(buf, 0, 3, 1, 1, 1024));
+}
+
+/* Ready 変化 (媒体の入れ替え) を SIS で見たら、持っている先読みを当てない。 */
+static void readychange_invalidates(void)
+{
+    static u8 buf[1024];
+    const struct fdc_geom *g = &fdc_geom_2hd;
+
+    model_boot(0);
+    cache_setup(2);
+    CHECK(fdc_track_read(&s_cache, &REAL_OPS, 0, g, 32, 1, buf) == 0);  /* C2 H0 */
+    CHECK(check_bytes(buf, 0, 2, 0, 1, 1024));
+    s_media_seed = 1;                           /* 入れ替え */
+    model_pend(0xC0, 2);                        /* Ready 変化の通知 */
+    model_line();
+    CHECK(fdc_track_read(&s_cache, &REAL_OPS, 0, g, 80, 1, buf) == 0);  /* 別シリンダ */
+    CHECK(fdc_track_read(&s_cache, &REAL_OPS, 0, g, 33, 1, buf) == 0);  /* C2 H0 R2 */
+    CHECK(check_bytes(buf, 0, 2, 0, 2, 1024));  /* 新しい媒体の中身 */
+}
+
+/* NR (媒体無し) はまとめ読みの失敗に数えず、行も出さない。 */
+static void multi_nr_quiet(void)
+{
+    static u8 buf[8 * 1024];
+    struct fdc_stats st;
+
+    /* (a) READ のリザルトの NR */
+    model_boot(1);
+    M.present[0] = 0;
+    CHECK(fdc_read_sectors(0, 7, 0, 1, 8, &fdc_geom_2hd, buf) == -3);
+    fdc_get_stats(&st);
+    CHECK(st.multi_fail == 0);
+    CHECK(st.multi_nr == 1);
+    CHECK(s_kprintf_lines == 0);
+
+    /* (b) SEEK の NR */
+    model_boot(1);
+    M.present[0] = 0;
+    M.nr_on_seek = 1;
+    CHECK(fdc_read_sectors(0, 7, 0, 1, 8, &fdc_geom_2hd, buf) == -3);
+    fdc_get_stats(&st);
+    CHECK(st.multi_fail == 0);
+    CHECK(st.multi_nr == 1);
+    CHECK(M.reads == 0);
+    CHECK(s_kprintf_lines == 0);
+}
+
+/* diskio.c の結線: 読む → 書く → 読む。FatFs の disk_write でも、dev.c や
+ * KAPI の dev_blk_write と同じ fdc_write_sector 直でも、古い先読みを返さない。
+ * disk_initialize は (Ready 変化の無い) 媒体の入れ替えでも読み直させる。 */
+static void diskio_rw(void)
+{
+    static u8 buf[1024], data[1024];
+    int i;
+
+    model_boot(0);
+    diskio_set_fdd_drive(0);
+    CHECK(disk_read(0, buf, 40, 1) == RES_NOTRDY);  /* 初期化の前 */
+    CHECK(disk_initialize(0) == 0);
+    CHECK(disk_read(0, buf, 40, 1) == RES_OK);      /* C2 H1 R1、トラックを持つ */
+    CHECK(check_bytes(buf, 0, 2, 1, 1, 1024));
+    CHECK(disk_read(0, buf, 47, 1) == RES_OK);      /* 同じトラックは読まない */
+    CHECK(M.reads == 1 && M.multi_reads == 1);
+
+    for (i = 0; i < 1024; i++) data[i] = (u8)(0x5A ^ i);
+    CHECK(disk_write(0, data, 41, 1) == RES_OK);    /* 持っているトラックの中 */
+    CHECK(disk_read(0, buf, 41, 1) == RES_OK);
+    CHECK(memcmp(buf, data, 1024) == 0);
+
+    CHECK(disk_read(0, buf, 42, 1) == RES_OK);      /* 同じトラックをまた持つ */
+    for (i = 0; i < 1024; i++) data[i] = (u8)(0xC3 ^ i);
+    CHECK(fdc_write_sector(0, 2, 1, 4, data) == 0); /* dev.c / KAPI の経路 */
+    CHECK(disk_read(0, buf, 43, 1) == RES_OK);
+    CHECK(memcmp(buf, data, 1024) == 0);
+
+    /* 媒体の入れ替え (Ready 変化無し) → disk_initialize で読み直す */
+    CHECK(disk_read(0, buf, 44, 1) == RES_OK);
+    s_media_seed = 3;
+    memset(s_written, 0, sizeof(s_written));
+    CHECK(disk_initialize(0) == 0);
+    CHECK(disk_read(0, buf, 45, 1) == RES_OK);
+    CHECK(check_bytes(buf, 0, 2, 1, 6, 1024));
+}
+
+
+/* 受け皿の割り付け: DMA の窓は 64KB 境界をまたがず、先読みの領域と
+ * 重ならない。境界が領域のどこにあっても取れる。 */
+static void buf_layout(void)
+{
+    const u32 slot = FDC_DMA_BUF_SIZE, total = FDC_BUF_BYTES;
+    u32 base, d, r;
+    int bad = 0;
+
+    for (base = 0x160000 - total - 64; base <= 0x160000 + 64; base += 4) {
+        if (fdc_buf_layout(base, total, slot, &d, &r) != 0) { bad++; continue; }
+        if ((((base + d) & 0xFFFF) + slot) > 0x10000) bad++;       /* またいだ */
+        if (d + slot > total || r + (total - slot) > total) bad++;  /* はみ出し */
+        if (!(d + slot <= r || r + (total - slot) <= d)) bad++;      /* 重なり */
+    }
+    CHECK(bad == 0);
+    /* 境界が先頭の窓の中 → 窓は末尾 */
+    CHECK(fdc_buf_layout(0x10000 - 100, total, slot, &d, &r) == 0);
+    CHECK(d == total - slot && r == 0);
+    /* 境界が領域の外 → 窓は先頭 */
+    CHECK(fdc_buf_layout(0x20000, total, slot, &d, &r) == 0);
+    CHECK(d == 0 && r == slot);
+    /* 取れない引数 */
+    CHECK(fdc_buf_layout(0, slot - 1, slot, &d, &r) != 0);
+    CHECK(fdc_buf_layout(0, 0x10000, slot, &d, &r) != 0);
+    CHECK(fdc_buf_layout(0, total, 0, &d, &r) != 0);
+    /* 本物の領域も */
+    CHECK(fdc_track_slot(0) != 0 && fdc_track_slot(FDC_TRACK_SLOTS) == 0);
+    CHECK((((u32)(unsigned long)dma_buffer & 0xFFFF) + slot) <= 0x10000);
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -904,6 +1212,14 @@ int main(int argc, char **argv)
         { "fdc_seek_skip", fdc_seek_skip },
         { "fdc_forget_rules", fdc_forget_rules },
         { "fdc_end_to_end", fdc_end_to_end },
+        { "fat_data_interleave", fat_data_interleave },
+        { "gen_and_lru", gen_and_lru },
+        { "seek_edge_foreign", seek_edge_foreign },
+        { "drain_before_skip", drain_before_skip },
+        { "readychange_invalidates", readychange_invalidates },
+        { "multi_nr_quiet", multi_nr_quiet },
+        { "diskio_rw", diskio_rw },
+        { "buf_layout", buf_layout },
     };
     if (argc != 2) { fprintf(stderr, "usage: %s CASE\n", argv[0]); return 2; }
     for (i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {

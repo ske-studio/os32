@@ -22,7 +22,51 @@
   [`fdc_hostshim/io.h`](fdc_hostshim/io.h) が模型へ回し、`tick_count` は
   `-Dtick_count=(*fdc_fake_tick_ptr())` で「読むたびに 1 進む」時計にする
 - KAPI は動かしていない。既存 API のシグネチャもそのまま。足したのは
-  `fdc_read_sectors` / `fdc_get_multi_stats` / `fdc_get_known_cyl` (カーネル内だけ)
+  `fdc_read_sectors` / `fdc_get_stats` / `fdc_print_stats` / `fdc_media_gen` /
+  `fdc_track_slot` / `fdc_get_known_cyl` (カーネル内だけ)
+
+## 0. 9ed7c80 を NP21/W で起動して分かったこと (2026-09-24 夕) と直したもの
+
+PM の実測: フォントの読み込みは 4a8fad4 とほぼ同じ約 3 分。EIP は全部
+`fdc_wait_seek_end` の IRQ 待ち (0x118140〜0x118150 = 内側に展開された `fdc_wait_irq`)。
+
+- **主因 (机上で確定、実測は PM)**: FatFs は `FF_FS_TINY=1` で FAT とデータが 1 つの窓
+  (`fs->win`) を取り合う。`f_read` (ff.c 3914〜) はクラスタを越えるたびに `get_fat` →
+  `move_window(FAT のセクタ)` で窓を FAT に替え、次のデータのセクタで窓を戻す。フォントは
+  16B のヘッダの後に 1024B ずつ読むので**毎回セクタ (= 2HD の 1 クラスタ) を越える**。
+  FAT はシリンダ 0、データは奥なので、**1KB ごとにシークが 2 回**。先読みを 1 本しか
+  持たないと FAT のトラックとデータのトラックが追い出し合い、まったく当たらない。
+  → 先読みを **2 本 (LRU)** にした。`fat_data_interleave` で、同じ読み方が
+  READ 6 回・SEEK 4 回・期限切れ 0 になることを本物の `fdc.c` で見る。
+- **完了待ちの取りこぼし (実機の形)**: `fdc_wait_seek_end` は SIS が別ドライブの通知や
+  Ready 変化を返すと、1 件読んだだけで次の IRQ を待っていた。µPD765A の INT 線は pending が
+  尽きるまで上がったままで、エッジの PIC には次のエッジが来ない → 自分の完了が FIFO に
+  残ったまま **1.5 秒の期限まで空待ちし、救済の SIS で拾う**。1 本のエッジで 80h が出るまで
+  読むようにした (`seek_edge_foreign`)。NP21/W は事象ごとに IRQ を出す
+  (`fdc_intdelay` → `fdc_interrupt`) ので、エミュレータでこれが主因かは起動時の
+  `[fdc] font: ... tmo=` の行で確かめる
+- **IF=0 に見えたもの**: 0x244 は IF (bit9 = 0x200) が立っている (0x200 + ZF 0x40 + PF 0x04)。
+  0x214 と同じく IF=1 で、割り込み禁止の区間ではない
+- 模型は **INT 線をレベルで持ち、立ち上がりだけ `fdc_irq_fired` を立てる**形にした
+  (pending の SIS 結果か、読み終わっていない READ/WRITE のリザルトがあるあいだ上がったまま)。
+  これで「省略を排水より先に置く」変異が RED になる (`drain_before_skip`)
+- レビューの major:
+  - 先読みのスロットに**中身の世代** (`fdc_media_gen`) を持たせた。`fdc_write_sector_geom` を
+    通る書き込み全部 (FatFs / dev.c の fd0・fd1 / KAPI の `dev_blk_write`)、SIS で見た Ready
+    変化、`fdc_set_media` で進む。diskio.c の `disk_write` での破棄はこれに置き換えた
+  - `.bss` の詰め物: 受け皿を **1 本の静的な領域 (27KB = 窓 1 + スロット 2)** にし、DMA の窓の
+    位置を `fdc_buf_layout()` が実行時に決める (領域は 64KB より短いので境界は高々 1 本、窓は
+    先頭か末尾に必ず取れる)。揃え指定もリンカスクリプトも使わない。`__bss_end` は
+    0x184800 → 0x180780
+  - diskio.c の破棄の試験 (`diskio_rw`): 読む → `disk_write` → 読む、読む → `fdc_write_sector`
+    直 → 読む、Ready 変化の無い入れ替え → `disk_initialize` → 読む。
+    `diskio_set_fdd_drive` の破棄は外した — `STA_NOINIT` にするので次の読みの前に必ず
+    `disk_initialize` を通り、そこで捨てる (残すと等価な変異になる)
+- minor: NR はまとめ読みの失敗に数えず行も出さない (`multi_nr_quiet`、戻り値 -3)。
+  Ready 変化は SIS のどこで見ても世代を進め、覚えたシリンダを捨てる
+  (`readychange_invalidates`)
+- 起動時に `[fdc] font: seek= skip= recal= tmo= foreign= rdy= multi=ok/fail nr= single= retry= write=`
+  を 1 行出す (`kernel/kernel.c`、FD に触っていなければ出ない)
 
 ## 1. ケース
 
@@ -39,6 +83,14 @@
 | `fdc_multi_cmd` | 本物の `fdc.c`: READ DATA が MT=0、R=sect、EOT=sect+count-1、DMA 長 = count×bps、受け皿が 64KB 境界をまたがない ([HW2])、トラックをまたぐ引数は I/O の前に断る |
 | `fdc_seek_skip` | 同じシリンダならシークを省く (ヘッドが違っても、単発でも、書き込みでも)。違えばシークし、覚えた値を更新する |
 | `fdc_forget_rules` | まとめ読みの失敗 (DMA を閉じ、リセット + RECALIBRATE でヘッドを 0 に戻して 0 を覚え直す)・その RECALIBRATE も落ちたとき・メディアの変更・ドライブの切り替え・単発の最終失敗・IRQ 無し・シークの失敗で覚えた値を捨てる |
+| `fat_data_interleave` | FatFs の読み方 (FAT のセクタとデータのセクタが交互) で、2 本なら FAT のトラックは 1 回だけ読む。本物の `fdc.c` で SEEK 4 回・READ 6 回・期限切れ 0 |
+| `gen_and_lru` | 世代が進んだスロットは当てない。LRU で使ったばかりのスロットを残す |
+| `seek_edge_foreign` | SEEK の完了の前に別ドライブの通知 / 自ドライブの Ready 変化が積まれていても、1 本のエッジで全部読んで期限切れを待たない。Ready 変化で世代が進む |
+| `drain_before_skip` | 取り残しの通知で INT 線が上がったままでも、省略の前の排水で下ろし、READ の完了のエッジが来る |
+| `readychange_invalidates` | SIS で Ready 変化を見たら、持っている先読みを入れ替え後の媒体に当てない |
+| `multi_nr_quiet` | SEEK の NR / READ の NR はまとめ読みの失敗に数えず、行も出さない |
+| `diskio_rw` | diskio.c ごと: 初期化前は NOTRDY、同じトラックは 1 回だけ読む、`disk_write` と `fdc_write_sector` 直の後に古い中身を返さない、Ready 変化の無い入れ替えは `disk_initialize` で読み直す |
+| `buf_layout` | 受け皿の割り付け: 境界がどこにあっても DMA の窓は 64KB をまたがず、先読みの領域と重ならない |
 | `fdc_end_to_end` | `fdc_track_read` + 本物の `fdc.c`: count=1 × 48 セクタが READ 6 回・SEEK 3 回。裏でヘッドが動いていても (V86 の BIOS など) ID 部の照合 (WC) で落ちて読み直し、別のシリンダは読まない |
 
 ## 2. 資料の根拠
@@ -67,6 +119,12 @@ SURVIVED = 見逃し。最後の 1 本は何も変えない対照で、SURVIVED 
 
 2026-09-24 の結果: **RED 20 / ERROR 0 / SURVIVED 1 (対照)** (変異 21 本)。
 
+2026-09-24 夕 (上の §0 を直した後): **RED 32 / ERROR 0 / SURVIVED 1 (対照)** (変異 33 本)。
+途中で SURVIVED が 2 本出た: (a) 覚えたシリンダの破棄はリセット・RECALIBRATE に加えて
+Ready 変化の SIS でも行うので三重 (3 つとも消す形にして RED)、(b) `disk_initialize` の変異が
+スロットの貸し出しごと消していて先読み自体が止まり、古い中身を返しようがなかった
+(貸し出しと破棄を分け、試験に「同じトラックは 1 回だけ読む」を足して RED)。
+
 途中で見つけた穴 (直した):
 - 「トラックの境目で切らない」の最初の書き方は未使用変数でコンパイルが落ちた (ERROR)。
   境目を 1 つ越えて切る形に書き直して RED
@@ -84,7 +142,6 @@ SURVIVED = 見逃し。最後の 1 本は何も変えない対照で、SURVIVED 
 
 ## 4. ホストで見ていないもの
 
-- `fs/fatfs/diskio.c` の結線と破棄 (書き込みの前、`disk_initialize`、
-  `diskio_set_fdd_drive`) は i386-elf のコンパイル (`--target`) だけ
+- diskio.c はホストでも回す (`diskio_rw`)。FatFs 本体 (ff.c) は通していない
 - 実機の速度、エミュレータでの起動、実機での MT なしのまとめ読みの挙動 (TC と EOT が
   同時に来て正常終了すること) は未確認

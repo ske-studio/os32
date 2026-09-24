@@ -54,16 +54,29 @@ static Device *hdd_dev = 0;
 /*  1 セクタずつ SEEK + READ DATA を出していたころは 1 セクタごとにほぼ      */
 /*  1 回転待ち、実機でフォント (188KB) の読み込みが 1 分以上止まった。       */
 /*  要求をトラックの境目で区切り、要求したセクタからトラックの終わりまでを  */
-/*  1 回で読んで持っておく (drivers/fdc_track.h の注記)。                   */
+/*  1 回で読んで持っておく (drivers/fdc_track.h の注記)。持つのは           */
+/*  FDC_TRACK_SLOTS 本 — FAT のトラックとデータのトラックの分。             */
+/*  受け皿は fdc.c の静的な領域から借りる (fdc_track_slot)。                */
 /*                                                                          */
-/*  **捨てる時**: 書き込み (disk_write) の前、disk_initialize、             */
-/*  diskio_set_fdd_drive。メディアの種類が変われば fdc_track_hit が          */
-/*  ジオメトリの違いで外す。                                                */
+/*  **捨てる時**: disk_initialize (媒体の入れ替えを Ready 変化無しで済ませ  */
+/*  る経路もあるので明示的に。diskio_set_fdd_drive もここを通らせる)。書き込みは */
+/*  fdc_media_gen() の世代で外れる (FatFs 以外の書き込みも同じ)。          */
+/*  メディアの種類が変われば世代とジオメトリの両方で外れる。               */
 /* ======================================================================== */
-static u8 fdd_track_buf[FDC_TRACK_MAX_BYTES];
-static struct fdc_track_cache fdd_track = {
-    0, 0, 0, 0, 0, 0, 0, fdd_track_buf, 0, 0, 0, 0, 0
-};
+static struct fdc_track_cache fdd_track;
+static int fdd_track_ready = 0;
+
+/* 受け皿を fdc.c から借りる (最初の 1 回だけ)。 */
+static void fdd_track_setup(void)
+{
+    int i;
+
+    if (fdd_track_ready) return;
+    for (i = 0; i < FDC_TRACK_SLOTS; i++) {
+        fdc_track_init(&fdd_track, i, fdc_track_slot(i));
+    }
+    fdd_track_ready = 1;
+}
 
 static int fdd_ops_read_multi(void *ctx, int drv, int cyl, int head, int sect,
                               int count, const struct fdc_geom *g, void *buf)
@@ -84,16 +97,22 @@ static void fdd_ops_copy(void *dst, const void *src, u32 n)
     kmemcpy(dst, src, n);
 }
 
+static u32 fdd_ops_gen(void *ctx, int drv)
+{
+    (void)ctx;
+    return fdc_media_gen(drv);
+}
+
 static const struct fdc_track_ops fdd_track_ops = {
-    fdd_ops_read_multi, fdd_ops_read_one, fdd_ops_copy, 0
+    fdd_ops_read_multi, fdd_ops_read_one, fdd_ops_copy, fdd_ops_gen, 0
 };
 
 /* ドライブ番号設定 API (fatfs_vfs.c から呼ばれる)
  * ドライブ変更時はstatusとオフセットをリセットし、f_mountでの再初期化を促す */
-void diskio_set_fdd_drive(int drv) {
-    fdd_drive = drv; fdd_status = STA_NOINIT;
-    fdc_track_invalidate(&fdd_track);
-}
+/* 先読みはここでは捨てない: STA_NOINIT にするので、次の読みの前に必ず
+ * disk_initialize (そこで捨てる) を通る (disk_read は NOINIT なら
+ * RES_NOTRDY を返し、FatFs は disk_status を見て初期化し直す)。 */
+void diskio_set_fdd_drive(int drv) { fdd_drive = drv; fdd_status = STA_NOINIT; }
 void diskio_set_hdd_drive(int drv) {
     char devname[8];
     hdd_drive = drv; hdd_status = STA_NOINIT;
@@ -133,6 +152,7 @@ DSTATUS disk_initialize(BYTE pdrv)
     case DRV_FDD:
         /* FDCはカーネル起動時に fdc_init() で初期化済み。
          * 持っているトラックは捨てる (マウントし直し = 媒体が替わったかも)。 */
+        fdd_track_setup();
         fdc_track_invalidate(&fdd_track);
         fdd_status = 0;
         return fdd_status;
@@ -217,9 +237,9 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
         if (fdd_status & STA_NOINIT) return RES_NOTRDY;
         /* FDD: fdc_write_sector (CHS ネイティブ) を直接使用。
          * 読み側と同じくジオメトリはドライブから聞く。
-         * **先に持っているトラックを捨てる** — 書いたセクタの古い中身を
-         * 次の読みに当てない (途中で失敗しても捨てたままでよい)。 */
-        fdc_track_invalidate(&fdd_track);
+         * 先読みの古い中身は fdc_write_sector_geom が世代を進めて外す
+         * (dev.c や KAPI からの書き込みも同じ経路なので、ここで捨てる
+         * だけでは足りない)。 */
         {
             const struct fdc_geom *g = fdc_get_geom(fdd_drive);
             for (i = 0; i < count; i++) {

@@ -31,7 +31,9 @@ SOURCES = ["drivers/fdc_track.c", "drivers/fdc.c", "drivers/fdc_decide.c",
 CASES = ["split_2hd", "split_144", "readahead_count1", "cross_boundary",
          "fallback_single", "single_fail", "cache_rules", "oversize_geom",
          "timeout_math", "fdc_multi_cmd", "fdc_seek_skip", "fdc_forget_rules",
-         "fdc_end_to_end"]
+         "fdc_end_to_end", "fat_data_interleave", "gen_and_lru",
+         "seek_edge_foreign", "drain_before_skip", "readychange_invalidates",
+         "multi_nr_quiet", "diskio_rw", "buf_layout"]
 
 # fdc.c の fdc_motor_off() は元から未使用の static (test_fdc_seek.py と同じ)。
 # tick_count の差し替えは「volatile u32 * を返す関数」の宣言になるので
@@ -44,13 +46,15 @@ FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
 
 def includes(first=None):
     dirs = ([first] if first else []) + [SHIM] + [
-        ROOT / p for p in ("include", "drivers", "lib", "sdk/include/os32")]
+        ROOT / p for p in ("include", "drivers", "lib", "sdk/include/os32",
+                           "fs/fatfs")]
     return ["-I" + str(d) for d in dirs]
 
 
 # 否定側。実装を 1 か所だけ壊して RED になることを見る。
 # (ファイル, パターン, 置換, 説明)。最後の 1 本は対照 (何も変えない)。
 MUTATIONS = [
+    # --- 区切り・先読み・読み直し (drivers/fdc_track.c)
     ("drivers/fdc_track.c",
      r"in_track = \(count < left\) \? count : left;",
      "in_track = (count < left + 1) ? count : left + 1;",
@@ -60,19 +64,23 @@ MUTATIONS = [
      "left = spt * heads - (lba % (spt * heads));",
      "ヘッドの境目で切らない (MT 無しでヘッド 1 まで読もうとする)"),
     ("drivers/fdc_track.c",
-     r"if \(run->sect < c->first\) return 0;",
+     r"if \(run->sect < t->first\) continue;",
      "",
      "持っていない手前のセクタを当てる"),
     ("drivers/fdc_track.c",
-     r"if \(c->geom != g\) return 0;",
+     r"if \(t->geom != g\) continue;",
      "",
      "ジオメトリが変わっても中身を当てる"),
     ("drivers/fdc_track.c",
-     r"if \(c->drv != drv \|\| ",
+     r"if \(t->drv != drv \|\| ",
      "if (",
      "別ドライブに中身を当てる"),
     ("drivers/fdc_track.c",
-     r"            c->valid = 0;\n            if \(eot > 0 &&",
+     r"if \(t->gen != gen\) continue;",
+     "",
+     "世代 (書き込み / Ready 変化) が進んでも中身を当てる"),
+    ("drivers/fdc_track.c",
+     r"            t->valid = 0;\n            if \(eot > 0 &&",
      "            if (eot > 0 &&",
      "まとめ読みの前に捨てない (失敗しても古い中身が残る)"),
     ("drivers/fdc_track.c",
@@ -87,41 +95,71 @@ MUTATIONS = [
      r"if \(eot > want_last && fdc_track_is_bad\(c, drv, g, &run\)\) \{",
      "if (0) {",
      "先読みが落ちたトラックでも先読みを続ける (毎回失敗 + 1 セクタずつ)"),
+    ("drivers/fdc_track.c",
+     r"if \(v < 0 \|\| c->slot\[i\]\.used < c->slot\[v\]\.used\) v = i;",
+     "if (v < 0) v = i;",
+     "LRU でなく常に先頭のスロットを追い出す (FAT のトラックが追い出される)"),
+    ("drivers/fdc.h",
+     r"#define FDC_TRACK_SLOTS      2",
+     "#define FDC_TRACK_SLOTS      1",
+     "スロットを 1 本にする (FAT とデータが取り合う — 9ed7c80 の姿)"),
+    # --- シークの省略・完了待ち (drivers/fdc.c)
+    ("drivers/fdc.c",
+     r"if \(drv >= 0 && drv < FDC_MAX_DRIVES && s_known_cyl\[drv\] == cyl\) \{\n        s_stats\.seek_skipped\+\+;\n        return 0;\n    \}",
+     "",
+     "同じシリンダでもシークする (直す前の姿)"),
+    ("drivers/fdc.c",
+     [(r"     \* 排水は pending 無しなら SIS 1 回 \(1 バイト応答\) で終わる。 \*/\n    \(void\)fdc_drain_interrupts\(\);",
+       "     */"),
+      (r"        s_stats\.seek_skipped\+\+;\n        return 0;\n    \}\n    fdc_forget_cyl\(drv\);",
+       "        s_stats.seek_skipped++;\n        return 0;\n    }\n    (void)fdc_drain_interrupts();\n    fdc_forget_cyl(drv);")],
+     None,
+     "シークの省略を排水より先に置く (取り残しで INT 線が上がったまま)"),
+    ("drivers/fdc.c",
+     r"                s_stats\.sis_foreign\+\+;\n                continue;",
+     "                s_stats.sis_foreign++;\n                break;",
+     "1 本のエッジで 1 件しか読まない (別の通知の後ろの完了を期限まで待つ)"),
+    ("drivers/fdc.c",
+     r"    if \(\(u8\)\(st0 & FDC_ST0_IC_MASK\) == FDC_ST0_IC_RDYCHG\n        && \(st0 & FDC_ST0_SE\) == 0\) return 1;",
+     "",
+     "自ドライブの Ready 変化をシークの失敗として扱う"),
+    ("drivers/fdc.c",
+     r"        s_stats\.ready_change\+\+;\n        fdc_bump_gen\(d\);",
+     "        s_stats.ready_change++;",
+     "Ready 変化で世代を進めない (入れ替えた媒体に古い先読みを当てる)"),
+    ("drivers/fdc.c",
+     r"    fdc_bump_gen\(drv\);\n    s_stats\.writes\+\+;",
+     "    s_stats.writes++;",
+     "書き込みで世代を進めない (dev.c / KAPI の書き込みの後に古い先読み)"),
+    # リセットの後は Ready 変化の通知も来て、SIS の側でも捨てる (三重)。
+    ("drivers/fdc.c",
+     [(r"    /\* ヘッドが動く。通るまでは知らないことにする。 \*/\n    fdc_note_drive\(drv\);\n    fdc_forget_cyl\(drv\);",
+       "    fdc_note_drive(drv);"),
+      (r"    /\* 2\. FDC をリセットして実行フェーズを畳む。覚えているシリンダも捨てる。 \*/\n    fdc_forget_all\(\);",
+       "    /* 2. */"),
+      (r"        if \(d < FDC_MAX_DRIVES\) s_known_cyl\[d\] = FDC_CYL_UNKNOWN;",
+       "")],
+     None,
+     "リセットと RECALIBRATE で覚えた値を捨てない (RECALIBRATE が落ちても古い値を信じる)"),
+    ("drivers/fdc.c",
+     [(r"    fdc_forget_cyl\(drv\);\n\n    fdc_irq_fired = 0;\n    s_stats\.seek_issued\+\+;",
+       "\n    fdc_irq_fired = 0;\n    s_stats.seek_issued++;"),
+      (r"    \} else \{\n        fdc_forget_cyl\(drv\);\n    \}\n    /\* リザルトの NR",
+       "    }\n    /* リザルトの NR")],
+     None,
+     "シークの失敗の後も古い値を信じる"),
     ("drivers/fdc.c",
      r"        fdc_abort_transfer\(\);\n        \(void\)fdc_recalibrate\(drv\);",
      "        fdc_abort_transfer();",
      "まとめ読みの失敗の後に RECALIBRATE しない"),
     ("drivers/fdc.c",
-     r"if \(drv >= 0 && drv < FDC_MAX_DRIVES && s_known_cyl\[drv\] == cyl\) \{\n        return 0;\n    \}",
-     "",
-     "同じシリンダでもシークする (直す前の姿)"),
-    # まとめ読みが DMA を積んだ後で落ちたときの「覚えた値を捨てる」は
-    # fdc_abort_transfer (リセット) の fdc_forget_all と、続く RECALIBRATE の
-    # 出す前の破棄の**二重**。片方だけ消す変異は等価なので、両方消す。
-    ("drivers/fdc.c",
-     [(r"    /\* 2\. FDC をリセットして実行フェーズを畳む。覚えているシリンダも捨てる。 \*/\n    fdc_forget_all\(\);",
-       "    /* 2. */"),
-      (r"    /\* ヘッドが動く。通るまでは知らないことにする。 \*/\n    fdc_note_drive\(drv\);\n    fdc_forget_cyl\(drv\);",
-       "    fdc_note_drive(drv);")],
-     None,
-     "リセットと RECALIBRATE で覚えた値を捨てない (RECALIBRATE が落ちても古い値を信じる)"),
-    # シークの失敗も二重 (fdc_seek の出す前の破棄 + まとめ読みの DMA 前の
-    # 失敗経路の破棄)。DMA を積む前なのでリセットは通らない。両方消す。
-    ("drivers/fdc.c",
-     [(r"    fdc_forget_cyl\(drv\);\n\n    fdc_irq_fired = 0;\n    if \(fdc_send_byte\(FDC_CMD_SEEK\)",
-       "\n    fdc_irq_fired = 0;\n    if (fdc_send_byte(FDC_CMD_SEEK)"),
-      (r"    \} else \{\n        fdc_forget_cyl\(drv\);\n    \}\n    s_multi_fail\+\+;",
-       "    }\n    s_multi_fail++;")],
-     None,
-     "シークの失敗の後も古い値を信じる"),
-    ("drivers/fdc.c",
      r"    if \(drv != s_last_drv\) fdc_forget_all\(\);",
      "",
      "ドライブの切り替えで捨てない"),
     ("drivers/fdc.c",
-     r"    s_geom\[drv\] = g;\n    /\* メディアが変わった。覚えているシリンダは信じない。 \*/\n    fdc_forget_cyl\(drv\);",
+     r"    s_geom\[drv\] = g;\n    /\* メディアが変わった。覚えているシリンダは信じず、先読みも捨てさせる。 \*/\n    fdc_forget_cyl\(drv\);",
      "    s_geom[drv] = g;",
-     "メディアの変更で捨てない"),
+     "メディアの変更で覚えたシリンダを捨てない"),
     ("drivers/fdc.c",
      r"if \(fdc_send_byte\(\(u8\)eot\) != 0\) goto fail;",
      "if (fdc_send_byte((u8)sect) != 0) goto fail;",
@@ -134,6 +172,20 @@ MUTATIONS = [
      r"if \(eot > \(int\)g->spt\) return -2;",
      "",
      "トラックをまたぐ引数を断らない"),
+    ("drivers/fdc.c",
+     r"        if \(seek_rc == FDC_RC_NOT_READY\) \{\n            fdc_forget_cyl\(drv\);\n            s_stats\.multi_nr\+\+;\n            return -3;\n        \}",
+     "",
+     "SEEK の NR をまとめ読みの失敗に数える (行も出す)"),
+    ("drivers/fdc.c",
+     r"    if \(have_results && \(results\[0\] & FDC_ST0_NR\) != 0\) \{",
+     "    if (0) {",
+     "READ の NR をまとめ読みの失敗に数える (行も出す)"),
+    # --- diskio.c の結線
+    ("fs/fatfs/diskio.c",
+     r"        fdc_track_invalidate\(&fdd_track\);\n        fdd_status = 0;",
+     "        fdd_status = 0;",
+     "disk_initialize で先読みを捨てない (Ready 変化の無い入れ替え)"),
+    # --- 純粋な判定 (drivers/fdc_decide.c)
     ("drivers/fdc_decide.c",
      r"xfer = \(\(u32\)count \* rot_ticks \+ \(u32\)spt - 1\) / \(u32\)spt;",
      "xfer = ((u32)count * rot_ticks) / (u32)spt;",
@@ -142,6 +194,10 @@ MUTATIONS = [
      r"return \(t < floor_ticks\) \? floor_ticks : t;",
      "return t;",
      "時間上限が単発の値を下回る"),
+    ("drivers/fdc_decide.c",
+     r"    if \(!fdc_crosses_bank\(start, slot\)\) \{",
+     "    if (1) {",
+     "DMA の窓を常に先頭に置く (境界をまたぐ)"),
     # 対照: 何も変えない。SURVIVED でなければ試験が不安定 (偽の RED)。
     ("drivers/fdc_track.c", r"(#include \"fdc_track.h\")", r"\1",
      "対照 (何も変えない)"),
@@ -159,13 +215,14 @@ def host_build(tmp, mutated=None):
     else:
         rel, text = mutated
         tree = tmpd / "tree"
-        for sub in ("drivers", "tools/tests"):
+        for sub in ("drivers", "tools/tests", "fs/fatfs"):
             (tree / sub).mkdir(parents=True, exist_ok=True)
-        for name in ("fdc_track.c", "fdc_track.h", "fdc.c", "fdc.h",
-                     "fdc_decide.c", "fdc_decide.h"):
-            (tree / "drivers" / name).write_text(
-                (ROOT / "drivers" / name).read_text(encoding="utf-8"),
-                encoding="utf-8")
+        for rel_ in ("drivers/fdc_track.c", "drivers/fdc_track.h",
+                     "drivers/fdc.c", "drivers/fdc.h",
+                     "drivers/fdc_decide.c", "drivers/fdc_decide.h",
+                     "fs/fatfs/diskio.c"):
+            (tree / rel_).write_text(
+                (ROOT / rel_).read_text(encoding="utf-8"), encoding="utf-8")
         (tree / rel).write_text(text, encoding="utf-8")
         harness = tree / "tools/tests/fdc_track_host.c"
         harness.write_text(HARNESS.read_text(encoding="utf-8"), encoding="utf-8")

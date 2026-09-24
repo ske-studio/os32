@@ -20,6 +20,17 @@
 /*  変わらないので、要求したセクタからトラックの終わりまでを 1 回の READ    */
 /*  DATA で読み、残りを持っておいて次の要求に当てる。                       */
 /*                                                                          */
+/*  **持つのは FDC_TRACK_SLOTS 本 (LRU)**。FF_FS_TINY=1 では FAT とデータが  */
+/*  1 つの窓を取り合い、クラスタ (2HD は 1 セクタ) を越えるたびに FAT の     */
+/*  セクタ (シリンダ 0) を読み直す。1 本だけだと FAT のトラックとデータの    */
+/*  トラックが交互に追い出し合い、1KB ごとにシークが 2 回出た (9ed7c80 を   */
+/*  NP21/W で起動して速くならなかった理由、2026-09-24)。                    */
+/*                                                                          */
+/*  **中身の世代**: スロットは埋めたときの fdc_media_gen() を覚え、違えば   */
+/*  当てない。書き込みは FatFs 以外 (dev.c の fd0/fd1、KAPI の              */
+/*  dev_blk_write) からも fdc_write_sector_geom に来るので、diskio.c の     */
+/*  破棄だけでは古い中身が残る (レビューの指摘)。                          */
+/*                                                                          */
 /*  試験: tools/tests/test_fdc_track.py + tools/tests/fdc_track_host.c      */
 /*  記録: tools/tests/fdc_track_tdd.md                                      */
 /* ======================================================================== */
@@ -43,9 +54,9 @@ struct fdc_run {
     int count;      /* この区間で要求を満たすセクタ数 (>= 1) */
 };
 
-/* 持っているトラックの中身。buf は呼び手が用意する (FDC_TRACK_MAX_BYTES)。
- * **有効なのは valid != 0 のときの [first, last] だけ**。 */
-struct fdc_track_cache {
+/* 持っているトラック 1 本。buf は呼び手が用意する (FDC_TRACK_MAX_BYTES)。
+ * **有効なのは valid != 0 かつ gen が今の世代と同じときの [first, last] だけ**。 */
+struct fdc_track_slot {
     int valid;
     int drv;
     int cyl;
@@ -53,7 +64,14 @@ struct fdc_track_cache {
     int first;      /* 持っている最初のセクタ (1 始まり) */
     int last;       /* 持っている最後のセクタ */
     const struct fdc_geom *geom;   /* 読んだときのジオメトリ (変われば捨てる) */
+    u32 gen;        /* 読んだときの中身の世代 (ops->gen) */
+    u32 used;       /* 最後に使った順番 (LRU) */
     u8 *buf;        /* first のセクタが buf[0] から並ぶ */
+};
+
+struct fdc_track_cache {
+    struct fdc_track_slot slot[FDC_TRACK_SLOTS];
+    u32 clock;      /* LRU の時計 */
     /* 先読みが失敗したトラック (1 本だけ覚える)。ここでは先読みをやめ、
      * 要求した範囲だけを束ねて読む — 要求の外に傷んだセクタがあるだけで
      * そのトラックの要求が毎回「まとめ読みの失敗 + 回復 + 1 セクタずつ」を
@@ -70,15 +88,20 @@ struct fdc_track_cache {
  *                0 = 成功 / 負 = 失敗 (**リトライしない 1 回きり**でよい —
  *                失敗したら下で 1 セクタずつ読み直す)。
  *   read_one   : 1 セクタを読む (リトライと回復は fdc 側が持つ)。
- *   copy       : dst へ n バイト写す (カーネルは kmemcpy)。 */
+ *   copy       : dst へ n バイト写す (カーネルは kmemcpy)。
+ *   gen        : ドライブの中身の世代 (カーネルは fdc_media_gen)。 */
 struct fdc_track_ops {
     int  (*read_multi)(void *ctx, int drv, int cyl, int head, int sect,
                        int count, const struct fdc_geom *g, void *buf);
     int  (*read_one)(void *ctx, int drv, int cyl, int head, int sect,
                      const struct fdc_geom *g, void *buf);
     void (*copy)(void *dst, const void *src, u32 n);
+    u32  (*gen)(void *ctx, int drv);
     void *ctx;
 };
+
+/* スロット i の受け皿を渡す (FDC_TRACK_MAX_BYTES)。中身は捨てる。 */
+void fdc_track_init(struct fdc_track_cache *c, int i, u8 *buf);
 
 /* lba から count セクタの要求のうち、最初の 1 トラック分を *run に返す。
  * 戻り値はその区間のセクタ数 (= run->count)。count == 0 か、ジオメトリが
@@ -95,9 +118,11 @@ int fdc_track_eot(const struct fdc_geom *g, const struct fdc_run *run);
  * 変更・ドライブの切り替え・disk_initialize のたびに呼ぶ。 */
 void fdc_track_invalidate(struct fdc_track_cache *c);
 
-/* 持っている中身で run を満たせるか (1 = 満たせる)。 */
+/* 持っている中身で run を満たせるスロットの番号。無ければ -1。
+ * gen は今の世代 (違うスロットは当てない)。 */
 int fdc_track_hit(const struct fdc_track_cache *c, int drv,
-                  const struct fdc_geom *g, const struct fdc_run *run);
+                  const struct fdc_geom *g, u32 gen,
+                  const struct fdc_run *run);
 
 /* lba から count セクタを buff へ読む。
  *   - 要求をトラックの境目で区切る

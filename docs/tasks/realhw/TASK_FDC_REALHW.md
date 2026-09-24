@@ -201,3 +201,17 @@ NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `F
 | ローダ | `boot/` の FAT 版ローダは触っていない。`boot/loader_fat.asm` / `loader_fat_new.asm` の `read_sect16` は **INT 1Bh (AH=76h = SEEK あり・MT なし) を 1 セクタ (BX = 1 セクタ長) ずつ**呼んでいるので、カーネルの読み込みも 1 セクタ 1 回転に近い形の可能性がある (未測定、見直しは別件) |
 | 試験 | `make check-fdc-track-host` (`tools/tests/test_fdc_track.py --target --mutate`、記録 `tools/tests/fdc_track_tdd.md`)。本物の `fdc.c` を µPD765A の模型の上で回す。変異 21 本: RED 20 / ERROR 0 / SURVIVED 1 (対照) |
 | 未確認 | 実機の速度、NP21/W での FD 起動、実機で MT なしのまとめ読みが正常終了すること |
+
+**9ed7c80 の NP21/W での結果と直し (2026-09-24 夕)**: フォントの読み込みは約 3 分のまま (4a8fad4 と同じ)、EIP は全部 `fdc_wait_seek_end` の IRQ 待ち。
+
+| 件 | 内容 |
+|---|---|
+| 主因 | FatFs (`FF_FS_TINY=1`) は FAT とデータで 1 つの窓を取り合い、クラスタ (2HD は 1 セクタ) を越えるたびに FAT のセクタ (シリンダ 0) を読み直す。1KB ずつ 16B ずれて読むフォントは毎回越えるので **1KB ごとにシーク 2 回**。先読み 1 本では FAT とデータのトラックが追い出し合って当たらなかった → **2 本 (LRU)** に |
+| 完了待ち | SIS が別ドライブの通知 / Ready 変化を返したとき 1 件で次のエッジを待っていた。INT 線は pending が尽きるまで上がったままなので、実機では自分の完了を 1.5 秒の期限まで待って救済で拾う形になる → 1 本のエッジで 80h まで読む。NP21/W は事象ごとに IRQ を出すので、エミュレータでの寄与は `[fdc] font:` の `tmo=` で見る |
+| IF=0 | 0x244 は IF=1 (0x200 + ZF + PF)。割り込み禁止の区間ではない |
+| 世代 | 先読みは `fdc_media_gen()` の世代で外す。書き込み全部 (FatFs / dev.c / KAPI の `dev_blk_write`)・Ready 変化・`fdc_set_media` で進む |
+| 受け皿 | 1 本の静的な領域 27KB (DMA の窓 1 + スロット 2)、窓の位置は `fdc_buf_layout()` が実行時に決めて 64KB をまたがない。揃えの詰め物は無くなり `__bss_end` 0x184800 → 0x180780 (4a8fad4 比 +29KB) |
+| NR | まとめ読みの失敗に数えず行も出さない (-3) |
+| 診断 | 起動時に `[fdc] font: seek= skip= recal= tmo= foreign= rdy= multi=ok/fail nr= single= retry= write=` を 1 行。`time:1ms` の FAIL には測った値を出す行を足した (原因は未特定、下) |
+| time:1ms | `cpu_delay_us(1000)` を `sys_time_now` で挟む試験。校正 (`cpu_calibrate`) は FDC より前に 1 回だけで、FD の新しいコードは割り込みを禁止しない。NP21/W の CPU 速度はホストの負荷で揺れるので校正と実測がずれた可能性があるが**未確認**。次の起動で `[selftest] time: 1ms delay measured` の値を見る |
+| 試験 | 21 ケース、変異 33 本: RED 32 / ERROR 0 / SURVIVED 1 (対照) |

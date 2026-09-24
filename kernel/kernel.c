@@ -521,6 +521,10 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
             tvram_print(6, 3, "NG ", TATTR_RED);
             kprintf(0x07, "[KCG] kernel-init load failed: %d\n", fret);
         }
+        /* FD の読みの数 (シーク / 省略 / 期限切れ / まとめ読み)。FD から
+         * 起動したときフォントの読み込みが遅い件 (2026-09-24) の切り分け用。
+         * FD に触っていなければ何も出ない。 */
+        fdc_print_stats("font");
     }
 
     /* TTF由来フォント: 外部プログラムから kcg_load_font() (KAPI) で呼ぶ */

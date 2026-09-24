@@ -98,3 +98,33 @@ u32 fdc_rw_timeout_ticks(int spt, int count, u32 rot_ticks, u32 find_rot,
     t = margin * (find_rot * rot_ticks + xfer + head_load_ticks);
     return (t < floor_ticks) ? floor_ticks : t;
 }
+
+/* ======================================================================== */
+/*  受け皿の割り付け (DMA の窓は 64KB 境界をまたがない)                     */
+/* ======================================================================== */
+#define FDC_BANK_BYTES 0x10000UL
+
+static int fdc_crosses_bank(u32 addr, u32 len)
+{
+    return ((addr & (FDC_BANK_BYTES - 1)) + len) > FDC_BANK_BYTES;
+}
+
+int fdc_buf_layout(u32 start, u32 total, u32 slot, u32 *dma_off, u32 *rest_off)
+{
+    if (slot == 0 || total < slot || total >= FDC_BANK_BYTES) return -1;
+
+    /* 先頭に置けるなら先頭、先読み用はその後ろ。 */
+    if (!fdc_crosses_bank(start, slot)) {
+        *dma_off = 0;
+        *rest_off = slot;
+        return 0;
+    }
+    /* 先頭 slot バイトの中に境界がある。境界は 1 本しか無いので、末尾の
+     * slot バイトはまたがない (total >= 2 × slot なら境界より後ろ)。 */
+    if (!fdc_crosses_bank(start + total - slot, slot)) {
+        *dma_off = total - slot;
+        *rest_off = 0;
+        return 0;
+    }
+    return -1;
+}

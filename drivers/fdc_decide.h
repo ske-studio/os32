@@ -95,4 +95,16 @@ int fdc_classify_seek_end(u8 st0, u8 pcn, int want_cyl);
 u32 fdc_rw_timeout_ticks(int spt, int count, u32 rot_ticks, u32 find_rot,
                          u32 head_load_ticks, u32 margin, u32 floor_ticks);
 
+/* FD の受け皿 (1 本の静的な領域) の割り付け。
+ *   領域 [start, start + nslot_plus_dma × slot) のうち、DMA に使う slot
+ *   バイトの窓 1 つと、CPU だけが触る連続した先読み用の領域を決める。
+ *   **DMA の窓は 64KB 境界をまたがない** ([HW2])。先読み用はまたいでよい。
+ *   領域は 64KB より短いので境界は高々 1 本で、窓は先頭か末尾のどちらかに
+ *   必ず取れる (境界が先頭 slot バイトの中にあれば末尾に置く)。
+ *   *dma_off / *rest_off は start からのオフセット。先読み用は
+ *   (total - slot) バイトの連続領域。
+ *   0 = 取れた / -1 = 取れない (total < slot、total >= 64KB、slot == 0)。
+ * 揃え指定に頼らないので .bss の詰め物が出ない (2026-09-24 のレビュー)。 */
+int fdc_buf_layout(u32 start, u32 total, u32 slot, u32 *dma_off, u32 *rest_off);
+
 #endif /* FDC_DECIDE_H */
