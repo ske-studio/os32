@@ -13,7 +13,10 @@
  * utf8:      入力UTF-8文字列 (NULL終端)
  * utf16:     出力UTF-16LEバッファ
  * max_words: utf16バッファの最大WORD数 (NULL終端分含む)
- * 戻り値:    書き込んだWORD数 (NULL終端含む), エラー時0
+ * 戻り値:    書き込んだWORD数 (NULL終端含む, 1 以上)。
+ *            不正な UTF-8 (途中で切れた列・単独の継続バイト・冗長な符号化・
+ *            サロゲート・4 バイト列 = BMP 外)、収まらない入力、引数の誤りは
+ *            **-1** (置換も切り詰めもしない。utf16 の中身は不定)
  */
 int kutf8_to_utf16le(const char *utf8, u16 *utf16, int max_words);
 

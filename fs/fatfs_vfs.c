@@ -86,16 +86,33 @@ static int ff_stat_to_vfs(FRESULT fr)
 
 
 /* ======== パスにボリューム接頭辞を付加 ========
- * 戻り値: VFS_OK / VFS_ERR_INVAL (FatFs が意味を変える名前)。
- * 名前を受け取る入口は**必ず**ここを通るので、検査もここに置く。 */
+ * 戻り値: VFS_OK / VFS_ERR_INVAL (FatFs が意味を変える名前) /
+ *         VFS_ERR_NAMETOOLONG ("0:" 付きで out に収まらない)。
+ * 名前を受け取る入口は**必ず**ここを通るので、検査もここに置く。
+ *
+ * **切り詰めない** (実装レビュー ラリー 3、Codex B1 / Opus): FD 起動では FAT が
+ * "/" にマウントされるので、FS に届く相対パスは VFS の上限 (255 バイト) まで
+ * 伸びる。以前は "0:" を前に付けた後 kstrncat が末尾を黙って落としたため、
+ * 255 バイトの "…/disk1.imgXY" が 253 バイトの "…/disk1.img" になり、BUSY /
+ * pinned の比較 (元の 255 バイトの名前) をすり抜けて使用中の実体を消せた。
+ * 収まらなければ FatFs に何も渡さずに断る。 */
 static int ff_make_path(const FatFsCtx *fc, const char *path, char *out, int max)
 {
     int len;
     int rc;
+    u32 need;
 
     out[0] = '\0';
     rc = vfs_name_rule_check(path, VFS_NAME_RULE_FAT);
     if (rc != VFS_OK) return rc;
+    /* 要る大きさ: "0:" + (先頭に '/' が無ければ 1) + path + NUL。
+     * 空の path は "0:/" (4 バイト) */
+    if (path && path[0]) {
+        need = 2u + (path[0] != '/' ? 1u : 0u) + kstrlen(path) + 1u;
+    } else {
+        need = 4u;
+    }
+    if (max < 0 || need > (u32)max) return VFS_ERR_NAMETOOLONG;
     /* "0:/path..." のような FatFs パスを構築 */
     out[0] = fc->vol[0];
     out[1] = ':';
@@ -242,10 +259,18 @@ static int fatfs_vfs_rmdir(void *ctx, const char *path)
     FatFsCtx *fc = (FatFsCtx *)ctx;
     int rc_path;
     char fpath[VFS_MAX_PATH];
+    FILINFO fno;
+    FRESULT fr;
 
-    /* FatFsでは f_unlink でディレクトリ削除も可能 (空の場合) */
     rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
     if (rc_path != VFS_OK) return rc_path;
+    /* FatFs の f_unlink はファイルも (空の) ディレクトリも消す。rmdir が
+     * ファイルを消すと、VFS の pinned / BUSY を通らない経路で使用中の
+     * 実体を失う (実装レビュー ラリー 3、Opus)。先に種別を見て、
+     * ディレクトリ以外は NOTDIR で断る。 */
+    fr = f_stat(fpath, &fno);
+    if (fr != FR_OK) return ff_stat_to_vfs(fr);
+    if (!(fno.fattrib & AM_DIR)) return VFS_ERR_NOTDIR;
     return ff_to_vfs(f_unlink(fpath));
 }
 

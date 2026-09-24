@@ -33,6 +33,8 @@ userland/lib/rt/pkg.c を取り込み、RAM 上の 8MB の ext2 で
   namerule / fatname / hostname … FatFs・Win32 が意味を変える名前 ("disk.img "、
           "d\\img.dat"、"db." …) を入口で INVAL で断る (ラリー 2 の blocker)。
           fatname は実物の fs/fatfs_vfs.c + fs/fatfs/ff.c を RAM の FAT12 で回す
+          (FAT を "/" にマウントした 253/254/255 バイトと rmdir の種別 — ラリー 3)
+  utf8  … Win32 の名前の規則と lib/kutf16.c の変換が同じ集合を通し 1 対 1 (ラリー 3 B2)
   hostwire … fs/hostdrvfs.c の入口検査の配線 (本文の検査。ホストで組めないため)
 
   python3 -B tools/tests/test_vfs_fd_path.py [--target] [--mutants] [case]
@@ -65,7 +67,7 @@ SRC = ROOT / "tools/tests/vfs_fd_path_host.c"
 ERRNO_SRC = ROOT / "tools/tests/newlib_errno_host.c"
 SYSCALLS_SRC = ROOT / "sdk/crt/syscalls.c"
 TARGET_SRCS = ["fs/vfs.c", "fs/vfs_fd.c", "fs/ext2_vfs.c", "fs/ext2_file.c",
-               "fs/fatfs_vfs.c", "fs/hostdrvfs.c", "fs/iso9660.c"]
+               "fs/fatfs_vfs.c", "fs/hostdrvfs.c", "fs/iso9660.c", "lib/kutf16.c"]
 TARGET_FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding",
                 "-fno-pie", "-fno-stack-protector", "-nostdlib",
                 "-mno-red-zone", "-fcommon", "-O2",
@@ -199,6 +201,42 @@ MUTANTS = [
      "if (c == ' ' && rule == VFS_NAME_RULE_FAT)", "if (c == ' ')"),
     ("'.' / '..' の要素まで断る", "fs/vfs_name_rules.inc",
      "if (last == '.' && !dot_entry)", "if (last == '.' && (dot_entry || 1))"),
+    # ---- 実装レビュー ラリー 3 (B1 FAT の長いパス / rmdir、B2 HostDrv の名前) ----
+    ("FAT が \"0:\" 付きの長さを見ない (切り詰める)", "fs/fatfs_vfs.c",
+     "    if (max < 0 || need > (u32)max) return VFS_ERR_NAMETOOLONG;",
+     "    if (max < 0 || need > (u32)max + 16u) return VFS_ERR_NAMETOOLONG;"),
+    ("FAT の rmdir が種別を見ない", "fs/fatfs_vfs.c",
+     "    if (!(fno.fattrib & AM_DIR)) return VFS_ERR_NOTDIR;\n", ""),
+    ("vfs_rmdir が pinned を見ない", "fs/vfs.c",
+     "    if (!ops->ino && vfs_fd_pinned_busy(fs_ctx, 0, 0, rel_path))\n        return VFS_ERR_BUSY;\n",
+     ""),
+    ("Win32 の規則が ':' を通す", "fs/vfs_name_rules.inc",
+     "if (c == ':' || c == '*'", "if (c == '*'"),
+    ("Win32 の規則が UTF-8 を見ない", "fs/vfs_name_rules.inc",
+     "            if (n == 0) return VFS_ERR_INVAL;\n", "            if (n == 0) n = 1;\n"),
+    ("Win32 の規則が 2 バイトの冗長形を通す", "fs/vfs_name_rules.inc",
+     "    if (c >= 0xC2 && c <= 0xDF)", "    if (c >= 0xC0 && c <= 0xDF)"),
+    ("Win32 の規則が 3 バイトの冗長形を通す", "fs/vfs_name_rules.inc",
+     "        if (c == 0xE0 && p[1] < 0xA0) return 0;", ""),
+    ("Win32 の規則がサロゲートを通す", "fs/vfs_name_rules.inc",
+     "        if (c == 0xED && p[1] >= 0xA0) return 0;", ""),
+    ("Win32 の規則が途中で切れた列を通す", "fs/vfs_name_rules.inc",
+     "        return ((p[1] & 0xC0) == 0x80) ? 2 : 0;", "        return p[1] ? 2 : 1;"),
+    ("FAT にも UTF-8 の規則をかける", "fs/vfs_name_rules.inc",
+     "        if (rule == VFS_NAME_RULE_WIN32) {", "        if (1) {"),
+    ("変換が途中で切れた列で打ち切る", "lib/kutf16.c",
+     "            if ((s[1] & 0xC0) != 0x80) return -1;\n            cp = ((u32)(c & 0x1F) << 6)",
+     "            if ((s[1] & 0xC0) != 0x80) break;\n            cp = ((u32)(c & 0x1F) << 6)"),
+    ("変換が 3 バイトの冗長形を受理する", "lib/kutf16.c",
+     "            if (cp < 0x800) return -1;                      /* 冗長 */\n", ""),
+    ("変換がサロゲートを受理する", "lib/kutf16.c",
+     "            if (cp >= 0xD800 && cp <= 0xDFFF) return -1;    /* サロゲート */\n", ""),
+    ("変換が BMP 外を U+FFFD にする", "lib/kutf16.c",
+     "             * (BMP 外: UTF-16 ではサロゲートペアが要るが未対応) */\n            return -1;",
+     "             * (BMP 外: UTF-16 ではサロゲートペアが要るが未対応) */\n            s++; while ((*s & 0xC0) == 0x80) s++; cp = 0xFFFD;"),
+    ("変換が収まらない入力を切り詰める", "lib/kutf16.c",
+     "        if (out >= max_words - 1) return -1;   /* 収まらない: 切り詰めない */",
+     "        if (out >= max_words - 1) break;"),
     ("pkg_extract (LZSS) が開けない失敗を飲む", "lib/rt/pkg.c",
      "            if (wfd < 0) {\n                api->mem_free(data_buf);\n                return PKG_ERR_IO;\n            }",
      "            if (wfd < 0) continue;"),
@@ -451,10 +489,19 @@ def check_hostwire(text=None):
     i = b.find("vfs_name_rule_check(path, VFS_NAME_RULE_WIN32)")
     if i < 0 or i > b.find("setup_create("):
         bad.append("hostdrv_create が setup_create の前に名前を見ない")
+    # 変換の失敗でハイパーコールしない (ラリー 3 B2): setup_create の戻り値を見て
+    # から hostdrv_hypercall
+    j = b.find("rc = setup_create(")
+    k = b.find("if (rc != VFS_OK) return rc;", j)
+    if j < 0 or k < 0 or k > b.find("hostdrv_hypercall();"):
+        bad.append("hostdrv_create が setup_create の失敗を見ずにハイパーコールする")
     b = body("hdrv_rename") or ""
     i = b.find("vfs_name_rule_check(new_path, VFS_NAME_RULE_WIN32)")
     if i < 0 or i > b.find("session_begin();"):
         bad.append("hdrv_rename が宛先を元を開く前に見ない")
+    i = b.find("if (words < 1) return VFS_ERR_INVAL;")
+    if i < 0 or i > b.find("session_begin();"):
+        bad.append("hdrv_rename が宛先の変換の失敗を元を開く前に見ない")
     ops = re.findall(r"^static int (hdrv_\w+)\(void \*ctx, const char \*path", src, re.M)
     if len(ops) < 10:
         bad.append("パスを受け取る口が %d 本しか見つからない" % len(ops))
@@ -714,6 +761,8 @@ def mutants(tmp, pkgdir, e2fsck):
         shutil.copytree(ROOT / "userland/lib/rt", mdir / "lib/rt")
         (mdir / "system").mkdir()
         shutil.copy(ROOT / "userland/system/cdinst.c", mdir / "system/cdinst.c")
+        # lib/kutf16.c (段 utf8 が #include する) は -I の順で写しが先に当たる
+        shutil.copy(ROOT / "lib/kutf16.c", mdir / "lib/kutf16.c")
         path = mdir / fname
         text = path.read_text(encoding="utf-8")
         if text.count(before) != 1:

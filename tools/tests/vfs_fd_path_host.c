@@ -21,7 +21,12 @@
  *    fatname  … 実物の fs/fatfs_vfs.c + fs/fatfs/ff.c (RAM の FAT12) で、
  *               "disk.img " / "d\img.dat" / "db." などを INVAL で断り、
  *               BUSY / pinned の実体が消えない・動かない (ラリー 2 blocker)
- *    hostname … Win32 の規則 (末尾の空白・'.'・'\') を合成ドライバで
+ *    fatroot  … (fatname の中) FAT を "/" にマウントして 253/254/255 バイト、
+ *               255 バイトの名前で 253 バイトの pinned を消せない (ラリー 3 B1)
+ *    utf8     … Win32 の名前の規則と lib/kutf16.c の変換が同じ集合を通し、
+ *               通ったものは 1 対 1 (ラリー 3 B2、130^3 の総当たり)
+ *    hostname … Win32 の規則 (末尾の空白・'.'・'\'・不正な UTF-8・禁止文字)
+ *               を合成ドライバで
  *    pkg   … pkg_parse の 127/128 バイト・128/129 項目・切れた表・項目数の
  *            食い違い、pkg_first_overflow (cdinst の 123〜127)、pkg_extract の
  *            失敗の伝播
@@ -1319,7 +1324,44 @@ static void case_namerule(void)
         { "a//b/",              VFS_OK,        VFS_OK },
         { "/a/./b/../c",        VFS_OK,        VFS_OK },   /* "." / ".." そのもの */
         { "/.x/..y",            VFS_OK,        VFS_OK },   /* 先頭の '.' */
-        { "/\x82\xa0.txt",      VFS_OK,        VFS_OK },   /* 0x80 以上は通す */
+        /* 0x80 以上: FAT は通す (CP437 / SJIS のバイト)。Win32 は最短形の
+         * 正しい BMP の UTF-8 だけ (ラリー 3 B2) — SJIS の "あ" は不正な列 */
+        { "/\x82\xa0.txt",      VFS_OK,        VFS_ERR_INVAL },
+        { "/\xe3\x81\x82.txt",  VFS_OK,        VFS_OK },   /* "あ" (UTF-8) */
+        { "/\xe6\x97\xa5\xe6\x9c\xac/\xe8\xaa\x9e", VFS_OK, VFS_OK }, /* 日本/語 */
+        { "/caf\xc3\xa9",       VFS_OK,        VFS_OK },   /* U+00E9 */
+        { "/\xc2\x80",          VFS_OK,        VFS_OK },   /* U+0080 (2 バイトの最小) */
+        { "/\xdf\xbf",          VFS_OK,        VFS_OK },   /* U+07FF */
+        { "/\xe0\xa0\x80",      VFS_OK,        VFS_OK },   /* U+0800 (3 バイトの最小) */
+        { "/\xed\x9f\xbf",      VFS_OK,        VFS_OK },   /* U+D7FF */
+        { "/\xee\x80\x80",      VFS_OK,        VFS_OK },   /* U+E000 */
+        { "/\xef\xbf\xbf",      VFS_OK,        VFS_OK },   /* U+FFFF */
+        { "/disk.img\xc2",       VFS_OK,        VFS_ERR_INVAL }, /* 途中で切れた列 */
+        { "/disk.img\xe3\x81",   VFS_OK,        VFS_ERR_INVAL },
+        { "/\xe3\x81/x",         VFS_OK,        VFS_ERR_INVAL }, /* 区切りの前で切れる */
+        { "/a\x80",              VFS_OK,        VFS_ERR_INVAL }, /* 単独の継続バイト */
+        { "/\xbf",               VFS_OK,        VFS_ERR_INVAL },
+        { "/\xc1\xa4isk.img",    VFS_OK,        VFS_ERR_INVAL }, /* 冗長 = "disk.img" */
+        { "/\xc0\xae",           VFS_OK,        VFS_ERR_INVAL }, /* 冗長 = "." */
+        { "/\xe0\x81\xa4",      VFS_OK,        VFS_ERR_INVAL }, /* 3 バイトの冗長 */
+        { "/\xe0\x9f\xbf",      VFS_OK,        VFS_ERR_INVAL }, /* 冗長 (U+07FF) */
+        { "/\xed\xa0\x80",      VFS_OK,        VFS_ERR_INVAL }, /* U+D800 サロゲート */
+        { "/\xed\xbf\xbf",      VFS_OK,        VFS_ERR_INVAL }, /* U+DFFF */
+        { "/\xf0\x9f\x98\x80.img", VFS_OK,     VFS_ERR_INVAL }, /* U+1F600 (BMP 外) */
+        { "/\xf4\x8f\xbf\xbf",  VFS_OK,        VFS_ERR_INVAL },
+        { "/\xf8\x88\x80\x80\x80", VFS_OK,    VFS_ERR_INVAL },
+        { "/\xff",               VFS_OK,        VFS_ERR_INVAL },
+        { "/\xe3\x81\x82\x80",  VFS_OK,        VFS_ERR_INVAL }, /* 正しい文字の後の余り */
+        /* Win32 の禁止文字 (FAT は FatFs 自身が断るので入口では見ない) */
+        { "/disk.img::$DATA",   VFS_OK,        VFS_ERR_INVAL },
+        { "/disk.img:s",        VFS_OK,        VFS_ERR_INVAL },
+        { "/a*",                VFS_OK,        VFS_ERR_INVAL },
+        { "/a?",                VFS_OK,        VFS_ERR_INVAL },
+        { "/a\"b",              VFS_OK,        VFS_ERR_INVAL },
+        { "/a<b",               VFS_OK,        VFS_ERR_INVAL },
+        { "/a>b",               VFS_OK,        VFS_ERR_INVAL },
+        { "/a|b",               VFS_OK,        VFS_ERR_INVAL },
+        { "/a+b=c[1];d,e",      VFS_OK,        VFS_OK },   /* Win32 では正当 */
         { "/disk.img ",         VFS_ERR_INVAL, VFS_ERR_INVAL },
         { "/disk.img /x",       VFS_ERR_INVAL, VFS_ERR_INVAL },
         { "/disk.img ignored",  VFS_ERR_INVAL, VFS_OK },
@@ -1348,6 +1390,152 @@ static void case_namerule(void)
         }
     }
     CHECK(vfs_name_rule_check((const char *)0, VFS_NAME_RULE_FAT) == VFS_OK);
+}
+
+/* FD 起動と同じく FAT を "/" にマウントすると、FS に届く相対パスは VFS の
+ * 上限 (255 バイト) まで伸びる。ff_make_path は "0:" を前に付けるので、
+ * 以前は kstrncat が末尾を黙って落とし、255 バイトの ".../disk1.imgXY" が
+ * 253 バイトの ".../disk1.img" (pinned) を消した (実装レビュー ラリー 3、
+ * Codex B1)。収まらなければ NAMETOOLONG で、FatFs には何も渡らない。
+ * fpath は VFS_MAX_PATH (256): "0:" + 253 + NUL が上限。 */
+static void case_fatroot(void)
+{
+    static char buf[64];
+    char *P = g_p1, *X = g_p2;
+    OS32_Stat st;
+    u32 n, i;
+    int fd, fd2;
+
+    report("case fatroot\n");
+    EQ(vfs_mount("/", "fd0", "fat"), VFS_OK);
+    /* P = "/" + "abcdefgh/" x 27 (244 バイト、27 階層) */
+    n = 0;
+    P[n++] = '/';
+    for (i = 0; i < 27; i++) {
+        kmemcpy(P + n, "abcdefgh", 8);
+        n += 8;
+        P[n] = '\0';
+        EQ(vfs_mkdir(P), VFS_OK);
+        P[n++] = '/';
+    }
+    P[n] = '\0';
+    CHECK(n == 244);
+
+    /* 253 バイト: 通る (境界の内側) */
+    kstrncpy(X, P, VFS_MAX_PATH * 2);
+    kstrncat(X, "disk1.img", VFS_MAX_PATH * 2);
+    CHECK(h_strlen(X) == 253);
+    CHECK(wfile(X, "PINNED") == 6);
+    EQ(vfs_read(X, buf, sizeof(buf)), 6);
+    fd = vfs_open(X, O_RDWR);
+    CHECK(fd >= 3);
+    EQ(vfs_fd_set_pinned(fd, 1), VFS_OK);
+    EQ(vfs_rm(X), VFS_ERR_BUSY);
+
+    /* 255 バイト: Codex の反例 — 以前は "XY" が落ちて pinned の実体が消えた */
+    kstrncpy(X, P, VFS_MAX_PATH * 2);
+    kstrncat(X, "disk1.imgXY", VFS_MAX_PATH * 2);
+    CHECK(h_strlen(X) == 255);
+    EQ(vfs_rm(X), VFS_ERR_NAMETOOLONG);
+    EQ(vfs_rename(X, "/moved"), VFS_ERR_NAMETOOLONG);
+    CHECK(wfile("/src", "SRC") == 3);
+    EQ(vfs_rename("/src", X), VFS_ERR_NAMETOOLONG);   /* 置き換えにもならない */
+    CHECK(vfs_open(X, O_RDWR | O_CREAT | O_TRUNC) == VFS_ERR_NAMETOOLONG);
+    CHECK(vfs_write(X, "Z", 1) == VFS_ERR_NAMETOOLONG);
+    fd2 = vfs_open(X, O_RDONLY);
+    CHECK(fd2 == VFS_ERR_NAMETOOLONG);
+    if (fd2 >= 3) vfs_close(fd2);
+
+    /* 254 バイト: "0:" を付けると 257 > 256 — NAMETOOLONG */
+    kstrncpy(X, P, VFS_MAX_PATH * 2);
+    kstrncat(X, "disk1.imgX", VFS_MAX_PATH * 2);
+    CHECK(h_strlen(X) == 254);
+    EQ(vfs_rm(X), VFS_ERR_NAMETOOLONG);
+    EQ(vfs_stat(X, &st), VFS_ERR_NAMETOOLONG);
+    CHECK(vfs_open(X, O_RDWR | O_CREAT) == VFS_ERR_NAMETOOLONG);
+    CHECK(vfs_write(X, "Z", 1) == VFS_ERR_NAMETOOLONG);
+    EQ(vfs_read(X, buf, sizeof(buf)), VFS_ERR_NAMETOOLONG);
+    EQ(vfs_mkdir(X), VFS_ERR_NAMETOOLONG);
+    EQ(vfs_rmdir(X), VFS_ERR_NAMETOOLONG);
+
+    EQ(vfs_fd_set_pinned(fd, 0), VFS_OK);
+    vfs_close(fd);
+    /* 実体は残り、中身もそのまま */
+    kstrncpy(X, P, VFS_MAX_PATH * 2);
+    kstrncat(X, "disk1.img", VFS_MAX_PATH * 2);
+    EQ(vfs_read(X, buf, sizeof(buf)), 6);
+    buf[6] = '\0';
+    CHECK(streq(buf, "PINNED"));
+    CHECK(fat_exists("0:/SRC") && !fat_exists("0:/MOVED"));
+    EQ(vfs_rm(X), VFS_OK);                           /* 放した後は消せる */
+
+    vfs_umount("/");
+}
+
+/* 段 utf8: 名前の規則 (Win32) と lib/kutf16.c の kutf8_to_utf16le が**同じ
+ * 集合**を通し、通ったものは 1 対 1 に変換される (ラリー 3 B2)。
+ * 以前の変換は途中で切れた列で打ち切り ("disk.img\xC2" → "disk.img")、
+ * 冗長な符号化を受理し ("\xC1\xA4isk.img" → "disk.img")、BMP 外を U+FFFD
+ * に置き換えた (絵文字 2 種が同じ名前に)。
+ * 1〜3 バイトの列を、ASCII は 'a' だけ・それ以外は 0x80〜0xFF の全部で
+ * 総当たりする (130^3 通り)。 */
+#include "kutf16.c"
+
+static void case_utf8(void)
+{
+    static u16 w[16];
+    static char back[16];
+    u8 in[4];
+    u32 a, b, c;
+    u32 bad_agree = 0, bad_round = 0, n_ok = 0;
+
+    report("case utf8\n");
+    for (a = 0x7F; a <= 0xFF; a++) {
+        for (b = 0x7E; b <= 0xFF; b++) {
+            for (c = 0x7D; c <= 0xFF; c++) {
+                int rule, words;
+                in[0] = (u8)(a == 0x7F ? 'a' : a);
+                in[1] = (u8)(b == 0x7E ? 0 : (b == 0x7F ? 'a' : b));
+                in[2] = (u8)(c == 0x7D ? 0 : (c == 0x7E || c == 0x7F ? 'a' : c));
+                in[3] = 0;
+                if (in[1] == 0 && c != 0x7D) continue;   /* 同じ列の重複 */
+                rule = vfs_name_rule_check((const char *)in, VFS_NAME_RULE_WIN32);
+                words = kutf8_to_utf16le((const char *)in, w, 16);
+                if ((rule == VFS_OK) != (words >= 1)) {
+                    if (bad_agree++ < 4) {
+                        report("    disagree "); report_i((int)a); report(" ");
+                        report_i((int)b); report(" "); report_i((int)c); report("\n");
+                    }
+                    continue;
+                }
+                if (words < 1) continue;
+                n_ok++;
+                /* 変換は逆変換で元のバイト列に戻る = 別名を作らない */
+                kutf16le_to_utf8(w, (words - 1) * 2, back, sizeof(back));
+                if (kstrcmp(back, (const char *)in) != 0) bad_round++;
+            }
+        }
+    }
+    CHECK(bad_agree == 0);
+    CHECK(bad_round == 0);
+    CHECK(n_ok > 60000u);       /* 3 バイトの BMP だけで 61440 - 2048 通り */
+
+    /* Codex の反例: 変換は失敗を返す (置換も打ち切りもしない) */
+    CHECK(kutf8_to_utf16le("disk.img\xc2", w, 16) == -1);
+    CHECK(kutf8_to_utf16le("\xc1\xa4isk.img", w, 16) == -1);
+    CHECK(kutf8_to_utf16le("\xf0\x9f\x98\x80.img", w, 16) == -1);
+    CHECK(kutf8_to_utf16le("\xf0\x9f\x98\x81.img", w, 16) == -1);
+    CHECK(kutf8_to_utf16le("a\x80", w, 16) == -1);
+    CHECK(kutf8_to_utf16le("\xed\xa0\x80", w, 16) == -1);
+    /* 正当な日本語 (3 バイト) は通り、中身も正しい */
+    CHECK(kutf8_to_utf16le("\xe6\x97\xa5.txt", w, 16) == 6);
+    CHECK(w[0] == 0x65E5 && w[1] == '.' && w[4] == 't' && w[5] == 0);
+    /* 収まらなければ切り詰めずに失敗 */
+    CHECK(kutf8_to_utf16le("abc", w, 4) == 4);
+    CHECK(kutf8_to_utf16le("abcd", w, 4) == -1);
+    CHECK(kutf8_to_utf16le("\xe6\x97\xa5", w, 1) == -1);
+    CHECK(kutf8_to_utf16le("", w, 1) == 1 && w[0] == 0);
+    CHECK(kutf8_to_utf16le((const char *)0, w, 4) == -1);
 }
 
 static void case_fatname(void)
@@ -1429,6 +1617,20 @@ static void case_fatname(void)
     EQ(vfs_rm("/fd0/D/IMG.DAT"), VFS_ERR_BUSY);
     EQ(vfs_rm("/fd0/Disk"), VFS_ERR_BUSY);
 
+    /* ---- rmdir は FatFs の f_unlink (ファイルも消す) — 実装レビュー
+     *      ラリー 3 (Opus)。pinned の実体は VFS が BUSY で、FAT は種別を見て
+     *      NOTDIR で断る (二重の防御) ---- */
+    EQ(vfs_rmdir("/fd0/disk.img"), VFS_ERR_BUSY);
+    EQ(vfs_rmdir("/fd0/DISK.IMG"), VFS_ERR_BUSY);
+    EQ(vfs_rmdir("/fd0/d/img.dat"), VFS_ERR_BUSY);
+    EQ(vfs_rmdir("/fd0/d"), VFS_ERR_BUSY);          /* pinned の祖先 */
+    EQ(vfs_rmdir("/fd0/other"), VFS_ERR_NOTDIR);    /* pinned でないファイル */
+    EQ(vfs_rmdir("/fd0/nothing"), VFS_ERR_NOTFOUND);
+    CHECK(fat_exists("0:/OTHER") && fat_exists("0:/DISK.IMG"));
+    EQ(vfs_mkdir("/fd0/e"), VFS_OK);
+    EQ(vfs_rmdir("/fd0/e"), VFS_OK);                /* 本物のディレクトリは消える */
+    CHECK(!fat_exists("0:/E"));
+
     /* ---- 開いている SQLite DB ---- */
     cookie.group_index = 1;
     cookie.generation = 1;
@@ -1471,6 +1673,7 @@ static void case_fatname(void)
     CHECK(!fat_exists("0:/DISK.IMG"));
 
     vfs_umount("/fd0");
+    case_fatroot();
 }
 
 /* 合成ドライバ: ext2 の口の前に Win32 (HostDrv) の名前の入口検査を置く。
@@ -1545,6 +1748,27 @@ static void case_hostname(void)
     EQ(vfs_rename("/hw/other", "/hw/disk.img "), VFS_ERR_INVAL);
     CHECK(vfs_open("/hw/disk.img ", O_RDONLY) == VFS_ERR_INVAL);
     EQ(vfs_rm("/hw/DISK.IMG"), VFS_ERR_BUSY);
+    /* ラリー 3 B2 (Codex の反例): UTF-16 への変換が別名に化かす綴りと、
+     * Win32 の禁止文字 (':' は代替データストリーム) */
+    EQ(vfs_rm("/hw/disk.img\xc2"), VFS_ERR_INVAL);
+    EQ(vfs_rm("/hw/\xc1\xa4isk.img"), VFS_ERR_INVAL);
+    EQ(vfs_rm("/hw/\xf0\x9f\x98\x80.img"), VFS_ERR_INVAL);
+    EQ(vfs_rm("/hw/disk.img::$DATA"), VFS_ERR_INVAL);
+    EQ(vfs_rm("/hw/a\x80"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/hw/disk.img\xc2", "/hw/moved"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/hw/\xc1\xa4isk.img", "/hw/moved"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/hw/disk.img::$DATA", "/hw/moved"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/hw/other", "/hw/disk.img\xc2"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/hw/other", "/hw/\xc1\xa4isk.img"), VFS_ERR_INVAL);
+    EQ(vfs_rename("/hw/other", "/hw/disk.img:x"), VFS_ERR_INVAL);
+    CHECK(vfs_open("/hw/disk.img\xc2", O_RDWR | O_CREAT) == VFS_ERR_INVAL);
+    CHECK(vfs_write("/hw/\xf0\x9f\x98\x81.img", "X", 1) == VFS_ERR_INVAL);
+    /* 正当な日本語の名前 (3 バイトの UTF-8) は通る */
+    CHECK(wfile("/hw/\xe6\x97\xa5\xe6\x9c\xac.txt", "JP") >= 0);
+    EQ(vfs_read("/hw/\xe6\x97\xa5\xe6\x9c\xac.txt", buf, sizeof(buf)), 2);
+    EQ(vfs_rename("/hw/\xe6\x97\xa5\xe6\x9c\xac.txt", "/hw/\xe8\xaa\x9e.txt"), VFS_OK);
+    CHECK(exists("/\xe8\xaa\x9e.txt"));
+    EQ(vfs_rm("/hw/\xe8\xaa\x9e.txt"), VFS_OK);
     /* 途中の空白は Windows の名前として正当 (FAT と違う) */
     CHECK(wfile("/hw/my file.txt", "SP") >= 0);
     CHECK(exists("/my file.txt"));
@@ -1570,6 +1794,7 @@ static void run(const char *sel)
     if (all || kstrcmp(sel, "nocase") == 0) case_nocase();
     if (all || kstrcmp(sel, "cdinst") == 0) case_cdinst();
     if (all || kstrcmp(sel, "namerule") == 0) case_namerule();
+    if (all || kstrcmp(sel, "utf8") == 0) case_utf8();
     if (all || kstrcmp(sel, "fatname") == 0) case_fatname();
     if (all || kstrcmp(sel, "hostname") == 0) case_hostname();
 #endif

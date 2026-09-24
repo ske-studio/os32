@@ -584,6 +584,12 @@ int vfs_rmdir(const char *path)
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->rmdir) return VFS_ERR_NOMOUNT;
     if (vfs_rel_is_root(rel_path)) return VFS_ERR_INVAL;   /* マウント中のルート */
+    /* inode を持たない FS (FAT / HostDrv) の pinned FD はパスで動く。FS の
+     * rmdir がファイルを消す実装 (FatFs の f_unlink) だと使用中の実体を
+     * 失うので、名前か祖先が pinned の FD に当たれば断る (二重の防御、
+     * FAT 側は種別を見て NOTDIR — 実装レビュー ラリー 3)。 */
+    if (!ops->ino && vfs_fd_pinned_busy(fs_ctx, 0, 0, rel_path))
+        return VFS_ERR_BUSY;
     /* ディレクトリは open できないので失効させる FD は無い */
     return ops->rmdir(fs_ctx, rel_path);
 }

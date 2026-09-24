@@ -554,6 +554,81 @@ static void case_status_table(void)
     CHECK(hdrv_create_status_to_vfs(0xC0000999UL) == OS32_ERR_IO);
 }
 
+/* [E6] 名前の厳密化 (TASK_VFS_FD_PATH 実装レビュー ラリー 3 B2)。
+ * 以前は UTF-16 への変換が途中で切れた列で打ち切り・冗長な符号化を受理・
+ * BMP 外を U+FFFD に置き換えたので、"disk.img\xC2" が "disk.img" として
+ * ホストに届き、VFS の BUSY / pinned の比較をすり抜けた。**実物の
+ * hostdrv_create / hdrv_rename** で、断る名前ではハイパーコールが 1 度も
+ * 出ない (ホストへ何も送らない) ことと、正当な日本語は正しい UTF-16 で
+ * 届くことを見る。 */
+static void case_strict_names(void)
+{
+    static const char *const bad[] = {
+        "/disk.img\xc2",            /* 途中で切れた列 */
+        "/\xc1\xa4isk.img",         /* 冗長な符号化 = "disk.img" */
+        "/\xf0\x9f\x98\x80.img",   /* BMP 外 */
+        "/\xf0\x9f\x98\x81.img",
+        "/a\x80",                   /* 単独の継続バイト */
+        "/\xed\xa0\x80",           /* サロゲート */
+        "/disk.img::$DATA",         /* 代替データストリーム */
+        "/a*", "/a?", "/a\"", "/a<", "/a>", "/a|",
+    };
+    static u8 buf[16];
+    OS32_Stat st;
+    u32 i, sz;
+    static const u16 want[] = { '\\', 0x65E5, 0x672C, '.', 't', 'x', 't', 0 };
+
+    report("  [E6] 不正な UTF-8 / BMP 外 / Win32 の禁止文字はホストへ送らない\n");
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        t_reset();
+        CHECK(hdrv_unlink((void *)0, bad[i]) == VFS_ERR_INVAL);
+        CHECK(hdrv_stat((void *)0, bad[i], &st) == VFS_ERR_INVAL);
+        CHECK(hdrv_read_file((void *)0, bad[i], buf, sizeof(buf)) == VFS_ERR_INVAL);
+        CHECK(hdrv_get_file_size((void *)0, bad[i], &sz) == VFS_ERR_INVAL);
+        CHECK(hdrv_write_file((void *)0, bad[i], "X", 1) == VFS_ERR_INVAL);
+        CHECK(hdrv_rmdir((void *)0, bad[i]) == VFS_ERR_INVAL);
+        CHECK(hdrv_rename((void *)0, bad[i], "/b") == VFS_ERR_INVAL);
+        CHECK(hdrv_rename((void *)0, "/a", bad[i]) == VFS_ERR_INVAL);
+        CHECK(t_create_calls == 0);
+        CHECK(t_setinfo_calls == 0);
+        CHECK(t_write_calls == 0);
+        if (t_create_calls != 0) {
+            report("    ^ bad["); report_i((int)i); report("]\n");
+        }
+    }
+
+    /* 二重の防御: 規則を通ってしまった名前でも、変換の段 (session_set_path /
+     * setup_create) が失敗を返し、hostdrv_create はハイパーコールしない */
+    CHECK(session_set_path("/disk.img\xc2") == VFS_ERR_INVAL);
+    CHECK(session_set_path("/\xc1\xa4isk.img") == VFS_ERR_INVAL);
+    CHECK(session_set_path("/\xf0\x9f\x98\x80.img") == VFS_ERR_INVAL);
+    CHECK(setup_create("/a\x80", NP2_FILE_OPEN, 0, 0) == VFS_ERR_INVAL);
+    CHECK(session_set_path("/ok") == VFS_OK);
+    /* 規則は通るが ntpath (260) に収まらない名前: 切り詰めずに断り、
+     * ホストへ何も送らない (以前は kstrncpy が黙って落とした) */
+    {
+        static char longp[300];
+        for (i = 0; i < 299; i++) longp[i] = (i % 9 == 0) ? '/' : 'a';
+        longp[299] = '\0';
+        t_reset();
+        CHECK(hdrv_stat((void *)0, longp, &st) == VFS_ERR_NAMETOOLONG);
+        CHECK(hdrv_unlink((void *)0, longp) == VFS_ERR_NAMETOOLONG);
+        CHECK(hdrv_rename((void *)0, "/a", longp) == VFS_ERR_NAMETOOLONG);
+        CHECK(t_create_calls == 0 && t_setinfo_calls == 0);
+    }
+
+    /* 正当な日本語 (3 バイトの UTF-8) は正しい UTF-16 でホストへ届く */
+    t_reset();
+    CHECK(hdrv_stat((void *)0, "/\xe6\x97\xa5\xe6\x9c\xac.txt", &st) == 0);
+    CHECK(t_create_calls >= 1);
+    CHECK(g_fobj.FileName.Length == 14);
+    for (i = 0; i < sizeof(want) / sizeof(want[0]); i++)
+        CHECK(g_namebuf[i] == want[i]);
+    t_reset();
+    CHECK(hdrv_rename((void *)0, "/a", "/\xe8\xaa\x9e.txt") == 0);
+    CHECK(t_create_calls == 1 && t_setinfo_calls == 1);
+}
+
 static void run(void)
 {
     report("=== 票 B8 / P1-4: HostDrv の実物を通す ===\n");
@@ -562,6 +637,7 @@ static void run(void)
     case_other_entries();
     case_no_truncate_on_open_failure();
     case_status_table();
+    case_strict_names();
 
     report("\n");
     report_i(g_checks);

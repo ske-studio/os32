@@ -76,6 +76,46 @@ FDD ブート (root = FAT) で `db_open_existing` が落ちていた。
 - rmdir / rename (両引数) / unlink / mkdir は、末尾の `/` を落とした後の**最終要素が `.` / `..`**
   なら正規化の前に `OS32_ERR_INVAL` (`rmdir a/.` が a を消さない)。
 - マウント点への `O_CREAT|O_EXCL` は (NOSYS の判定の後で) `OS32_ERR_EXIST`。
+- **FAT は `0:` を前に付けた後の長さも見る** (`ff_make_path`)。FD 起動では FAT が `/` に
+  マウントされるので FS に届く相対パスは 255 バイトまで伸び、`"0:"` + パス + NUL が 256 に収まら
+  ない (相対パス 254 / 255 バイト) ものは **`OS32_ERR_NAMETOOLONG`** (253 バイトまでは通る)。
+  以前は末尾を黙って落とし、255 バイトの `…/disk1.imgXY` が 253 バイトの `…/disk1.img` を消せた。
+- **FAT の rmdir はディレクトリだけ**を消す。FatFs の `f_unlink` はファイルも消すので、先に種別を
+  見てファイルなら **`OS32_ERR_NOTDIR`**。加えて `vfs_rmdir` は inode を持たない FS (FAT / HostDrv)
+  で名前か祖先が pinned の FD に当たれば `OS32_ERR_BUSY` (二重の防御)。
+
+#### 名前の規則 — FAT / HostDrv (票 TASK_VFS_FD_PATH、実装レビュー ラリー 2・3)
+
+BUSY / pinned (使用中の SQLite DB・loop イメージ) は、FD を開いた名前と操作の名前を 1 バイトずつ
+(大文字小文字は `VfsOps.name_fold` で畳んで) 比べる。下の FS が「別の綴りを同じ実体」と読む名前は、
+この比較をすり抜けて使用中の実体を消せるので、**入口で `OS32_ERR_INVAL` で断る**
+(`fs/vfs_name_rules.inc`、FAT は `ff_make_path`、HostDrv は `hostdrv_create` と rename の宛先)。
+
+| 断るもの | FAT | HostDrv (Win32) |
+|---|---|---|
+| `\`、制御文字 (0x01〜0x1F) | ○ | ○ |
+| 要素の末尾の空白・末尾の `.` (`.` / `..` そのものは除く) | ○ | ○ |
+| 要素の途中の空白 (FatFs はそこで名前を打ち切る) | ○ | 通す (`my file.txt` は正当) |
+| `: * ? " < > \|` (`:` は代替データストリーム `disk.img::$DATA`) | FatFs 自身が断る | ○ |
+| 最短形の正しい UTF-8 で BMP (U+0000〜U+FFFF、サロゲートを除く) の文字でないもの — 途中で切れた列 (`disk.img\xC2`)、単独の継続バイト、冗長な符号化 (`\xC1\xA4isk.img` = `disk.img`)、4 バイト列 (絵文字など BMP 外) | 見ない (0x80 以上は CP437 / SJIS のバイト) | ○ |
+
+HostDrv の名前は `lib/kutf16.c` の `kutf8_to_utf16le` で UTF-16 にしてホストへ渡る。変換も同じ
+規則で、不正な列・BMP 外・収まらない入力は置換も切り詰めもせずに失敗し (-1)、呼び手はホストへ
+何も送らずに `INVAL` / `NAMETOOLONG` を返す。以前は途中終了・冗長形の受理・U+FFFD への置換で、
+検査した名前と別の名前がホストに届いていた。**ホスト上の BMP 外の名前 (絵文字など) のファイルは
+HostDrv から開けない** (一覧には CESU-8 風の名前で出るが、開く・消す・改名は `INVAL`)。
+
+**既知の制限 (ユーザー決裁 2026-09-24)** — HostDrv 上のファイルを次の別名で指したときの BUSY /
+pinned の保護は**保証しない**:
+
+- Windows の **8.3 短名** (`disk-image.img` に対する `DISK-I~1.IMG`)
+- **予約名** (`CON`、`NUL`、`COM1` など)
+- **ASCII 以外の大文字小文字** (HostDrv の `name_fold` は ASCII の英字だけを畳む)
+
+影響は**開発者のホスト上のファイルと、それを載せた loop デバイス**に限られる (実機に HostDrv は
+無い)。HostDrv 上のイメージを loop に載せている間は、これらの別名で消したり改名したりしないこと。
+将来 HostDrv を Host Services (ネットワーク越し) の経路でも使えるようにするときに、ホスト側の
+実体識別で保護する案を検討する (v3 PLAN の候補)。
 
 #### 排他的作成 `O_EXCL` (KAPI v53、票 H2)
 

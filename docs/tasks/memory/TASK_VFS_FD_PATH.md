@@ -1,6 +1,6 @@
 # TASK_VFS_FD_PATH — FD がパスを覚えて書き込みごとに引き直す / 長いパスを黙って切り詰める (VFS の既存欠陥)
 
-> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-24) / 状態: **方針確定 (2026-09-24)** — ラリー 3: Opus 条件付き Approve、Codex は A-R3-1 のみ → ユーザー決裁 ①。実装中 — ユーザー指示「別票を着手」(2026-09-24)。カーネル層 (VFS/FS) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
+> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-24) / 状態: **方針確定 (2026-09-24)** — ラリー 3: Opus 条件付き Approve、Codex は A-R3-1 のみ → ユーザー決裁 ①。実装中 — ユーザー指示「別票を着手」(2026-09-24)。**実装レビュー ラリー 3 の修正 (FAT の長いパス・FAT の rmdir・HostDrv の名前の厳密化・既知の制限の記載) を実装、レビュー待ち** (wt/vfs-fix4、記録 `tools/tests/vfs_fd_path_tdd.md` の「ラリー 3」)。カーネル層 (VFS/FS) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
 > 出所: TASK_EXT2_EMPTY_NAME の修正 (fc5ce67) の実装レビュー (Codex / Opus とも Approve、どちらも「修正前からある別の欠陥」として挙げた)。
 
 ## 欠陥 1 (Codex、優先): 開いた FD の書き込みが、同じパスに作り直したディレクトリを上書きする

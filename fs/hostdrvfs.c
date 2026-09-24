@@ -158,13 +158,18 @@ static void session_begin(void)
     g_stack.fileObject = (u32)&g_fobj;
 }
 
-/* パスをUTF-16LEに変換してg_namebufとg_fobjに設定 */
-static void session_set_path(const char *path)
+/* パスをUTF-16LEに変換してg_namebufとg_fobjに設定
+ * 戻り値: VFS_OK / VFS_ERR_NAMETOOLONG (ntpath に収まらない) /
+ *         VFS_ERR_INVAL (正しい BMP の UTF-8 でない — 変換が別名を作らない
+ *         ように、置換も切り詰めもせずに断る。実装レビュー ラリー 3 B2)。
+ * 失敗したら**ホストへ何も送らない** (呼び手はハイパーコールをしない)。 */
+static int session_set_path(const char *path)
 {
     int words;
     char ntpath[260];
     int i;
 
+    if (kstrlen(path) >= sizeof(ntpath)) return VFS_ERR_NAMETOOLONG;
     kstrncpy(ntpath, path, sizeof(ntpath));
     for (i = 0; ntpath[i]; i++) {
         if (ntpath[i] == '/') ntpath[i] = '\\';
@@ -176,10 +181,16 @@ static void session_set_path(const char *path)
     }
 
     words = kutf8_to_utf16le(ntpath, (u16*)g_namebuf, HOSTDRV_NAME_BUF_WORDS);
+    if (words < 1) {
+        g_fobj.FileName.Length = 0;
+        g_fobj.FileName.MaximumLength = 0;
+        return VFS_ERR_INVAL;
+    }
     /* UNICODE_STRING: Length はNULL終端を含まないバイト数 */
     g_fobj.FileName.Length = (u16)((words - 1) * 2);
     g_fobj.FileName.MaximumLength = (u16)(words * 2);
     g_fobj.FileName.Buffer = (u32)g_namebuf;
+    return VFS_OK;
 }
 
 /* ===================================================================== */
@@ -188,10 +199,13 @@ static void session_set_path(const char *path)
 /*  g_fobj / g_fsctx / g_invoke には一切触れない。                         */
 /* ===================================================================== */
 
-/* g_stack を全クリアして CREATE 用に設定 */
-static void setup_create(const char *path, u32 disposition,
-                         u32 options_flags, u32 desired_access)
+/* g_stack を全クリアして CREATE 用に設定
+ * 戻り値: VFS_OK / session_set_path の失敗 (そのときはハイパーコールしない) */
+static int setup_create(const char *path, u32 disposition,
+                        u32 options_flags, u32 desired_access)
 {
+    int rc;
+
     kmemset((void*)&g_stack, 0, sizeof(g_stack));
     g_stack.majorFunction = NP2_IRP_MJ_CREATE;
     g_stack.fileObject = (u32)&g_fobj;  /* 再設定必須 */
@@ -205,12 +219,13 @@ static void setup_create(const char *path, u32 disposition,
     g_secctx.DesiredAccess = desired_access;
     g_stack.parameters.create.securityContext = (u32)&g_secctx;
 
-    /* パス設定 */
-    session_set_path(path);
-
     /* IOステータス: 番兵値 */
     g_iostatus.Status = NP2_STATUS_SENTINEL;
     g_iostatus.Information = 0;
+
+    /* パス設定 */
+    rc = session_set_path(path);
+    return rc;
 }
 
 /* g_stack を全クリアして READ 用に再設定 */
@@ -336,7 +351,8 @@ static int hostdrv_create(const char *path, u32 disposition,
     int rc = vfs_name_rule_check(path, VFS_NAME_RULE_WIN32);
     if (rc != VFS_OK) return rc;
 
-    setup_create(path, disposition, options_flags, desired_access);
+    rc = setup_create(path, disposition, options_flags, desired_access);
+    if (rc != VFS_OK) return rc;    /* ホストへは何も送っていない */
     hostdrv_hypercall();
 
     if (g_iostatus.Status == NP2_STATUS_SENTINEL) {
@@ -853,12 +869,10 @@ static int hdrv_rename(void *ctx, const char *old_path, const char *new_path)
     rc = vfs_name_rule_check(new_path, VFS_NAME_RULE_WIN32);
     if (rc != VFS_OK) return rc;
 
-    session_begin();
-    rc = hostdrv_create(old_path, NP2_FILE_OPEN,
-                        NP2_FILE_SYNCHRONOUS_IO_NONALERT,
-                        NP2_DELETE);
-    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
-
+    /* 宛先の UTF-16 化も元を開く**前に**。変換できない宛先 (不正な
+     * UTF-8・BMP 外・収まらない) は置換も切り詰めもせずに断る — 別名に
+     * 化けた宛先へ付け替えさせない (実装レビュー ラリー 3 B2) */
+    if (kstrlen(new_path) >= sizeof(ntpath)) return VFS_ERR_NAMETOOLONG;
     kstrncpy(ntpath, new_path, sizeof(ntpath));
     for (i = 0; ntpath[i]; i++) {
         if (ntpath[i] == '/') ntpath[i] = '\\';
@@ -868,7 +882,14 @@ static int hdrv_rename(void *ctx, const char *old_path, const char *new_path)
     rename_info.ReplaceIfExists = 1;
     rename_info.RootDirectory = 0;
     words = kutf8_to_utf16le(ntpath, (u16*)rename_info.FileName, 260);
+    if (words < 1) return VFS_ERR_INVAL;
     rename_info.FileNameLength = (u32)((words - 1) * 2);
+
+    session_begin();
+    rc = hostdrv_create(old_path, NP2_FILE_OPEN,
+                        NP2_FILE_SYNCHRONOUS_IO_NONALERT,
+                        NP2_DELETE);
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     rc = hostdrv_set_info(NP2_FileRenameInformation, &rename_info,
                           sizeof(rename_info) - 520 + rename_info.FileNameLength);
