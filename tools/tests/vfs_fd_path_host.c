@@ -30,6 +30,7 @@
 #include "ide.h"
 #include "kmalloc.h"
 #include "kstring.h"
+#include <stdarg.h>
 
 /* ======================================================================== */
 /*  libc の代わり                                                           */
@@ -692,8 +693,109 @@ static void case_busy(void)
     expect_stale(fd2);
     vfs_close(fd); vfs_close(fd2);
 
+#ifndef FDP_RED
+    /* ---- 失効しても接続が閉じるまでは BUSY (Codex 実装レビュー ラリー 1 の
+     * B3)。unlink で FD が失効しても SQLite 接続は開いたままで、ジャーナルを
+     * 開いた時の名前で作り・消す ---- */
+    EQ(vfs_mkdir("/hd0/s3"), VFS_OK);
+    CHECK(wfile("/hd0/s3/x.db", "DBDATA") >= 0);
+    cookie.generation = 3;
+    EQ(vfs_open_sqlite("/hd0/s3/x.db", O_RDWR, 1, &cookie, 0, &lease), VFS_OK);
+    EQ(vfs_rm("/hd0/s3/x.db"), VFS_OK);
+    CHECK(vfs_fd_is_stale(lease.fd) == 1);
+    REFUSED_AS(vfs_rename("/hd0/s3", "/hd0/s3b"), VFS_ERR_BUSY);
+    REFUSED_AS(vfs_rename("/hd0/other", "/hd0/s3/x.db-journal"), VFS_ERR_BUSY);
+    REFUSED_AS(vfs_rename("/hd0/other", "/hd0/s3/x.db"), VFS_ERR_BUSY);
+    EQ(vfs_close_sqlite(&lease), VFS_OK);
+    EQ(vfs_rename("/hd0/s3", "/hd0/s3b"), VFS_OK);
+    /* 旧来の経路 (IME 辞書) も同じ */
+    CHECK(wfile("/hd0/s3b/y.db", "DBDATA") >= 0);
+    fd = vfs_open("/hd0/s3b/y.db", O_RDWR);
+    CHECK(fd >= 3);
+    EQ(vfs_fd_set_sqlite_db(fd), VFS_OK);
+    EQ(vfs_rm("/hd0/s3b/y.db"), VFS_OK);
+    REFUSED_AS(vfs_rename("/hd0/s3b", "/hd0/s3c"), VFS_ERR_BUSY);
+    vfs_close(fd);
+    EQ(vfs_rename("/hd0/s3b", "/hd0/s3c"), VFS_OK);
+
+    /* ext2 は名前の大文字小文字を区別する: 別の名前 (Q) は BUSY にしない */
+    EQ(vfs_mkdir("/hd0/q"), VFS_OK);
+    EQ(vfs_mkdir("/hd0/Q"), VFS_OK);
+    CHECK(wfile("/hd0/q/z.db", "DBDATA") >= 0);
+    cookie.generation = 4;
+    EQ(vfs_open_sqlite("/hd0/q/z.db", O_RDWR, 1, &cookie, 0, &lease), VFS_OK);
+    REFUSED_AS(vfs_rename("/hd0/q", "/hd0/q2"), VFS_ERR_BUSY);
+    EQ(vfs_rename("/hd0/Q", "/hd0/Q2"), VFS_OK);
+    EQ(vfs_close_sqlite(&lease), VFS_OK);
+#endif
+
     dump_image("busy.img");
 }
+
+#ifndef FDP_RED
+/* ======================================================================== */
+/*  段 nocase: 大文字小文字を区別しない FS の BUSY / pinned (Codex 実装      */
+/*  レビュー ラリー 1 の B4)。FAT (FatFs) は名前を大文字にして探すので、    */
+/*  `DB` と `db` は同じ実体。VFS の名前比較も FS の規則 (name_fold) に従う。   */
+/*  ここでは ext2 の口を「パスで動き、名前を ASCII で畳む FS」として別の     */
+/*  種別で 2 つ目にマウントする (拒否は FS の操作の前に決まるので、下の FS    */
+/*  が実際に区別するかは問わない)。像は書き出さない (同じ装置の 2 つ目の     */
+/*  コンテキストで書くと ext2 が整合しない)。                                */
+/* ======================================================================== */
+
+static u8 ci_fold(u8 c)
+{
+    if (c >= 'a' && c <= 'z') return (u8)(c - 'a' + 'A');
+    return c;
+}
+static VfsOps g_ci_ops;
+
+static void case_nocase(void)
+{
+    VfsSqliteCookie cookie;
+    VfsSqliteLease lease;
+    int fd;
+
+    report("case nocase\n");
+    disk_setup();
+    EQ(vfs_mkdir("/hd0/cdb"), VFS_OK);
+    CHECK(wfile("/hd0/cdb/x.db", "DBDATA") >= 0);
+    CHECK(wfile("/hd0/disk.img", "IMAGEDATA") >= 0);
+    CHECK(wfile("/hd0/other", "O") >= 0);
+    EQ(vfs_sync(), VFS_OK);
+
+    g_ci_ops = ext2_ops;
+    g_ci_ops.name = "ext2ci";
+    g_ci_ops.ino = (const VfsInoOps *)0;      /* FAT と同じくパスで動く */
+    g_ci_ops.name_fold = ci_fold;
+    vfs_register_fs(&g_ci_ops);
+    EQ(vfs_mount("/ci", "hd0", "ext2ci"), VFS_OK);
+
+    cookie.group_index = 1;
+    cookie.generation = 1;
+    EQ(vfs_open_sqlite("/ci/cdb/x.db", O_RDWR, 1, &cookie, 0, &lease), VFS_OK);
+    CHECK(open_files[lease.fd].has_ino == 0);
+    /* 大文字小文字だけ違う名前でも同じ実体 → BUSY (旧実装は通した) */
+    EQ(vfs_rename("/ci/CDB", "/ci/MOVED"), VFS_ERR_BUSY);
+    EQ(vfs_rename("/ci/cdb/X.DB", "/ci/y.db"), VFS_ERR_BUSY);
+    EQ(vfs_rename("/ci/other", "/ci/CDB/X.DB-JOURNAL"), VFS_ERR_BUSY);
+    EQ(vfs_rename("/ci/other", "/ci/cdb/x.db-Journal"), VFS_ERR_BUSY);
+    /* 似た名前は通す判定のまま (BUSY にはしない。下の FS の答えを返す) */
+    CHECK(vfs_rename("/ci/CDBX", "/ci/MOVED") != VFS_ERR_BUSY);
+    EQ(vfs_close_sqlite(&lease), VFS_OK);
+
+    /* 使用中の loop イメージ: 大文字にした名前でも消させない */
+    fd = vfs_open("/ci/disk.img", O_RDWR);
+    CHECK(fd >= 3);
+    EQ(vfs_fd_set_pinned(fd, 1), VFS_OK);
+    EQ(vfs_rm("/ci/DISK.IMG"), VFS_ERR_BUSY);
+    EQ(vfs_rm("/ci/Disk.Img"), VFS_ERR_BUSY);
+    EQ(vfs_rename("/ci/other", "/ci/DISK.IMG"), VFS_ERR_BUSY);
+    EQ(vfs_fd_set_pinned(fd, 0), VFS_OK);
+    vfs_close(fd);
+    CHECK(exists("/disk.img") && exists("/cdb/x.db"));
+}
+#endif
 
 /* ======================================================================== */
 /*  段 dot: 最終要素の "." / ".."                                            */
@@ -863,6 +965,7 @@ static void case_path(void)
 /* ======================================================================== */
 
 #define CD_FD 900
+static const char *g_cd_set;    /* 段 cdinst の PKG の組 ("A_" など)、ふだんは NULL */
 static int g_cd_hfd = -1;
 static char g_cd_path[512];
 
@@ -874,6 +977,8 @@ static int __cdecl f_sys_open(const char *path, int mode)
         u32 i = 0, j;
         for (j = 0; g_pkg_dir[j] && i < 400; j++) g_cd_path[i++] = g_pkg_dir[j];
         g_cd_path[i++] = '/';
+        /* 段 cdinst: 固定名 (/cd0/NORMAL.PKG 等) を組ごとの名前 (A_NORMAL.PKG) へ */
+        for (j = 0; g_cd_set && g_cd_set[j] && i < 450; j++) g_cd_path[i++] = g_cd_set[j];
         for (j = 5; path[j] && i < 500; j++) g_cd_path[i++] = path[j];
         g_cd_path[i] = '\0';
         g_cd_hfd = h_sys3(5, (long)g_cd_path, 0, 0);
@@ -1009,6 +1114,107 @@ static void case_pkg(void)
 }
 
 /* ======================================================================== */
+/*  段 cdinst: 実物の userland/system/cdinst.c の install_packages          */
+/*  (Codex / Opus 実装レビュー ラリー 1: MINIMAL 以外の失敗でも止め、完了を   */
+/*  表示しない)                                                             */
+/* ======================================================================== */
+
+#ifndef FDP_RED
+static int g_complete_seen;
+static void __cdecl f_kprintf_cap(u8 attr, const char *fmt, ...)
+{
+    va_list ap;
+    const char *p;
+    (void)attr;
+    va_start(ap, fmt);
+    if (fmt[0] == '%' && fmt[1] == 's') {
+        const char *a = va_arg(ap, const char *);
+        for (p = a; *p; p++) {
+            const char *k = "Installation Complete";
+            u32 i = 0;
+            while (k[i] && p[i] == k[i]) i++;
+            if (!k[i]) g_complete_seen = 1;
+        }
+    }
+    va_end(ap);
+}
+static int __cdecl f_sys_stat(const char *path, OS32_Stat *st)
+{
+    int fd, end;
+    if (path[0] == '/' && path[1] == 'c' && path[2] == 'd' && path[3] == '0') {
+        fd = f_sys_open(path, O_RDONLY);
+        if (fd < 0) return fd;
+        end = f_sys_lseek(fd, 0, SEEK_END);
+        f_sys_close(fd);
+        kmemset(st, 0, sizeof(*st));
+        st->st_size = (u32)end;
+        return 0;
+    }
+    return vfs_stat(path, st);
+}
+static int __cdecl f_vfs_sync(void) { return vfs_sync(); }
+
+/* 先に無効側 (OS32_DBG_SERIAL なし) で取り込み、cdinst.c の DBG を空にする */
+#include "rt/dbgserial.h"
+#define main cdinst_main
+#include "../system/cdinst.c"   /* -I の userland/lib (変異では写し) から */
+#undef main
+
+static void cdinst_setup(const char *set)
+{
+    disk_setup();
+    kmemset(&g_api, 0, sizeof(g_api));
+    g_api.sys_open = f_sys_open;
+    g_api.sys_close = f_sys_close;
+    g_api.sys_read = f_sys_read;
+    g_api.sys_write = f_sys_write;
+    g_api.sys_lseek = f_sys_lseek;
+    g_api.sys_mkdir = f_sys_mkdir;
+    g_api.sys_stat = f_sys_stat;
+    g_api.vfs_sync = f_vfs_sync;
+    g_api.mem_alloc = f_mem_alloc;
+    g_api.mem_free = f_mem_free;
+    g_api.kprintf = f_kprintf_cap;
+    api = &g_api;
+    g_arena_used = 0;
+    g_complete_seen = 0;
+    g_cd_set = set;
+}
+
+static void case_cdinst(void)
+{
+    report("case cdinst\n");
+    if (!g_pkg_dir) { report("  (harness) pkg dir missing\n"); g_failures++; return; }
+
+    /* A: NORMAL が格納パス 124 バイトで PATH TOO LONG → そこで止まる。
+     * FULL は展開しない、完了は表示しない */
+    cdinst_setup("A_");
+    EQ(install_packages('3', 0, 0), PKG_ERR_TOOLONG);
+    CHECK(exists("/good/a.txt"));             /* MINIMAL は済んでいる */
+    CHECK(!exists("/full"));
+    CHECK(!g_complete_seen);
+
+    /* B: APPEND の展開が置き場の衝突で IO → 止める、完了は表示しない */
+    cdinst_setup("B_");
+    EQ(vfs_mkdir("/hd0/clash"), VFS_OK);
+    EQ(install_packages('3', 0, 1), PKG_ERR_IO);
+    CHECK(exists("/full/f.txt"));
+    CHECK(!g_complete_seen);
+
+    /* D: MINIMAL の失敗 (従来から止まる) — NORMAL へ進まない */
+    cdinst_setup("D_");
+    EQ(install_packages('2', 0, 0), PKG_ERR_TOOLONG);
+    CHECK(!exists("/n"));
+    CHECK(!g_complete_seen);
+
+    /* C: 全部通れば完了を表示する (DEBUG / APPEND の PKG は無い = 飛ばす) */
+    cdinst_setup("C_");
+    EQ(install_packages('3', 1, 1), PKG_OK);
+    CHECK(exists("/good/a.txt") && exists("/n/a.txt") && exists("/full/f.txt"));
+    CHECK(g_complete_seen);
+    g_cd_set = (const char *)0;
+}
+#endif
 
 static void run(const char *sel)
 {
@@ -1018,6 +1224,10 @@ static void run(const char *sel)
     if (all || kstrcmp(sel, "dot") == 0) case_dot();
     if (all || kstrcmp(sel, "path") == 0) case_path();
     if (all || kstrcmp(sel, "pkg") == 0) case_pkg();
+#ifndef FDP_RED
+    if (all || kstrcmp(sel, "nocase") == 0) case_nocase();
+    if (all || kstrcmp(sel, "cdinst") == 0) case_cdinst();
+#endif
     report("checks "); report_i(g_checks);
     report(" failures "); report_i(g_failures); report("\n");
 }

@@ -1498,6 +1498,7 @@ static int replace_file(const char *src_path, const char *dst_path, u32 size,
         const char *note = " (公開したか判定できない)";
         OS32_Stat now;
         int srr = api->sys_stat(dst_path, &now);
+        int unpublished = 0;    /* 1 = 旧内容のまま (why = replace_failed) */
 
         if (srr == 0) {
             if (now.st_ino == tmp_ino) {
@@ -1512,10 +1513,24 @@ static int replace_file(const char *src_path, const char *dst_path, u32 size,
             } else if (dst_exists && now.st_ino == old_ino) {
                 why = HR_REPLACE_FAILED;
                 note = " (未公開: 宛先は旧内容のまま)";
+                unpublished = 1;
             }
         } else if (!dst_exists && srr == OS32_ERR_NOTFOUND) {
             why = HR_REPLACE_FAILED;
             note = " (未公開: 宛先は作られていない)";
+            unpublished = 1;
+        }
+        /* BUSY = VFS が**何もせずに**断った: 開いている SQLite DB (FEP を
+         * 有効にした後の /db/fep.db など) とそのジャーナル・祖先は、接続が
+         * 閉じるまで付け替えさせない (票 TASK_VFS_FD_PATH のユーザー決裁 ①)。
+         * 設計どおりの拒否なので、何が起きたかと次の手を言う。 */
+        if (rc == OS32_ERR_BUSY && unpublished) {
+            note = dst_exists
+                ? " (使用中で置き換えられなかった: 宛先は旧内容のまま。"
+                  "開いている DB (FEP 辞書など) は閉じるまで置き換えない。"
+                  "再起動して FEP を有効にする前に hsync する)"
+                : " (使用中で作れなかった: 開いている DB のジャーナル名か"
+                  "その祖先。DB を閉じてから hsync する)";
         }
         api->kprintf(ATTR_RED, "  FAIL %s reason=%s err=%d%s%s\n",
                      dst_path, why, rc, err_tag(rc), note);

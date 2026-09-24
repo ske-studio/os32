@@ -36,6 +36,12 @@ static char iso_toupper(char c)
     return c;
 }
 
+/* VFS の名前比較 (BUSY / pinned) 用の 1 バイト版。iso_toupper と同じ規則 */
+static u8 iso_name_fold(u8 c)
+{
+    return (u8)iso_toupper((char)c);
+}
+
 /* case-insensitive文字列比較 */
 static int iso_strcasecmp(const char *a, const char *b)
 {
@@ -530,5 +536,7 @@ VfsOps iso9660_ops = {
      * 直接上書きへ落ちずに replace_unsupported で断る。 */
     0,
     /* inode で動く口も持たない (票 TASK_VFS_FD_PATH)。FD はパスで動く */
-    0
+    0,
+    /* iso_strcasecmp と同じ規則 (英字だけ区別しない) (BUSY / pinned の名前比較用) */
+    iso_name_fold
 };

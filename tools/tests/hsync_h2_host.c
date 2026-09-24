@@ -778,6 +778,20 @@ static void case_a14a(void)
     check(dst_unchanged(), "公開前の rename 失敗: 旧宛先が不変");
     check(node_of(TMP_PATH) < 0, "公開前の rename 失敗: 一時ファイルを片づける");
     check(!log_has("copied=1"), "copied に数えない");
+
+    /* (5) 開いている DB の置き換えは VFS が BUSY で断る (票 TASK_VFS_FD_PATH
+     * のユーザー決裁 ①、FEP を有効にした後の /db/fep.db)。未公開の失敗として
+     * 数え、「使用中」と次の手を出す */
+    setup_pair(5000, 1, 111, 3000, 2, 222);
+    fk_rename_mode = RN_FAIL_BEFORE;
+    fk_rename_rc = OS32_ERR_BUSY;
+    check(run1("bin") != 0, "BUSY の rename で非ゼロ終了");
+    check(log_has("reason=replace_failed"), "BUSY も未公開 = replace_failed");
+    check(log_has("(BUSY)"), "BUSY と名前で出す");
+    check(log_has("使用中で置き換えられなかった"), "使用中と明示する");
+    check(dst_unchanged(), "BUSY: 旧宛先が不変");
+    check(node_of(TMP_PATH) < 0, "BUSY: 一時ファイルを片づける");
+    check(!log_has("copied=1"), "BUSY: copied に数えない");
 }
 
 /* ========================================================================= */

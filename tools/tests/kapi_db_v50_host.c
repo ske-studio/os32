@@ -819,6 +819,24 @@ static void path_len(void)
     CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
     CHECK(kapi_db_open_existing(longp, 1) == -1);
     CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
+
+    /* kapi_db_open (作成もする経路) も**開く時点で**断る (Opus 実装レビュー
+     * ラリー 1 の nb2)。以前は本体だけ開けて、最初の書き込みでジャーナルを
+     * 開けない「読めるのに書けない」接続を返していた */
+    CHECK(kapi_db_open(longp) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
+    /* 下の SQLite VFS (xOpen) も同じ長さで断る (IME 辞書などの直の接続) */
+    {
+        sqlite3 *db = 0;
+        CHECK(sqlite3_open_v2(longp, &db, SQLITE_OPEN_READWRITE, 0) ==
+              SQLITE_CANTOPEN);
+        if (db) sqlite3_close(db);
+    }
+    /* ちょうど収まる長さは kapi_db_open でも開けて書ける */
+    longp[room] = '\0';
+    h = kapi_db_open(longp);
+    CHECK(h >= 0);
+    CHECK(kapi_db_close(h) == 0);
 }
 
 /* ---- 15. SQLITE_TRANSIENT: スクラッチを上書きしても値が残る ------------- */

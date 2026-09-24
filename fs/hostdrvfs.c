@@ -892,6 +892,15 @@ static u32 hdrv_free_blocks(void *ctx)
 static u32 hdrv_block_size(void *ctx)
 { (void)ctx; return 512; }
 
+/* 名前の比較規則 (BUSY / pinned、Codex 実装レビュー ラリー 1 の B4)。
+ * ホストの Windows は英字の大文字小文字を区別しない。ASCII だけを畳む
+ * (非 ASCII の畳み方はホスト側の変換に依るので、ここでは区別したまま) */
+static u8 hdrv_name_fold(u8 c)
+{
+    if (c >= 'a' && c <= 'z') return (u8)(c - 'a' + 'A');
+    return c;
+}
+
 /* ===================================================================== */
 /*  VfsOps テーブル                                                       */
 /* ===================================================================== */
@@ -925,7 +934,9 @@ static VfsOps g_hostdrvfs_ops = {
      * 直接上書きへ落ちずに replace_unsupported で断る。 */
     0,
     /* inode で動く口も持たない (票 TASK_VFS_FD_PATH)。FD はパスで動く */
-    0
+    0,
+    /* ホスト (Windows) の名前は大文字小文字を区別しない (BUSY / pinned の名前比較用) */
+    hdrv_name_fold
 };
 
 VfsOps *hostdrvfs_get_ops(void)
