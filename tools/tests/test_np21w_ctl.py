@@ -34,6 +34,8 @@ NHD = WIN + '\\os32.nhd'
 ISO = WIN + '\\os32_install.iso'
 D88 = WIN + '\\os32_boot.d88'
 PID = 4242
+TOKEN = 'f0' * 32
+TOKEN_NAME = 'np21w_aidebug_8025.token'
 
 
 class FakeClock(object):
@@ -127,7 +129,9 @@ class FakeHttp(object):
 
     def __init__(self, ops, mode='new', inst_pid=None, inst_exe=EXE,
                  quit_stops=True, dialog=None, instance_dialog=False,
-                 api_up_after=0, tvram=None, fdd_status=200):
+                 api_up_after=0, tvram=None, fdd_status=200, token=TOKEN,
+                 token_file=None, fdd_delay=2, fdd_accepts=True, paused=None,
+                 quit_status=200, quit_error='', latency=0.0, quit_policy=None):
         self.ops = ops
         self.mode = mode
         self.inst_pid = inst_pid
@@ -138,6 +142,18 @@ class FakeHttp(object):
         self.api_up_after = api_up_after
         self.tvram = tvram
         self.fdd_status = fdd_status
+        self.token = token              # 正しいトークン (None = 検査しない)
+        self.token_file = token_file    # /api/instance の token_file ('' = 書けていない)
+        self.fdd_delay = fdd_delay      # insert 後、何回目の instance で path が立つか
+        self.fdd_accepts = fdd_accepts  # False = 受理はするが path が立たない (開けない)
+        self.paused = paused            # 'trap' / 'user' = pending のまま
+        self.quit_status = quit_status
+        self.quit_error = quit_error
+        self.latency = latency          # 1 要求あたりに進める偽の時計 (秒)
+        self.quit_policy = quit_policy  # 既に受け付けた save (None = 未要求)
+        self.fdd = {1: {'path': D88, 'cfg': D88, 'pending': False}}
+        self.fdd_inserted_at = {}
+        self.base = 'http://127.0.0.1:8025'
         self.calls = []
 
     def _pid(self):
@@ -145,8 +161,30 @@ class FakeHttp(object):
             return self.inst_pid
         return next(iter(self.ops.running), None)
 
-    def request(self, method, path, body=None, timeout=10):
-        self.calls.append((method, path, body, timeout))
+    def _authorized(self, headers):
+        return self.token is None or (headers or {}).get('X-Aidebug-Token') == self.token
+
+    def _fdd_json(self):
+        out = []
+        n = len([c for c in self.calls if c[1] == '/api/instance'])
+        for d in (1, 2, 3, 4):
+            f = dict(self.fdd.get(d) or {'path': '', 'cfg': '', 'pending': False})
+            at = self.fdd_inserted_at.get(d)
+            if at is not None and f.get('pending'):
+                if self.paused is None and self.fdd_accepts and n - at >= self.fdd_delay:
+                    f['pending'] = False
+                    f['path'] = f['cfg']
+                elif not self.fdd_accepts and n - at >= 1:
+                    f['pending'] = False      # 開けなかった: path は空のまま
+            self.fdd[d] = f
+            out.append({'drive': d, 'equip': d == 1 or d == 2, 'path': f['path'],
+                        'cfg': f['cfg'], 'pending': f['pending'], 'ready': bool(f['path'])})
+        return out
+
+    def request(self, method, path, body=None, timeout=10, headers=None):
+        self.calls.append((method, path, body, timeout, dict(headers or {})))
+        if self.latency:
+            self.ops.fc.now += self.latency
         if self.mode == 'down' or not self.ops.running:
             return None
         n = len([c for c in self.calls if c[1] == path])
@@ -164,14 +202,29 @@ class FakeHttp(object):
         if path == '/api/instance':
             if self.mode == 'old':
                 return 404, '{"ok":false,"error":"unknown endpoint"}'
-            return 200, json.dumps({
-                'ok': True, 'api_version': 1, 'pid': self._pid(),
+            js = {
+                'ok': True, 'api_version': 2, 'pid': self._pid(),
                 'exe': self.inst_exe, 'ini': WIN + '\\test.ini',
                 'instance_id': 'ab' * 16, 'started_at': '2026-09-25T00:00:00.000Z',
                 'dialog': self.instance_dialog,
-                'fdd': [{'drive': 1, 'equip': True, 'path': D88}],
-                'ide': [{'slot': 1, 'type': 'hdd', 'ready': True, 'path': NHD}]})
+                'trap_pause': self.paused == 'trap', 'user_pause': self.paused == 'user',
+                'fdd': self._fdd_json(),
+                'ide': [{'slot': 1, 'type': 'hdd', 'ready': True, 'path': NHD}]}
+            if self.token_file is not None:
+                js['token_file'] = self.token_file
+                if not self.token_file:
+                    js['token_error'] = 'CreateFile failed (5)'
+            return 200, json.dumps(js)
         if path == '/api/quit':
+            if not self._authorized(headers):
+                return 401, '{"ok":false,"error":"need the aidebug token"}'
+            if self.quit_status != 200:
+                return self.quit_status, json.dumps({'ok': False, 'error': self.quit_error})
+            save = parse_qs(body or '').get('save', [''])[0]
+            if self.quit_policy is not None and self.quit_policy != save:
+                return 409, json.dumps({'ok': False, 'error':
+                                        'quit already requested with save=%s' % self.quit_policy})
+            self.quit_policy = save
             if self.quit_stops:
                 self.ops.running.pop(self._pid(), None)
             return 200, '{"ok":true,"quitting":true}'
@@ -182,8 +235,20 @@ class FakeHttp(object):
         if path == '/api/fdd':
             if self.mode == 'old':
                 return 404, '{"ok":false,"error":"unknown endpoint"}'
-            return self.fdd_status, '{"ok":%s,"error":"x"}' % (
-                'true' if self.fdd_status == 200 else 'false')
+            if not self._authorized(headers):
+                return 401, '{"ok":false,"error":"need the aidebug token"}'
+            if self.fdd_status != 200:
+                return self.fdd_status, '{"ok":false,"error":"x"}'
+            q = parse_qs(body or '')
+            d = int(q['drive'][0])
+            n = len([c for c in self.calls if c[1] == '/api/instance'])
+            if q['action'][0] == 'insert':
+                self.fdd[d] = {'path': '', 'cfg': q['path'][0], 'pending': True}
+                self.fdd_inserted_at[d] = n
+            else:
+                self.fdd[d] = {'path': '', 'cfg': '', 'pending': False}
+                self.fdd_inserted_at.pop(d, None)
+            return 200, '{"ok":true}'
         return 404, '{"ok":false,"error":"unknown endpoint"}'
 
 
@@ -210,12 +275,18 @@ class Base(unittest.TestCase):
         self.dir = self.tmp.name
         for name in ('np21x64w.exe', 'os32.nhd', 'os32_boot.d88', 'other.d88'):
             open(os.path.join(self.dir, name), 'wb').close()
+        with open(os.path.join(self.dir, TOKEN_NAME), 'w') as f:
+            f.write(TOKEN + '\r\n')
         self.write_ini(INI_TEXT)
+        self.env = mock.patch.dict(os.environ, {}, clear=False)
+        self.env.start()
+        os.environ.pop('NP21W_AIDEBUG_TOKEN_FILE', None)
         self.fc = FakeClock()
         self.out = io.StringIO()
         self.err = io.StringIO()
 
     def tearDown(self):
+        self.env.stop()
         self.tmp.cleanup()
 
     def write_ini(self, text, name='test.ini', encoding='cp932'):
@@ -267,6 +338,22 @@ class IniParse(Base):
 
     def test_unreadable_ini_is_none(self):
         self.assertIsNone(ctl.ini_media(os.path.join(self.dir, 'nope.ini')))
+
+    def test_forward_slash_absolute_is_not_made_relative(self):
+        # Codex P2: `C:/NP21/os32.nhd` は絶対。区切りを揃えてから判定し、値も揃える
+        self.write_ini('[NekoProject21]\r\n'
+                       'HDD1FILE=C:/NP21/os32.nhd\r\n'
+                       'CD1_FILE=//server/share/a.iso\r\n'
+                       'FDD1FILE=sub/rel.d88\r\n')
+        got = ctl.ini_media(os.path.join(self.dir, 'test.ini'), WIN)
+        self.assertEqual(got, [NHD, '\\\\server\\share\\a.iso', WIN + '\\sub\\rel.d88'])
+        self.assertNotIn('C:\\NP21\\C:', ' '.join(got))
+
+    def test_is_win_abs_accepts_both_separators(self):
+        for p in ('C:/x', 'c:\\x', '//srv/s', '\\\\srv\\s'):
+            self.assertTrue(ctl.is_win_abs(p), p)
+        for p in ('x.nhd', 'sub/x.nhd', '/mnt/c/x', 'C:x'):
+            self.assertFalse(ctl.is_win_abs(p), p)
 
 
 # ---------------------------------------------------------------------------
@@ -502,6 +589,25 @@ class Stop(Base):
         self.assertEqual(len(quit_calls), 1)
         self.assertEqual(quit_calls[0][0], 'POST')
         self.assertEqual(quit_calls[0][2], 'save=0&instance_id=' + 'ab' * 16)
+        self.assertEqual(quit_calls[0][4], {'X-Aidebug-Token': TOKEN})
+        self.assertEqual(ops.killed, [])
+        self.assertIn('stopped (/api/quit)', self.out.getvalue())
+
+    def test_missing_token_falls_back_to_force_kill_of_ours(self):
+        os.remove(os.path.join(self.dir, TOKEN_NAME))
+        ops = FakeOps(self.fc, running=[self.ours(77)] + self.others())
+        c = self.make(ops=ops, inst_pid=77)
+        self.assertEqual(self.run_main(c, ['stop']), 0, self.err.getvalue())
+        self.assertEqual([x for x in self.http.calls if x[1] == '/api/quit'], [])
+        self.assertEqual(ops.killed, [77])
+        self.assertIn('トークンが読めない', self.err.getvalue())
+
+    def test_quit_already_requested_with_other_policy_waits(self):
+        # 先に save=1 で受け付けられている → 409。方針は最初に固定されるので待つだけ
+        ops = FakeOps(self.fc, running=[self.ours(77)], vanish={77: 3})
+        c = self.make(ops=ops, inst_pid=77, quit_policy='1')
+        self.assertEqual(self.run_main(c, ['stop']), 0, self.err.getvalue())
+        self.assertIn('別の方針', self.err.getvalue())
         self.assertEqual(ops.killed, [])
         self.assertIn('stopped (/api/quit)', self.out.getvalue())
 
@@ -636,6 +742,36 @@ class AfterStart(Base):
         self.assertEqual([x for x in self.http.calls if x[1] == '/api/instance'], [])
         self.assertIn('API は待たない', self.out.getvalue())
 
+    def test_api_timeout_zero_makes_no_http_call_at_all(self):
+        # Codex P2: 0 なら /api/dialog も呼ばない (ダイアログが出ていても知らない)
+        dlg = {'modal': True, 'title': 'T', 'text': ['stuck'], 'buttons': []}
+        c = self.make(dialog=dlg)
+        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--api-timeout', '0'])
+        self.assertEqual(rc, 0, self.err.getvalue())
+        self.assertEqual(self.http.calls, [])
+
+    def test_instance_answer_after_api_deadline_is_not_success(self):
+        # Codex P2: 各 HTTP が 4 秒かかり、API の期限は 3 秒。最初の応答は t=4 に
+        # 届く — 期限を過ぎているので確認に数えず、期限切れとして失敗する
+        c = self.make(latency=4.0)
+        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--api-timeout', '3',
+                               '--alive', '1'])
+        self.assertEqual(rc, 1)
+        self.assertIn('3 秒応答しない', self.err.getvalue())
+        self.assertNotIn('aidebug up', self.out.getvalue())
+
+    def test_http_gets_remaining_time_not_more(self):
+        c = self.make(api_up_after=3)
+        rc = self.run_main(c, ['start', '--ini', 'test.ini', '--api-timeout', '4'])
+        self.assertEqual(rc, 0, self.err.getvalue())
+        inst_calls = [x for x in self.http.calls if x[1] == '/api/instance']
+        self.assertGreaterEqual(len(inst_calls), 2)
+        # 1 秒おきに呼ぶので、渡す timeout は 5 → 残り時間 (4, 3, 2, ...) へ切り詰まる
+        self.assertLessEqual(inst_calls[0][3], 4)
+        self.assertLess(inst_calls[-1][3], inst_calls[0][3])
+        for x in inst_calls:
+            self.assertGreaterEqual(x[3], 1)
+
     def test_old_fork_after_start_uses_status(self):
         c = self.make('old')
         self.assertEqual(self.run_main(c, ['start', '--ini', 'test.ini']), 0, self.err.getvalue())
@@ -669,6 +805,25 @@ class WaitReady(Base):
         self.assertEqual(self.run_main(c, ['wait-ready']), 1)
         self.assertIn('stuck', self.err.getvalue())
 
+    def test_ready_text_arriving_after_deadline_is_not_success(self):
+        # Codex P2: 1 回の /api/tvram に 5 秒かかる。期限 4 秒 → t=5 に届いた
+        # "Waiting for commands" は成功に数えない
+        c = self.make(ops=self.ops0, tvram='Waiting for commands via serial...\n',
+                      latency=5.0)
+        self.assertEqual(self.run_main(c, ['wait-ready', '--timeout', '4']), 1)
+        self.assertNotIn('ready', self.out.getvalue())
+        tv = [x for x in self.http.calls if x[1] == '/api/tvram']
+        self.assertEqual(len(tv), 1)
+        self.assertLessEqual(tv[0][3], 4)       # 残り時間を渡す (15 ではなく)
+
+    def test_tvram_timeout_is_capped_at_remaining(self):
+        screens = ['booting'] * 3 + ['Waiting for commands\n']
+        c = self.make(ops=self.ops0,
+                      tvram=lambda: screens.pop(0) if len(screens) > 1 else screens[0])
+        self.assertEqual(self.run_main(c, ['wait-ready', '--timeout', '10']), 0)
+        tv = [x[3] for x in self.http.calls if x[1] == '/api/tvram']
+        self.assertEqual(tv, [10, 9, 8, 7])
+
 
 class Fdd(Base):
     def setUp(self):
@@ -683,12 +838,90 @@ class Fdd(Base):
         self.assertEqual(parse_qs(call[2]), {'drive': ['2'], 'action': ['insert'],
                                              'path': [WIN + '\\other.d88'],
                                              'readonly': ['0']})
+        self.assertEqual(call[4], {'X-Aidebug-Token': TOKEN})
+        # 受理の後、/api/instance に path が立つまで待って "ready" (PM の実地確認 8)
+        self.assertIn('fdd2 insert %s 受理' % (WIN + '\\other.d88'), self.out.getvalue())
+        self.assertIn('fdd2 ready %s' % (WIN + '\\other.d88'), self.out.getvalue())
+        inst = [x for x in self.http.calls if x[1] == '/api/instance']
+        self.assertGreaterEqual(len(inst), 3)      # 事前 1 + 反映待ち 2 回以上
+
+    def _pending_case(self, paused, word):
+        self.fc = FakeClock()
+        self.out, self.err = io.StringIO(), io.StringIO()
+        ops = FakeOps(self.fc, running=[ctl.Proc(PID, 'np21x64w.exe', EXE)])
+        c = self.make(ops=ops, paused=paused)
+        rc = self.run_main(c, ['fdd', '--drive', '1', '--insert', 'other.d88'])
+        self.assertEqual(rc, 1, paused)
+        self.assertIn('pending', self.err.getvalue())
+        self.assertIn(word, self.err.getvalue())
+        self.assertGreaterEqual(self.fc.now, 5)
+
+    def test_insert_pending_forever_when_paused_fails(self):
+        # trap (ブレーク) / user (一時停止) / それ以外 (背景で停止など) で理由を分ける
+        self._pending_case('trap', 'ブレーク')
+        self._pending_case('user', '一時停止')
+        self._pending_case('bg', '進んでいない')
+
+    def test_insert_not_opened_fails(self):
+        c = self.make(ops=self.ops0, fdd_accepts=False)
+        rc = self.run_main(c, ['fdd', '--drive', '1', '--insert', 'other.d88'])
+        self.assertEqual(rc, 1)
+        self.assertIn('開けなかった', self.err.getvalue())
+
+    def test_insert_ready_wait_zero_does_not_wait(self):
+        c = self.make(ops=self.ops0)
+        rc = self.run_main(c, ['fdd', '--drive', '1', '--insert', 'other.d88',
+                               '--ready-wait', '0'])
+        self.assertEqual(rc, 0, self.err.getvalue())
+        self.assertIn('反映は待たない', self.out.getvalue())
+        self.assertEqual(self.fc.now, 0)
 
     def test_eject(self):
         c = self.make(ops=self.ops0)
         self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--eject']), 0)
         call = [x for x in self.http.calls if x[1] == '/api/fdd'][0]
         self.assertEqual(call[2], 'drive=1&action=eject')
+        self.assertEqual(call[4], {'X-Aidebug-Token': TOKEN})
+        self.assertIn('fdd1 empty', self.out.getvalue())
+
+    def test_missing_token_file_fails_before_calling_fdd(self):
+        os.remove(os.path.join(self.dir, TOKEN_NAME))
+        c = self.make(ops=self.ops0)
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--eject']), 1)
+        self.assertIn('トークンが読めない', self.err.getvalue())
+        self.assertNotIn(TOKEN, self.err.getvalue() + self.out.getvalue())
+        self.assertEqual([x for x in self.http.calls if x[1] == '/api/fdd'], [])
+
+    def test_wrong_token_is_reported_as_401(self):
+        c = self.make(ops=self.ops0, token='11' * 32)
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--eject']), 1)
+        self.assertIn('401', self.err.getvalue())
+
+    def test_token_file_from_env_wins(self):
+        alt = os.path.join(self.dir, 'alt.token')
+        with open(alt, 'w') as f:
+            f.write('ab' * 32 + '\n')
+        os.environ['NP21W_AIDEBUG_TOKEN_FILE'] = alt
+        c = self.make(ops=self.ops0, token='ab' * 32,
+                      token_file=WIN + '\\' + TOKEN_NAME)
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--eject']), 0,
+                         self.err.getvalue())
+
+    def test_token_file_from_instance_maps_to_wsl(self):
+        c = self.make(ops=self.ops0)
+        self.assertEqual(c.token_file({'token_file': 'D:\\Emu\\np21w_aidebug_9000.token'}),
+                         '/mnt/d/Emu/np21w_aidebug_9000.token')
+        self.assertEqual(c.token_file({'token_file': ''}),
+                         os.path.join(self.dir, TOKEN_NAME))
+        self.assertEqual(ctl.to_wsl_path('\\\\srv\\x'), None)
+        self.assertEqual(ctl.aidebug_port('http://127.0.0.1:9000'), 9000)
+        self.assertEqual(ctl.aidebug_port('http://localhost'), 8025)
+
+    def test_instance_without_token_file_explains(self):
+        os.remove(os.path.join(self.dir, TOKEN_NAME))
+        c = self.make(ops=self.ops0, token_file='')
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--eject']), 1)
+        self.assertIn('CreateFile failed', self.err.getvalue())
 
     def test_old_fork(self):
         c = self.make('old', ops=self.ops0)
@@ -738,6 +971,18 @@ class Status(Base):
         c = self.make(ops=ops)
         self.assertEqual(self.run_main(c, ['status']), 0)
         self.assertIn('dialog: none', self.out.getvalue())
+
+    def test_token_and_pending_lines(self):
+        ops = FakeOps(self.fc, running=[ctl.Proc(PID, 'np21x64w.exe', EXE)])
+        c = self.make(ops=ops, token_file=WIN + '\\' + TOKEN_NAME, paused='user')
+        self.http.fdd[2] = {'path': '', 'cfg': WIN + '\\other.d88', 'pending': True}
+        self.http.fdd_inserted_at[2] = 0
+        self.assertEqual(self.run_main(c, ['status']), 0)
+        out = self.out.getvalue()
+        self.assertIn('token: ' + WIN + '\\' + TOKEN_NAME, out)
+        self.assertIn('paused: user', out)
+        self.assertIn('fdd2: pending ' + WIN + '\\other.d88', out)
+        self.assertNotIn(TOKEN, out)
 
     def test_old_fork_line(self):
         ops = FakeOps(self.fc, running=[ctl.Proc(PID, 'np21x64w.exe', EXE)])
@@ -862,7 +1107,7 @@ MUTATIONS = [
     ("        if timeout < stable:\n            raise CtlError(",
      "        if False:\n            raise CtlError(",
      "--timeout < --stable を通す (Fable L1)"),
-    ("        confirmed = api_timeout <= 0\n",
+    ("        confirmed = not use_api\n",
      "        confirmed = False\n",
      "--api-timeout 0 でも API を待つ (Fable L3)"),
     ("                    self.fail_if_dialog('起動の確認中 (aidebug が応答しない)')",
@@ -880,6 +1125,49 @@ MUTATIONS = [
     ("def win_norm(path):",
      "def win_norm(path)",
      "構文を壊す — import できない写しは RED にも GREEN にも数えないことの確認"),
+    # ---- 2026-09-25 のレビュー (Codex P2 ×3、PM 8、トークン) ----
+    ("        v = win_sep(values.get(_ascii_upper(key), ''))",
+     "        v = values.get(_ascii_upper(key), '')",
+     "ini の値の区切りを揃えない (Codex 9: C:/NP21/… が相対扱い or 生のまま)"),
+    ("    path = win_sep(path)\n    return bool(re.match(",
+     "    return bool(re.match(",
+     "is_win_abs が `/` 区切りの絶対パスを相対と言う (Codex 9)"),
+    ("        use_api = api_timeout > 0      # 0 = HTTP を 1 回も呼ばない (/api/dialog も)",
+     "        use_api = True",
+     "--api-timeout 0 でも HTTP (/api/dialog) を呼ぶ (Codex 10)"),
+    ("            if value and now <= deadline:\n                return value",
+     "            if value:\n                return value",
+     "_until が期限を過ぎてから得た値を成功に数える (Codex 11)"),
+    ("        if deadline is not None and self.clock() > deadline:\n            return None, None\n",
+     "",
+     "api() が期限を過ぎてから届いた応答を返す (Codex 11)"),
+    ("            timeout = max(1.0, min(timeout, remaining))",
+     "            timeout = timeout",
+     "HTTP に残り時間を渡さない (Codex 11)"),
+    ("            r = self.http.request('GET', '/api/tvram', None, max(1.0, min(15, remaining)))",
+     "            r = self.http.request('GET', '/api/tvram', None, 15)",
+     "wait-ready が /api/tvram に残り時間を渡さない (Codex 11)"),
+    ("            st, js = self.api('POST', '/api/quit', body, timeout=10, headers=headers)",
+     "            st, js = self.api('POST', '/api/quit', body, timeout=10)",
+     "quit にトークンを付けない (7/12)"),
+    ("        st, js = self.api('POST', '/api/fdd', urllib.parse.urlencode(params), timeout=15,\n                          headers=headers)",
+     "        st, js = self.api('POST', '/api/fdd', urllib.parse.urlencode(params), timeout=15)",
+     "fdd にトークンを付けない (7/12)"),
+    ("            return win_norm(f.get('path') or '') == win_norm(want_path)",
+     "            return True",
+     "insert の反映 (fdd[].path) を確かめない (PM 8)"),
+    ("        if want_path and last.get('pending'):",
+     "        if False:",
+     "pending (エミュレーションが進んでいない) と開けない失敗を区別しない (PM 8)"),
+    ("            if st == 409 and (js or {}).get('error', '').startswith('quit already requested'):",
+     "            if False:",
+     "先に別の方針で受け付けられた quit (409) を失敗として強制終了に落とす (Codex 6)"),
+    ("        env = os.environ.get('NP21W_AIDEBUG_TOKEN_FILE')\n        if env:\n            return env\n",
+     "",
+     "NP21W_AIDEBUG_TOKEN_FILE を見ない"),
+    ("            wsl = to_wsl_path(win)\n",
+     "            wsl = None\n",
+     "/api/instance の token_file を使わない"),
 ]
 
 

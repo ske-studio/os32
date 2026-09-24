@@ -19,7 +19,8 @@ ExecutablePath が一致するプロセス**に限る。名前に np21 を含む
   4. プロセスが --alive 秒生きていて、`/api/instance` の pid と exe が Start-Process の
      pid と NP21W_DIR の exe に一致することを確かめる。API が応答しない・進まない
      ときは `/api/dialog` を見て、モーダルのダイアログが出ていればその本文を出して
-     失敗する。成功を返す直前にもう一度 pid の生存を確かめる
+     失敗する。成功を返す直前にもう一度 pid の生存を確かめる。HTTP には残り時間を
+     渡し、期限を過ぎてから届いた応答は成功に数えない
 
 使い方:
   python3 tools/np21w_ctl.py stop [--exe np21x64w.exe] [--timeout 60]
@@ -31,8 +32,20 @@ ExecutablePath が一致するプロセス**に限る。名前に np21 を含む
   python3 tools/np21w_ctl.py status [--ini np21x64w.ini] [--exe np21x64w.exe]
 
   --ini / --fd / --exe / --insert は NP21W_DIR 直下の**名前**で渡す (パスは不可)。
-  --api-timeout 0 は「API を待たない」(プロセスの生存だけを --alive 秒見る)。
+  --api-timeout 0 は「API を待たない」(プロセスの生存だけを --alive 秒見る。
+  /api/dialog も含めて HTTP を 1 回も呼ばない)。
   --timeout は --stable 以上であること (満たさなければ引数の誤り)。
+
+トークン (`/api/quit` と `/api/fdd` に必須):
+  NP21/W は起動時に exe の隣へ `np21w_aidebug_<port>.token` (利用者だけが読める ACL)
+  を書く。ctl は NP21W_AIDEBUG_TOKEN_FILE (WSL パス) → `/api/instance` の token_file →
+  NP21W_DIR/np21w_aidebug_<port>.token の順で探して読み、`X-Aidebug-Token` ヘッダで
+  送る。中身は出力しない ([D3])。読めなければ stop は強制終了に落ち、fdd は失敗する。
+
+fdd --insert は `/api/fdd` の 200 の後、`/api/instance` の fdd[].path にその媒体が
+現れる (DISK_DELAY = 0.4 秒のエミュレーション時間) まで --ready-wait 秒 (既定 5) 待つ。
+現れなければ失敗 (pending のまま = エミュレーションが進んでいない: ブレーク中・
+一時停止・背景で停止。空 = NP21/W が受け付けなかった)。
 
 ロック待ちの対象:
   ini の [NekoProject21] 節の HDD1FILE〜HDD4FILE、CD1_FILE〜CD4_FILE、
@@ -41,10 +54,12 @@ ExecutablePath が一致するプロセス**に限る。名前に np21 を含む
   1 組だけ外してもう一度空白を取る。節の中で同じキーが複数あれば**最初**が効く。
   ini が読めなければ既定の os32.nhd / os32_install.iso / os32_boot.d88。
   ini にあるが存在しない媒体は警告して待たない (--fd の媒体が無ければ失敗)。
+  区切りは `/` も `\\` に揃えてから絶対かどうかを見る (`C:/NP21/os32.nhd` は絶対)。
 
 NP21W_DIR: 環境変数 → .env → .env.sample の順 (nhd_deploy.py と同じ)。
 Windows 表記は WIN_NP21W_DIR で上書きできる。.env の中身は出力しない ([D3])。
 aidebug の URL は NP21W_AIDEBUG_URL (既定 http://127.0.0.1:8025)。
+NP21/W 側の仕様: np21w-src/docs/03-api-reference.md「アプリ層の口」。
 
 終了コード: 0 = 成功、1 = 失敗 (プロセスが残る・ロックが解けない・プローブが壊れた・
             起動直後に終了した・ダイアログが出ている・API が応答しない・起動完了しない)、
@@ -87,6 +102,14 @@ TASKKILL = WIN_SYS + '/taskkill.exe'
 POWERSHELL = WIN_SYS + '/WindowsPowerShell/v1.0/powershell.exe'
 CURL = WIN_SYS + '/curl.exe'
 AIDEBUG_URL = os.environ.get('NP21W_AIDEBUG_URL', 'http://127.0.0.1:8025')
+TOKEN_HEADER = 'X-Aidebug-Token'
+TOKEN_FILE_FMT = 'np21w_aidebug_%d.token'   # NP21/W aidebug_app.cpp token_write
+
+
+def aidebug_port(url=None):
+    """URL のポート (無ければ 8025)。トークンファイルの名前に使う。"""
+    m = re.search(r':(\d+)/*$', url or AIDEBUG_URL)
+    return int(m.group(1)) if m else 8025
 
 
 class CtlError(Exception):
@@ -128,6 +151,19 @@ def to_win_path(wsl_path):
     return wsl_path
 
 
+def to_wsl_path(win_path):
+    """C:\\x\\y → /mnt/c/x/y。ドライブ文字で始まらなければ None。"""
+    m = re.match(r'^([A-Za-z]):[\\/](.*)$', win_path or '')
+    if not m:
+        return None
+    return '/mnt/%s/%s' % (m.group(1).lower(), m.group(2).replace('\\', '/'))
+
+
+def win_sep(path):
+    """区切りを `\\` に揃える (NP21/W は `/` も通すが、比較と絶対判定の前に揃える)。"""
+    return path.replace('/', '\\')
+
+
 def win_norm(path):
     """Windows パスの比較用 (大文字小文字・区切り・末尾を揃える)。"""
     if not path:
@@ -136,6 +172,8 @@ def win_norm(path):
 
 
 def is_win_abs(path):
+    """`X:\\…` か `\\\\server\\…`。区切りは先に win_sep で揃えておく。"""
+    path = win_sep(path)
     return bool(re.match(r'^[A-Za-z]:\\', path)) or path.startswith('\\\\')
 
 
@@ -234,7 +272,7 @@ def ini_media(ini_path, np21w_win_dir=None):
     values = parse_ini(raw)
     out = []
     for key in MEDIA_KEYS:
-        v = values.get(_ascii_upper(key), '')
+        v = win_sep(values.get(_ascii_upper(key), ''))
         if not v:
             continue
         if not is_win_abs(v) and np21w_win_dir:
@@ -438,10 +476,11 @@ class Http(object):
     def __init__(self, base=None):
         self.base = base or AIDEBUG_URL
 
-    def request(self, method, path, body=None, timeout=10):
-        """(status, text) か None (届かない)。"""
+    def request(self, method, path, body=None, timeout=10, headers=None):
+        """(status, text) か None (届かない)。headers は {名前: 値}。"""
         data = body.encode('utf-8') if body is not None else None
-        req = urllib.request.Request(self.base + path, data=data, method=method)
+        req = urllib.request.Request(self.base + path, data=data, method=method,
+                                     headers=dict(headers or {}))
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.status, r.read().decode('utf-8', 'replace')
@@ -451,6 +490,8 @@ class Http(object):
             pass
         args = [CURL, '-s', '-m', str(max(1, int(timeout))), '-w', '\n%{http_code}',
                 '-X', method, self.base + path]
+        for k, v in (headers or {}).items():
+            args += ['-H', '%s: %s' % (k, v)]
         if body is not None:
             args += ['--data-binary', body]
         try:
@@ -509,9 +550,20 @@ class Ctl(object):
         self.err.flush()
 
     # -- HTTP ------------------------------------------------------------------
-    def api(self, method, path, body=None, timeout=10):
-        """(status, dict|None)。届かなければ (None, None)。"""
-        r = self.http.request(method, path, body, timeout)
+    def api(self, method, path, body=None, timeout=10, headers=None, deadline=None):
+        """(status, dict|None)。届かなければ (None, None)。
+
+        deadline があれば HTTP の待ちを残り時間に切り詰め (最短 1 秒)、応答の後で
+        期限を確かめ直す — 期限を過ぎてから届いた応答は「届かない」と同じに扱う
+        (成功に数えない)。残りが無ければ呼ばない。"""
+        if deadline is not None:
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                return None, None
+            timeout = max(1.0, min(timeout, remaining))
+        r = self.http.request(method, path, body, timeout, headers)
+        if deadline is not None and self.clock() > deadline:
+            return None, None
         if r is None:
             return None, None
         status, text = r
@@ -521,9 +573,9 @@ class Ctl(object):
             js = None
         return status, js if isinstance(js, dict) else None
 
-    def instance(self):
+    def instance(self, deadline=None):
         """('ok', js) / ('old', None) / ('down', None) / ('bad', status)"""
-        st, js = self.api('GET', '/api/instance', timeout=5)
+        st, js = self.api('GET', '/api/instance', timeout=5, deadline=deadline)
         if st is None:
             return 'down', None
         if st == 200 and js and js.get('instance_id') and js.get('pid'):
@@ -545,6 +597,37 @@ class Ctl(object):
             raise CtlError('%s — NP21/W がダイアログを出している:\n  %s'
                            % (context, format_dialog(js)))
 
+    # -- トークン --------------------------------------------------------------
+    def token_file(self, inst=None):
+        """トークンファイルの WSL パス。環境変数 → /api/instance の token_file →
+        NP21W_DIR/np21w_aidebug_<port>.token。"""
+        env = os.environ.get('NP21W_AIDEBUG_TOKEN_FILE')
+        if env:
+            return env
+        win = (inst or {}).get('token_file')
+        if win:
+            wsl = to_wsl_path(win)
+            if wsl:
+                return wsl
+        return self.paths.wsl_of(TOKEN_FILE_FMT % aidebug_port(getattr(self.http, 'base', None)))
+
+    def token_headers(self, inst=None):
+        """{TOKEN_HEADER: 値}。読めなければ CtlError (中身は出力しない、[D3])。"""
+        path = self.token_file(inst)
+        try:
+            with open(path, 'r', errors='replace') as f:
+                token = f.read().strip()
+        except OSError as exc:
+            hint = ''
+            if inst is not None and not inst.get('token_file'):
+                hint = ' (NP21/W がトークンファイルを書けていない: %s)' % (
+                    inst.get('token_error') or 'フォークが古いか、書き込みに失敗')
+            raise CtlError('aidebug のトークンが読めない: %s (%s)%s'
+                           % (path, exc.__class__.__name__, hint))
+        if not re.fullmatch(r'[0-9A-Fa-f]{16,}', token):
+            raise CtlError('aidebug のトークンの形式が違う: %s' % path)
+        return {TOKEN_HEADER: token}
+
     # -- プロセス --------------------------------------------------------------
     def expected_exe(self, exe):
         return self.paths.win_of(exe)
@@ -558,11 +641,15 @@ class Ctl(object):
         return ours, others
 
     def _until(self, deadline, done):
-        """done() が真になるか期限まで poll 間隔で呼ぶ。最後の値を返す。"""
+        """done() が真になるか期限まで poll 間隔で呼ぶ。真になった値を返す。
+        期限を過ぎてから得た値は (真でも) 成功に数えず False を返す。"""
         while True:
             value = done()
-            if value or self.clock() >= deadline:
+            now = self.clock()
+            if value and now <= deadline:
                 return value
+            if now >= deadline:
+                return False
             self.sleep(self.poll)
 
     def note_others(self, others):
@@ -605,7 +692,18 @@ class Ctl(object):
             pid = int(inst['pid'])
             body = urllib.parse.urlencode({'save': '0',
                                            'instance_id': inst['instance_id']})
-            st, js = self.api('POST', '/api/quit', body, timeout=10)
+            try:
+                headers = self.token_headers(inst)
+            except CtlError as exc:
+                self.warn('%s — 強制終了に落とす' % exc)
+                return self.force_kill(exe, max(deadline, self.clock() + 10))
+            st, js = self.api('POST', '/api/quit', body, timeout=10, headers=headers)
+            if st == 409 and (js or {}).get('error', '').startswith('quit already requested'):
+                # 先に別の方針 (save=1) で受け付けられている。方針は最初のものに固定
+                # されるので、こちらは終了を待つだけ
+                self.warn('quit は既に別の方針で要求されている (%s) — 終了を待つ'
+                          % js.get('error'))
+                st = 200
             if st == 200:
                 self.say('quit 要求 (save=0) pid=%d instance=%s'
                          % (pid, inst['instance_id']))
@@ -760,7 +858,8 @@ class Ctl(object):
         api_deadline = begin + api_timeout
         want_exe = win_norm(self.expected_exe(exe))
         want_ini = win_norm(self.paths.win_of(ini))
-        confirmed = api_timeout <= 0
+        use_api = api_timeout > 0      # 0 = HTTP を 1 回も呼ばない (/api/dialog も)
+        confirmed = not use_api
         old_warned = False
 
         def alive_now():
@@ -772,8 +871,10 @@ class Ctl(object):
                 raise CtlError('起動直後に終了した (pid=%d、起動から %.0f 秒)。'
                                '媒体が開けなかった可能性 — status で媒体を確かめる'
                                % (pid, self.clock() - begin))
-            if not confirmed:
-                state, inst = self.instance()
+            if not use_api:
+                pass
+            elif not confirmed:
+                state, inst = self.instance(deadline=api_deadline)
                 if state == 'ok':
                     if int(inst['pid']) != pid or win_norm(inst.get('exe')) != want_exe:
                         raise CtlError(
@@ -792,7 +893,8 @@ class Ctl(object):
                     if not old_warned:
                         self.warn(OLD_FORK + ' — pid と exe の照合はできない')
                         old_warned = True
-                    st, js = self.api('GET', '/api/status', timeout=5)
+                    st, js = self.api('GET', '/api/status', timeout=5,
+                                      deadline=api_deadline)
                     if st == 200:
                         confirmed = True
                 else:
@@ -819,7 +921,11 @@ class Ctl(object):
         seen = {'text': None}
 
         def ready():
-            r = self.http.request('GET', '/api/tvram', None, 15)
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                return False
+            # 期限を過ぎてから届いた画面は _until が成功に数えない
+            r = self.http.request('GET', '/api/tvram', None, max(1.0, min(15, remaining)))
             if r is None:
                 return False
             st, text = r
@@ -844,11 +950,14 @@ class Ctl(object):
                        % (timeout, READY_TEXT, '\n  '.join(tail)))
 
     # -- FD --------------------------------------------------------------------
-    def fdd(self, drive, insert=None, eject=False, readonly=False, exe=DEFAULT_EXE):
+    def fdd(self, drive, insert=None, eject=False, readonly=False, exe=DEFAULT_EXE,
+            ready_wait=5.0):
         if drive not in (1, 2, 3, 4):
             raise CtlError('--drive は 1〜4', 2)
         if bool(insert) == bool(eject):
             raise CtlError('--insert <name> か --eject のどちらか 1 つ', 2)
+        if ready_wait < 0:
+            raise CtlError('--ready-wait は 0 以上', 2)
         params = {'drive': str(drive)}
         if insert:
             check_name(insert, '--insert')
@@ -865,15 +974,64 @@ class Ctl(object):
             raise CtlError('aidebug が応答しない (NP21/W が動いているか)')
         if win_norm(inst.get('exe')) != win_norm(self.expected_exe(exe)):
             raise CtlError('aidebug に答えているのは別の場所の NP21/W (%s)' % inst.get('exe'))
-        st, js = self.api('POST', '/api/fdd', urllib.parse.urlencode(params), timeout=15)
-        if st == 200:
-            self.say('fdd%d %s%s' % (drive, params['action'],
-                                     (' ' + params['path']) if insert else ''))
-            return 0
+        headers = self.token_headers(inst)
+        st, js = self.api('POST', '/api/fdd', urllib.parse.urlencode(params), timeout=15,
+                          headers=headers)
         if st == 404 and (js or {}).get('error') == 'unknown endpoint':
             raise CtlError(OLD_FORK)
-        raise CtlError('/api/fdd が失敗した (HTTP %s): %s'
-                       % (st, (js or {}).get('error', '応答なし')))
+        if st != 200:
+            raise CtlError('/api/fdd が失敗した (HTTP %s): %s'
+                           % (st, (js or {}).get('error', '応答なし')))
+        self.say('fdd%d %s%s 受理' % (drive, params['action'],
+                                       (' ' + params['path']) if insert else ''))
+        return self.fdd_confirm(drive, params.get('path', ''), ready_wait)
+
+    def fdd_confirm(self, drive, want_path, ready_wait):
+        """/api/instance の fdd[drive] に反映されるまで待つ。insert は DISK_DELAY
+        (0.4 秒のエミュレーション時間) の後に path が立つ。eject は即時。"""
+        deadline = self.clock() + ready_wait
+        last = {}
+
+        def slot():
+            state, inst = self.instance(deadline=deadline if ready_wait else None)
+            if state != 'ok':
+                return None
+            for f in inst.get('fdd') or []:
+                if f.get('drive') == drive:
+                    last.clear()
+                    last.update(f)
+                    last['_trap'] = inst.get('trap_pause')
+                    last['_user'] = inst.get('user_pause')
+                    return f
+            return None
+
+        def reflected():
+            f = slot()
+            if f is None:
+                return False
+            return win_norm(f.get('path') or '') == win_norm(want_path)
+
+        if ready_wait <= 0:
+            slot()
+            if last and win_norm(last.get('path') or '') == win_norm(want_path):
+                self.say('fdd%d %s' % (drive, 'ready ' + want_path if want_path else 'empty'))
+                return 0
+            self.say('fdd%d %s (反映は待たない)' % (drive, 'pending' if last.get('pending') else '?'))
+            return 0
+        if self._until(deadline, reflected):
+            self.say('fdd%d %s' % (drive, 'ready ' + want_path if want_path else 'empty'))
+            return 0
+        if not last:
+            raise CtlError('fdd%d: /api/instance が %g 秒答えない' % (drive, ready_wait))
+        if want_path and last.get('pending'):
+            why = ('ブレークで止まっている (/api/resume)' if last.get('_trap') else
+                   '一時停止中 (/api/resume)' if last.get('_user') else
+                   'エミュレーションが進んでいない (背景で停止?)')
+            raise CtlError('fdd%d: 受理されたが %g 秒たっても入らない (pending) — %s'
+                           % (drive, ready_wait, why))
+        raise CtlError('fdd%d: 受理されたが %g 秒たっても反映されない (path=%r cfg=%r) — '
+                       'NP21/W がイメージを開けなかった可能性 (形式・ロック)'
+                       % (drive, ready_wait, last.get('path'), last.get('cfg')))
 
     # -- 状態 ------------------------------------------------------------------
     def status(self, ini=None, exe=DEFAULT_EXE):
@@ -892,9 +1050,16 @@ class Ctl(object):
                      % (inst.get('pid'), inst.get('instance_id'), inst.get('started_at')))
             self.say('  exe: %s' % inst.get('exe'))
             self.say('  ini: %s' % inst.get('ini'))
+            if 'token_file' in inst:
+                self.say('  token: %s' % (inst.get('token_file') or
+                                          '(無い: %s)' % inst.get('token_error')))
+            if inst.get('trap_pause') or inst.get('user_pause'):
+                self.say('  paused: %s' % ('trap' if inst.get('trap_pause') else 'user'))
             for f in inst.get('fdd') or []:
                 if f.get('path'):
                     self.say('  fdd%s: %s' % (f.get('drive'), f.get('path')))
+                elif f.get('pending'):
+                    self.say('  fdd%s: pending %s' % (f.get('drive'), f.get('cfg')))
             for s in inst.get('ide') or []:
                 if s.get('path'):
                     self.say('  ide%s (%s): %s' % (s.get('slot'), s.get('type'), s.get('path')))
@@ -954,6 +1119,8 @@ def build_parser():
     g.add_argument('--eject', action='store_true')
     p.add_argument('--readonly', action='store_true')
     p.add_argument('--exe', default=DEFAULT_EXE)
+    p.add_argument('--ready-wait', type=float, default=5,
+                   help='/api/instance に反映されるまで待つ秒数 (既定 5、0 = 待たない)')
     p = sub.add_parser('status', help='プロセス・aidebug・ダイアログ・媒体のロック状態')
     p.add_argument('--ini', default=None, help='媒体を拾う ini (既定: 既定の 3 つ)')
     p.add_argument('--exe', default=DEFAULT_EXE)
@@ -973,7 +1140,8 @@ def main(argv=None, ctl_factory=None):
         if args.cmd == 'wait-ready':
             return ctl.wait_ready(args.timeout)
         if args.cmd == 'fdd':
-            return ctl.fdd(args.drive, args.insert, args.eject, args.readonly, args.exe)
+            return ctl.fdd(args.drive, args.insert, args.eject, args.readonly, args.exe,
+                           args.ready_wait)
         return ctl.status(args.ini, args.exe)
     except CtlError as exc:
         ctl.warn(str(exc))

@@ -687,9 +687,21 @@ python3 tools/np21w_ctl.py stop                          # /api/quit save=0 → 
 python3 tools/np21w_ctl.py start --ini np21x64w.ini      # プロセス 0 → 媒体が続けて 5 秒開ける → 起動 → pid/exe 照合 + 10 秒生存
 python3 tools/np21w_ctl.py start --ini np21w-trial-cdinst.ini --fd os32_boot.d88 --wait-ready
 python3 tools/np21w_ctl.py wait-ready                    # /api/tvram に "Waiting for commands" (既定 180 秒)
-python3 tools/np21w_ctl.py fdd --drive 1 --insert os32_boot.d88   # FD の出し入れ (--eject)。ini は変えない
+python3 tools/np21w_ctl.py fdd --drive 1 --insert os32_boot.d88   # FD の出し入れ (--eject)。ini は変えない。/api/instance に反映されるまで待つ (--ready-wait 5)
 python3 tools/np21w_ctl.py status [--ini <name>]         # プロセス・aidebug (instance)・ダイアログ・媒体の free/locked/missing
 ```
+
+- **トークン**: `/api/quit` と `/api/fdd` は NP21/W が起動時に exe の隣へ書く `np21w_aidebug_<port>.token`
+  (利用者だけが読める ACL) の中身を `X-Aidebug-Token` で要求する。ctl は `NP21W_AIDEBUG_TOKEN_FILE`
+  (WSL パス) → `/api/instance` の `token_file` → `NP21W_DIR/np21w_aidebug_8025.token` の順で読む。
+  中身は出力しない ([D3])。読めなければ `stop` は exe 一致の強制終了に落ち、`fdd` は失敗する。
+  読み取り系の口 (`/api/status` `/api/cmd` `/api/key` など) はトークン不要のまま。Origin ヘッダを
+  付ける要求は 403 (ブラウザ経由を閉じる) — curl / urllib は付けないので手順は変わらない。
+- `fdd --insert` の 200 は「受理」で、FD は 0.4 秒のエミュレーション時間の後に入る (`DISK_DELAY`)。
+  ctl は `/api/instance` の `fdd[].path` に現れるまで待って `ready` と言う。`pending` のまま
+  なら理由 (ブレーク中 / 一時停止 / 背景で停止) を出して失敗する。
+- `--api-timeout 0` は HTTP を 1 回も呼ばない (`/api/dialog` も)。HTTP の待ちには残り時間を渡し、
+  期限を過ぎてから届いた応答は成功に数えない。
 
 - **止める対象**: `NP21W_DIR` の exe (`--exe`、既定 `np21x64w.exe`) と CIM の `ExecutablePath` が
   一致するプロセスだけ。名前に np21 を含むだけのもの、別の場所に入っている NP21/W、exe の
