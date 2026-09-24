@@ -59,14 +59,16 @@ fd144: images/os32_boot144.img
 .PHONY: fd144
 
 # パッケージ / ISO生成
-# mkpkg は登録ファイルの欠損をエラーにするので、core / userland のパッケージ定義が
-# 要求する入力をすべて依存に結ぶ (clean 後の単独 `make iso` や `make -j` でも
-# 欠損で落ちないように)。assets/fep.db は userland 層の NORMAL が要求する。
+# 中身は配備マニフェスト (build/core.yaml + userland/deploy.yaml) のタグから
+# 決める (構成は build/packages.yaml)。mkpkg は登録ファイルの欠損をエラーに
+# するので、配備マニフェストが挙げる成果物をすべて依存に結ぶ (clean 後の単独
+# `make iso` や `make -j` でも欠損で落ちないように)。settings.db は媒体だけ、
+# settings.v2.fixture は DEBUG が持つ。出力先の古い *.PKG は mkpkg が消す
+# (ISO は packages/ を丸ごと焼くので、名前の変わった PKG が残らないように)。
 packages: programs boot $(BUILD_OUT)/vmkernel.lz4 unicode_bin \
-          $(BUILD_OUT)/settings.db assets/fep.db
-	python3 tools/mkpkg.py --defs build/core_packages.yaml \
-	                     --defs userland/package_defs.yaml \
-	                     --output packages/ --base .
+          $(BUILD_OUT)/settings.db $(BUILD_OUT)/settings.v2.fixture \
+          assets-deployed assets/fep.db
+	python3 tools/mkpkg.py --plan build/packages.yaml --output packages/ --base .
 
 iso: packages
 	@mkdir -p images

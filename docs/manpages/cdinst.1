@@ -9,11 +9,18 @@ CD-ROM (ISO9660) からパッケージをインストールする
 ## DESCRIPTION
 
 ATAPI CD-ROM 上のインストール ISO (`os32_install.iso`) から
-OS32 パッケージ (.PKG) を読み込み、ext2 ルートファイルシステムへ展開する。
-BOOT / MINIMAL / NORMAL / FULL / DEBUG の各パッケージを選択してインストールできる。
+OS32 パッケージ (.PKG) を読み込み、HDD を ext2 でフォーマットして展開する。
+BOOT.PKG はブートセクタへ直接書く。インストールの型は 3 つ:
 
-パッケージは `tools/mkpkg.py` (ホスト側) で生成され、
-LZSS 圧縮 + hash-chain 連結形式で格納されている。
+- `1. Minimal` — BOOT + MINIMAL (シェル + 基本コマンド、GUI シェル、フォント、設定)
+- `2. Normal` — 1 + NORMAL (コマンド、アプリ、man、FEP 辞書、データ)
+- `3. Full` — 2 + DEBUG (試験プログラムと試験データ)
+
+128 項目を超えるパッケージは NORMAL.PKG, NORMAL2.PKG, … に分かれていて、
+連番を欠けるまで順に展開する。どれかの展開に失敗したら止め、完了とは言わない。
+
+パッケージはホスト側の `tools/mkpkg.py --plan build/packages.yaml` が
+配備マニフェストのタグから生成する (無圧縮)。
 
 ## EXAMPLES
 

@@ -6,6 +6,10 @@
 /*                                                                          */
 /*  CD-ROM (ISO 9660) 上の .PKG ファイルからHDDにインストールする。           */
 /*  - インストールタイプ選択 (Minimal / Normal / Full)                       */
+/*    1 = BOOT + MINIMAL、2 = + NORMAL、3 = + DEBUG。中身は配備マニフェストの */
+/*    タグから tools/mkpkg.py --plan が作る (構成は build/packages.yaml)     */
+/*  - 128 項目を超えるパッケージは NAME.PKG, NAME2.PKG, … に分かれている。   */
+/*    連番を欠けるまで順に展開する                                          */
 /*  - BOOT.PKG はブートセクタ直接書込み (IPL/PT/Loader/Kernel)              */
 /*  - 他のPKGは /hd0 マウントポイントにファイルシステム展開                  */
 /* ======================================================================== */
@@ -18,13 +22,16 @@
 #define CD_MOUNT "/cd0"
 #define HDD_MOUNT "/hd0"
 
-/* パッケージファイルパス */
+/* パッケージファイルパス。BOOT は分割しない (セクタへ直接書く) */
 #define PKG_BOOT    "/cd0/BOOT.PKG"
-#define PKG_MINIMAL "/cd0/MINIMAL.PKG"
-#define PKG_NORMAL  "/cd0/NORMAL.PKG"
-#define PKG_FULL    "/cd0/FULL.PKG"
-#define PKG_DEBUG   "/cd0/DEBUG.PKG"
-#define PKG_APPEND  "/cd0/APPEND.PKG"
+/* 分割されうるパッケージのベース名 (build/packages.yaml と一致させる。
+ * make check-packages-host が突き合わせる)。連番は 2..PKG_SERIES_MAX */
+#define PKG_BASE_MINIMAL "MINIMAL"
+#define PKG_BASE_NORMAL  "NORMAL"
+#define PKG_BASE_DEBUG   "DEBUG"
+#define PKG_SERIES_MAX   9
+/* "/cd0/" + 8 文字 + ".PKG" + NUL */
+#define PKG_PATH_BUF     32
 
 /* PC-98ジオメトリ定数 */
 #define PC98_HEADS   8
@@ -79,6 +86,34 @@ static int pkg_exists(const char *path)
 {
     OS32_Stat st;
     return (api->sys_stat(path, &st) == 0) ? 1 : 0;
+}
+
+/* 分割の n 本目 (1 始まり) のパス: n = 1 は "/cd0/NORMAL.PKG"、
+ * n >= 2 は "/cd0/NORMAL<n>.PKG" */
+static void pkg_series_path(char *buf, const char *base, int n)
+{
+    const char *pre = CD_MOUNT "/";
+    const char *ext = ".PKG";
+    int i = 0;
+
+    while (*pre && i < PKG_PATH_BUF - 1) buf[i++] = *pre++;
+    while (*base && i < PKG_PATH_BUF - 1) buf[i++] = *base++;
+    if (n >= 2 && i < PKG_PATH_BUF - 1) buf[i++] = (char)('0' + n);
+    while (*ext && i < PKG_PATH_BUF - 1) buf[i++] = *ext++;
+    buf[i] = '\0';
+}
+
+/* 媒体にある分割の本数 (0 = 1 本も無い) */
+static int pkg_series_count(const char *base)
+{
+    char path[PKG_PATH_BUF];
+    int n;
+
+    for (n = 1; n <= PKG_SERIES_MAX; n++) {
+        pkg_series_path(path, base, n);
+        if (!pkg_exists(path)) break;
+    }
+    return n - 1;
 }
 
 /* 大文字小文字を無視してサフィックス一致判定 */
@@ -320,13 +355,15 @@ static int install_package_hd(const char *path, const char *label)
 }
 
 /* ======================================================================== */
-/*  パッケージの展開 (MINIMAL → NORMAL → FULL → DEBUG / APPEND) と同期       */
+/*  パッケージの展開 (MINIMAL → NORMAL → DEBUG) と同期                      */
 /*                                                                          */
 /*  **どのパッケージの失敗でも止める** (Codex / Opus 実装レビュー ラリー 1)。 */
 /*  以前は MINIMAL だけ戻り値を見ていたので、NORMAL 以降が PATH TOO LONG や  */
 /*  容量不足で失敗しても後続へ進み、最後に "Installation Complete" を出して   */
 /*  いた。失敗したら失敗したパッケージ名を出し、完了表示は出さない。         */
 /*  同期 (vfs_sync) の失敗も完了扱いにしない。                               */
+/*  選んだ型のパッケージが媒体に 1 本も無いのも失敗 (黙って飛ばすと「Full を */
+/*  選んだのに試験が入っていない」HDD が完了扱いになる)。                    */
 /*  戻り値: PKG_OK = 完了 / それ以外 = 失敗した段の値                        */
 /* ======================================================================== */
 
@@ -340,33 +377,51 @@ static int install_step(const char *path, const char *label)
     return ret;
 }
 
-static int install_packages(int choice, int install_debug, int install_append)
+/* base の分割をすべて (NAME.PKG, NAME2.PKG, …) 順に展開する */
+static int install_series(const char *base)
+{
+    char path[PKG_PATH_BUF];
+    char label[PKG_PATH_BUF];
+    int n, count, ret;
+
+    count = pkg_series_count(base);
+    if (count == 0) {
+        api->kprintf(COL_RED, "\n%s.PKG not found on CD!\n", base);
+        println(COL_RED, "Installation aborted. The HDD is incomplete.");
+        return PKG_ERR_IO;
+    }
+    for (n = 1; n <= count; n++) {
+        pkg_series_path(path, base, n);
+        /* 表示名 = パスから "/cd0/" と ".PKG" を除いたもの */
+        {
+            int i = 0;
+            const char *p = path + sizeof(CD_MOUNT);
+            while (*p && *p != '.' && i < PKG_PATH_BUF - 1) label[i++] = *p++;
+            label[i] = '\0';
+        }
+        ret = install_step(path, label);
+        if (ret != PKG_OK) return ret;
+    }
+    return PKG_OK;
+}
+
+static int install_packages(int choice)
 {
     int ret;
 
-    /* 2. MINIMAL.PKG → /hd0 配下に展開 */
-    ret = install_step(PKG_MINIMAL, "MINIMAL");
+    /* 2. MINIMAL → /hd0 配下に展開 (全タイプ) */
+    ret = install_series(PKG_BASE_MINIMAL);
     if (ret != PKG_OK) return ret;
 
-    /* 3. NORMAL.PKG (タイプ2以上) */
-    if (choice >= '2' && pkg_exists(PKG_NORMAL)) {
-        ret = install_step(PKG_NORMAL, "NORMAL");
+    /* 3. NORMAL (タイプ2以上) */
+    if (choice >= '2') {
+        ret = install_series(PKG_BASE_NORMAL);
         if (ret != PKG_OK) return ret;
     }
 
-    /* 4. FULL.PKG (タイプ3) */
-    if (choice >= '3' && pkg_exists(PKG_FULL)) {
-        ret = install_step(PKG_FULL, "FULL");
-        if (ret != PKG_OK) return ret;
-    }
-
-    /* 5. オプション */
-    if (install_debug && pkg_exists(PKG_DEBUG)) {
-        ret = install_step(PKG_DEBUG, "DEBUG");
-        if (ret != PKG_OK) return ret;
-    }
-    if (install_append && pkg_exists(PKG_APPEND)) {
-        ret = install_step(PKG_APPEND, "APPEND");
+    /* 4. DEBUG (タイプ3 = Full) */
+    if (choice >= '3') {
+        ret = install_series(PKG_BASE_DEBUG);
         if (ret != PKG_OK) return ret;
     }
 
@@ -397,8 +452,6 @@ static int install_packages(int choice, int install_debug, int install_append)
 void __cdecl main(int argc, char **argv, KernelAPI *_api)
 {
     int choice;
-    int install_debug;
-    int install_append;
     int ide_drv;
     u32 total_sects;
 
@@ -439,18 +492,27 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     print(COL_NORMAL, "\n");
     println(COL_NORMAL, "Available packages on CD:");
     if (pkg_exists(PKG_BOOT))    println(COL_CYAN, "  [*] BOOT.PKG");
-    if (pkg_exists(PKG_MINIMAL)) println(COL_CYAN, "  [*] MINIMAL.PKG");
-    if (pkg_exists(PKG_NORMAL))  println(COL_CYAN, "  [*] NORMAL.PKG");
-    if (pkg_exists(PKG_FULL))    println(COL_CYAN, "  [*] FULL.PKG");
-    if (pkg_exists(PKG_DEBUG))   println(COL_CYAN, "  [*] DEBUG.PKG");
-    if (pkg_exists(PKG_APPEND))  println(COL_CYAN, "  [*] APPEND.PKG");
+    {
+        static const char *const bases[3] = {
+            PKG_BASE_MINIMAL, PKG_BASE_NORMAL, PKG_BASE_DEBUG
+        };
+        int b, n, count;
+        for (b = 0; b < 3; b++) {
+            count = pkg_series_count(bases[b]);
+            for (n = 1; n <= count; n++) {
+                char path[PKG_PATH_BUF];
+                pkg_series_path(path, bases[b], n);
+                api->kprintf(COL_CYAN, "  [*] %s\n", path + sizeof(CD_MOUNT));
+            }
+        }
+    }
 
-    /* インストールタイプ選択 */
+    /* インストールタイプ選択 (中身は build/packages.yaml の振り分け) */
     print(COL_NORMAL, "\n");
     println(COL_NORMAL, "Install type:");
-    println(COL_NORMAL, "  1. Minimal  (shell + basic commands)");
-    println(COL_NORMAL, "  2. Normal   (+ editor, tools, manpages)");
-    println(COL_NORMAL, "  3. Full     (+ graphics, sound, viewers)");
+    println(COL_NORMAL, "  1. Minimal  (shell + basic commands, GUI shell)");
+    println(COL_NORMAL, "  2. Normal   (+ commands, apps, manpages, IME dictionary, data)");
+    println(COL_NORMAL, "  3. Full     (+ test programs and test data)");
     println(COL_NORMAL, "  0. Cancel");
     print(COL_NORMAL, "\n");
 
@@ -465,25 +527,12 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
         return;
     }
 
-    install_debug = 0;
-    install_append = 0;
-
-    if (pkg_exists(PKG_DEBUG)) {
-        print(COL_YELLOW, "Include Debug package? [y/N]: ");
-        {
-            int k = getkey();
-            api->kprintf(COL_NORMAL, "%c\n", k);
-            if (k == 'y' || k == 'Y') install_debug = 1;
-        }
-    }
-
-    if (pkg_exists(PKG_APPEND)) {
-        print(COL_YELLOW, "Include Append data? [y/N]: ");
-        {
-            int k = getkey();
-            api->kprintf(COL_NORMAL, "%c\n", k);
-            if (k == 'y' || k == 'Y') install_append = 1;
-        }
+    /* 選んだ型に要るパッケージが媒体に揃っているか、HDD を消す前に見る */
+    if (pkg_series_count(PKG_BASE_MINIMAL) == 0
+        || (choice >= '2' && pkg_series_count(PKG_BASE_NORMAL) == 0)
+        || (choice >= '3' && pkg_series_count(PKG_BASE_DEBUG) == 0)) {
+        println(COL_RED, "ERROR: the CD lacks a package for this install type.");
+        return;
     }
 
     print(COL_NORMAL, "\n");
@@ -609,5 +658,5 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     }
 
     /* 2〜5. パッケージの展開・同期・完了表示 */
-    (void)install_packages(choice, install_debug, install_append);
+    (void)install_packages(choice);
 }

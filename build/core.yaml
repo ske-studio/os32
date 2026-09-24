@@ -4,7 +4,9 @@
 #  ブートローダー、カーネルイメージ、ゲスト側ディレクトリ構造。
 #  ユーザーランドとゲームの定義はそれぞれ
 #  userland/deploy.yaml / game/deploy.yaml にある。
-#  nhd_deploy.py / mkpkg.py は 3 つをマージして読む。
+#  nhd_deploy.py / hostdrv_deploy.py は全層を、mkpkg.py --plan (CD の
+#  パッケージ) は本体の 2 層 (ここと userland/deploy.yaml) をマージして読む。
+#  tags: が CD のパッケージの振り分けを決める (build/packages.yaml)。
 #
 #  ここには自層の成果物しか書かないこと。他層のパスが混ざると、
 #  リポジトリを分割したときにそのままでは動かなくなる。

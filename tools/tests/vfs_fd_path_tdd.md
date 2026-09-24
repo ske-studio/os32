@@ -112,6 +112,7 @@ Codex (B1〜B6) と Opus (nb1・nb2) の Request changes。試験を先に足し
 | 項目 | 試験 | RED (修正前) |
 |---|---|---|
 | cdinst (6) | 段 `cdinst`: 実物の `install_packages` に NORMAL の PATH TOO LONG / APPEND の IO / MINIMAL の失敗 / 全部成功の 4 組 | 修正前は `main` の中に直書きで戻り値を捨てていた (関数が無いので組めない)。変異 3 本 (NORMAL / APPEND / MINIMAL で止まらない) で代える |
+| cdinst (2026-09-24 追記) | CD のパッケージ再構成 (FULL / APPEND を廃し、MINIMAL / NORMAL / DEBUG を配備マニフェストのタグから生成、128 項目超は `NAME2.PKG` … に分割) に合わせて組を 5 つに: A = NORMAL の PATH TOO LONG で DEBUG へ進まない、B = 分割の 2 本目 NORMAL2 の IO で止まる、C = NORMAL / NORMAL2 / DEBUG を全部展開して完了、D = MINIMAL の失敗、E = Full なのに DEBUG が無い → 失敗 | 変異は APPEND の 1 本を外し、「分割の途中の失敗で止まらない」「媒体に無いパッケージを黙って飛ばす」の 2 本を足した (cdinst 4 本、全部 killed) |
 | SQLite の失効 (B2) | `ime` 段 `sqlite_stale_legacy` / `sqlite_stale_group`: 旧来と group の両経路で truncate / sync / size / lock / unlock / CheckReservedLock / FileControl / read / write が IOERR、close は通り FD が空く | `FAIL expect_methods_fail: m->xTruncate(pf, 0) == SQLITE_IOERR_TRUNCATE` |
 | 失効後の BUSY (B3) | 段 `busy` (ext2、group と旧来の経路) と `ime` 段 `sqlite_stale_group` | `busy`: rename が 0 / NOTFOUND で通る。`ime`: `vfs_fd_rename_busy(... "/db/m.db" ...) == 1` で落ちる |
 | FAT の名前比較 (B4) | 段 `nocase` (パスで動き ASCII で畳む種別を 2 つ目にマウント): `CDB` / `X.DB` / `X.DB-JOURNAL` の rename、`DISK.IMG` の unlink が BUSY。`fatfold`: 表が ff.c と一致 | BUSY のはずが NOTFOUND (-2)、`x.db-Journal` への rename は 0 (実際に置いた) |

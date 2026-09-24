@@ -176,14 +176,17 @@ MUTANTS = [
      "    return (ops && ops->name_fold) ? ops->name_fold((u8)c) : (u8)c;",
      "    return (u8)c;"),
     ("cdinst が NORMAL の失敗で止まらない", "system/cdinst.c",
-     '        ret = install_step(PKG_NORMAL, "NORMAL");\n        if (ret != PKG_OK) return ret;',
-     '        ret = install_step(PKG_NORMAL, "NORMAL");'),
-    ("cdinst が APPEND の失敗で止まらない", "system/cdinst.c",
-     '        ret = install_step(PKG_APPEND, "APPEND");\n        if (ret != PKG_OK) return ret;',
-     '        ret = install_step(PKG_APPEND, "APPEND");'),
+     '        ret = install_series(PKG_BASE_NORMAL);\n        if (ret != PKG_OK) return ret;',
+     '        ret = install_series(PKG_BASE_NORMAL);'),
+    ("cdinst が分割の途中の失敗で止まらない", "system/cdinst.c",
+     '        ret = install_step(path, label);\n        if (ret != PKG_OK) return ret;',
+     '        ret = install_step(path, label);\n        (void)ret;'),
+    ("cdinst が媒体に無いパッケージを黙って飛ばす", "system/cdinst.c",
+     '        return PKG_ERR_IO;\n    }\n    for (n = 1;',
+     '        return PKG_OK;\n    }\n    for (n = 1;'),
     ("cdinst が失敗しても完了を出す", "system/cdinst.c",
-     "    ret = install_step(PKG_MINIMAL, \"MINIMAL\");\n    if (ret != PKG_OK) return ret;",
-     "    ret = install_step(PKG_MINIMAL, \"MINIMAL\");\n    if (ret != PKG_OK) ret = PKG_OK;"),
+     "    ret = install_series(PKG_BASE_MINIMAL);\n    if (ret != PKG_OK) return ret;",
+     "    ret = install_series(PKG_BASE_MINIMAL);\n    if (ret != PKG_OK) ret = PKG_OK;"),
     ("FAT の入口が名前を見ない", "fs/fatfs_vfs.c",
      "    rc = vfs_name_rule_check(path, VFS_NAME_RULE_FAT);\n",
      "    rc = VFS_OK; (void)path;\n"),
@@ -575,17 +578,20 @@ def make_pkgs(d):
     w("CLASHZ.PKG", raw_pkg([(b"/clash", 3, F)], b"abc", lzss=True))
     w("GOOD.PKG", raw_pkg([(b"/good", 0, D), (b"/good/a.txt", 5, F)],
                           b"hello", lzss=True))
-    # 段 cdinst: cdinst.c の固定名 (/cd0/NORMAL.PKG 等) を組の接頭辞で差し替える
+    # 段 cdinst: cdinst.c の固定名 (/cd0/NORMAL.PKG 等) を組の接頭辞で差し替える。
+    # NORMAL2 は分割の 2 本目 (cdinst は連番を欠けるまで展開する)
     good = raw_pkg([(b"/good", 0, D), (b"/good/a.txt", 5, F)], b"hello", lzss=True)
     norm = raw_pkg([(b"/n", 0, D), (b"/n/a.txt", 1, F)], b"N")
+    norm2 = raw_pkg([(b"/n2", 0, D), (b"/n2/b.txt", 1, F)], b"M")
     full = raw_pkg([(b"/full", 0, D), (b"/full/f.txt", 1, F)], b"F")
     too_long = raw_pkg([(b"/l", 0, D), (b"/l/" + b"x" * 121, 1, F)], b"Z")  # 124
     for setname, files in (
-            ("A_", {"MINIMAL": good, "NORMAL": too_long, "FULL": full}),
-            ("B_", {"MINIMAL": good, "NORMAL": norm, "FULL": full,
-                    "APPEND": raw_pkg([(b"/clash", 3, F)], b"abc")}),
-            ("C_", {"MINIMAL": good, "NORMAL": norm, "FULL": full}),
-            ("D_", {"MINIMAL": too_long, "NORMAL": norm})):
+            ("A_", {"MINIMAL": good, "NORMAL": too_long, "DEBUG": full}),
+            ("B_", {"MINIMAL": good, "NORMAL": norm,
+                    "NORMAL2": raw_pkg([(b"/clash", 3, F)], b"abc"), "DEBUG": full}),
+            ("C_", {"MINIMAL": good, "NORMAL": norm, "NORMAL2": norm2, "DEBUG": full}),
+            ("D_", {"MINIMAL": too_long, "NORMAL": norm}),
+            ("E_", {"MINIMAL": good, "NORMAL": norm})):
         for n, b in files.items():
             w(f"{setname}{n}.PKG", b)
 

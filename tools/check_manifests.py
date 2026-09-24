@@ -43,10 +43,10 @@ DEPLOY_MANIFESTS = [
     "build/core.yaml",
     "userland/deploy.yaml",
 ]
-PACKAGE_MANIFESTS = [
-    "build/core_packages.yaml",
-    "userland/package_defs.yaml",
-]
+# CD のパッケージの構成。中身は配備マニフェストのタグから作るので、ここに
+# 直に書いてあるのは媒体だけの物 (ブートセクタ、settings.db) だけ。振り分けの
+# 検査は make check-packages-host (tools/tests/test_packages.py)。
+PACKAGE_PLAN = "build/packages.yaml"
 APP_CONF = "build/app.conf"
 
 
@@ -81,20 +81,16 @@ def check_missing_hosts():
             elif not os.path.isfile(h):
                 bad.append((path, h, "ファイルなし"))
 
-    for path in PACKAGE_MANIFESTS:
-        if not os.path.isfile(path):
-            bad.append((path, "-", "マニフェストがない"))
-            continue
-        with open(path, encoding="utf-8") as f:
+    if not os.path.isfile(PACKAGE_PLAN):
+        bad.append((PACKAGE_PLAN, "-", "パッケージ構成がない"))
+    else:
+        with open(PACKAGE_PLAN, encoding="utf-8") as f:
             p = yaml.safe_load(f) or {}
-        for pkg, body in p.items():
-            for e in (body or {}).get("files", []):
+        for pkg, body in (p.get("packages") or {}).items():
+            for e in (body or {}).get("files") or []:
                 h = e["host"]
-                if "*" in h:
-                    if not glob.glob(h):
-                        warn.append((path + " [" + pkg + "]", h, "glob 一致なし"))
-                elif not os.path.isfile(h):
-                    bad.append((path + " [" + pkg + "]", h, "ファイルなし"))
+                if not os.path.isfile(h):
+                    bad.append((PACKAGE_PLAN + " [" + pkg + "]", h, "ファイルなし"))
     return bad, warn
 
 

@@ -292,14 +292,45 @@ make external                   # apps + game (make apps / make game で個別)
 #### `tools/hostdrv_deploy.py`
 HostDrv デプロイ先 (`HOSTDRV_DIR`, 既定 `C:\os32`) への差分同期。sudo 不要で高速。`make deploy` から呼ばれる。
 
-#### `tools/mkpkg.py`
-OS32パッケージ (.PKG) を生成するビルダー。複数ファイルをLZSS圧縮し、hash-chainで連結したパッケージを生成する。CDインストーラ (`cdinst.bin`) と連携し、ISOイメージ経由でのプログラム配布に使用される。
+#### `tools/mkpkg.py` と CD のパッケージ
+
+CD インストール媒体 (`images/os32_install.iso`) の `.PKG` を作る。`make packages`
+(`make iso` / `make all` から) が次を呼ぶ:
 
 ```bash
-python3 tools/mkpkg.py --defs tools/package_defs.yaml --output packages/ --base .
+python3 tools/mkpkg.py --plan build/packages.yaml --output packages/ --base .
+python3 tools/mkpkg.py --plan build/packages.yaml --check-plan   # 振り分けの検査だけ
+python3 tools/mkpkg.py --list packages/NORMAL.PKG                # 中身の一覧
 ```
-- `make packages` ターゲットで自動実行 (定義: `tools/package_defs.yaml`)
-- `make iso` で `genisoimage` を使用しISOイメージを生成
+
+**中身は配備の正典 (`build/core.yaml` + `userland/deploy.yaml`) の `tags:` から決める。**
+[`build/packages.yaml`](../build/packages.yaml) に書くのはタグとパッケージの対応と、
+配備マニフェストに載らない媒体だけの物 (ブートセクタ、`/etc/settings.db`) だけ。
+2026-09-24 までは一覧を別の YAML に手で写していて、配備 179 本のうち 27 本
+(gshell / libos32gui.shlib / 既定フォント …) が CD に入っていなかった。
+
+| パッケージ | 中身 (タグ) | cdinst の選択肢 |
+|---|---|---|
+| `BOOT.PKG` | IPL + ローダ (`type: boot`、セクタへ直接書く。分割しない、無圧縮) | 全部 |
+| `MINIMAL.PKG` | `core` + `base` — カーネル、unicode.bin、shell、gshell、libos32gui.shlib、既定フォント、filetypes、settings.tsv、基本コマンド (more / less / grep / find / sort / head / tail / wc / tee / touch / hexdump / sleep / sndctl)、install / cdinst + 媒体だけの settings.db | 1. Minimal 以上 |
+| `NORMAL.PKG` | `programs` / `docs` / `data` — コマンドとアプリ、man、FEP 辞書、TTF、MGX サンプル | 2. Normal 以上 |
+| `DEBUG.PKG` | `test` — 試験バイナリと試験用データ | 3. Full |
+
+- **タグの規則**: 配備マニフェストの 1 行はちょうど 1 つのパッケージに当たるタグを持つ。
+  `userland/tests/` 由来の行は必ず `test` (試験バイナリが NORMAL に混ざらないように)。
+  パッケージに入れない物は `build/packages.yaml` の `exclude:` に**理由つきで**書く (今は無い)。
+- **分割**: 1 本の項目数 (ファイル + ディレクトリ) が消費側の上限 128
+  (`userland/lib/rt/pkg.h` の `PKG_MAX_ENTRIES`) を超えると、mkpkg が `NAME.PKG`,
+  `NAME2.PKG`, … (最大 9) に分け、cdinst は連番を欠けるまで順に展開する。ベース名は
+  ISO 9660 の 8.3 に連番 1 桁を足せるよう 7 文字以下。
+- **パス長**: 格納パスは UTF-8 で 123 バイトまで (`/hd0` 前置 + NUL で 128)。
+- **古い PKG**: `--plan` は出力先の他の `*.PKG` を消す (ISO は `packages/` を丸ごと焼く)。
+- **apps/ と game/** (private submodule) は CD に入れない。`make all` では作られず CI では空なので、
+  入れると媒体の中身が環境で変わる。これらは `make deploy` + `hsync` で配る。
+- 検査は `make check-packages-host` ([`tools/tests/test_packages.py`](../tools/tests/test_packages.py)):
+  振り分けの否定側、分割、実物の mkpkg で作った PKG と ISO の中の PKG を読み戻して
+  配備の全ファイルが同じバイト列で揃うこと、cdinst.c のベース名との一致。
+- 試験用に `--defs` (ファイル一覧を直に書いた YAML) と `--name` (1 本) の形も残してある。
 
 #### `build/app.conf` (OS32X ヘッダ設定)
 
