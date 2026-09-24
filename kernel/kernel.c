@@ -763,8 +763,14 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
                 console_text_gdc_stop();
                 tvram_print(0, 0, "Loading gshell...", TATTR_GRAY);
             } else {
+                /* prepare が TVRAM を消さなくなった (PEGC、2026-09-24) ので、
+                 * 0 行目には起動ログが残っている。文言の後ろを空白で消す。 */
+                static const char loading[] = "Loading shell...";
+                int col;
                 console_text_gdc_start();
-                tvram_print(0, 0, "Loading shell...", TATTR_GRAY);
+                tvram_print(0, 0, loading, TATTR_GRAY);
+                for (col = (int)sizeof(loading) - 1; col < TVRAM_COLS; col++)
+                    tvram_putchar_at(col, 0, ' ', TATTR_GRAY);
             }
 
             rc = exec_run(cur_shell);
