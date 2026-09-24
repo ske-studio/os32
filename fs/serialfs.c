@@ -42,6 +42,7 @@ static int sfs_status(int st)
     case OS32_ERR_EXIST: case OS32_ERR_NOTDIR: case OS32_ERR_NOTEMPTY:
     case OS32_ERR_ISDIR: case OS32_ERR_INVAL: case OS32_ERR_NOSYS:
     case OS32_ERR_NAMETOOLONG: case OS32_ERR_BUSY:
+    case OS32_ERR_ROFS:     /* ホストが書き込みを許していない (--allow-write の外) */
         return (int)st;
     default:
         return OS32_ERR_IO;

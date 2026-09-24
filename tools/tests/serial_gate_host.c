@@ -191,6 +191,22 @@ static void gate_rx(void)
     rx_push("ok", 2);
     serial_irq_handler();
     CHECK(serial_trygetchar() == 'o');
+
+    /* **UART / FIFO に残ったまま** (ISR がまだ汲んでいない) のバイトも、
+     * ゲートを下ろすときに読み捨てる (Codex 6)。下ろした直後の ISR が
+     * rshell に渡さない */
+    reset();
+    serial_gate_set(1);
+    rx_push("\x05SFtail", 6);          /* ISR を呼ばない = 8251 に残っている */
+    serial_gate_set(0);
+    serial_irq_handler();
+    CHECK(serial_trygetchar() == -1);
+    CHECK(g_rxq_n == 0);
+    /* 上げるときも同じ (前の会話の残りを SerialFS の受信器に渡さない) */
+    rx_push("old", 3);
+    serial_gate_set(1);
+    CHECK(serial_gate_get() == -1);
+    serial_gate_set(0);
 }
 
 static void gate_init_refused(void)

@@ -104,3 +104,46 @@ const char *rsh_sfs_child(const char *line)
     if (*p == '\0') return (const char *)0;
     return p;
 }
+
+void rsh_line_begin(struct rsh_line *l, char *buf, int cap)
+{
+    l->buf = buf;
+    l->cap = cap;
+    l->pos = 0;
+    l->overflow = 0;
+    l->junk = 0;
+    l->local = 0;
+    l->bytes = 0;
+    if (cap > 0) buf[0] = '\0';
+}
+
+int rsh_line_feed(struct rsh_line *l, int ch, int from_serial, int at_start,
+                  int followed)
+{
+    int cls;
+
+    if (ch == '\n' || ch == '\r') return RSH_LINE_DONE;
+    cls = rsh_esc_classify(ch, from_serial, at_start, followed);
+    /* 閉じる ESC は数えない (行頭の単独 ESC に EOT を返さないため) */
+    if (cls == RSH_ESC_EXIT) return RSH_LINE_EXIT;
+    l->bytes++;
+    if (!from_serial) l->local = 1;
+    if (cls == RSH_ESC_JUNK) {
+        l->junk = 1;
+        return RSH_LINE_MORE;
+    }
+    if (l->pos >= l->cap - 2) {
+        l->overflow = 1;
+    } else {
+        l->buf[l->pos++] = (char)ch;
+        l->buf[l->pos] = '\0';
+    }
+    return RSH_LINE_MORE;
+}
+
+int rsh_line_idle(const struct rsh_line *l, unsigned long idle_ticks)
+{
+    if (!l->junk) return RSH_LINE_DONE;
+    return idle_ticks >= (unsigned long)RSH_JUNK_IDLE_TICKS
+           ? RSH_LINE_DONE : RSH_LINE_MORE;
+}

@@ -1112,7 +1112,9 @@ LBA28、無ければ word 53 bit0 の現在の CHS、それも無ければ既定
   (`drivers/serial.c`) を上げ、HELLO でセッション ID を得て、`/host` に SerialFS を
   マウントする。0 / `OS32_ERR_INVAL` (owner 1 以外・シリアル未初期化・IF=0) /
   `OS32_ERR_BUSY` (セッション中・`/host` 使用中) / `OS32_ERR_IO` (HELLO に答えが無い。
-  ゲートは下ろして戻る) / `vfs_mount` の負値 (BYE してゲートを下ろして戻る)。
+  相手がセッションを始めている可能性を前提に隔離 (500ms 静まるまで、上限 5 秒) を
+  済ませてからゲートを下ろし、溜めた文字を生で流して戻る) / `vfs_mount` の負値
+  (BYE してゲートを下ろして戻る)。
   `vfs_mount` は cwd を `/` に戻すので、呼び手が元へ戻す。
 - **`sfs_end`** — BYE → アンマウント (線が死んでいても手元は解放) → 隔離 (受信を捨てて
   500ms 静まるのを待つ。上限 5 秒で打ち切って警告、決裁 1B) → 溜めた出力と
@@ -1120,7 +1122,9 @@ LBA28、無ければ word 53 bit0 の現在の CHS、それも無ければ既定
   空にする)。0 / `KAPI_SFS_END_NOT_QUIET` (1) / `OS32_ERR_INVAL` (セッションが無い)。
 - セッション中は `serial_putchar` / `serial_puts` (console の複写・KAPI・ime_dict・ISR の
   kprintf) の出力は線へ出ずカーネルの保留リング (8KB、溢れたら古い方を捨てて数える) に
-  溜まり、`serial_getchar` / `serial_trygetchar` / `kbd.c` の読み口は「無い」を返し、
+  溜まり、`serial_trygetchar` / `kbd.c` の読み口は「無い」(-1) を返し、
+  **`serial_getchar` (ブロッキング) も待たずに -1 を返す** (待つと SerialFS の応答を
+  盗む。セッションの外では従来どおり 1 バイト来るまで待つ)。
   `serial_init` / `serial_init_vfast` は断る。`serial_puts_polled` (パニック) は通る。
 - **`serial_diag`** — `SerialDiag` (16 バイト: `oe` / `fe` / `pe` / `overflow`) を写す。
   受信の誤りは ISR (と SerialFS の受信器) がリセットする前に数える。V･FAST の 0132h は

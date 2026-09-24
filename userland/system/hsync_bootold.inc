@@ -34,6 +34,7 @@
 #define HBO_REFUSE_INFO 2   /* 起動したイメージの記録が無い → 断る */
 #define HBO_REFUSE_DISK 3   /* ディスクの vmkernel.lz4 が読めない / VK32 v2 でない → 断る */
 #define HBO_REFUSE_DIFF 4   /* 一致しない (起動していない版) → 断る */
+#define HBO_REFUSE_CORRUPT 5 /* ファイルの image_crc 欄と中身が合わない (欄が壊れている) → 断る */
 
 static u32 hbo_le32(const u8 *p)
 {
@@ -82,13 +83,18 @@ static u32 hbo_crc_update(u32 state, const u8 *chunk, u32 len, u32 pos,
 }
 
 /* have_info = 起動したイメージの記録がある (crc_valid)、disk_ok = ディスクの
- * CRC が求まった。 */
+ * CRC が求まった、disk_crc = 欄を 0 として求めた CRC、stored_crc = ファイルの
+ * image_crc 欄に**書いてある**値。
+ * **欄も検査する** (レビュー往復 1、Codex 2): 中身は起動した版と同じで欄だけが
+ * 壊れたファイルは、ローダが VK32_ERR_FILE_CRC で断る = 戻しても起動しない。
+ * 同じ関数を**公開する一時ファイル (.old の複製)** にも掛ける。 */
 static int hbo_decide(int no_backup, int have_info, u32 booted_crc,
-                      int disk_ok, u32 disk_crc)
+                      int disk_ok, u32 disk_crc, u32 stored_crc)
 {
     if (no_backup) return HBO_NO_BACKUP;
     if (!have_info) return HBO_REFUSE_INFO;
     if (!disk_ok) return HBO_REFUSE_DISK;
+    if (stored_crc != disk_crc) return HBO_REFUSE_CORRUPT;
     if (booted_crc != disk_crc) return HBO_REFUSE_DIFF;
     return HBO_MAKE;
 }

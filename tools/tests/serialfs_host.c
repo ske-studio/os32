@@ -888,6 +888,49 @@ static void rshell_rules(void)
     CHECK(rsh_sfs_child("xsfs run ls") == 0);
     CHECK(rsh_sfs_child("echo a && sfs run ls") == 0);
     CHECK(rsh_sfs_child(0) == 0);
+
+    /* 行の組み立て (レビュー往復 1、Codex 8): 拒否は本当の行末まで持つ */
+    {
+        char b[8];
+        struct rsh_line l;
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        CHECK(rsh_line_feed(&l, 0x1B, 1, 1, 1) == RSH_LINE_MORE && l.junk);
+        CHECK(rsh_line_feed(&l, 'x', 1, 0, 1) == RSH_LINE_MORE);
+        CHECK(rsh_line_idle(&l, 0) == RSH_LINE_MORE);        /* 間が空いても解けない */
+        CHECK(rsh_line_idle(&l, RSH_JUNK_IDLE_TICKS - 1) == RSH_LINE_MORE);
+        CHECK(rsh_line_feed(&l, 'l', 1, 0, 1) == RSH_LINE_MORE);
+        CHECK(l.junk && l.pos == 2 && strcmp(b, "xl") == 0);
+        CHECK(rsh_line_feed(&l, '\n', 1, 0, 1) == RSH_LINE_DONE && l.junk);
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        CHECK(rsh_line_idle(&l, RSH_JUNK_IDLE_TICKS) == RSH_LINE_DONE);
+        l.junk = 1;
+        CHECK(rsh_line_idle(&l, RSH_JUNK_IDLE_TICKS) == RSH_LINE_DONE);
+        /* 普通の行は短い空回りで終わる (従来どおり) */
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        CHECK(rsh_line_feed(&l, 'l', 1, 1, 0) == RSH_LINE_MORE);
+        CHECK(rsh_line_idle(&l, 0) == RSH_LINE_DONE && !l.junk && l.bytes == 1);
+        /* 行の途中のシリアルの ESC は拒否 (閉じない)、本体の ESC は閉じる */
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        CHECK(rsh_line_feed(&l, 'a', 1, 1, 0) == RSH_LINE_MORE);
+        CHECK(rsh_line_feed(&l, 0x1B, 1, 0, 1) == RSH_LINE_MORE && l.junk);
+        CHECK(rsh_line_feed(&l, 0x1B, 0, 0, 1) == RSH_LINE_EXIT && l.bytes == 2);
+        /* 行頭の単独の ESC は閉じ、EOT の数え (bytes) に入れない */
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        CHECK(rsh_line_feed(&l, 0x1B, 1, 1, 0) == RSH_LINE_EXIT && l.bytes == 0);
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        CHECK(rsh_line_feed(&l, 0x1B, 0, 1, 0) == RSH_LINE_EXIT && l.bytes == 0);
+        /* 溢れ: 読み続けて印だけ */
+        rsh_line_begin(&l, b, 4);
+        CHECK(rsh_line_feed(&l, 'a', 1, 1, 0) == RSH_LINE_MORE);
+        CHECK(rsh_line_feed(&l, 'b', 1, 0, 1) == RSH_LINE_MORE);
+        CHECK(rsh_line_feed(&l, 'c', 1, 0, 1) == RSH_LINE_MORE && l.overflow);
+        CHECK(strcmp(b, "ab") == 0 && l.bytes == 3);
+        /* 本体のバイトの印 */
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        (void)rsh_line_feed(&l, 's', 1, 1, 0);
+        (void)rsh_line_feed(&l, 'f', 0, 0, 1);
+        CHECK(l.local == 1);
+    }
 }
 
 /* ======================================================================== */
@@ -936,12 +979,14 @@ static void bootold_rules(void)
     sfs_put32(img + 12, 5);
     CHECK(hbo_crc_offset(img, sizeof(img), &off) == -1);
     /* 判定 */
-    CHECK(hbo_decide(0, 1, 0x1234, 1, 0x1234) == HBO_MAKE);
-    CHECK(hbo_decide(0, 1, 0x1234, 1, 0x1235) == HBO_REFUSE_DIFF);
-    CHECK(hbo_decide(0, 0, 0, 1, 0x1234) == HBO_REFUSE_INFO);
-    CHECK(hbo_decide(0, 1, 0x1234, 0, 0) == HBO_REFUSE_DISK);
-    CHECK(hbo_decide(1, 0, 0, 0, 0) == HBO_NO_BACKUP);
-    CHECK(hbo_decide(1, 1, 1, 1, 2) == HBO_NO_BACKUP);
+    CHECK(hbo_decide(0, 1, 0x1234, 1, 0x1234, 0x1234) == HBO_MAKE);
+    CHECK(hbo_decide(0, 1, 0x1234, 1, 0x1235, 0x1235) == HBO_REFUSE_DIFF);
+    CHECK(hbo_decide(0, 0, 0, 1, 0x1234, 0x1234) == HBO_REFUSE_INFO);
+    CHECK(hbo_decide(0, 1, 0x1234, 0, 0, 0) == HBO_REFUSE_DISK);
+    /* 中身は起動した版と同じで、欄だけが壊れている → 断る (起動しない .old) */
+    CHECK(hbo_decide(0, 1, 0x1234, 1, 0x1234, 0x9999) == HBO_REFUSE_CORRUPT);
+    CHECK(hbo_decide(1, 0, 0, 0, 0, 0) == HBO_NO_BACKUP);
+    CHECK(hbo_decide(1, 1, 1, 1, 2, 3) == HBO_NO_BACKUP);
 }
 
 /* ======================================================================== */

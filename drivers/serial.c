@@ -689,7 +689,20 @@ void serial_gate_set(int on)
     }
     /* 上げるときも下ろすときも受信リングを空にする。上げるとき = 前の
      * 会話の残り、下ろすとき = 隔離の後に届いたセッションの残り
-     * (rshell にフレームの断片を 1 バイトも渡さない)。 */
+     * (rshell にフレームの断片を 1 バイトも渡さない)。
+     * **UART / FIFO に残っているバイトも先に読み捨てる** — ISR がまだ汲んで
+     * いない分 (FIFO モードの閾値未満の末尾) は、下ろした直後に ISR が
+     * リングへ入れて rshell に渡してしまう (レビュー往復 1、Codex 6)。 */
+    {
+        int n;
+        for (n = 0; n < SER_GATE_DRAIN_MAX; n++) {
+            u8 sts = (u8)inp(s_port_cmd);
+            if (sts & s_mask_err)
+                outp(s_port_cmd, CMD_TXE | CMD_DTR | CMD_RXE | CMD_RTS | CMD_ER);
+            if (!(sts & s_mask_rxrdy)) break;
+            (void)inp(s_port_data);
+        }
+    }
     ser_head = 0;
     ser_tail = 0;
     ser_count = 0;

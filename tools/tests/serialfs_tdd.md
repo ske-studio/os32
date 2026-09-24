@@ -50,11 +50,58 @@ python3 -B tools/tests/test_serialfs.py --target --mutate   # make check-serialf
 2026-09-25: 51 本 (C 33 + ゲート 6 + Python 12)、うち対照 2 本 GREEN、残り 49 本すべて RED、
 ERROR 0。一覧は `test_serialfs.py` の `C_MUTATIONS` / `GATE_MUTATIONS` / `PY_MUTATIONS`。
 
+レビュー往復 1 の後 (2026-09-25): 66 本 (C 36 + ゲート 7 + Python 23)、対照 2 本 GREEN、
+残り 64 本すべて RED、ERROR 0。足した試験と変異:
+
+| 指摘 | 試験 | 変異 |
+|---|---|---|
+| Codex 1 期限切れの応答 | 偽の線 (到着時刻つき) で「STAT の処理が 20 秒止まる間に再送 3 回・BYE・EXIT・EOT」、「処理が 2.5 秒 → 応答は送らず、再送に保存した応答で答える」、「先に BYE が届いていれば期限内でも送らない」 | 期限切れの要求を実行する / 送る前に取り込まない / 先の BYE を見ない / 送る直前に期限を見ない |
+| Fable M1 要求ごとの 200ms | pyserial の read を模した偽物 (揃わなければ待つ = stalls) で send_cmd と実物の PortReceiver (スレッド) + serve_line の 20 往復が stalls 0 | read(MAX_FRAME) / read(256) に戻す |
+| Codex 2 壊れた .old | `hsync_h2_host.c` の `case_boot_old`: image_crc 欄だけ壊す → 断る、既存の .old がある状態で書き込み・sync・読戻し・判定後の差し替え・rename の各段で落とす → 旧 .old も本名もそのまま | (h2) 一時ファイルの自己検査なし / 欄を見ない / 門の失敗を無視、(C) 欄の検査を外す |
+| Codex 3 / Fable m2 Windows のパス | ntpath で `C:\hostile` / 別ドライブ / `..` / ADS の `:` | 前方一致に戻す / `:` を通す |
+| Codex 4 / Fable m1 パイプの後段 | rshell が行全体を引き受ける (組込みの `sfs` は常に断る) | — (rshell のループはホストで回していない) |
+| Codex 5 symlink の差し替え | 固定の作り (dir_fd + O_NOFOLLOW) で、操作の直前に要素を根の外への symlink に差し替えても辿らない。根の中の symlink も辿らない | O_NOFOLLOW を外す |
+| Codex 6 UART / FIFO の残り | ゲートの上げ下げで ISR 前のバイトを読み捨てる | 読み捨てを外す |
+| Codex 7 REPL の EXIT | 2 行目で EXIT が来なければ exit は None | begin_line を空にする |
+| Codex 8 ESC の拒否 | `rsh_line_*` (行の組み立てを純粋な関数に) で、拒否は行末か 2 秒の沈黙まで解けない | 間で解ける / 行頭の ESC を数える |
+| PM 決定 (書き込み) | 既定は ROFS、`--allow-write` は要素単位 (`subx` は `sub` でない) | 禁止が無い |
+| Fable m4 | `--serve-host` 無しの `sfs run` は送らない | 送る |
+
+レビュー往復 1 の仕上げ (2026-09-25、コーダー交代の後): **セッション層のホスト試験
+`tools/tests/serialfs_session_host.c`** を足した (段 SESSION)。実物の `fs/serialfs_session.c`
+を `drivers/serial.c`・`fs/sfs_*.c` と組み、偽物はポート I/O (届く tick つきの受信)、
+hlt で進む tick、VFS の mount / umount / fstype、kprintf (console の複写と同じく
+serial_putchar へ)、常駐シェルの持ち主だけ。5 案件:
+
+| 案件 | 見ること |
+|---|---|
+| `flow` | HELLO → mount (`/host` `COM1` `serialfs`、permit の中) → 子の kprintf は線に出ない → BYE → LOG (子の出力・計数・`sfs: exit=7`) → EXIT (code 7、flags 0) の順、終わった後は線に何も残らず rshell にも渡らない、2 度目の begin は BUSY、owner 違い / IF=0 は INVAL、`/host` 使用中は BUSY (HELLO を出さない) |
+| `hello_fail_quiet` | 決定 11: 答えの無い HELLO (1 + 3 試行) の後、ごみが最後の期限の後も 100 tick 続く → **ごみが止まってから 500ms 静まるまで下ろさない**、`sfs: no answer to HELLO` は下ろした後に生で流れる、ごみは時計を進めて ISR を回しても rshell に 1 バイトも渡らない |
+| `hello_fail_flood` | 相手が送り続ける → 隔離は 5 秒で打ち切り、`line not quiet` を画面と線 (生) に出して下ろす (決裁 1B) |
+| `end_late_hold` | Fable m6: 2 回目の sfs_send_log の送信中に入った 'Y' は同じ汲み出しの LOG フレームで EXIT の前に、EXIT の送信中に入った 'Z' は下ろした後に生で流れる (どちらも捨てない)。保留は空になる |
+| `end_not_quiet` | 終わりに相手が送り続ける → sfs_end は 1、EXIT の flags に NOT_QUIET |
+
+変異 (`SESSION_MUTATIONS`、対照 1 本を含む 7 本): HELLO が通らなかった回は隔離せずに下ろす /
+EXIT の後の保留を捨てる (4bde23b の `if (sid == 0)`) / BYE を送らない / NOT_QUIET を出さない /
+`/host` 使用中でも始める / IF=0 のまま始める。**組んでみて外した変異 2 本**: 「EXIT の直前の
+3 回目の sfs_send_log を外す」は GREEN のまま (2 回目の汲み出しループが送信中に入った分も
+拾うので 3 回目は空振り。窓を閉じるのは下ろした後の生の流しなので、3 回目の呼び出し自体を
+削った)、「`g_active` の BUSY を外す」も GREEN (マウント中は `/host` の検査が先に BUSY を
+返し、単一スレッドでは到達しない)。
+
+合計 73 本 (C 36 + ゲート 7 + セッション 7 + Python 23)、対照 3 本 GREEN、残り 70 本すべて
+RED、ERROR 0 (`make check-serialfs-host`)。`--allow-write /` は根の全体、`..` を含む指定は
+起動時に ValueError で断る (試験 `paths`)。
+
 ## 試していないこと
 
 - NP21/W と実機 (T2 / T3 / T4)。**NP21/W は通信速度を模擬しない**ので、115200 の
   16 バイト FIFO の取りこぼし・ISR が汲み残す FIFO の末尾は実機でしか踏めない
-- カーネルの `fs/serialfs_session.c` (ゲート・HELLO・マウント・隔離・ログのフレーム) は
-  i386-elf で組むだけで、ホストでは回していない (KAPI・VFS・tick に依存する)
+- `fs/serialfs_session.c` はホストで回す (段 SESSION) が、VFS・kprintf・tick は偽物。
+  実物の `vfs_mount` が cwd を `/` に戻す件と `sfs run` の cwd の復元は rshell の側で、
+  ホストでは回していない
+- rshell の行ループ (`sfs run` を行全体で引き受ける、ESC の拒否を行末まで保つ) は
+  純粋な関数 `rsh_line_*` / `rsh_sfs_child` だけをホストで見ている。ループ本体は
+  NP21/W / 実機
 - 常駐シェルの `sfs run` と rshell の行の読み取り (ESC の単独判定の待ち) は、純粋な
   判定 (`rsh_esc_classify` / `rsh_sfs_child`) だけを回している

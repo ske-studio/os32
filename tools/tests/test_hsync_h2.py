@@ -173,6 +173,16 @@ MUTATIONS = [
     ("stale_counted_twice",
      "        (void)drop_temp(tmp);\n",
      "        if (drop_temp(tmp) != 0) g_errors++;\n"),
+    # 票 TASK_SERIAL_HOSTFS (レビュー往復 1、Codex 2): vmkernel.old の門
+    ("old_no_tmp_selfcheck",
+     "        if (hbo_decide(0, 1, bi.image_crc, tok, tcrc, tstored) != HBO_MAKE) {",
+     "        if (tok < 0) {"),
+    ("old_ignores_stored_field",
+     "                     disk_ok, disk_crc, stored);",
+     "                     disk_ok, disk_crc, disk_crc);"),
+    ("old_backup_failure_ignored",
+     "        if (kernel_backup(dst_path, &ds) != 0) return;",
+     "        (void)kernel_backup(dst_path, &ds);"),
 ]
 
 

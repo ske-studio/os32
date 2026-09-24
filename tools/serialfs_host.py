@@ -32,8 +32,11 @@ C の組み立てた列をここで読み、その逆も確かめる。
 """
 import errno
 import os
+import collections
+import queue
 import random
 import stat as statmod
+import threading
 import struct
 import time
 import zlib
@@ -88,6 +91,7 @@ ERR_NOTEMPTY = -7
 ERR_ISDIR = -8
 ERR_INVAL = -9
 ERR_STALE = -11
+ERR_ROFS = -15
 ERR_NAMETOOLONG = -16
 
 ERRNO_MAP = {
@@ -99,6 +103,9 @@ ERRNO_MAP = {
     errno.ENOSPC: ERR_NOSPC,
     errno.ENAMETOOLONG: ERR_NAMETOOLONG,
     errno.EINVAL: ERR_INVAL,
+    # O_NOFOLLOW で symlink に当たった = 辿らない (根の外へ出る道を作らない)
+    errno.ELOOP: ERR_INVAL,
+    errno.EROFS: ERR_ROFS,
 }
 
 
@@ -248,40 +255,144 @@ def _err(e):
 
 
 class HostFS(object):
-    """根 root の下だけを見せる。パスは bytes のまま扱う (名前を化けさせない)。"""
+    """根 root の下だけを見せる。パスは bytes のまま扱う (名前を化けさせない)。
 
-    def __init__(self, root):
-        self.root = os.path.realpath(os.fsencode(root))
-        if not os.path.isdir(self.root):
+    **書き込みは既定で禁止** (票 B-7'、レビュー往復 1 の PM 決定)。書けるのは
+    allow_write に並べたルート相対のパスとその下だけ (`--allow-write`)。それ以外の
+    WRITE / MKDIR / RMDIR / UNLINK / RENAME は OS32_ERR_ROFS。
+
+    **2 つの作り**:
+      - 固定 (POSIX、既定): 根のディレクトリを開いた fd から、各要素を
+        `O_DIRECTORY | O_NOFOLLOW` で 1 段ずつ開き (openat 相当の dir_fd)、最後の
+        操作も dir_fd と O_NOFOLLOW / follow_symlinks=False で行う。**symlink は
+        一切辿らない** (根の中を指すものも)。検査と操作の間に symlink を
+        差し替えられても根の外へは出ない (Codex 5)
+      - パス (Windows など dir_fd の無いホスト): realpath を取って根と
+        **要素単位で** (commonpath / normcase) 比べてから、パスで操作する。
+        **検査と操作の間に symlink / junction を差し替えられる競合は残る**
+        (man sfs に書いた)。Windows では `:` (代替データストリーム) も断る
+    pm に ntpath を渡すと Windows の規則で判定だけを試せる (試験用)。
+    """
+
+    def __init__(self, root, allow_write=(), pm=None, secure=None):
+        self.pm = pm or os.path
+        raw = os.fsencode(root) if not isinstance(root, bytes) else root
+        self.root = self.pm.realpath(raw)
+        if pm is None and not os.path.isdir(self.root):
             raise ValueError("serve-host root is not a directory: %r" % root)
+        if secure is None:
+            secure = (self.pm is os.path and os.name == "posix" and
+                      hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+                      and os.open in os.supports_dir_fd
+                      and os.stat in os.supports_dir_fd)
+        self.secure = bool(secure)
+        self.allow = []
+        for a in allow_write:
+            raw_a = a
+            a = os.fsencode(a) if not isinstance(a, bytes) else a
+            a = a.replace(b"\\", b"/")
+            try:
+                # `/` (または空) は根の全体 = どこでも書ける (明示したときだけ)
+                self.allow.append(tuple(self._comps(b"/" + a.lstrip(b"/"))))
+            except SfsError:
+                raise ValueError("--allow-write: bad path %r (root-relative, "
+                                 "no . / .. / backslash)" % (raw_a,))
 
-    def resolve(self, wire, allow_root=True):
-        """ワイヤ上のパス (bytes、`/` 始まり) → ホストのパス。断るときは SfsError。"""
+    # ---- パスの規則 ----
+    def _comps(self, wire):
         if not wire.startswith(b"/"):
             raise SfsError(ERR_INVAL)
         comps = [c for c in wire[1:].split(b"/") if c != b""]
         for c in comps:
             if c in (b".", b"..") or b"\\" in c or b"\x00" in c:
                 raise SfsError(ERR_INVAL)
+            if self.pm.sep == "\\" and b":" in c:
+                raise SfsError(ERR_INVAL)
             if len(c) > PATH_MAX:
                 raise SfsError(ERR_NAMETOOLONG)
+        return comps
+
+    def contained(self, path):
+        """path (realpath を取る) が根の中か。**要素単位で**比べる。"""
+        real = self.pm.realpath(path)
+        nc = self.pm.normcase
+        try:
+            common = self.pm.commonpath([nc(self.root), nc(real)])
+        except ValueError:            # 別のドライブなど
+            return False
+        return common == nc(self.root)
+
+    def resolve(self, wire, allow_root=True):
+        """ワイヤ上のパス → ホストのパス (パスの作りで使う)。断るときは SfsError。"""
+        comps = self._comps(wire)
         if not comps and not allow_root:
             raise SfsError(ERR_INVAL)
-        path = os.path.join(self.root, *comps) if comps else self.root
-        real = os.path.realpath(path)
-        if real != self.root and not real.startswith(self.root + b"/"):
+        path = self.pm.join(self.root, *comps) if comps else self.root
+        if not self.contained(path):
             raise SfsError(ERR_INVAL)       # symlink で根の外へ出る
         return path
 
-    # ---- 操作 (戻り値は応答ペイロードの status の後ろ、または例外) ----
-    def stat(self, wire):
-        st = os.stat(self.resolve(wire))
+    def _need_write(self, comps):
+        if not comps:
+            raise SfsError(ERR_INVAL)       # 根そのものは変えない
+        for a in self.allow:
+            if tuple(comps[:len(a)]) == a:
+                return
+        raise SfsError(ERR_ROFS)
+
+    # ---- 固定の作りの道具 ----
+    def _open_dir(self, comps):
+        """根から comps を 1 段ずつ辿ったディレクトリの fd (呼び手が閉じる)。"""
+        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for c in comps:
+                try:
+                    nfd = os.open(c, os.O_RDONLY | os.O_DIRECTORY |
+                                  os.O_NOFOLLOW, dir_fd=fd)
+                except OSError:
+                    # O_NOFOLLOW + O_DIRECTORY の symlink は ELOOP か ENOTDIR。
+                    # symlink なら「辿らない」(INVAL) と言い分ける
+                    try:
+                        lst = os.stat(c, dir_fd=fd, follow_symlinks=False)
+                    except OSError:
+                        lst = None
+                    if lst is not None and statmod.S_ISLNK(lst.st_mode):
+                        raise SfsError(ERR_INVAL)
+                    raise
+                os.close(fd)
+                fd = nfd
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    @staticmethod
+    def _kind(st):
         if statmod.S_ISDIR(st.st_mode):
-            kind, size = KIND_DIR, 0
-        elif statmod.S_ISREG(st.st_mode):
-            kind, size = KIND_FILE, st.st_size
-        else:
-            kind, size = KIND_OTHER, 0
+            return KIND_DIR, 0
+        if statmod.S_ISREG(st.st_mode):
+            return KIND_FILE, st.st_size
+        return KIND_OTHER, 0            # symlink も辿らずにここ
+
+    def _stat_raw(self, comps):
+        if self.secure:
+            if not comps:
+                fd = self._open_dir([])
+                try:
+                    return os.fstat(fd)
+                finally:
+                    os.close(fd)
+            pfd = self._open_dir(comps[:-1])
+            try:
+                return os.stat(comps[-1], dir_fd=pfd, follow_symlinks=False)
+            finally:
+                os.close(pfd)
+        return os.stat(self.resolve(b"/" + b"/".join(comps)))
+
+    # ---- 操作 (戻り値は (status, 応答の status の後ろ)、または例外) ----
+    def stat(self, wire):
+        st = self._stat_raw(self._comps(wire))
+        kind, size = self._kind(st)
         if size > 0xFFFFFFFF:
             raise SfsError(ERR_IO)
         mtime = int(st.st_mtime)
@@ -289,44 +400,90 @@ class HostFS(object):
             mtime = 0
         return 0, struct.pack("<BII", kind, size, mtime)
 
+    def _entries(self, comps):
+        if self.secure:
+            fd = self._open_dir(comps)
+            try:
+                # listdir(fd) は str を返す。bytes に戻す (名前を化けさせない)
+                names = sorted(os.fsencode(n) for n in os.listdir(fd))
+                out = []
+                for n in names:
+                    try:
+                        st = os.stat(n, dir_fd=fd, follow_symlinks=False)
+                        out.append((n,) + self._kind(st))
+                    except OSError:
+                        out.append((n, KIND_OTHER, 0))
+                return out
+            finally:
+                os.close(fd)
+        path = self.resolve(b"/" + b"/".join(comps))
+        out = []
+        for n in sorted(os.listdir(path)):
+            try:
+                out.append((n,) + self._kind(os.stat(self.pm.join(path, n))))
+            except OSError:
+                out.append((n, KIND_OTHER, 0))   # 壊れた symlink など
+        return out
+
     def list(self, wire, cookie):
-        path = self.resolve(wire)
-        names = sorted(os.listdir(path))
+        ents = self._entries(self._comps(wire))
         out = bytearray()
         room = MAX_PAYLOAD - 4 - 4
         idx = cookie
-        while idx < len(names):
-            name = names[idx]
+        while idx < len(ents):
+            name, kind, size = ents[idx]
             if len(name) > PATH_MAX or b"\\" in name:
                 idx += 1                     # 見せられない名前は飛ばす
                 continue
-            full = os.path.join(path, name)
-            try:
-                st = os.stat(full)
-                if statmod.S_ISDIR(st.st_mode):
-                    kind, size = KIND_DIR, 0
-                elif statmod.S_ISREG(st.st_mode):
-                    kind, size = KIND_FILE, min(st.st_size, 0xFFFFFFFF)
-                else:
-                    kind, size = KIND_OTHER, 0
-            except OSError:
-                kind, size = KIND_OTHER, 0   # 壊れた symlink など
-            ent = struct.pack("<BIB", kind, size, len(name)) + name
+            ent = struct.pack("<BIB", kind, min(size, 0xFFFFFFFF),
+                              len(name)) + name
             if len(out) + len(ent) > room:
                 break
             out += ent
             idx += 1
-        nxt = idx if idx < len(names) else 0
+        nxt = idx if idx < len(ents) else 0
         return 0, struct.pack("<I", nxt) + bytes(out)
 
     def read(self, wire, offset, count):
         count = min(count, READ_MAX)
+        comps = self._comps(wire)
+        if self.secure:
+            if not comps:
+                raise SfsError(ERR_ISDIR)
+            pfd = self._open_dir(comps[:-1])
+            try:
+                fd = os.open(comps[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=pfd)
+            finally:
+                os.close(pfd)
+            try:
+                if statmod.S_ISDIR(os.fstat(fd).st_mode):
+                    raise SfsError(ERR_ISDIR)
+                data = os.pread(fd, count, offset)
+            finally:
+                os.close(fd)
+            return len(data), data
         with open(self.resolve(wire), "rb") as f:
             f.seek(offset)
             data = f.read(count)
         return len(data), data
 
     def write(self, wire, offset, flags, data):
+        comps = self._comps(wire)
+        self._need_write(comps)
+        if self.secure:
+            pfd = self._open_dir(comps[:-1])
+            try:
+                fl = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+                if flags & WF_TRUNC:
+                    fl |= os.O_TRUNC
+                fd = os.open(comps[-1], fl, 0o644, dir_fd=pfd)
+            finally:
+                os.close(pfd)
+            try:
+                os.pwrite(fd, data, offset)
+            finally:
+                os.close(fd)
+            return len(data), b""
         path = self.resolve(wire, allow_root=False)
         if os.path.isdir(path):
             raise SfsError(ERR_ISDIR)
@@ -339,15 +496,42 @@ class HostFS(object):
             f.write(data)
         return len(data), b""
 
+    def _at_parent(self, comps, fn):
+        pfd = self._open_dir(comps[:-1])
+        try:
+            fn(comps[-1], pfd)
+        finally:
+            os.close(pfd)
+
     def mkdir(self, wire):
-        os.mkdir(self.resolve(wire, allow_root=False))
+        comps = self._comps(wire)
+        self._need_write(comps)
+        if self.secure:
+            self._at_parent(comps, lambda n, fd: os.mkdir(n, 0o755, dir_fd=fd))
+        else:
+            os.mkdir(self.resolve(wire, allow_root=False))
         return 0, b""
 
     def rmdir(self, wire):
-        os.rmdir(self.resolve(wire, allow_root=False))
+        comps = self._comps(wire)
+        self._need_write(comps)
+        if self.secure:
+            self._at_parent(comps, lambda n, fd: os.rmdir(n, dir_fd=fd))
+        else:
+            os.rmdir(self.resolve(wire, allow_root=False))
         return 0, b""
 
     def unlink(self, wire):
+        comps = self._comps(wire)
+        self._need_write(comps)
+        if self.secure:
+            def op(n, fd):
+                st = os.stat(n, dir_fd=fd, follow_symlinks=False)
+                if statmod.S_ISDIR(st.st_mode):
+                    raise SfsError(ERR_ISDIR)
+                os.unlink(n, dir_fd=fd)
+            self._at_parent(comps, op)
+            return 0, b""
         path = self.resolve(wire, allow_root=False)
         if os.path.isdir(path) and not os.path.islink(path):
             raise SfsError(ERR_ISDIR)
@@ -355,9 +539,22 @@ class HostFS(object):
         return 0, b""
 
     def rename(self, old, new):
-        src = self.resolve(old, allow_root=False)
-        dst = self.resolve(new, allow_root=False)
-        os.replace(src, dst)
+        oc, nc = self._comps(old), self._comps(new)
+        self._need_write(oc)
+        self._need_write(nc)
+        if self.secure:
+            sfd = self._open_dir(oc[:-1])
+            try:
+                dfd = self._open_dir(nc[:-1])
+                try:
+                    os.replace(oc[-1], nc[-1], src_dir_fd=sfd, dst_dir_fd=dfd)
+                finally:
+                    os.close(dfd)
+            finally:
+                os.close(sfd)
+            return 0, b""
+        os.replace(self.resolve(old, allow_root=False),
+                   self.resolve(new, allow_root=False))
         return 0, b""
 
 
@@ -389,6 +586,12 @@ class Server(object):
         self.stale = 0
         self.log_text = bytearray()
         self.exit = None             # (code, dropped, flags)
+
+    def begin_line(self):
+        """`sfs run` の 1 行ごとに結果を空にする (REPL で前の行の EXIT を
+        今の行の結果と取り違えない、レビュー往復 1 の Codex 7)。"""
+        self.log_text = bytearray()
+        self.exit = None
 
     # 要求 → (応答 bytes または None)
     def handle(self, fr):
@@ -505,63 +708,167 @@ def sfs_child(line):
     return s or None
 
 
+REQUEST_TYPES = (T_HELLO, T_STAT, T_LIST, T_READ, T_WRITE, T_MKDIR, T_RMDIR,
+                 T_UNLINK, T_RENAME)
+
+
+def read_size(port):
+    """来ている分だけ読む大きさ。pyserial の read(n) は n バイト揃うか timeout
+    まで戻らないので、**read(MAX_FRAME) だと要求ごとに 200ms 止まる**
+    (レビュー往復 1、Fable M1)。in_waiting が無い / 0 なら 1 (最初の 1 バイトを
+    待つ)。"""
+    try:
+        n = int(getattr(port, "in_waiting", 0) or 0)
+    except Exception:  # noqa: BLE001 — 閉じたポートなど
+        n = 0
+    return n if n > 0 else 1
+
+
+class PortReceiver(object):
+    """受信を**常に回す** (別スレッド)。(到着時刻, bytes) を積む。
+
+    ファイル操作と受信を同じループで回すと、ホストの操作が長く止まったあいだに
+    届いた再送や BYE を「今届いた」と読み、期限切れの応答を返してしまう
+    (レビュー往復 1、Codex 1)。到着時刻は受け取った時点で刻む。
+    """
+
+    def __init__(self, port, now=time.monotonic):
+        self.port = port
+        self.now = now
+        self.q = queue.Queue()
+        self.stop_ev = threading.Event()
+        self.error = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def step(self):
+        """1 回読む。戻りは読めたバイト (空もあり)。"""
+        d = self.port.read(read_size(self.port))
+        if d:
+            self.q.put((self.now(), bytes(d)))
+        return d
+
+    def _run(self):
+        while not self.stop_ev.is_set():
+            try:
+                self.step()
+            except Exception as e:  # noqa: BLE001
+                self.error = e
+                break
+
+    def get(self, timeout):
+        items = []
+        try:
+            items.append(self.q.get(timeout=timeout) if timeout > 0
+                         else self.q.get_nowait())
+        except queue.Empty:
+            return items
+        while True:
+            try:
+                items.append(self.q.get_nowait())
+            except queue.Empty:
+                return items
+
+    def close(self):
+        self.stop_ev.set()
+        self.thread.join(2.0)
+
+
 def serve_line(port, line, server, timeout_s, out, now=time.monotonic,
-               sleep=time.sleep):
+               sleep=time.sleep, rx=None):
     """`sfs run ...` の 1 行を送り、行末の EOT まで線を振り分けて答える。
 
-    port は read(n) / write(b) / flush() / reset_input_buffer() を持つもの。
-    **時間切れは「進捗が無い時間」** — 何か受け取るたびに期限を延ばす
-    (hsync boot は何分もかかりうる)。**配信中は reset_input_buffer を使わない**。
-    戻り値 dict: text (rshell の文字), eot (見たか), exit (code, dropped, flags)
-    または None, sent / late / bad_frames。
+    - 受信は PortReceiver が常に回し、フレームごとに**到着時刻**を持つ
+    - 要求は**到着から** FIRST_BYTE_S を過ぎていたら実行もしない (ゲストは
+      その試行をあきらめて再送している。再送の方に答える)
+    - 応答を送る**直前に**、処理中に届いた分を取り込み、(a) 同じセッションの
+      BYE か行末の EOT が来ている (b) 到着から期限を過ぎた、なら送らない
+    - 時間切れは「進捗が無い時間」(何か届くたびに延ばす)
+    - `sfs run` の行から EOT までのフレームでない部分は rshell の出力として出す
+      (HELLO が通らなかった回にゲストが生で流す文字もここ、決定 11)
+    port は write / flush / reset_input_buffer を持つもの。rx を渡さなければ
+    PortReceiver(port) を作る (read / in_waiting を使う)。
+    戻り値 dict: text / eot / exit / sent / late / after_bye / bad_frames。
     """
     dm = Demux()
     text = bytearray()
+    server.begin_line()
     port.reset_input_buffer()            # 送る前だけ (配信中は使わない)
     port.write(line.encode("utf-8") + b"\n")
     port.flush()
-    deadline = now() + timeout_s
+    own_rx = rx is None
+    if own_rx:
+        rx = PortReceiver(port, now)
+    events = collections.deque()
+    stats = {"sent": 0, "late": 0, "after_bye": 0}
+
+    def pump(timeout):
+        got = rx.get(timeout)
+        for t, d in got:
+            for e in dm.feed(d, t):
+                events.append((t, e))
+        if not got:
+            t = now()
+            for e in dm.poll(t):
+                events.append((t, e))
+        return bool(got)
+
+    def closed_ahead(sid):
+        for _, e in events:
+            if e[0] == "eot":
+                return True
+            if (e[0] == "frame" and e[1].type == T_BYE and
+                    e[1].sid and e[1].sid in (sid, server.sid)):
+                return True
+        return False
+
     eot = False
-    sent = 0
-    while not eot:
-        t = now()
-        if t >= deadline:
-            break
-        chunk = port.read(MAX_FRAME)
-        t = now()
-        if chunk:
-            deadline = t + timeout_s
-            events = dm.feed(chunk, t)
-        else:
-            events = dm.poll(t)
-        for ev in events:
+    last_progress = now()
+    try:
+        while not eot:
+            if not events:
+                if pump(0.05):
+                    last_progress = now()
+                elif now() - last_progress >= timeout_s:
+                    break
+                continue
+            t, ev = events.popleft()
             if ev[0] == "text":
                 text += ev[1]
                 out.write(ev[1].decode("utf-8", errors="replace"))
+            elif ev[0] == "eot":
+                eot = True
             elif ev[0] == "frame":
+                fr = ev[1]
+                if fr.type in REQUEST_TYPES and now() - t > FIRST_BYTE_S:
+                    stats["late"] += 1          # 実行もしない
+                    continue
                 had_log = len(server.log_text)
-                resp = server.handle(ev[1])
+                resp = server.handle(fr)
                 if len(server.log_text) != had_log:
                     out.write(bytes(server.log_text[had_log:]).decode(
                         "utf-8", errors="replace"))
-                if resp is not None:
-                    # **期限を過ぎた応答は送らない** — ゲストは次の試行に
-                    # 入っていて、古い番号は捨てられるだけ (線を無駄に塞ぐ)
-                    if now() - t > FIRST_BYTE_S:
-                        server.late += 1
-                        continue
-                    port.write(resp)
-                    port.flush()
-                    sent += 1
-            elif ev[0] == "eot":
-                eot = True
-                break
-        if not chunk and not eot:
-            sleep(0.001)
+                if resp is None:
+                    continue
+                pump(0)                         # 処理中に届いた分
+                if fr.sid in server.closed or closed_ahead(fr.sid):
+                    stats["after_bye"] += 1
+                    continue
+                if now() - t > FIRST_BYTE_S:
+                    stats["late"] += 1
+                    continue
+                port.write(resp)
+                port.flush()
+                stats["sent"] += 1
+    finally:
+        if own_rx:
+            rx.close()
     # 行が終わった = セッションも終わっている。以後このセッションには答えない
     if server.sid:
         server.closed.add(server.sid)
         server.last_closed = server.sid
         server.sid = 0
+    server.late += stats["late"]
     return {"text": bytes(text), "eot": eot, "exit": server.exit,
-            "sent": sent, "late": server.late, "bad_frames": dm.bad_frames}
+            "sent": stats["sent"], "late": stats["late"],
+            "after_bye": stats["after_bye"], "bad_frames": dm.bad_frames}

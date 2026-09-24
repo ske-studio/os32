@@ -50,6 +50,7 @@ extern int gfx_lease_palette(int first, int count, const u8 *rgb);
 extern int kapi_sys_set_mtime(const char *path, u32 mtime);
 extern int kapi_sys_time_now(u32 *lo, u32 *hi);
 extern int kapi_pci_bind_info(u32 idx, void *out);
+extern int kapi_serial_diag(SerialDiag *out);
 
 #include "kapi_profile.h"
 
@@ -2209,6 +2210,6 @@ int __cdecl wrap_serial_diag(SerialDiag *out)
                                     (u32)0, 0u)) {
         ring3_fault_kill();   /* 戻らない */
     }
-    if (!out) return OS32_ERR_INVAL; serial_diag_get(&out->oe, &out->fe, &out->pe, &out->overflow); return 0;
+    return kapi_serial_diag(out);
 }
 

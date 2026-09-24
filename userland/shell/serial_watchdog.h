@@ -93,6 +93,37 @@ int serial_watchdog_decide(unsigned long elapsed_ticks, int acked);
 #define RSH_ESC_JUNK  2           /* この行は実行しない */
 int rsh_esc_classify(int ch, int from_serial, int at_line_start, int followed);
 
+/* ------------------------------------------------------------------------ */
+/*  rshell の 1 行の組み立て (レビュー往復 1、Codex 8)                        */
+/*                                                                          */
+/*  ESC を含んで拒否した行は、**本当の行末 (\n / \r) まで**拒否のまま読み捨て */
+/*  る。受信に間が空いても解かない (解くと残りが次の行として実行される)。    */
+/*  間が RSH_JUNK_IDLE_TICKS 続いたら、行末が来なくても拒否のまま閉じる。    */
+/*  拒否していない行は従来どおり、短い空回りで行が終わる。                   */
+/* ------------------------------------------------------------------------ */
+#define RSH_JUNK_IDLE_TICKS 200   /* 2 秒 */
+#define RSH_LINE_MORE 0           /* 続きを待つ */
+#define RSH_LINE_DONE 1           /* 行が終わった */
+#define RSH_LINE_EXIT 2           /* rshell を閉じる */
+
+struct rsh_line {
+    char *buf;
+    int  cap;
+    int  pos;
+    int  overflow;     /* 上限を越えた (実行しない) */
+    int  junk;         /* ESC を含んだ (実行しない) */
+    int  local;        /* 本体キーボードのバイトを含んだ */
+    int  bytes;        /* 受け取ったバイト数 (EOT を返すかの判定) */
+};
+void rsh_line_begin(struct rsh_line *l, char *buf, int cap);
+/* 1 バイト入れる。at_start = 行の 1 文字目、followed = 行頭のシリアルの ESC の
+ * 後ろに続きが来たか (それ以外は 0)。戻りは RSH_LINE_*。buf は常に NUL 終端。 */
+int  rsh_line_feed(struct rsh_line *l, int ch, int from_serial, int at_start,
+                   int followed);
+/* バイトが来なかった。idle_ticks = 最後のバイトからの tick。戻りは
+ * RSH_LINE_MORE (待ち続ける) / RSH_LINE_DONE。 */
+int  rsh_line_idle(const struct rsh_line *l, unsigned long idle_ticks);
+
 /* `sfs run <コマンド行>` の行から子のコマンド行を取り出す。行全体が
  * 空白* "sfs" 空白+ "run" 空白+ <1 文字以上> の形でなければ NULL。
  * (`a && sfs run b` のような入れ子は受けない — 決裁 3A「ホストから送った

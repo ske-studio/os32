@@ -41,6 +41,8 @@ Windows 側の Python (pyserial 入り) で動かす:
 従来どおり — セッション外の `cat` の本文で要求が動かない)。セッション中の
 ゲストの出力は溜められ、終わりに長さ付きのフレームで届く (`sfs: exit=N` を含む)。
 終了コードはゲストの子の終了コードが 0 なら 0、それ以外は 1。
+**ゲストからの書き込みは既定で禁止** — push の宛先などは `--allow-write <相対パス>`
+(複数可) で明示する (票 B-7')。`--serve-host` 無しの `sfs run` は送らずに断る。
 プロトコルは tools/serialfs_host.py と fs/sfs_proto.h。
 NP21/W (ai-debug) では `--port aidebug:http://127.0.0.1:8025` で COM1 を HTTP の
 /api/serial/read・write 越しに使える (ini は変えない。/api/cmd と同時に使わない)。
@@ -143,6 +145,10 @@ class AidebugPort(object):
             obj = json.loads(r.read().decode("utf-8"))
         return bytes.fromhex(obj.get("hex", ""))
 
+    @property
+    def in_waiting(self):
+        return len(self.pending)
+
     def read(self, n):
         deadline = time.monotonic() + self.timeout
         while not self.pending:
@@ -178,6 +184,16 @@ class AidebugPort(object):
 AIDEBUG_PREFIX = "aidebug:"
 
 
+def read_size(port):
+    """来ている分 (in_waiting)、無ければ 1。serialfs_host.read_size と同じ規則
+    (こちらは serialfs_host が無くても動くように持つ)。"""
+    try:
+        n = int(getattr(port, "in_waiting", 0) or 0)
+    except Exception:  # noqa: BLE001
+        n = 0
+    return n if n > 0 else 1
+
+
 def open_port(name, baud):
     if name.startswith(AIDEBUG_PREFIX):
         # NP21/W の COM1 (速度は模擬されないので baud は使わない)
@@ -191,7 +207,9 @@ def read_until_eot(port, timeout_s):
     buf = bytearray()
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        chunk = port.read(256)
+        # **来ている分だけ読む。** read(256) は 256 バイト揃うか timeout (0.2s)
+        # まで戻らないので、短い応答ごとに 200ms 止まっていた (Fable M1)。
+        chunk = port.read(read_size(port))
         if chunk:
             i = chunk.find(EOT)
             if i >= 0:
@@ -415,6 +433,11 @@ def main():
     ap.add_argument("--serve-host", metavar="DIR", default=None,
                     help="`sfs run ...` の行のあいだ DIR をゲストの /host として"
                          "シリアル越しに出す (票 TASK_SERIAL_HOSTFS 部品 B)")
+    ap.add_argument("--allow-write", metavar="RELPATH", action="append",
+                    default=[],
+                    help="--serve-host の下でゲストが書いてよいパス (ルート相対、"
+                         "その下も含む。複数可)。**既定は書き込み禁止** — "
+                         "push の宛先はここに含める (票 B-7')")
     sub = ap.add_subparsers(dest="mode", required=True)
     p_cmd = sub.add_parser("cmd", help="1 コマンドを送って応答を出す")
     p_cmd.add_argument("line", nargs="+")
@@ -471,8 +494,15 @@ def run_line(args, port, line, server=None, out=None):
     だけで、本文に `ENQ 'S' 'F'` が並んでいても何も答えない。
     """
     out = out or sys.stdout
-    if (server is not None and serialfs_host is not None
-            and serialfs_host.sfs_child(line) is not None):
+    is_sfs = (serialfs_host is not None and
+              serialfs_host.sfs_child(line) is not None)
+    if is_sfs and server is None:
+        # 答える者が居ないのに送ると、ゲストは HELLO の期限 (約 10 秒) まで
+        # 線を占有して断るだけ (Fable m4)。送らずに断る。
+        print("[rshell_serial] 'sfs run' needs --serve-host DIR "
+              "(not sent)")
+        return 2, ""
+    if is_sfs:
         r = serialfs_host.serve_line(port, line, server, args.timeout, out)
         text = r["text"].decode("utf-8", errors="replace")
         if not r["eot"]:
@@ -486,8 +516,9 @@ def run_line(args, port, line, server=None, out=None):
             print("[rshell_serial] sfs: session did not run (no EXIT frame)")
             return 1, text
         code, dropped, flags = r["exit"]
-        print("[rshell_serial] sfs exit=%d sent=%d late=%d bad_frames=%d%s%s"
-              % (code, r["sent"], r["late"], r["bad_frames"],
+        print("[rshell_serial] sfs exit=%d sent=%d late=%d after_bye=%d "
+              "bad_frames=%d%s%s"
+              % (code, r["sent"], r["late"], r["after_bye"], r["bad_frames"],
                  " log_dropped=%d" % dropped if dropped else "",
                  " line_not_quiet" if flags & serialfs_host.XF_NOT_QUIET
                  else ""))
@@ -510,8 +541,12 @@ def make_server(args):
         return None
     if serialfs_host is None:
         raise SystemExit("--serve-host には tools/serialfs_host.py が要る")
-    return serialfs_host.Server(serialfs_host.HostFS(args.serve_host),
-                                log=lambda m: print(m))
+    fs = serialfs_host.HostFS(args.serve_host,
+                              allow_write=args.allow_write or ())
+    print("[serve-host] %s (%s, writable: %s)" % (
+        args.serve_host, "fd-pinned" if fs.secure else "path-checked",
+        ", ".join(args.allow_write) if args.allow_write else "none"))
+    return serialfs_host.Server(fs, log=lambda m: print(m))
 
 
 def run_mode(args, port, baud):

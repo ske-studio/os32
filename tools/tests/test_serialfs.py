@@ -3,7 +3,7 @@
 記録: tools/tests/serialfs_tdd.md
 票  : docs/tasks/realhw/TASK_SERIAL_HOSTFS.md 部品 B (§1-v2 / §1-v3 / ユーザー決裁 2026-09-24)
 
-4 つの段:
+5 つの段:
 
   C   ゲスト側の実物 (fs/sfs_proto.c・fs/sfs_client.c・fs/serialfs.c・
       userland/shell/serial_watchdog.c・userland/system/hsync_bootold.inc) を
@@ -13,6 +13,10 @@
       ホストの停止 / ごみの連続 / ERR / 契約違反の応答)
   GATE drivers/serial.c のゲート (tools/tests/serial_gate_host.c)。セッション中に
       rshell へフレームが漏れない・出力は保留リングへ・下ろすと受信を捨てる
+  SESSION fs/serialfs_session.c (tools/tests/serialfs_session_host.c)。実物の
+      drivers/serial.c・fs/sfs_*.c と組み、HELLO → mount → BYE / LOG / EXIT の
+      流れ、HELLO が通らなかった回も隔離してから下ろす (決定 11)、EXIT の後に
+      保留へ入った文字も流す (Fable m6)、隔離の上限と NOT_QUIET
   PY  ホスト側の実物 (tools/serialfs_host.py・tools/rshell_serial.py): 振り分け
       (EOT とフレームの混在)、`..` と symlink の脱出の拒否、応答のキャッシュ
       (再送で副作用が二重にならない)、期限切れの応答を送らない、BYE の後は
@@ -48,6 +52,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 TOOLS = ROOT / "tools"
 HARNESS = ROOT / "tools/tests/serialfs_host.c"
 GATE_HARNESS = ROOT / "tools/tests/serial_gate_host.c"
+SESSION_HARNESS = ROOT / "tools/tests/serialfs_session_host.c"
 
 C_SRCS = {
     "fs/sfs_proto.c": "sfs_proto.c",
@@ -66,6 +71,8 @@ C_CASES = ["crc_and_frames", "timing_and_seq", "vfs_contract", "mount_permit",
            "bootold_rules"]
 GATE_CASES = ["gate_tx", "hold_overflow", "gate_rx", "gate_init_refused",
               "isr_counts"]
+SESSION_CASES = ["flow", "hello_fail_quiet", "hello_fail_flood", "end_late_hold",
+                 "end_not_quiet"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D_DEFAULT_SOURCE", "-D__cdecl=",
@@ -122,6 +129,48 @@ def gate_build(tmp, mutated=None, name="gate"):
     cmd = ["gcc", *flags_for(mutated), "-I" + str(work), "-I" + str(ROOT / "include"),
            "-I" + str(ROOT / "drivers"), "-I" + str(ROOT / "sdk/include/os32"),
            str(GATE_HARNESS), "-o", str(exe)]
+    subprocess.run(cmd, cwd=ROOT, check=True,
+                   stderr=subprocess.DEVNULL if mutated is not None else None)
+    return exe
+
+
+# セッションの試験は hlt で tick を進め、IF=1 で待てる (ゲートの偽物は IF=0)
+FAKE_ARCH_IO_SESSION = FAKE_ARCH_IO.replace(
+    "static inline int _irq_enabled(void) { return 0; }",
+    "int fake_irq_enabled(void);\n"
+    "static inline int _irq_enabled(void) { return fake_irq_enabled(); }").replace(
+    "static inline void _halt(void) {}",
+    "void fake_halt(void);\nstatic inline void _halt(void) { fake_halt(); }").replace(
+    "static inline void _idle(void) {}",
+    "static inline void _idle(void) { fake_halt(); }")
+SESSION_SRCS = ("drivers/serial.c", "fs/sfs_proto.c", "fs/sfs_client.c",
+                "fs/serialfs_session.c", "lib/crc32.c")
+
+
+def session_build(tmp, mutated=None, name="session"):
+    """fs/serialfs_session.c を実物の drivers/serial.c・fs/sfs_*.c と組む。
+    kstring.h (glibc の string.h と衝突) と appslot.h (カーネルの構造体) は
+    写しのディレクトリの小さな偽物で影にする。"""
+    work = pathlib.Path(tmp) / name
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    (work / "arch_io.h").write_text(FAKE_ARCH_IO_SESSION, encoding="utf-8")
+    (work / "platform_io.h").write_text(FAKE_PLATFORM_IO, encoding="utf-8")
+    (work / "kstring.h").write_text(
+        "#ifndef KSTRING_H\n#define KSTRING_H\n"
+        "int kstrcmp(const char *a, const char *b);\n#endif\n", encoding="utf-8")
+    (work / "appslot.h").write_text(
+        "#ifndef APPSLOT_H\n#define APPSLOT_H\n#define APP_ID_SHELL 1\n#endif\n",
+        encoding="utf-8")
+    for rel in SESSION_SRCS:
+        text = (mutated or {}).get(rel, (ROOT / rel).read_text(encoding="utf-8"))
+        (work / pathlib.Path(rel).name).write_text(text, encoding="utf-8")
+    exe = work / "serialfs-session-host"
+    cmd = ["gcc", *flags_for(mutated), "-I" + str(work), "-I" + str(ROOT / "include"),
+           "-I" + str(ROOT / "drivers"), "-I" + str(ROOT / "fs"),
+           "-I" + str(ROOT / "lib"), "-I" + str(ROOT / "sdk/include/os32"),
+           str(SESSION_HARNESS), "-o", str(exe)]
     subprocess.run(cmd, cwd=ROOT, check=True,
                    stderr=subprocess.DEVNULL if mutated is not None else None)
     return exe
@@ -264,58 +313,157 @@ def mk_tree(tmp):
     return root
 
 
+def expect_err(h, fn, code, what):
+    try:
+        fn()
+        check(False, "%s: accepted" % what)
+    except h.SfsError as e:
+        check(e.code == code, "%s: code %d (want %d)" % (what, e.code, code))
+    except OSError as e:
+        got = h.ERRNO_MAP.get(e.errno, h.ERR_IO)
+        check(got == code, "%s: errno %d -> %d (want %d)" % (what, e.errno, got, code))
+
+
+def list_all(h, fs, wire):
+    names, cookie, pages = [], 0, 0
+    while True:
+        st, body = fs.list(wire, cookie)
+        nxt = struct.unpack_from("<I", body)[0]
+        check(len(body) + 4 <= h.MAX_PAYLOAD, "list: page fits")
+        pos = 4
+        while pos < len(body):
+            k, sz, nl = struct.unpack_from("<BIB", body, pos)
+            names.append((body[pos + 6:pos + 6 + nl], k))
+            pos += 6 + nl
+        pages += 1
+        if nxt == 0:
+            return names, pages
+        check(nxt > cookie, "list: cookie advances")
+        cookie = nxt
+
+
 def case_paths(h, r):
+    """`..` と symlink の脱出、固定の作り (dir_fd + O_NOFOLLOW) とパスの作り。"""
     with tempfile.TemporaryDirectory(prefix="os32-sfs-paths-") as tmp:
         root = mk_tree(tmp)
-        fs = h.HostFS(str(root))
-        for bad in (b"/../outside/secret", b"/sub/../../outside", b"/.",
-                    b"/sub/..", b"relative", b"/a\\b", b"/a\x00b",
-                    b"/escape/secret", b"/escape"):
+        for secure in (True, False):
+            tag = "fd" if secure else "path"
+            fs = h.HostFS(str(root), allow_write=["sub", "w.bin"], secure=secure)
+            check(fs.secure == secure, "%s: mode" % tag)
+            for bad in (b"/../outside/secret", b"/sub/../../outside", b"/.",
+                        b"/sub/..", b"relative", b"/a\\b", b"/a\x00b"):
+                expect_err(h, lambda: fs.stat(bad), h.ERR_INVAL, "%s: %r" % (tag, bad))
+            # symlink で根の外へ: どちらの作りでも断る
+            expect_err(h, lambda: fs.stat(b"/escape/secret"), h.ERR_INVAL,
+                       "%s: symlink escape stat" % tag)
+            expect_err(h, lambda: fs.read(b"/escape/secret", 0, 1), h.ERR_INVAL,
+                       "%s: symlink escape read" % tag)
+            expect_err(h, lambda: fs.list(b"/escape", 0), h.ERR_INVAL,
+                       "%s: symlink escape list" % tag)
+            # 根そのものは変えない
+            for op in (lambda: fs.unlink(b"/"), lambda: fs.rmdir(b"/"),
+                       lambda: fs.rename(b"/", b"/x"),
+                       lambda: fs.write(b"/", 0, 0, b"")):
+                expect_err(h, op, h.ERR_INVAL, "%s: root modification" % tag)
+            # 操作の結果
+            st, body = fs.stat(b"/hello.txt")
+            kind, size, mtime = struct.unpack("<BII", body)
+            check(kind == h.KIND_FILE and size == 4000 and mtime > 0, "%s: stat file" % tag)
+            st, body = fs.stat(b"/many")
+            check(struct.unpack("<BII", body)[0] == h.KIND_DIR, "%s: stat dir" % tag)
+            st, body = fs.stat(b"/")
+            check(struct.unpack("<BII", body)[0] == h.KIND_DIR, "%s: stat root" % tag)
+            names, pages = list_all(h, fs, b"/many")
+            check(len(names) == 150 and [n for n, _ in names] == sorted(n for n, _ in names)
+                  and pages > 1, "%s: list %d names in %d pages" % (tag, len(names), pages))
+            n, data = fs.read(b"/hello.txt", 3990, 100)
+            check(n == 10, "%s: read at EOF" % tag)
+            n, data = fs.read(b"/hello.txt", 0, 5000)
+            check(n == h.READ_MAX, "%s: read is clamped to READ_MAX" % tag)
+            expect_err(h, lambda: fs.read(b"/many", 0, 1), h.ERR_ISDIR, "%s: read dir" % tag)
+            # **書き込みは既定で禁止**。--allow-write のパスとその下だけ
+            expect_err(h, lambda: fs.write(b"/hello.txt", 0, h.WF_TRUNC, b"x"),
+                       h.ERR_ROFS, "%s: write outside allow" % tag)
+            expect_err(h, lambda: fs.unlink(b"/gone.txt"), h.ERR_ROFS,
+                       "%s: unlink outside allow" % tag)
+            expect_err(h, lambda: fs.mkdir(b"/newdir"), h.ERR_ROFS,
+                       "%s: mkdir outside allow" % tag)
+            expect_err(h, lambda: fs.rename(b"/sub/a", b"/hello.txt"), h.ERR_ROFS,
+                       "%s: rename into outside allow" % tag)
+            expect_err(h, lambda: fs.write(b"/subx", 0, h.WF_TRUNC, b"x"), h.ERR_ROFS,
+                       "%s: allow is per component (subx is not sub)" % tag)
+            check(fs.write(b"/w.bin", 0, h.WF_TRUNC, b"abc")[0] == 3, "%s: allowed file" % tag)
+            check(fs.write(b"/w.bin", 3, 0, b"de")[0] == 2 and
+                  (root / "w.bin").read_bytes() == b"abcde", "%s: write at offset" % tag)
+            check(fs.mkdir(b"/sub/d")[0] == 0 and fs.write(b"/sub/d/f", 0, h.WF_TRUNC, b"1")[0] == 1,
+                  "%s: allowed subtree" % tag)
+            check(fs.rename(b"/sub/d/f", b"/sub/g")[0] == 0, "%s: rename inside allow" % tag)
+            check(fs.unlink(b"/sub/g")[0] == 0 and fs.rmdir(b"/sub/d")[0] == 0,
+                  "%s: unlink / rmdir inside allow" % tag)
+            expect_err(h, lambda: fs.unlink(b"/sub"), h.ERR_ISDIR, "%s: unlink dir" % tag)
+            (root / "w.bin").unlink()
+        # `--allow-write /` だけが根の全体を開く。壊れた指定は起動時に断る
+        fs_all = h.HostFS(str(root), allow_write=["/"])
+        check(fs_all.write(b"/w2.bin", 0, h.WF_TRUNC, b"q")[0] == 1 and
+              fs_all.unlink(b"/w2.bin")[0] == 0, "allow /: whole root writable")
+        for bad_allow in ("..", "a/../b", "a\\..\\b", "x\x00"):
             try:
-                fs.resolve(bad)
-                check(False, "paths: %r accepted" % bad)
-            except h.SfsError as e:
-                check(e.code == h.ERR_INVAL, "paths: %r code %d" % (bad, e.code))
-        check(fs.resolve(b"/") == fs.root, "paths: root")
-        check(fs.resolve(b"//sub//") == os.path.join(fs.root, b"sub"),
-              "paths: empty components folded")
-        check(fs.resolve(b"/inside_link").endswith(b"inside_link"),
-              "paths: symlink inside the root is fine")
-        for op in (lambda: fs.unlink(b"/"), lambda: fs.rmdir(b"/"),
-                   lambda: fs.rename(b"/", b"/x"), lambda: fs.write(b"/", 0, 0, b"")):
-            try:
-                op()
-                check(False, "paths: root modification accepted")
-            except h.SfsError:
+                h.HostFS(str(root), allow_write=[bad_allow])
+                check(False, "allow %r accepted" % bad_allow)
+            except ValueError:
                 pass
-        # 操作の結果
-        st, body = fs.stat(b"/hello.txt")
-        kind, size, mtime = struct.unpack("<BII", body)
-        check(kind == h.KIND_FILE and size == 4000 and mtime > 0, "stat file")
-        st, body = fs.stat(b"/many")
-        check(struct.unpack("<BII", body)[0] == h.KIND_DIR, "stat dir")
-        # 列挙は頁に分かれ、cookie は前へ進み、全部そろう
-        names, cookie, pages = [], 0, 0
-        while True:
-            st, body = fs.list(b"/many", cookie)
-            nxt = struct.unpack_from("<I", body)[0]
-            check(len(body) + 4 <= h.MAX_PAYLOAD, "list: page fits")
-            pos = 4
-            while pos < len(body):
-                k, sz, nl = struct.unpack_from("<BIB", body, pos)
-                names.append(body[pos + 6:pos + 6 + nl])
-                pos += 6 + nl
-            pages += 1
-            if nxt == 0:
-                break
-            check(nxt > cookie, "list: cookie advances")
-            cookie = nxt
-        check(len(names) == 150 and names == sorted(names) and pages > 1,
-              "list: %d names in %d pages" % (len(names), pages))
-        n, data = fs.read(b"/hello.txt", 3990, 100)
-        check(n == 10 and data == b"the host\n"[-10:] or n == 10, "read at EOF")
-        n, data = fs.read(b"/hello.txt", 0, 5000)
-        check(n == h.READ_MAX, "read is clamped to READ_MAX")
+        # 固定の作りは**根の中を指す symlink も辿らない** (差し替えの競合を作らない)
+        fs = h.HostFS(str(root), allow_write=["sub"])
+        st, body = fs.stat(b"/inside_link")
+        check(struct.unpack("<BII", body)[0] == h.KIND_OTHER, "fd: symlink is OTHER")
+        expect_err(h, lambda: fs.read(b"/inside_link", 0, 1), h.ERR_INVAL,
+                   "fd: symlink not followed on read")
+        os.symlink(str(root / "outside_target"), str(root / "sub" / "lnk"))
+        expect_err(h, lambda: fs.write(b"/sub/lnk", 0, h.WF_TRUNC, b"x"), h.ERR_INVAL,
+                   "fd: write through a symlink refused")
+        check(not (root / "outside_target").exists(), "fd: nothing written through the link")
+        # 検査と操作の間で要素を symlink に差し替える: 固定の作りは辿らない
+        (root / "sub" / "real").mkdir()
+        (root / "sub" / "real" / "f").write_bytes(b"in")
+        fs2 = h.HostFS(str(root), allow_write=["sub"])
+        comps = fs2._comps(b"/sub/real/f")
+        orig_open_dir = fs2._open_dir
+
+        def swapping_open_dir(c):
+            # 最後の親を開く直前に real を根の外への symlink に差し替える
+            if list(c) == [b"sub", b"real"]:
+                os.rename(str(root / "sub" / "real"), str(root / "sub" / "real.bak"))
+                os.symlink(str(pathlib.Path(tmp) / "outside"), str(root / "sub" / "real"))
+            return orig_open_dir(c)
+        fs2._open_dir = swapping_open_dir
+        expect_err(h, lambda: fs2.read(b"/sub/real/f", 0, 10), h.ERR_INVAL,
+                   "fd: swapped component is not followed")
+        check(comps == [b"sub", b"real", b"f"], "fd: comps")
+
+
+def case_ntpath(h, r):
+    """Windows のホストの判定 (ntpath)。要素単位で比べ、`C:\\hostile` を `C:\\host`
+    の中と読まない。ドライブ違い・`:` (代替データストリーム) も断る。"""
+    import ntpath
+    fs = h.HostFS(b"C:\\host", pm=ntpath, secure=False)
+    check(fs.root == b"C:\\host", "nt: root %r" % fs.root)
+    check(fs.contained(b"C:\\host"), "nt: root itself")
+    check(fs.contained(b"C:\\host\\a\\b"), "nt: child")
+    check(fs.contained(b"c:\\HOST\\a"), "nt: case-insensitive")
+    check(not fs.contained(b"C:\\hostile\\x"), "nt: prefix sibling is outside")
+    check(not fs.contained(b"C:\\host\\..\\x"), "nt: .. outside")
+    check(not fs.contained(b"D:\\host\\a"), "nt: other drive")
+    check(fs.resolve(b"/a/b") == b"C:\\host\\a\\b", "nt: join %r" % fs.resolve(b"/a/b"))
+    expect_err(h, lambda: fs.resolve(b"/a:b"), h.ERR_INVAL, "nt: drive-like colon")
+    expect_err(h, lambda: fs.resolve(b"/file.txt:stream"), h.ERR_INVAL, "nt: ADS colon")
+    expect_err(h, lambda: fs.resolve(b"/a\\..\\..\\x"), h.ERR_INVAL, "nt: backslash")
+    top = h.HostFS(b"C:\\", pm=ntpath, secure=False)
+    check(top.contained(b"C:\\x") and not top.contained(b"D:\\x"), "nt: drive root")
+    # POSIX でも接頭辞の兄弟は外
+    import posixpath
+    px = h.HostFS(b"/srv/host", pm=posixpath, secure=False)
+    check(not px.contained(b"/srv/hostile/x") and px.contained(b"/srv/host/x"),
+          "posix: prefix sibling is outside")
 
 
 def req(h, t, sid, seq, payload):
@@ -327,10 +475,13 @@ def pth(p):
     return bytes([len(p)]) + p
 
 
+WRITABLE = ["renamed.txt", "hello.txt", "newdir", "gone.txt", "w.bin"]
+
+
 def case_server(h, r):
     with tempfile.TemporaryDirectory(prefix="os32-sfs-server-") as tmp:
         root = mk_tree(tmp)
-        sv = h.Server(h.HostFS(str(root)))
+        sv = h.Server(h.HostFS(str(root), allow_write=WRITABLE))
         hello = req(h, h.T_HELLO, 0, 0, struct.pack("<HHI", 1, 512, 42))
         r1 = sv.handle(hello)
         sid = frames_of(h, r1)[0].sid
@@ -378,6 +529,11 @@ def case_server(h, r):
         sv.handle(req(h, h.T_WRITE, sid, 9,
                       struct.pack("<IB", 3, 0) + pth(b"/w.bin") + b"123"))
         check((root / "w.bin").read_bytes() == b"xyz123", "server: WRITE without TRUNC appends at offset")
+        # 許されていないパスへの書き込みは ROFS (中身は変わらない)
+        rr = frames_of(h, sv.handle(req(h, h.T_WRITE, sid, 10,
+                       struct.pack("<IB", 0, h.WF_TRUNC) + pth(b"/many/x") + b"no")))[0]
+        check(struct.unpack_from("<i", rr.payload)[0] == h.ERR_ROFS and
+              not (root / "many" / "x").exists(), "server: write outside --allow-write -> ROFS")
         # キャッシュは直前の 1 件だけ (前の番号の再送は実行し直す)
         ex = sv.executed
         sv.handle(req(h, h.T_STAT, sid, 5, pth(b"/")))
@@ -391,6 +547,9 @@ def case_server(h, r):
         sv.handle(req(h, h.T_EXIT, sid, 0, struct.pack("<iII", 3, 0, 0)))
         check(bytes(sv.log_text) == b"log line\n" and sv.exit == (3, 0, 0),
               "server: LOG / EXIT after BYE")
+        # 行ごとに結果を空にする (REPL で前の EXIT を取り違えない)
+        sv.begin_line()
+        check(sv.exit is None and not sv.log_text, "server: begin_line resets")
         # 新しいセッション。古い ID には答えない
         h2 = req(h, h.T_HELLO, 0, 0, struct.pack("<HHI", 1, 512, 43))
         sid2 = frames_of(h, sv.handle(h2))[0].sid
@@ -407,21 +566,32 @@ def case_server(h, r):
               "server: .. rejected on the wire")
 
 
-class GuestPort(object):
-    """rshell_serial が話す相手の偽物。書かれた応答を見て次の要求を出す。
+class VClock(object):
+    def __init__(self):
+        self.t = 0.0
 
-    script(h, port, frame) は応答 1 つごとに呼ばれ、次に送るバイトを返す。
-    """
+    def __call__(self):
+        return self.t
 
-    def __init__(self, h, first, script, clock):
+
+class ScriptedLine(object):
+    """偽の線 (仮想の時計)。ゲストの台本は、ホストが書いた応答を見て次のバイトを
+    **届く時刻つきで**積む。serve_line の port と rx の両方を兼ねる。"""
+
+    def __init__(self, h, clock, first, step):
         self.h = h
-        self.q = bytearray()
-        self.writes = []
-        self.first = first
-        self.script = script
         self.clock = clock
+        self.first = first
+        self.step = step
+        self.arrivals = []       # (t, bytes)
+        self.writes = []
         self.dm = h.Demux()
 
+    def at(self, dt, data):
+        self.arrivals.append((self.clock.t + dt, bytes(data)))
+        self.arrivals.sort(key=lambda a: a[0])
+
+    # port
     def reset_input_buffer(self):
         pass
 
@@ -431,48 +601,41 @@ class GuestPort(object):
     def write(self, data):
         self.writes.append(bytes(data))
         if len(self.writes) == 1:
-            self.q += self.first(data)
+            self.first(self, data)
             return
-        for e in self.dm.feed(data, 0.0):
+        for e in self.dm.feed(data, self.clock.t):
             if e[0] == "frame":
-                self.q += self.script(e[1])
+                self.step(self, e[1])
 
-    def read(self, n):
-        if not self.q:
-            self.clock.t += 0.01
-            return b""
-        out = bytes(self.q[:n])
-        del self.q[:n]
+    # rx
+    def get(self, timeout):
+        """届いた分を返す。無ければ (timeout > 0 なら) 次の到着まで時計を進める。"""
+        if timeout > 0 and not any(t <= self.clock.t for t, _ in self.arrivals):
+            if self.arrivals:
+                self.clock.t = max(self.clock.t, self.arrivals[0][0])
+            else:
+                self.clock.t += timeout
+        out = [(t, d) for t, d in self.arrivals if t <= self.clock.t]
+        self.arrivals = [(t, d) for t, d in self.arrivals if t > self.clock.t]
         return out
-
-
-class Clock(object):
-    def __init__(self, step=0.0):
-        self.t = 0.0
-        self.step = step
-
-    def __call__(self):
-        self.t += self.step
-        return self.t
 
 
 def guest_script(h, log=b"hsync: ok\nsfs: exit=0\n", code=0):
     state = {"sid": 0}
 
-    def first(line):
-        return (b"> " + line.rstrip(b"\n") + b"\n" +
+    def first(line, data):
+        line.at(0.01, b"> " + data.rstrip(b"\n") + b"\n" +
                 h.encode(h.T_HELLO, 0, 0, struct.pack("<HHI", 1, 512, 99)))
 
-    def step(fr):
+    def step(line, fr):
         if fr.type == (h.T_HELLO | h.T_RESP):
             state["sid"] = fr.sid
-            return h.encode(h.T_STAT, fr.sid, 1, pth(b"/hello.txt"))
-        if fr.type == (h.T_STAT | h.T_RESP):
+            line.at(0.01, h.encode(h.T_STAT, fr.sid, 1, pth(b"/hello.txt")))
+        elif fr.type == (h.T_STAT | h.T_RESP):
             sid = state["sid"]
-            return (h.encode(h.T_BYE, sid, 0) + h.encode(h.T_LOG, sid, 0, log) +
+            line.at(0.01, h.encode(h.T_BYE, sid, 0) + h.encode(h.T_LOG, sid, 0, log) +
                     h.encode(h.T_EXIT, sid, 0, struct.pack("<iII", code, 0, 0)) +
                     b"\x04")
-        return b""
     return first, step
 
 
@@ -480,59 +643,243 @@ class Args(object):
     timeout = 30.0
 
 
+def serve(h, line, sv, clock, text="sfs run hsync boot", timeout=30.0):
+    return h.serve_line(line, text, sv, timeout, io.StringIO(), now=clock,
+                        sleep=lambda s: None, rx=line)
+
+
 def case_serve_line(h, r):
     with tempfile.TemporaryDirectory(prefix="os32-sfs-serve-") as tmp:
         root = mk_tree(tmp)
         # 正常: HELLO → STAT → BYE / LOG / EXIT → EOT
-        clock = Clock()
+        clock = VClock()
         first, step = guest_script(h)
-        port = GuestPort(h, first, step, clock)
+        line = ScriptedLine(h, clock, first, step)
         sv = h.Server(h.HostFS(str(root)), now=clock)
         out = io.StringIO()
-        res = h.serve_line(port, "sfs run hsync boot", sv, 30.0, out,
-                           now=clock, sleep=lambda s: None)
+        res = h.serve_line(line, "sfs run hsync boot", sv, 30.0, out, now=clock,
+                           sleep=lambda s: None, rx=line)
         check(res["eot"] and res["exit"] == (0, 0, 0), "serve: exit frame %r" % res)
         check(res["sent"] == 2, "serve: two responses sent")
         check("> sfs run hsync boot" in out.getvalue() and
               "hsync: ok" in out.getvalue(), "serve: echo + log shown")
         check(sv.sid == 0, "serve: session closed at EOT")
-        # run_line (rshell_serial) の結果: 子が 0 なら 0
-        clock = Clock()
-        first, step = guest_script(h, code=2)
-        port = GuestPort(h, first, step, clock)
-        sv = h.Server(h.HostFS(str(root)), now=clock)
+        # 次の行 (REPL): EXIT が来なければ exit は None (前の行の結果を持ち越さない)
+        clock2 = VClock()
+
+        def first_noexit(ln, data):
+            ln.at(0.01, b"> sfs run x\nsfs: session not started (-1)\n\x04")
+        line2 = ScriptedLine(h, clock2, first_noexit, lambda ln, fr: None)
+        res2 = serve(h, line2, sv, clock2, "sfs run x")
+        check(res2["eot"] and res2["exit"] is None, "serve: REPL result reset %r" % res2)
+        check(b"session not started" in res2["text"],
+              "serve: raw text between the line and EOT is output (HELLO failed)")
+
+        # **20 秒止まった後に、滞留した再送と BYE** (Codex 1)。STAT の処理が
+        # 20 秒かかるあいだに、ゲストは再送を 3 回・BYE・LOG・EXIT・EOT を送る。
+        # 到着時刻で数えるので、止まっていた処理の応答も再送への応答も送らない。
+        clock3 = VClock()
+        sv3 = h.Server(h.HostFS(str(root)), now=clock3)
+        slow = {"armed": False}
+        real_stat = sv3.fs.stat
+
+        def slow_stat(wire):
+            if slow["armed"]:
+                slow["armed"] = False
+                clock3.t += 20.0
+            return real_stat(wire)
+        sv3.fs.stat = slow_stat
+        st3 = {"sid": 0}
+
+        def first3(ln, data):
+            ln.at(0.01, b"> sfs run hsync boot\n" +
+                  h.encode(h.T_HELLO, 0, 0, struct.pack("<HHI", 1, 512, 7)))
+
+        def step3(ln, fr):
+            if fr.type == (h.T_HELLO | h.T_RESP):
+                sid = st3["sid"] = fr.sid
+                q = h.encode(h.T_STAT, sid, 1, pth(b"/hello.txt"))
+                slow["armed"] = True
+                ln.at(0.01, q)
+                for k in (1, 2, 3):
+                    ln.at(0.01 + 2.8 * k, q)      # 再送 (同じ番号)
+                ln.at(12.0, h.encode(h.T_BYE, sid, 0) +
+                      h.encode(h.T_LOG, sid, 0, b"sfs: line declared dead\n") +
+                      h.encode(h.T_EXIT, sid, 0, struct.pack("<iII", 1, 0, h.XF_DEAD)) +
+                      b"\x04")
+        line3 = ScriptedLine(h, clock3, first3, step3)
+        res3 = serve(h, line3, sv3, clock3)
+        check(len(line3.writes) == 2, "stall: only the command line and HELLO_R written "
+              "(%d writes)" % len(line3.writes))
+        check(res3["eot"] and res3["exit"] == (1, 0, h.XF_DEAD), "stall: EXIT %r" % res3)
+        check(res3["late"] >= 3 and sv3.executed == 1 and sv3.replayed == 0,
+              "stall: stale resends not even replayed %r executed=%d replayed=%d"
+              % (res3, sv3.executed, sv3.replayed))
+        check(res3["after_bye"] >= 1, "stall: the slow answer is dropped (BYE ahead)")
+
+        # 処理が期限 (2 秒) を越えた: BYE が無くてもその応答は送らない。
+        # ゲストの再送 (到着は新しい) には保存した応答で答える
+        clock7 = VClock()
+        sv7 = h.Server(h.HostFS(str(root)), now=clock7)
+        real7 = sv7.fs.stat
+        slow7 = {"armed": False}
+
+        def slow_stat7(wire):
+            if slow7["armed"]:
+                slow7["armed"] = False
+                clock7.t += 2.5
+            return real7(wire)
+        sv7.fs.stat = slow_stat7
+        st7 = {"sid": 0, "resent": False}
+
+        def step7(ln, fr):
+            if fr.type == (h.T_HELLO | h.T_RESP):
+                sid = st7["sid"] = fr.sid
+                q = h.encode(h.T_STAT, sid, 1, pth(b"/hello.txt"))
+                slow7["armed"] = True
+                ln.at(0.01, q)
+                ln.at(2.6, q)                           # 期限切れの後の再送
+            elif fr.type == (h.T_STAT | h.T_RESP):
+                sid = st7["sid"]
+                ln.at(0.01, h.encode(h.T_BYE, sid, 0) +
+                      h.encode(h.T_EXIT, sid, 0, struct.pack("<iII", 0, 0, 0)) +
+                      b"\x04")
+        line7 = ScriptedLine(h, clock7, first3, step7)
+        res7 = serve(h, line7, sv7, clock7)
+        check(len(line7.writes) == 3 and res7["late"] >= 1 and sv7.replayed == 1,
+              "slow: late answer dropped, resend answered from the cache %r writes=%d"
+              % (res7, len(line7.writes)))
+
+        # 期限の直前に BYE が届いていたら、期限内でも送らない
+        clock4 = VClock()
+        sv4 = h.Server(h.HostFS(str(root)), now=clock4)
+        real4 = sv4.fs.stat
+
+        def slow4(wire):
+            clock4.t += 0.5
+            return real4(wire)
+        sv4.fs.stat = slow4
+
+        def step4(ln, fr):
+            if fr.type == (h.T_HELLO | h.T_RESP):
+                sid = fr.sid
+                ln.at(0.01, h.encode(h.T_STAT, sid, 1, pth(b"/hello.txt")))
+                ln.at(0.2, h.encode(h.T_BYE, sid, 0) + b"\x04")
+        line4 = ScriptedLine(h, clock4, first3, step4)
+        res4 = serve(h, line4, sv4, clock4)
+        check(len(line4.writes) == 2 and res4["after_bye"] == 1,
+              "bye-ahead: response not sent after a queued BYE %r" % res4)
+
+        # run_line (rshell_serial) の結果: 子が 0 以外なら 1
+        clock5 = VClock()
+        first5, step5 = guest_script(h, code=2)
+        line5 = ScriptedLine(h, clock5, first5, step5)
+        sv5 = h.Server(h.HostFS(str(root)), now=clock5)
         saved = h.serve_line
-        h.serve_line = (lambda p, l, s, t, o: saved(p, l, s, t, o, now=clock,
-                                                    sleep=lambda x: None))
+        h.serve_line = (lambda p, l, s, t, o: saved(p, l, s, t, o, now=clock5,
+                                                    sleep=lambda x: None, rx=line5))
         try:
-            rc, text = r.run_line(Args(), port, "sfs run hsync boot", sv,
+            rc, text = r.run_line(Args(), line5, "sfs run hsync boot", sv5,
                                   out=io.StringIO())
         finally:
             h.serve_line = saved
         check(rc == 1, "run_line: nonzero child -> rc 1")
-        # 期限切れの応答は送らない (処理に 2 秒以上かかった)
-        clock = Clock(step=2.5)
-        first, step = guest_script(h)
-        gave_up = {"n": 0}
+        # --serve-host 無しの `sfs run` は送らずに断る (Fable m4)
+        line6 = ScriptedLine(h, VClock(), first5, step5)
+        rc, _ = r.run_line(Args(), line6, "sfs run hsync boot", None, out=io.StringIO())
+        check(rc == 2 and line6.writes == [], "run_line: sfs run without --serve-host not sent")
 
-        def first2(line):
-            gave_up["n"] += 1
-            return first(line)
-        port = GuestPort(h, first2, step, clock)
-        port.q += b""
-        sv = h.Server(h.HostFS(str(root)), now=clock)
-        orig_read = port.read
 
-        def read_then_eot(n):
-            d = orig_read(n)
-            if not d and len(port.writes) == 1 and clock.t > 20:
-                return b"\x04"          # ゲストはあきらめて EOT
-            return d
-        port.read = read_then_eot
-        res = h.serve_line(port, "sfs run x", sv, 1000.0, io.StringIO(),
-                           now=clock, sleep=lambda s: None)
-        check(res["late"] >= 1 and res["sent"] == 0 and len(port.writes) == 1,
-              "serve: late response not sent %r" % res)
+class FakeSerial(object):
+    """pyserial の read の振る舞いの模型: read(n) は n バイト揃えば即座に、
+    揃わなければ timeout まで待ってから有るだけ返す。**来ているのに待った**
+    回数 (0 < 有る < n) を stalls に数える (Fable M1 の 200ms)。"""
+
+    def __init__(self, reply):
+        self.buf = bytearray()
+        self.reply = reply
+        self.writes = []
+        self.stalls = 0
+        self.timeout = 0.2
+        import threading as _th
+        self.lock = _th.Lock()
+
+    @property
+    def in_waiting(self):
+        return len(self.buf)
+
+    def reset_input_buffer(self):
+        self.buf = bytearray()
+
+    def flush(self):
+        pass
+
+    def write(self, d):
+        self.writes.append(bytes(d))
+        more = self.reply(bytes(d))
+        with self.lock:
+            self.buf += more
+        return len(d)
+
+    def read(self, n):
+        import time as _t
+        with self.lock:
+            if 0 < len(self.buf) < n:
+                self.stalls += 1
+            out = bytes(self.buf[:n])
+            del self.buf[:n]
+        if not out:
+            _t.sleep(0.001)          # 実物は timeout まで待つ (空回りしない)
+        return out
+
+
+def case_read_size(h, r):
+    port = FakeSerial(lambda d: b"> ver\nOS32\n  Build: x\n\x04")
+    for _ in range(5):
+        text, ok = r.send_cmd(port, "ver", 1.0)
+        check(ok and "Build" in text, "send_cmd: reply")
+    check(port.stalls == 0, "send_cmd: no per-request wait (stalls=%d)" % port.stalls)
+    port = FakeSerial(lambda d: b"")
+    port.buf += b"x" * 37
+    rx = h.PortReceiver.__new__(h.PortReceiver)
+    rx.port = port
+    rx.now = lambda: 1.0
+    import queue as _q
+    rx.q = _q.Queue()
+    got = rx.step()
+    check(got == b"x" * 37 and port.stalls == 0, "receiver: reads what is waiting")
+    check(h.read_size(port) == 1, "read_size: 1 when nothing waits")
+    # 実物の PortReceiver (スレッド) で serve_line を回し、要求ごとに待たない
+    with tempfile.TemporaryDirectory(prefix="os32-sfs-rs-") as tmp:
+        root = mk_tree(tmp)
+        sv = h.Server(h.HostFS(str(root)))
+        dm = h.Demux()
+        st = {"sid": 0, "n": 0}
+
+        def reply(d):
+            if d.endswith(b"\n") and d.startswith(b"sfs"):
+                return (b"> " + d + h.encode(h.T_HELLO, 0, 0,
+                                             struct.pack("<HHI", 1, 512, 3)))
+            out = b""
+            for e in dm.feed(d, 0.0):
+                if e[0] != "frame":
+                    continue
+                fr = e[1]
+                if fr.type == (h.T_HELLO | h.T_RESP):
+                    st["sid"] = fr.sid
+                if st["n"] < 20:
+                    st["n"] += 1
+                    out += h.encode(h.T_STAT, st["sid"], st["n"], pth(b"/hello.txt"))
+                else:
+                    sid = st["sid"]
+                    out += (h.encode(h.T_BYE, sid, 0) +
+                            h.encode(h.T_EXIT, sid, 0, struct.pack("<iII", 0, 0, 0)) +
+                            b"\x04")
+            return out
+        port = FakeSerial(reply)
+        res = h.serve_line(port, "sfs run ls /host", sv, 10.0, io.StringIO())
+        check(res["eot"] and res["sent"] == 21, "receiver: 20 requests answered %r" % res)
+        check(port.stalls == 0, "receiver: no per-request wait (stalls=%d)" % port.stalls)
 
 
 def case_outside_session(h, r):
@@ -620,6 +967,8 @@ def case_aidebug_port(h, r):
 
 PY_CASES = {
     "aidebug_port": case_aidebug_port,
+    "ntpath": case_ntpath,
+    "read_size": case_read_size,
     "demux": case_demux,
     "paths": case_paths,
     "server": case_server,
@@ -752,7 +1101,8 @@ def integration(exe, h):
     with tempfile.TemporaryDirectory(prefix="os32-sfs-int-") as tmp:
         root = mk_tree(tmp)
         (root / "hello.txt").write_bytes(bytes(range(256)) * 20)
-        sv = h.Server(h.HostFS(str(root)))
+        sv = h.Server(h.HostFS(str(root), allow_write=[
+            "out.bin", "out2.bin", "newdir", "gone.txt"]))
         p = subprocess.Popen([str(exe), "pipe"], stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         os.set_blocking(p.stdout.fileno(), False)
@@ -918,6 +1268,16 @@ C_MUTATIONS = [
      r"    if \(booted_crc != disk_crc\) return HBO_REFUSE_DIFF;\n", "",
      "起動していない版でも .old を作る"),
     ("userland/system/hsync_bootold.inc",
+     r"    if \(stored_crc != disk_crc\) return HBO_REFUSE_CORRUPT;\n", "",
+     "image_crc 欄が壊れた版でも .old を作る (起動しない .old)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    if \(!l->junk\) return RSH_LINE_DONE;\n",
+     "    return RSH_LINE_DONE;\n", "拒否した行が受信の間で解ける (残りが次の行として走る)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    if \(cls == RSH_ESC_EXIT\) return RSH_LINE_EXIT;\n    l->bytes\+\+;",
+     "    l->bytes++;\n    if (cls == RSH_ESC_EXIT) return RSH_LINE_EXIT;",
+     "行頭の単独 ESC を数える (閉じるときに余分な EOT を返す)"),
+    ("userland/system/hsync_bootold.inc",
      r"    if \(!have_info\) return HBO_REFUSE_INFO;\n", "",
      "起動したイメージの記録が無くても .old を作る"),
     ("userland/system/hsync_bootold.inc",
@@ -931,8 +1291,8 @@ GATE_MUTATIONS = [
      "ゲート中の serial_putchar が線へ出る (console の複写がフレームに混ざる)"),
     ("drivers/serial.c", r"    if \(s_gate\) return -1;         /\* rshell / kbd.c / KAPI にフレームを渡さない \*/\n",
      "", "ゲート中の serial_trygetchar が受信を渡す (rshell にフレームが漏れる)"),
-    ("drivers/serial.c", r"1 バイトも渡さない\)。 \*/\n    ser_head = 0;\n    ser_tail = 0;\n    ser_count = 0;\n",
-     "1 バイトも渡さない)。 */\n    if (on) { ser_head = 0; ser_tail = 0; ser_count = 0; }\n",
+    ("drivers/serial.c", r"    ser_head = 0;\n    ser_tail = 0;\n    ser_count = 0;\n    s_gate = on",
+     "    if (on) { ser_head = 0; ser_tail = 0; ser_count = 0; }\n    s_gate = on",
      "下ろすときに受信リングを空にしない (遅れた応答が rshell に入る)"),
     ("drivers/serial.c", r"        s_hold_head = \(s_hold_head \+ 1\) % \(u32\)SER_HOLD_SIZE;\n        s_hold_count--;\n        s_hold_dropped\+\+;\n    \}\n    s_hold\[",
      "        s_hold_dropped++;\n        irq_restore(f);\n        return;\n    }\n    s_hold[",
@@ -941,6 +1301,28 @@ GATE_MUTATIONS = [
      "", "セッション中に速度を変えられる"),
     ("drivers/serial.c", r"            if \(sts & serial_oe_mask\(s_setup.mode\)\) ser_err_oe\+\+;\n            if \(sts & serial_fe_mask",
      "            if (sts & serial_fe_mask", "ISR が OE を数えない"),
+    ("drivers/serial.c", r"            if \(!\(sts & s_mask_rxrdy\)\) break;\n            \(void\)inp\(s_port_data\);",
+     "            break;", "ゲートの上げ下げで UART / FIFO の残りを読み捨てない"),
+]
+SESSION_MUTATIONS = [
+    ("fs/serialfs_session.c", r"(static SfsClient g_cli;)", r"\1", IDENTITY),
+    ("fs/serialfs_session.c",
+     r"    quiet = sfs_client_quiesce\(&g_cli, SFS_QUIET_MS, SFS_QUIET_MAX_MS\);",
+     "    quiet = g_cli.sid ? sfs_client_quiesce(&g_cli, SFS_QUIET_MS, SFS_QUIET_MAX_MS) : 1;",
+     "HELLO が通らなかった回は隔離せずに下ろす (遅れて届く相手の応答が rshell に入る)"),
+    ("fs/serialfs_session.c", r"    sfs_flush_hold_raw\(\);\n    g_cli.sid = 0;",
+     "    if (g_cli.sid == 0) sfs_flush_hold_raw();\n    g_cli.sid = 0;",
+     "EXIT からゲートを下ろすまでに保留へ入った文字を捨てる"),
+    ("fs/serialfs_session.c",
+     r"    if \(g_cli.sid != 0\) \(void\)sfs_client_oneway\(&g_cli, SFS_T_BYE, 0, 0\);\n",
+     "", "BYE を送らない"),
+    ("fs/serialfs_session.c", r"        flags \|= SFS_XF_NOT_QUIET;\n", "",
+     "隔離の上限に達しても EXIT の flags に出さない"),
+    ("fs/serialfs_session.c",
+     r"    if \(vfs_fstype\(SERIALFS_PREFIX\)\[0\] != '\\0'\) return OS32_ERR_BUSY;\n", "",
+     "/host が使われていても (HostDrv) 始める"),
+    ("fs/serialfs_session.c", r"    if \(!_irq_enabled\(\)\) return OS32_ERR_INVAL;\n", "",
+     "IF=0 のまま始める (tick が進まず期限が来ない)"),
 ]
 PY_MUTATIONS = [
     ("tools/serialfs_host.py", r"(    def feed\(self, data, now\):)", r"\1", IDENTITY),
@@ -954,18 +1336,43 @@ PY_MUTATIONS = [
      "キャッシュの一致に要求の CRC を見ない"),
     ("tools/serialfs_host.py", r"            if c in \(b\"\.\", b\"\.\.\"\) or",
      "            if c in (b\".\",) or", "`..` を通す"),
-    ("tools/serialfs_host.py", r"        if real != self.root and not real.startswith\(self.root \+ b\"/\"\):\n            raise SfsError\(ERR_INVAL\)",
-     "        pass", "realpath で根の外を断らない (symlink で脱出)"),
-    ("tools/serialfs_host.py", r"                    if now\(\) - t > FIRST_BYTE_S:",
-     "                    if False:", "期限を過ぎた応答も送る"),
+    ("tools/serialfs_host.py", r"        if not self.contained\(path\):\n            raise SfsError\(ERR_INVAL\)",
+     "        pass", "パスの作りで realpath の検査をしない (symlink で脱出)"),
+    ("tools/serialfs_host.py", r"            common = self.pm.commonpath\(\[nc\(self.root\), nc\(real\)\]\)",
+     "            common = nc(self.root) if nc(real).startswith(nc(self.root)) else b\"\"",
+     "根の判定を文字列の前方一致に戻す (C:\\hostile を C:\\host の中と読む)"),
+    ("tools/serialfs_host.py", r"                    nfd = os.open\(c, os.O_RDONLY \| os.O_DIRECTORY \|\n                                  os.O_NOFOLLOW, dir_fd=fd\)",
+     "                    nfd = os.open(c, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)",
+     "固定の作りで symlink の要素を辿る (差し替えで根の外へ)"),
+    ("tools/serialfs_host.py", r"            if self.pm.sep == \"\\\\\" and b\":\" in c:\n                raise SfsError\(ERR_INVAL\)\n",
+     "", "Windows で `:` (代替データストリーム) を通す"),
+    ("tools/serialfs_host.py", r"            if tuple\(comps\[:len\(a\)\]\) == a:\n                return\n        raise SfsError\(ERR_ROFS\)",
+     "            pass\n        return", "書き込みの既定の禁止が無い"),
+    ("tools/serialfs_host.py", r"                if fr.type in REQUEST_TYPES and now\(\) - t > FIRST_BYTE_S:",
+     "                if False:", "到着から期限を過ぎた要求も実行する (再送が二重に走る)"),
+    ("tools/serialfs_host.py", r"                pump\(0\)                         # 処理中に届いた分\n",
+     "", "送る前に、処理中に届いた BYE / EOT を取り込まない"),
+    ("tools/serialfs_host.py", r"                if fr.sid in server.closed or closed_ahead\(fr.sid\):",
+     "                if fr.sid in server.closed:", "先に届いている BYE を見ない"),
+    ("tools/serialfs_host.py", r"                if now\(\) - t > FIRST_BYTE_S:\n                    stats\[\"late\"\] \+= 1\n                    continue\n                port.write",
+     "                port.write", "送る直前に期限を見ない"),
+    ("tools/serialfs_host.py", r"    return n if n > 0 else 1\n\n\nclass PortReceiver",
+     "    return MAX_FRAME\n\n\nclass PortReceiver", "受信で MAX_FRAME を待つ (要求ごとに 200ms 止まる)"),
+    ("tools/serialfs_host.py", r"        self.log_text = bytearray\(\)\n        self.exit = None\n\n    # 要求",
+     "        pass\n\n    # 要求", "行ごとに結果を空にしない (REPL で前の EXIT を取り違える)"),
+    ("tools/rshell_serial.py", r"        chunk = port.read\(read_size\(port\)\)",
+     "        chunk = port.read(256)", "send_cmd が 256 バイト待つ (要求ごとに 200ms)"),
+    ("tools/rshell_serial.py", r"    if is_sfs and server is None:",
+     "    if False:", "--serve-host 無しでも `sfs run` を送る"),
     ("tools/serialfs_host.py", r"        if fr.sid in self.closed:\n            return None ",
      "        if False:\n            return None ", "BYE の後も答える"),
     ("tools/serialfs_host.py", r"        if fr.sid == 0 or fr.sid != self.sid:\n            self.stale \+= 1\n",
      "        if False:\n            self.stale += 1\n", "未知のセッションに普通に答える"),
     ("tools/serialfs_host.py", r"        if flags & WF_TRUNC:\n            mode = \"wb\"",
      "        if True:\n            mode = \"wb\"", "TRUNC の無い書き込みでも作り直す"),
-    ("tools/rshell_serial.py", r"            and serialfs_host.sfs_child\(line\) is not None\):",
-     "):", "`sfs run` の行の外でもフレームを解釈する"),
+    ("tools/rshell_serial.py", r"    if is_sfs:\n        r = serialfs_host.serve_line",
+     "    if server is not None:\n        r = serialfs_host.serve_line",
+     "`sfs run` の行の外でもフレームを解釈する"),
     ("tools/serialfs_host.py", r"    if not s.startswith\(\"run\"\) or s\[3:4\] not in \(\" \", \"\\t\"\):",
      "    if not s.startswith(\"run\"):", "ホスト側の行の判定が `sfs runx` を受ける"),
 ]
@@ -974,21 +1381,27 @@ PY_MUTATIONS = [
 def mutate(tmp):
     bad = 0
     errors = 0
-    for i, (rel, pattern, repl, why) in enumerate(C_MUTATIONS + GATE_MUTATIONS, 1):
+    for i, (rel, pattern, repl, why) in enumerate(
+            C_MUTATIONS + GATE_MUTATIONS + SESSION_MUTATIONS, 1):
         original = (ROOT / rel).read_text(encoding="utf-8")
         text, n = re.subn(pattern, repl, original, count=1)
         if n != 1:
             print(f"MUTATION C{i} ERROR (not applicable): {why}", flush=True)
             errors += 1
             continue
-        gate = rel == "drivers/serial.c"
+        if rel == "drivers/serial.c":
+            build, cases = gate_build, GATE_CASES
+        elif rel == "fs/serialfs_session.c":
+            build, cases = session_build, SESSION_CASES
+        else:
+            build, cases = c_build, C_CASES
         try:
-            exe = (gate_build if gate else c_build)(tmp, {rel: text}, name="mut")
+            exe = build(tmp, {rel: text}, name="mut")
         except subprocess.CalledProcessError:
             print(f"MUTATION C{i} ERROR (compile): {why}", flush=True)
             errors += 1
             continue
-        hits = run_exe_cases(exe, GATE_CASES if gate else C_CASES, quiet=True)
+        hits = run_exe_cases(exe, cases, quiet=True)
         if why == IDENTITY:
             status = "GREEN (control)" if not hits else "**RED (control broken)**"
             bad += bool(hits)
@@ -1027,7 +1440,8 @@ def mutate(tmp):
             bad += not hits
         print(f"MUTATION P{i} {status} ({hits} 件): {why}", flush=True)
     load_pair()                 # 実物へ戻す
-    total = len(C_MUTATIONS) + len(GATE_MUTATIONS) + len(PY_MUTATIONS)
+    total = (len(C_MUTATIONS) + len(GATE_MUTATIONS) + len(SESSION_MUTATIONS)
+             + len(PY_MUTATIONS))
     print(f"MUTATION SUMMARY total={total} errors={errors} missed={bad}",
           flush=True)
     return bad + errors
@@ -1040,13 +1454,16 @@ def main():
     with tempfile.TemporaryDirectory(prefix="os32-serialfs-") as tmp:
         exe = c_build(tmp)
         gexe = gate_build(tmp)
+        sexe = session_build(tmp)
         print("HOST GNU89 -Werror compile PASS (real fs/sfs_*.c, fs/serialfs.c, "
-              "drivers/serial.c)", flush=True)
+              "fs/serialfs_session.c, drivers/serial.c)", flush=True)
         if "--target" in args:
             build_target(tmp)
         rc += run_exe_cases(exe, [c for c in C_CASES if not only or c in only])
         rc += run_exe_cases(gexe, [c for c in GATE_CASES if not only or c in only],
                             tag="gate:")
+        rc += run_exe_cases(sexe, [c for c in SESSION_CASES if not only or c in only],
+                            tag="session:")
         h, r = load_pair()
         rc += run_py(h, r, [c for c in PY_CASES if not only or c in only])
         if not only:

@@ -88,9 +88,8 @@ static int rsh_serial_follow(void)
 }
 
 #ifndef SHELL_AS_APP
-/* 実行中の rshell の行。**全バイトがシリアル由来**のときだけ指す (決裁 3A:
- * `sfs run` はホストから送った 1 行だけで使う)。それ以外は NULL。 */
-static const char *rsh_cur_line;
+/* `sfs run` の本体 (下)。rshell の行ループが**行全体を**渡す */
+static int sfs_run_child(const char *child);
 #endif
 
 /* 直前の設定へ戻す (番犬が REVERT を出したとき)。 */
@@ -340,11 +339,8 @@ static void rshell_end_reply(void)
 static int cmd_rshell(int argc, char **argv)
 {
     char rbuf[RSHELL_LINE_MAX];
-    int rpos, ch, fs, cls;
-    int overflow;
-    int junk;          /* 行の中にシリアルの ESC があった = 実行しない */
-    int line_local;    /* 行の中に本体キーボードのバイトがあった */
-    int line_bytes;    /* この行で受け取ったバイト数 (EOT を返すかの判定) */
+    struct rsh_line ln;
+    int ch, fs, r;
     (void)argc; (void)argv;
 
     if (!g_api->serial_is_initialized()) {
@@ -358,17 +354,12 @@ static int cmd_rshell(int argc, char **argv)
     g_api->kprintf(ATTR_CYAN, "%s", "Waiting for commands via serial...\n");
     g_api->serial_putchar(0x04);
 
-    line_bytes = 0;
+    rsh_line_begin(&ln, rbuf, (int)sizeof(rbuf));
     for (;;) {
-        /* **ESC を見るより先に** 1 行分の状態を畳む。line_bytes は抜け口で
+        /* **ESC を見るより先に** 1 行分の状態を畳む。ln.bytes は抜け口で
          * 「ホストへ EOT を返し損ねていないか」の判定に使うので、前の行の
          * 長さが残っていると待っていないホストへ 2 つ目を返してしまう。 */
-        rpos = 0;
-        overflow = 0;
-        junk = 0;
-        line_local = 0;
-        line_bytes = 0;
-        rbuf[0] = '\0';
+        rsh_line_begin(&ln, rbuf, (int)sizeof(rbuf));
 
         /* ---- 行頭: 1 文字目を待つ ----
          * **受信そのものでは番犬を解除しない。** 解除するのは `serial ack`
@@ -395,43 +386,49 @@ static int cmd_rshell(int argc, char **argv)
         /* ---- 行頭の ESC (票 TASK_SERIAL_HOSTFS §1-v3 / 決裁 1B) ----
          * シリアルの ESC で閉じるのは**単独のとき**だけ。後ろに続きが来たら
          * フレームの断片か化けた行なので、閉じずに「実行しない行」にする。 */
-        if (ch == 0x1B) {
-            int nxt = fs ? rsh_serial_follow() : -1;
-            cls = rsh_esc_classify(ch, fs, 1, nxt >= 0);
-            if (cls == RSH_ESC_EXIT) goto rshell_exit;
-            junk = 1;
-            line_bytes++;
+        if (ch == 0x1B && fs) {
+            int nxt = rsh_serial_follow();
+            r = rsh_line_feed(&ln, ch, fs, 1, nxt >= 0);
             ch = nxt;
             fs = 1;
+        } else {
+            r = rsh_line_feed(&ln, ch, fs, 1, 0);
+            ch = -1;
         }
+        if (r == RSH_LINE_EXIT) goto rshell_exit;
 
-        /* T10: 上限を超えたら**そこで読み取りを止めない**。止めると残りが
-         * 次の入力になって勝手に実行される。行末まで読み捨てて印だけ立てる。 */
-        while (ch >= 0 && ch != '\n' && ch != '\r') {
-            line_bytes++;
-            if (!fs) line_local = 1;
-            cls = rsh_esc_classify(ch, fs, 0, 1);
-            if (cls == RSH_ESC_EXIT) goto rshell_exit;   /* 本体の ESC */
-            if (cls == RSH_ESC_JUNK) {
-                junk = 1;                                /* 行の途中の ESC */
-            } else if (rpos >= RSHELL_LINE_MAX - 2) {
-                overflow = 1;
-            } else {
-                rbuf[rpos++] = (char)ch;
-            }
-            {
-                int t = 0;
-                ch = -1;
-                while (t < 50000) {
-                    ch = rsh_getch(&fs);
-                    if (ch >= 0) break;
-                    t++;
+        /* ---- 行の残り ----
+         * T10: 上限を超えたら**そこで読み取りを止めない**。止めると残りが
+         * 次の入力になって勝手に実行される。行末まで読み捨てて印だけ立てる。
+         * ESC を含んで拒否した行は、**本当の行末まで**拒否のまま読む
+         * (受信の間で解けると残りが次の行として実行される、Codex 8)。 */
+        {
+            u32 last = g_api->get_tick();
+            while (r == RSH_LINE_MORE) {
+                if (ch < 0) {
+                    int t = 0;
+                    while (t < 50000) {
+                        ch = rsh_getch(&fs);
+                        if (ch >= 0) break;
+                        t++;
+                    }
                 }
+                if (ch < 0) {
+                    r = rsh_line_idle(&ln, (unsigned long)(g_api->get_tick() - last));
+                    if (r == RSH_LINE_MORE) {
+                        u32 w = g_api->get_tick() + 1;
+                        while (g_api->get_tick() < w) g_api->sys_halt();
+                    }
+                    continue;
+                }
+                last = g_api->get_tick();
+                r = rsh_line_feed(&ln, ch, fs, 0, 1);
+                ch = -1;
             }
         }
-        rbuf[rpos] = '\0';
+        if (r == RSH_LINE_EXIT) goto rshell_exit;
 
-        if (junk) {
+        if (ln.junk) {
             /* ESC を含む行は**実行しない**。EOT は必ず返す (§2-2)。
              * 化けた行やセッションの断片を命令として走らせない。 */
             g_api->kprintf(ATTR_RED, "%s",
@@ -441,7 +438,7 @@ static int cmd_rshell(int argc, char **argv)
             continue;
         }
 
-        if (overflow) {
+        if (ln.overflow) {
             /* 赤字 1 行を出して**実行しない**。EOT は必ず返す (§2-2)。 */
             sh_refuse("rshell: command line", RSHELL_LINE_MAX - 2);
             (void)sh_refused_take();   /* 対話と同じ — 次の行へ持ち越さない */
@@ -451,7 +448,7 @@ static int cmd_rshell(int argc, char **argv)
             continue;
         }
 
-        if (rpos == 0) continue;
+        if (ln.pos == 0) continue;
 
         g_api->buz_off();
 
@@ -462,18 +459,26 @@ static int cmd_rshell(int argc, char **argv)
         g_api->kprintf(ATTR_WHITE, "%s", "\n");
 
 #ifndef SHELL_AS_APP
-        /* `sfs run` はこの印があるときだけ動く (決裁 3A) */
-        rsh_cur_line = line_local ? (const char *)0 : rbuf;
-#else
-        (void)line_local;
+        /* `sfs run ...` は**行全体を**ここで引き受ける (execute_command の
+         * 分割より前、Codex 4)。全バイトがシリアル由来の行だけ (決裁 3A)。 */
+        if (rsh_sfs_child(rbuf) != (const char *)0) {
+            if (ln.local) {
+                g_api->kprintf(ATTR_RED, "%s",
+                               "sfs: 'sfs run' must be sent by the host "
+                               "(line contains local keystrokes)\n");
+                sh_status_set(SH_STATUS_USAGE);
+            } else {
+                sh_status_set(sfs_run_child(rsh_sfs_child(rbuf)));
+            }
+            (void)sh_refused_take();
+            rshell_end_reply();
+            continue;
+        }
 #endif
         /* `$?` は execute_command が入れる。**rshell を抜けるとこの handler の
          * 0 で上書きされる** ので、ホストから見るときは「試験コマンド →
          * 完了待ち → `echo $?` を別送信」の順にすること (票 §2-5-1)。 */
         (void)execute_command(rbuf);
-#ifndef SHELL_AS_APP
-        rsh_cur_line = (const char *)0;
-#endif
 
         /* 印を **1 行ぶんで下ろす** (対話の ui.c と同じ扱い)。
          * rshell 自身が execute_command("rshell") の中で走っているので、
@@ -489,14 +494,14 @@ static int cmd_rshell(int argc, char **argv)
     }
 rshell_exit:
     /* 抜ける口はここ 1 つ — ホストの `exit`、行頭の単独の ESC、本体の ESC。
-     * line_bytes > 0 は「この行のバイトを受け取ったのに、まだ EOT を返して
+     * ln.bytes > 0 は「この行のバイトを受け取ったのに、まだ EOT を返して
      * いない」ことと同値なので、そのときだけ閉じる。
      *   - `exit`        : ホストは EOT を待っている → 返す
      *   - 行の途中の本体の ESC: 同じく待っている → 返す
      *   - 行頭の ESC    : 直前の行の EOT は返し終えている → **返さない**。
      *                     返すと 1 コマンドに EOT が 2 つ出て、/api/cmd は
      *                     次のコマンドの終端と取り違える (票 §2-2 の裏)。 */
-    if (line_bytes > 0) rshell_end_reply();
+    if (ln.bytes > 0) rshell_end_reply();
 
     rsh_in_rshell = 0;
     /* **arm 中で未確認なら、抜ける前にここで戻す** (往復 4 B4)。
@@ -532,29 +537,32 @@ static void sfs_restore_cwd(const char *saved)
     if (saved[0]) (void)g_api->sys_chdir(saved);
 }
 
+/* `sfs run` は**rshell の行ループが行全体を引き受けて**動かす (レビュー往復 1、
+ * Codex 4 / Fable m1)。execute_command の分割 (`|` `;` `&&` `>`) を通ると、
+ * `sfs run a | b` の後段がセッションの外でもう一度走る。組込みとしての
+ * `sfs` はここへ来た時点で必ず断る (本体のキーボード・スクリプト・パイプの中)。 */
 static int cmd_sfs(int argc, char **argv)
 {
-    char saved[OS32_MAX_PATH];
-    const char *child;
-    const char *cwd;
-    int rc, status, i;
-
     if (argc < 3 || strcmp(argv[1], "run") != 0) {
         shell_print_help(argv[0]);
         return SH_STATUS_USAGE;
     }
+    g_api->kprintf(ATTR_RED, "%s",
+                   "sfs: 'sfs run' works only as a whole line sent by the "
+                   "host over rshell (rshell_serial.py --serve-host)\n");
+    return SH_STATUS_USAGE;
+}
+
+static int sfs_run_child(const char *child)
+{
+    char saved[OS32_MAX_PATH];
+    const char *cwd;
+    int rc, status, i;
+
     if (g_api->version < 66) {
         g_api->kprintf(ATTR_RED, "sfs: kernel KAPI v%d < 66\n",
                        (int)g_api->version);
         return SH_STATUS_ERROR;
-    }
-    /* 行全体が `sfs run ...` で、全バイトがシリアル由来であること */
-    child = rsh_sfs_child(rsh_cur_line);
-    if (!child) {
-        g_api->kprintf(ATTR_RED, "%s",
-                       "sfs: 'sfs run' works only as a whole line sent by the "
-                       "host over rshell (rshell_serial.py --serve-host)\n");
-        return SH_STATUS_USAGE;
     }
 
     saved[0] = '\0';
@@ -575,8 +583,8 @@ static int cmd_sfs(int argc, char **argv)
         return SH_STATUS_ERROR;
     }
 
-    /* 子の中の `sfs run` は受けない (行の印を消す。sfs_begin も BUSY) */
-    rsh_cur_line = (const char *)0;
+    /* 子の中の `sfs run` は組込みが断る (sfs_begin も BUSY)。子の行の中の
+     * パイプやリダイレクトはセッションの中で普通に動く */
     status = execute_command(child);
 
     /* 子がどう終わってもここへ来る。**ここより後は何も出さない** —
