@@ -3,39 +3,24 @@
 # ============================================================================
 
 # FDD最小ブートイメージ (images/os32_boot.d88)
-# HDDインストール用ブートFD。必須コマンドのみ含む。
-# cfg は票 S3 (リカバリ後に FDD 自身のマスタを cfg status で確認する用途。HDD の DB には使えない)
-FDD_MIN_CMDS = more less grep find sort head tail wc tee touch hexdump sleep diff du cal man sndctl cfg
-# FDD イメージに入れるファイル一覧。**2hd と 1.44MB で 1 つを使う** —
-# 写すと片方だけ更新されて中身がずれる。$(1) = LOADER.BIN のもと。
+# HDDインストール用ブートFD。**中身は CD の BOOT + MINIMAL と同じ集合**で、
+# build/packages.yaml の fd: から tools/mkpkg.py --fd-args が作る (FD だけに
+# 要る LOADER.BIN / profile と、FAT の 8.3 に合わせた置き場所の違いもそこ)。
+# ここに一覧を書かないこと — 2026-09-24 まで FDD_MIN_CMDS を手で持っていて
+# CD の MINIMAL とずれていた。make check-packages-host が実物で等しいかを見る。
+# 2hd と 1.44MB で 1 つを使う。$(1) = LOADER.BIN のもと。
+FDD_IMAGE_DEPS = boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin \
+                 $(BUILD_OUT)/settings.db assets-deployed build/packages.yaml \
+                 userland/deploy.yaml build/core.yaml tools/mkpkg.py
 define FDD_IMAGE_ARGS
-args="--tree"; \
-	args="$$args /LOADER.BIN=$(1)"; \
-	args="$$args /VMKRNL.LZ4=$(BUILD_OUT)/vmkernel.lz4"; \
-	args="$$args /sys/shell.bin=userland/shell.bin"; \
-	args="$$args /sys/unicode.bin=$(BUILD_OUT)/unicode.bin"; \
-	args="$$args /sys/boot_hdd.bin=boot/boot_hdd.bin"; \
-	args="$$args /sys/loader_h.bin=boot/loader_hdd.bin"; \
-	for cmd in $$(echo $(FDD_MIN_CMDS)); do \
-		if [ -f "userland/cmds/$$cmd.bin" ]; then \
-			args="$$args /bin/$$cmd.bin=userland/cmds/$$cmd.bin"; \
-		elif [ -f "userland/system/$$cmd.bin" ]; then \
-			args="$$args /bin/$$cmd.bin=userland/system/$$cmd.bin"; \
-		fi; \
-	done; \
-	args="$$args /sbin/install.bin=userland/system/install.bin"; \
-	args="$$args /bin/timetest.bin=userland/tests/time_test.bin"; \
-	args="$$args /bin/pcmtest.bin=userland/tests/pcm_test.bin"; \
-	args="$$args /sbin/cdinst.bin=userland/system/cdinst.bin"; \
-	if [ -f assets/profile_fdd ]; then args="$$args /etc/profile=assets/profile_fdd"; fi; \
-	args="$$args /etc/settings.db=$(BUILD_OUT)/settings.db"
+args=$$(python3 tools/mkpkg.py --plan build/packages.yaml --base . --fd-args --fd-loader $(1)) || exit 1
 endef
 
-images/os32_boot.d88: boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin $(BUILD_OUT)/settings.db
+images/os32_boot.d88: $(FDD_IMAGE_DEPS)
 	@mkdir -p images
 	@echo "=== Building OS32 minimal FDD image (images/os32_boot.d88) ==="
 	@$(call FDD_IMAGE_ARGS,boot/loader_fat_new.bin); \
-	python3 tools/mkfat12.py -o images/os32_boot.img -b boot/boot_fat.bin -d images/os32_boot.d88 $$args
+	python3 tools/mkfat12.py -o images/os32_boot.img -b boot/boot_fat.bin -d images/os32_boot.d88 --tree $$args
 	@echo "Copying os32_boot.d88 to NP21/W directory..."
 	@cp images/os32_boot.d88 '$(NP21W_DIR)/os32_boot.d88' 2>/dev/null || echo "Warning: Failed to copy os32_boot.d88 to np21w directory."
 
@@ -43,11 +28,11 @@ images/os32_boot.d88: boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin $(BUIL
 # **D88 にしない。** 1.44MB の D88 は fd_type=0x21 かつ全セクタの rpm_flg=1 が
 # 要り、tools/mkd88.py はまだ書けない。NP21/W は 1,474,560 バイトちょうどの
 # 生イメージをサイズで 1.44MB と判定する (src/diskimage/fd/fdd_xdf.c の表)。
-images/os32_boot144.img: boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin $(BUILD_OUT)/settings.db
+images/os32_boot144.img: $(FDD_IMAGE_DEPS)
 	@mkdir -p images
 	@echo "=== Building OS32 1.44MB FDD image (images/os32_boot144.img) ==="
 	@$(call FDD_IMAGE_ARGS,boot/loader_fat144.bin); \
-	python3 tools/mkfat12.py -g 144 -o images/os32_boot144.img -b boot/boot_fat144.bin $$args
+	python3 tools/mkfat12.py -g 144 -o images/os32_boot144.img -b boot/boot_fat144.bin --tree $$args
 	@SIZE=$$(stat -c%s images/os32_boot144.img); \
 	if [ "$$SIZE" != "1474560" ]; then \
 		echo "ERROR: $$SIZE バイト。NP21/W は 1474560 ちょうどでないと 1.44MB と見ない"; \

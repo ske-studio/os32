@@ -539,9 +539,13 @@ class BuildWiring(unittest.TestCase):
 
     def test_image_mk_wiring(self):
         text = read_mk('image.mk')
-        self.assertIn('/etc/settings.db=$(BUILD_OUT)/settings.db', text)
-        d88 = mk_prereqs(text, 'images/os32_boot.d88')
-        self.assertIn('$(BUILD_OUT)/settings.db', d88)
+        # FD の中身は packages.yaml の MINIMAL (files: の settings.db を含む) から
+        # mkpkg --fd-args が作る (2026-09-24〜)。依存は FDD_IMAGE_DEPS にまとめてある
+        self.assertIn('--fd-args', text)
+        deps = text.split('FDD_IMAGE_DEPS =', 1)[1].split('\n', 1)[0]
+        self.assertIn('$(BUILD_OUT)/settings.db', deps)
+        for target in ('images/os32_boot.d88', 'images/os32_boot144.img'):
+            self.assertIn('$(FDD_IMAGE_DEPS)', mk_prereqs(text, target))
         pkg = mk_prereqs(text, 'packages')
         for dep in ('$(BUILD_OUT)/settings.db', '$(BUILD_OUT)/vmkernel.lz4',
                     'unicode_bin', 'boot'):

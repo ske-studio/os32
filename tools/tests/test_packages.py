@@ -17,7 +17,22 @@ CD インストール (userland/system/cdinst.c) の .PKG は、配備の正典
      (除外以外) + 媒体だけの物が**同じバイト列で**ちょうど 1 回ずつ入っているか
   5. ISO (実物): images/os32_install.iso の中の PKG を取り出して 4 と同じ検査
      (isoinfo が無ければ SKIP と表示する)
-  6. cdinst.c のベース名が構成の名前と一致し、pkg.h の上限が mkpkg と一致するか
+  6. cdinst.c のベース名が構成の名前と一致し、展開の順が MINIMAL → GUI →
+     NORMAL → DEBUG で、pkg.h の上限が mkpkg と一致するか
+  7. 起動 FD: build/image.mk が一覧を手で持たず、FD の中身が BOOT + MINIMAL
+     (+ fd.only) と**等しい**か。構成 (fd_plan) と、実物のイメージ
+     (images/os32_boot.img = 2HD の D88 のもと、images/os32_boot144.img) を
+     FAT12 として読み戻してバイト列で見る。否定側 (8.3 違反・理由なし・古い
+     rename) も。空きを表示する。配布物の D88 (images/os32_boot.d88) のセクタを
+     読み戻し、RAW (os32_boot.img) と一致するか (否定側: D88 を 1 セクタ壊すと落ちる)
+  8. 8.3 の短い名前へのフォールバックは FD (FAT) のときだけ: 実物の
+     kernel/boot_font.c をホストで取り込み、HDD (ext2) では正規名が無ければ
+     失敗のまま (短い名前を読まない) であることと、その否定側 (FS を見ない変異)
+  9. FD → install → HDD: install.c の逆変換表 (fd_renames / fd_only) が
+     packages.yaml の fd.rename / fd.only と一致し、実物の install.c を
+     ホストで回すと (tools/tests/install_fresh_host.c の段 fdset) HDD に
+     出来るファイルの集合と大きさが MINIMAL と等しい。否定側: 逆変換を
+     当てない変異で不一致になる
 
 先に make all を通してから実行すること (4 と 5 は成果物を読む)。
 """
@@ -42,9 +57,23 @@ PKG_H = os.path.join(ROOT, 'userland', 'lib', 'rt', 'pkg.h')
 
 fails = []
 
-# 以前の MINIMAL にあった外部コマンド (タグ base)。cdinst の「shell + basic commands」
+D88 = os.path.join(ROOT, 'images', 'os32_boot.d88')
+BOOT_FONT_C = os.path.join(ROOT, 'kernel', 'boot_font.c')
+FD_IMAGES = [('2HD', os.path.join(ROOT, 'images', 'os32_boot.img'),
+              'boot/loader_fat_new.bin'),
+             ('1.44MB', os.path.join(ROOT, 'images', 'os32_boot144.img'),
+              'boot/loader_fat144.bin')]
+IMAGE_MK = os.path.join(ROOT, 'build', 'image.mk')
+
+# MINIMAL の外部コマンド (タグ base)。cdinst の「CUI only: shell + basic commands」。
+# 2026-09-24 までの FD の FDD_MIN_CMDS と同じ顔ぶれ (diff / du / cal / man / cfg は
+# そのとき FD にだけあった)
 MINIMAL_BASE_CMDS = ['more', 'less', 'grep', 'find', 'sort', 'head', 'tail', 'wc',
-                     'tee', 'touch', 'hexdump', 'sleep']
+                     'tee', 'touch', 'hexdump', 'sleep', 'diff', 'du', 'cal', 'man',
+                     'sndctl', 'cfg']
+# GUI.PKG (タグ gui) の中身。shlib を使う試験アプリは test (DEBUG) のまま
+GUI_FILES = ['/bin/gshell.bin', '/sys/lib/libos32gui.shlib',
+             '/usr/bin/filer.bin', '/usr/bin/edit_gui.bin']
 
 
 def check(cond, label):
@@ -68,21 +97,24 @@ def case_real_plan():
         check(nent <= mkpkg.PKG_MAX_ENTRIES,
               f"{name.upper()}.PKG: {len(files)} files, {nent} entries <= "
               f"{mkpkg.PKG_MAX_ENTRIES}")
-    # Minimal =「シェル + 基本コマンド」(cdinst の選択肢 1 の文言)
+    # Minimal =「CUI のシェル + 基本コマンド」(cdinst の選択肢 1 の文言)
     minimal = {g for n, _, _, fs in resolved if n == 'minimal' for g, _ in fs}
-    need = ['/sys/shell.bin', '/bin/gshell.bin', '/sbin/install.bin', '/sbin/cdinst.bin',
-            '/bin/sndctl.bin'] + ['/bin/%s.bin' % c for c in MINIMAL_BASE_CMDS]
+    need = ['/sys/shell.bin', '/sbin/install.bin', '/sbin/cdinst.bin',
+            '/sys/font/default.kcgfont', '/boot/vmkernel.lz4', '/sys/unicode.bin'] + \
+        ['/bin/%s.bin' % c for c in MINIMAL_BASE_CMDS]
     lack = [g for g in need if g not in minimal]
-    check(not lack, f"MINIMAL にシェルと基本コマンドが入っている (欠け {lack})")
-    # FD の最小コマンド集合 (build/image.mk FDD_MIN_CMDS) との違いは情報として出す
-    mk = open(os.path.join(ROOT, 'build', 'image.mk'), encoding='utf-8').read()
-    m = re.search(r'^FDD_MIN_CMDS\s*=\s*(.*)$', mk, re.M)
-    if m:
-        fdd = set(m.group(1).split())
-        mini = {os.path.basename(g)[:-4] for g in minimal
-                if g.startswith('/bin/') and g.endswith('.bin')}
-        print(f"  info FD にだけある: {sorted(fdd - mini)}")
-        print(f"  info CD MINIMAL にだけある (/bin): {sorted(mini - fdd)}")
+    check(not lack, f"MINIMAL にシェルと基本コマンドと既定フォントが入っている (欠け {lack})")
+    # GUI は MINIMAL に無く、GUI.PKG が gui タグの行とちょうど一致する
+    gui = sorted(g for n, _, _, fs in resolved if n.startswith('gui') for g, _ in fs)
+    check(not (set(GUI_FILES) & minimal), "MINIMAL に GUI (gshell / shlib / GUI アプリ) が無い")
+    man = dm.load_merged(dm.CORE_MANIFEST_RELPATHS)
+    tagged = sorted(g for e in man['filesystem']['files'] if 'gui' in (e.get('tags') or [])
+                    for _, g in dm.resolve_entry(e, ROOT))
+    check(gui == tagged, f"GUI.PKG の中身 = gui タグの行 ({len(gui)} 件)")
+    check(gui == sorted(GUI_FILES), f"GUI.PKG の顔ぶれ {gui}")
+    order = [n for n, _, _, _ in resolved]
+    check([n for n in order if not n[-1].isdigit()] == ['boot', 'minimal', 'gui', 'normal', 'debug'],
+          f"パッケージの並びが依存の順 {order}")
     return plan, resolved
 
 
@@ -347,6 +379,9 @@ def case_consumer(plan):
             if (p or {}).get('type') != 'boot'}
     check(bases == want, f"cdinst のベース名 {sorted(bases)} = 構成 {sorted(want)}")
     check('BOOT.PKG' in src, "cdinst は BOOT.PKG を読む")
+    seq = [m.group(1) for m in re.finditer(r'install_series\(PKG_BASE_(\w+)\)', src)]
+    check(seq == ['MINIMAL', 'GUI', 'NORMAL', 'DEBUG'],
+          f"cdinst の展開順 {seq} = MINIMAL → GUI → NORMAL → DEBUG")
     check('FULL.PKG' not in src and 'APPEND.PKG' not in src,
           "cdinst に古い FULL / APPEND が残っていない")
     m = re.search(r'#define\s+PKG_SERIES_MAX\s+(\d+)', src)
@@ -358,6 +393,491 @@ def case_consumer(plan):
     check(me and int(me.group(1)) == mkpkg.PKG_MAX_ENTRIES, "PKG_MAX_ENTRIES が一致")
 
 
+# ---------------------------------------------------------------- 7. 起動 FD
+
+def fat12_files(path):
+    """FAT12 イメージのファイルを {PATH (大文字): bytes} と空きバイトで返す
+
+    BPB (オフセット 0x0B) から配置を読む。mkfat12 が作る 2HD (1024B/セクタ) と
+    1.44MB (512B/セクタ) の両方。. / .. と削除済みは飛ばす。
+    """
+    img = open(path, 'rb').read()
+    import struct
+    bps, spc, rsv, nfat, nroot, tot, _media, fatsz = \
+        struct.unpack_from('<HBHBHHBH', img, 0x0B)
+    fat = img[rsv * bps:(rsv + fatsz) * bps]
+    root_off = (rsv + nfat * fatsz) * bps
+    root_secs = (nroot * 32 + bps - 1) // bps
+    data_sec = rsv + nfat * fatsz + root_secs
+    nclus = (tot - data_sec) // spc
+    csize = bps * spc
+
+    def nxt(c):
+        v = fat[c * 3 // 2] | (fat[c * 3 // 2 + 1] << 8)
+        return (v >> 4) if c & 1 else (v & 0xFFF)
+
+    def chain(c):
+        out = []
+        while 2 <= c < 0xFF8 and len(out) <= nclus:
+            out.append(c)
+            c = nxt(c)
+        return out
+
+    def read_chain(c):
+        return b''.join(img[(data_sec + (x - 2) * spc) * bps:][:csize] for x in chain(c))
+
+    files = {}
+
+    def walk(raw, prefix):
+        for i in range(0, len(raw) - 31, 32):
+            e = raw[i:i + 32]
+            if e[0] == 0:
+                break
+            if e[0] == 0xE5 or e[11] == 0x0F or e[0] == ord('.'):
+                continue
+            base = e[0:8].decode('ascii').rstrip()
+            ext = e[8:11].decode('ascii').rstrip()
+            name = base + ('.' + ext if ext else '')
+            clus = struct.unpack_from('<H', e, 26)[0]
+            size = struct.unpack_from('<I', e, 28)[0]
+            if e[11] & 0x10:
+                walk(read_chain(clus), prefix + '/' + name)
+            elif not e[11] & 0x08:
+                files[prefix + '/' + name] = read_chain(clus)[:size] if size else b''
+
+    walk(img[root_off:root_off + nroot * 32], '')
+    used = sum(1 for c in range(2, nclus + 2) if nxt(c) != 0)
+    return files, (nclus - used) * csize, nclus * csize
+
+
+def case_fd(plan, resolved):
+    print("case 7: 起動 FD = BOOT + MINIMAL (+ fd.only)")
+    mk = open(IMAGE_MK, encoding='utf-8').read()
+    check(not re.search(r'^FDD_MIN_CMDS\s*[:?]?=', mk, re.M) and '--fd-args' in mk
+          and '/bin/$$cmd.bin' not in mk,
+          "build/image.mk は FD の一覧を手で持たず mkpkg --fd-args から作る")
+    fd = plan.get('fd') or {}
+    rename = {r['guest']: r['fd'] for r in fd.get('rename') or []}
+    only = {o['fd'] for o in fd.get('only') or []}
+    check(fd.get('from') == ['boot', 'minimal'], f"FD の元は BOOT + MINIMAL ({fd.get('from')})")
+
+    # 構成: FD の中身 (rename を戻し、only を除いた集合) = BOOT + MINIMAL
+    src = {g: os.path.join(ROOT, h) for n, _, _, fs in resolved
+           if n == 'boot' or n.startswith('minimal') for g, h in fs}
+    plans = {}
+    for label, _, loader in FD_IMAGES:
+        files, probs = mkpkg.fd_plan(plan, ROOT, loader)
+        for p in probs:
+            print(f"       {p}")
+        check(probs == [], f"FD {label}: fd_plan に問題が無い")
+        back = {v: k for k, v in rename.items()}
+        core = {back.get(g, g) for g, _ in files if g not in only}
+        check(core == set(src),
+              f"FD {label}: 中身 = BOOT + MINIMAL (FD にだけ {sorted(core - set(src))}、"
+              f"MINIMAL にだけ {sorted(set(src) - core)})")
+        check(sorted(g for g, _ in files if g in only) == sorted(only),
+              f"FD {label}: FD だけの物は fd.only の {sorted(only)} だけ")
+        check(files and files[0][0] == '/LOADER.BIN' and files[0][1] == loader,
+              f"FD {label}: 先頭が LOADER.BIN ({loader})")
+        plans[label] = files
+    check(not any(g in ('/bin/timetest.bin', '/bin/pcmtest.bin') for g, _ in plans['2HD']),
+          "FD に試験用の timetest / pcmtest が無い (DEBUG にある)")
+
+    # 否定側
+    base = [{'host': 'userland/shell.bin', 'guest': '/sys/shell.bin', 'tags': ['core']}]
+    fp = fake_plan()
+    fp['fd'] = {'from': ['boot', 'minimal'], 'rename': [], 'only': []}
+    _, p = mkpkg.fd_plan(fp, ROOT, None, fake_manifest(base + [
+        {'host': 'assets/filetypes', 'guest': '/etc/filetypes', 'tags': ['core']}]))
+    check(any('8.3' in x for x in p), "否定: 8.3 に収まらない名前を報告する")
+    fp['fd'] = {'from': ['boot', 'minimal'],
+                'rename': [{'guest': '/nope', 'fd': '/NOPE', 'reason': 'x'}], 'only': []}
+    _, p = mkpkg.fd_plan(fp, ROOT, None, fake_manifest(base))
+    check(any('古い rename' in x for x in p), "否定: どれにも当たらない rename を報告する")
+    fp['fd'] = {'from': ['boot', 'minimal'],
+                'rename': [{'guest': '/sys/shell.bin', 'fd': '/sys/sh.bin'}], 'only': []}
+    _, p = mkpkg.fd_plan(fp, ROOT, None, fake_manifest(base))
+    check(any('理由' in x for x in p), "否定: 理由の無い rename を報告する")
+    fp['fd'] = {'from': ['boot', 'minimal'], 'only': [], 'rename': [
+        {'guest': '/sys/shell.bin', 'fd': '/sys/sh1.bin', 'reason': 'x'},
+        {'guest': '/sys/shell.bin', 'fd': '/sys/sh2.bin', 'reason': 'x'}]}
+    _, p = mkpkg.fd_plan(fp, ROOT, None, fake_manifest(base))
+    check(any('rename' in x and '2 回' in x for x in p),
+          "否定: 同じ guest への rename が 2 回なのを報告する")
+    fp['fd'] = {'from': ['boot', 'minimal'], 'rename': [],
+                'only': [{'fd': '/LOADER.BIN', 'host': '{loader}', 'reason': 'x'}]}
+    _, p = mkpkg.fd_plan(fp, ROOT, None, fake_manifest(base))
+    check(any('ローダ' in x for x in p), "否定: ローダの指定が無いのを報告する")
+    fp['fd'] = {'from': ['boot', 'minimal'], 'rename': [], 'only': [
+        {'fd': '/SYS/SHELL.BIN', 'host': 'x', 'reason': 'x'}]}
+    _, p = mkpkg.fd_plan(fp, ROOT, None, fake_manifest(base))
+    check(any('2 回' in x for x in p), "否定: FD のパスの重複 (大文字小文字を畳む) を報告する")
+
+    # 実物のイメージ
+    for label, img, _ in FD_IMAGES:
+        if not os.path.isfile(img):
+            check(False, f"{os.path.relpath(img, ROOT)} がある (先に make all)")
+            continue
+        got, free, total = fat12_files(img)
+        want = {g.upper(): h for g, h in plans[label]}
+        missing = sorted(set(want) - set(got))
+        extra = sorted(set(got) - set(want))
+        bad = sorted(g for g in set(want) & set(got)
+                     if open(want[g], 'rb').read() != got[g])
+        for g in missing[:10]:
+            print(f"       missing {g}")
+        for g in extra[:10]:
+            print(f"       extra   {g}")
+        for g in bad[:10]:
+            print(f"       bytes   {g}")
+        check(not missing and not extra and not bad,
+              f"FD {label} の実物 = 構成 ({len(got)} ファイル、欠け {len(missing)}、"
+              f"余分 {len(extra)}、違い {len(bad)})")
+        print(f"  info FD {label}: 空き {free // 1024}KB / {total // 1024}KB")
+
+
+# ---------------------------------------------------------------- 7b. 配布物の D88
+
+def d88_to_raw(blob):
+    """D88 を読み、(c, h, r) 順に並べたセクタ列を RAW として返す
+
+    ヘッダ 0x2B0 (名前 17 + 予約 9 + 保護 1 + 種別 1 + 全長 4 + トラック表
+    164 × 4)。各セクタは 16 バイトのヘッダ (C, H, R, N, 数, 密度, 削除, 状態,
+    予約 5, データ長 2) + データ。トラックはシリンダ × 2 + ヘッド の順で読む。
+    形が崩れていれば ValueError。
+    """
+    import struct
+    if len(blob) < 0x2B0:
+        raise ValueError('D88 のヘッダより短い')
+    disk_size = struct.unpack_from('<I', blob, 0x1C)[0]
+    if disk_size != len(blob):
+        raise ValueError(f'ヘッダの全長 {disk_size} != 実物 {len(blob)}')
+    offs = struct.unpack_from('<164I', blob, 0x20)
+    out = bytearray()
+    for t, off in enumerate(offs):
+        if off == 0:
+            continue
+        p = off
+        # 1 本目のセクタのヘッダが「このトラックのセクタ数」を持つ。その数だけ読む
+        if p + 16 > len(blob):
+            raise ValueError(f'トラック {t}: セクタのヘッダが範囲外')
+        nsec = struct.unpack_from('<H', blob, p + 4)[0]
+        secs = {}
+        for _ in range(nsec):
+            if p + 16 > len(blob):
+                raise ValueError(f'トラック {t}: セクタのヘッダが範囲外')
+            c, h, r, n, ns, _dens, _dele, _st = struct.unpack_from('<BBBBHBBB', blob, p)
+            dlen = struct.unpack_from('<H', blob, p + 14)[0]
+            if ns != nsec:
+                raise ValueError(f'トラック {t} R{r}: セクタ数 {ns} != {nsec}')
+            if (c, h) != (t // 2, t % 2):
+                raise ValueError(f'トラック {t}: C/H = {c}/{h}')
+            if dlen != 128 << n:
+                raise ValueError(f'トラック {t} R{r}: データ長 {dlen} と N={n} が合わない')
+            if r in secs:
+                raise ValueError(f'トラック {t}: R{r} が 2 回')
+            secs[r] = blob[p + 16:p + 16 + dlen]
+            p += 16 + dlen
+        # R は重複なく 1〜spt (並べ替えで壊れた R を隠さない)
+        if sorted(secs) != list(range(1, nsec + 1)):
+            raise ValueError(f'トラック {t}: R が 1〜{nsec} でない ({sorted(secs)})')
+        for r in sorted(secs):
+            out += secs[r]
+    return bytes(out)
+
+
+def case_d88():
+    print("case 7b: 配布物の D88 = RAW")
+    raw_path = FD_IMAGES[0][1]
+    if not (os.path.isfile(D88) and os.path.isfile(raw_path)):
+        check(False, "images/os32_boot.d88 と os32_boot.img がある (先に make all)")
+        return
+    blob = open(D88, 'rb').read()
+    raw = open(raw_path, 'rb').read()
+    try:
+        got = d88_to_raw(blob)
+    except ValueError as e:
+        check(False, f"D88 が読める: {e}")
+        return
+    check(got == raw, f"D88 のセクタを並べると RAW と同じ ({len(got)} / {len(raw)} B)")
+    # 否定側: データ部を 1 セクタ壊す / セクタのヘッダ (R) を壊す
+    import struct
+    off0 = struct.unpack_from('<I', blob, 0x20 + 4 * 10)[0]   # トラック 10 の先頭
+    bad = bytearray(blob)
+    for i in range(1024):
+        bad[off0 + 16 + i] ^= 0xFF
+    check(d88_to_raw(bytes(bad)) != raw, "否定: D88 の 1 セクタ (トラック 10 R1) のデータを壊すと不一致")
+    def rejected(mut):
+        try:
+            return d88_to_raw(bytes(mut)) != raw
+        except ValueError:
+            return True
+
+    bad = bytearray(blob)
+    bad[off0 + 2] = 0x7F
+    check(rejected(bad), "否定: D88 のセクタ番号 (R) を 0x7F に壊すと不一致")
+    # R=1 を R=0 に: 並べ替えだけだと順序が変わらず通っていた (往復 2 の P2)
+    bad = bytearray(blob)
+    check(bad[off0 + 2] == 1, "トラック 10 の先頭セクタは R=1")
+    bad[off0 + 2] = 0
+    check(rejected(bad), "否定: R=1 を R=0 に壊すと断る (R は 1〜spt)")
+    # R の重複 (2 本目を R=1 に)
+    sec2 = off0 + 16 + (128 << blob[off0 + 3])
+    bad = bytearray(blob)
+    bad[sec2 + 2] = 1
+    check(rejected(bad), "否定: R の重複を断る")
+    bad = bytearray(blob[:-1024])
+    try:
+        d88_to_raw(bytes(bad))
+        broken = False
+    except ValueError:
+        broken = True
+    check(broken, "否定: 末尾 1 セクタ欠けた D88 は読めない (全長が合わない)")
+
+
+# ---------------------------------------------------------------- 8. 短い名前は FD だけ
+
+BOOT_FONT_HARNESS = r"""
+#include <stdio.h>
+#include <string.h>
+#include "kstring.h"
+/* FAT_NAME は fs/fatfs_vfs.c の VfsOps の名前 (Python が実物から読んで -D で渡す) */
+static const char *g_fs_root = "ext2";   /* "/" のマウントの FS */
+static const char *g_fs_sys = "";        /* "/sys" のマウント ("" = マウント点でない) */
+static int g_long_ok, g_short_ok, g_short_tried;
+int kcg_load_font(const char *path)
+{
+    if (strcmp(path, SYS_FONT_DEFAULT) == 0) return g_long_ok ? 0 : -1;
+    if (strcmp(path, SYS_FONT_DEFAULT_83) == 0) {
+        g_short_tried = 1;
+        return g_short_ok ? 0 : -1;
+    }
+    return -9;
+}
+const char *vfs_fstype(const char *prefix)
+{
+    if (strcmp(prefix, "/") == 0) return g_fs_root;
+    if (strcmp(prefix, "/sys") == 0) return g_fs_sys;
+    return "";
+}
+int kstrcmp(const char *a, const char *b) { return strcmp(a, b); }
+u32 kstrlen(const char *s) { return (u32)strlen(s); }
+char *kstrncpy(char *d, const char *s, u32 n)
+{
+    strncpy(d, s, n);
+    if (n) d[n - 1] = '\0';
+    return d;
+}
+#include "boot_font.c"
+static int fails;
+static void run(const char *root, const char *sys, int lo, int sh, int want_rc,
+                int want_tried, const char *label)
+{
+    int rc;
+    g_fs_root = root; g_fs_sys = sys;
+    g_long_ok = lo; g_short_ok = sh; g_short_tried = 0;
+    rc = boot_font_load();
+    if ((rc == 0) != (want_rc == 0) || g_short_tried != want_tried) {
+        printf("FAIL %s (rc=%d tried=%d)\n", label, rc, g_short_tried);
+        fails++;
+    } else {
+        printf("ok %s\n", label);
+    }
+}
+int main(void)
+{
+    run("ext2", "", 0, 1, -1, 0, "HDD: 正規名が無ければ失敗のまま、短い名前を読まない");
+    run("ext2", "", 1, 1, 0, 0, "HDD: 正規名を読む");
+    run(FAT_NAME, "", 0, 1, 0, 1, "FD: 正規名が無ければ短い名前を読む");
+    run(FAT_NAME, "", 1, 1, 0, 0, "FD: 正規名があれば正規名");
+    run(FAT_NAME, "", 0, 0, -1, 1, "FD: どちらも無ければ失敗");
+    run(FAT_NAME, "ext2", 0, 1, -1, 0,
+        "FD ルート + /sys に ext2 をマウント: 短い名前を読まない");
+    run("ext2", FAT_NAME, 0, 1, 0, 1, "HDD ルート + /sys に FAT: 短い名前を読む");
+    return fails ? 1 : 0;
+}
+"""
+
+
+def real_fat_name():
+    """fs/fatfs_vfs.c の VfsOps の名前 (vfs_fstype が返す文字列)"""
+    src = open(os.path.join(ROOT, 'fs', 'fatfs_vfs.c'), encoding='utf-8').read()
+    m = re.search(r'static\s+VfsOps\s+fatfs_ops\s*=\s*\{\s*"(\w+)"', src)
+    return m.group(1) if m else None
+
+
+def kernel_fd_root():
+    """kernel/kernel.c の FD 起動のルート (デバイス名, FS 名)"""
+    src = open(os.path.join(ROOT, 'kernel', 'kernel.c'), encoding='utf-8').read()
+    m = re.search(r'BOOT_DRIVE_FDD[^{]*\{\s*root_dev\s*=\s*"(\w+)";\s*'
+                  r'root_fs\s*=\s*"(\w+)";', src)
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def run_boot_font(src_text, fat_name):
+    """boot_font.c (src_text) をハーネスで回す。戻り値 (rc, 出力)"""
+    tmp = tempfile.mkdtemp(prefix='bootfont_')
+    try:
+        with open(os.path.join(tmp, 'boot_font.c'), 'w', encoding='utf-8') as f:
+            f.write(src_text)
+        h = os.path.join(tmp, 'h.c')
+        with open(h, 'w', encoding='utf-8') as f:
+            f.write(BOOT_FONT_HARNESS)
+        exe = os.path.join(tmp, 'a.out')
+        inc = ['-I' + tmp] + ['-I' + os.path.join(ROOT, d)
+                              for d in ('kernel', 'include', 'drivers', 'fs', 'lib',
+                                        'sdk/include', 'sdk/include/os32')]
+        r = subprocess.run(['gcc', '-std=gnu89', '-Wall', '-Wextra', '-Werror',
+                            '-Wdeclaration-after-statement', '-D__cdecl=',
+                            '-Wno-unused-function',   # 変異で遡りの関数が使われなくなる
+                            '-DFAT_NAME="%s"' % fat_name, '-include',
+                            os.path.join(ROOT, 'include', 'config.h'), *inc,
+                            '-o', exe, h], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None, r.stderr
+        r = subprocess.run([exe], capture_output=True, text=True)
+        return r.returncode, r.stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def case_boot_font():
+    print("case 8: 8.3 の短い名前へのフォールバックは LFN の無い FS (FAT) のときだけ")
+    # 試験の側で "fat" / "fd0" を決め打ちしない — 実物と突き合わせる
+    fat = real_fat_name()
+    root_dev, root_fs = kernel_fd_root()
+    check(fat is not None, f"fs/fatfs_vfs.c の VfsOps の名前が読める ({fat})")
+    check(root_fs == fat, f"kernel.c の FD ルートの FS ({root_fs}) = FAT の VfsOps 名 ({fat})")
+    cfg = open(os.path.join(ROOT, 'include', 'config.h'), encoding='utf-8').read()
+    m = re.search(r'#define\s+SYS_FONT_83_FSTYPE\s+"(\w+)"', cfg)
+    check(m is not None and m.group(1) == fat,
+          f"config.h SYS_FONT_83_FSTYPE ({m and m.group(1)}) = FAT の VfsOps 名")
+    filer = open(os.path.join(ROOT, 'userland', 'shell', 'cmd_filer.c'),
+                 encoding='utf-8').read()
+    p0 = re.search(r"#define\s+FL_FD_DEV_PREFIX0\s+'(.)'", filer)
+    p1 = re.search(r"#define\s+FL_FD_DEV_PREFIX1\s+'(.)'", filer)
+    check(root_dev is not None and p0 and p1 and root_dev[:2] == p0.group(1) + p1.group(1),
+          f"filer の FD 判定 ({p0 and p0.group(1)}{p1 and p1.group(1)}…) = kernel.c の "
+          f"FD ルート ({root_dev})")
+    if not shutil.which('gcc') or fat is None:
+        print("  SKIP gcc が無い / FAT の名前が読めない")
+        return
+    src = open(BOOT_FONT_C, encoding='utf-8').read()
+    rc, out = run_boot_font(src, fat)
+    for line in (out or '').splitlines():
+        print(f"       {line}")
+    check(rc == 0, "kernel/boot_font.c (実物): HDD は失敗のまま、FAT のマウントだけ短い名前")
+    gate = ('        kstrcmp(boot_font_fstype_of(SYS_FONT_DEFAULT), '
+            'SYS_FONT_83_FSTYPE) == 0) {')
+    check(src.count(gate) == 1, "変異の目印がちょうど 1 か所")
+    for mut, label in (
+            (gate.replace('kstrcmp(', '(kstrcmp(').replace('== 0) {', '== 0 || 1)) {'),
+             "FS を見ずに短い名前へ落ちる"),
+            (gate.replace('boot_font_fstype_of(SYS_FONT_DEFAULT)', 'vfs_fstype("/")'),
+             "対象のマウントではなくルートの FS を見る")):
+        rc, _ = run_boot_font(src.replace(gate, mut), fat)
+        check(rc not in (0, None), f"否定: {label}変異は RED")
+
+
+# ---------------------------------------------------------------- 9. FD → install → HDD
+
+INSTALL_C = os.path.join(ROOT, 'userland', 'system', 'install.c')
+INSTALL_HARNESS = os.path.join(ROOT, 'tools', 'tests', 'install_fresh_host.c')
+
+
+def install_table(src):
+    """install.c の fd_renames {fd: hdd} と fd_only [fd]"""
+    m = re.search(r'fd_renames\[\]\s*=\s*\{(.*?)\n\};', src, re.S)
+    ren = dict(re.findall(r'\{\s*"([^"]+)",\s*"([^"]+)"\s*\}', m.group(1))) if m else {}
+    m = re.search(r'fd_only\[\]\s*=\s*\{(.*?)\n\};', src, re.S)
+    only = re.findall(r'"([^"]+)"', m.group(1)) if m else []
+    return ren, only
+
+
+def run_install_fdset(install_src, fd_files):
+    """install.c (install_src) を install_fresh_host.c の段 fdset で回す。
+    fd_files = [(FD 上のパス, 大きさ)]。戻り値 {HDD のパス: 大きさ} か None"""
+    tmp = tempfile.mkdtemp(prefix='fdinst_')
+    try:
+        sysdir = os.path.join(tmp, 'userland', 'system')
+        hdir = os.path.join(tmp, 'tools', 'tests')
+        os.makedirs(sysdir)
+        os.makedirs(hdir)
+        with open(os.path.join(sysdir, 'install.c'), 'w', encoding='utf-8') as f:
+            f.write(install_src)
+        shutil.copy(os.path.join(ROOT, 'userland', 'system', 'install_recover.inc'), sysdir)
+        shutil.copy(INSTALL_HARNESS, hdir)
+        exe = os.path.join(tmp, 'a.out')
+        inc = ['-I' + os.path.join(ROOT, d) for d in
+               ('include', 'sdk/include', 'sdk/include/os32', 'userland/lib')]
+        r = subprocess.run(['gcc', '-std=gnu89', '-Wall', '-Wextra', '-Werror',
+                            '-Wdeclaration-after-statement', '-Wno-unused-function',
+                            '-Wno-pointer-to-int-cast', '-D__cdecl=',
+                            '-D__OS32_USERLAND__', '-O0', *inc,
+                            os.path.join(hdir, 'install_fresh_host.c'), '-o', exe],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr[-2000:])
+            return None
+        lst = os.path.join(tmp, 'fd.txt')
+        out = os.path.join(tmp, 'hdd.txt')
+        with open(lst, 'w') as f:
+            for g, n in fd_files:
+                f.write(f"{g} {n}\n")
+        r = subprocess.run([exe, 'fdset', lst, out], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr[-2000:])
+            return None
+        got = {}
+        for line in open(out):
+            g, n = line.split()
+            got[g] = int(n)
+        return got
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def case_install(plan, resolved):
+    print("case 9: FD → install → HDD = MINIMAL")
+    fd = plan.get('fd') or {}
+    src = open(INSTALL_C, encoding='utf-8').read()
+    ren, only = install_table(src)
+    want_ren = {r['fd'].lower(): r['guest'] for r in fd.get('rename') or []}
+    want_only = sorted(o['fd'].lower() for o in fd.get('only') or [])
+    check(ren == want_ren, f"install.c の fd_renames = packages.yaml の fd.rename (逆) {ren}")
+    check(sorted(only) == want_only, f"install.c の fd_only = fd.only {sorted(only)}")
+    if not shutil.which('gcc'):
+        print("  SKIP gcc が無い")
+        return
+    files, probs = mkpkg.fd_plan(plan, ROOT, FD_IMAGES[0][2])
+    if probs or any(not os.path.isfile(os.path.join(ROOT, h)) for _, h in files):
+        check(False, "FD の構成と成果物が揃っている (先に make all)")
+        return
+    fd_files = [(g, os.path.getsize(os.path.join(ROOT, h))) for g, h in files]
+    minimal = {g: os.path.getsize(h) for n, _, _, fs in resolved
+               if n.startswith('minimal') for g, h in fs}
+    got = run_install_fdset(src, fd_files)
+    check(got is not None, "実物の install.c が段 fdset で通る")
+    if got is None:
+        return
+    miss = sorted(set(minimal) - set(got))
+    extra = sorted(set(got) - set(minimal))
+    size = sorted(g for g in set(minimal) & set(got) if minimal[g] != got[g])
+    for g in miss[:10]:
+        print(f"       missing {g}")
+    for g in extra[:10]:
+        print(f"       extra   {g}")
+    check(not miss and not extra and not size,
+          f"HDD の集合 = MINIMAL ({len(got)} 件、欠け {len(miss)}、余分 {len(extra)}、"
+          f"大きさ違い {len(size)})")
+    # 否定側: 逆変換を当てない (8.3 名のまま写す) と不一致
+    mark = '        if (!str_eq_lower(src_path, fd_renames[i].fd)) continue;'
+    check(src.count(mark) == 1, "変異の目印がちょうど 1 か所")
+    bad = run_install_fdset(src.replace(mark, '        continue;'), fd_files)
+    check(bad is not None and set(bad) != set(minimal),
+          "否定: fd.rename を逆に当てない install は MINIMAL と違う集合になる")
+
+
 def main():
     plan, resolved = case_real_plan()
     case_negative()
@@ -365,6 +885,10 @@ def main():
     fresh = case_media(plan, resolved)
     case_iso(plan, fresh)
     case_consumer(plan)
+    case_fd(plan, resolved)
+    case_d88()
+    case_boot_font()
+    case_install(plan, resolved)
     print()
     if fails:
         print(f"FAIL {len(fails)} 件")

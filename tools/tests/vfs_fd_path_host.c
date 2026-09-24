@@ -1131,12 +1131,28 @@ static void case_pkg(void)
 
 #ifndef FDP_RED
 static int g_complete_seen;
+static char g_missing[128];     /* "missing on CD: %s" で出た名前を ',' で連ねる */
 static void __cdecl f_kprintf_cap(u8 attr, const char *fmt, ...)
 {
     va_list ap;
     const char *p;
     (void)attr;
     va_start(ap, fmt);
+    {
+        const char *k = "  missing on CD: %s";
+        u32 i = 0;
+        while (k[i] && fmt[i] == k[i]) i++;
+        if (!k[i]) {
+            const char *a = va_arg(ap, const char *);
+            u32 n = 0;
+            while (g_missing[n]) n++;
+            while (*a && n < sizeof(g_missing) - 2) g_missing[n++] = *a++;
+            g_missing[n++] = ',';
+            g_missing[n] = '\0';
+            va_end(ap);
+            return;
+        }
+    }
     if (fmt[0] == '%' && fmt[1] == 's') {
         const char *a = va_arg(ap, const char *);
         for (p = a; *p; p++) {
@@ -1188,6 +1204,7 @@ static void cdinst_setup(const char *set)
     api = &g_api;
     g_arena_used = 0;
     g_complete_seen = 0;
+    g_missing[0] = '\0';
     g_cd_set = set;
 }
 
@@ -1225,11 +1242,36 @@ static void case_cdinst(void)
     CHECK(exists("/n/a.txt"));
     CHECK(!g_complete_seen);
 
+    /* F: GUI (MINIMAL → GUI → NORMAL の 2 段目) の失敗 → NORMAL へ進まない */
+    cdinst_setup("F_");
+    EQ(install_packages('2'), PKG_ERR_TOOLONG);
+    CHECK(exists("/good/a.txt"));
+    CHECK(!exists("/n"));
+    CHECK(!g_complete_seen);
+
+    /* G: Normal を選んだのに GUI が媒体に無い → 飛ばさず失敗 */
+    cdinst_setup("G_");
+    EQ(install_packages('2'), PKG_ERR_IO);
+    CHECK(!exists("/n"));
+    CHECK(!g_complete_seen);
+    /* 欠けたパッケージは HDD を消す前に名前で知らせる (往復 2 の minor) */
+    cdinst_setup("G_");
+    EQ(report_missing_packages('1'), 0);
+    CHECK(g_missing[0] == '\0');
+    EQ(report_missing_packages('3'), 2);        /* GUI と DEBUG */
+    CHECK(kstrcmp(g_missing, "GUI,DEBUG,") == 0);
+
+    /* H: Minimal は GUI を展開しない (CUI のみ) */
+    cdinst_setup("C_");
+    EQ(install_packages('1'), PKG_OK);
+    CHECK(exists("/good/a.txt") && !exists("/g") && !exists("/n"));
+    CHECK(g_complete_seen);
+
     /* C: 全部通れば完了を表示する。NORMAL は 2 本に分かれていて両方展開する */
     cdinst_setup("C_");
     EQ(install_packages('3'), PKG_OK);
-    CHECK(exists("/good/a.txt") && exists("/n/a.txt") && exists("/n2/b.txt")
-          && exists("/full/f.txt"));
+    CHECK(exists("/good/a.txt") && exists("/g/a.txt") && exists("/n/a.txt")
+          && exists("/n2/b.txt") && exists("/full/f.txt"));
     CHECK(g_complete_seen);
     g_cd_set = (const char *)0;
 }

@@ -18,6 +18,10 @@
 /*    /sys/boot_hdd.bin, /sys/loader_h.bin → HDDブートセクタ                */
 /*    /VMKRNL.LZ4 → /hd0/boot/vmkernel.lz4                                  */
 /*    /sys/, /bin/, /sbin/, /etc/ → /hd0/ 配下にディレクトリごとコピー       */
+/*  2026-09-24: FD の中身は CD の BOOT + MINIMAL と同じ集合。FAT の 8.3 に    */
+/*    合わせて名前を変えた物 (build/packages.yaml の fd.rename) は正規名へ    */
+/*    戻して写し、ブート領域へ書く物と FD だけの物 (fd.only) は写さない      */
+/*    (fd_renames / fd_only。FD → install → HDD の集合 = MINIMAL)            */
 /* ======================================================================== */
 
 #include "os32api.h"
@@ -284,11 +288,57 @@ static int confirm_install(void) {
 
 /* ======== ディレクトリ再帰コピー ======== */
 
-/* 写さない媒体専用ファイル。/etc/profile は FDD 用で PATH に /usr/bin が
- * 無いので HDD へ持っていかない (HDD の profile は通常配備が置く)。 */
-static int skip_on_hdd(const char *dst_dir, const char *name)
+/* ======== FD の名前 → HDD の正規名 (build/packages.yaml の fd: の逆) ========
+ * FD の中身は CD の BOOT + MINIMAL と同じ集合で、FAT (LFN なし) に置けない名前と
+ * 置き場所の違うものだけ fd.rename で名前を変えてある。install はそれを**逆に**
+ * 当てて正規名で写す — そのまま写すと HDD に /sys/font/default.kcg や
+ * /etc/filetype が残り、HDD 起動ではフォントも filetypes も失われる (実装レビュー
+ * 往復 2)。この表は packages.yaml の fd.rename / fd.only と
+ * tools/tests/test_packages.py case 9 が突き合わせる (足したら両方直す)。
+ *   hdd が /boot/ … : ファイルとしては写さない。ブート領域へ書く (boot_hdd /
+ *                     loader) か、Phase 3 で別に写す (vmkernel.lz4)
+ *   それ以外         : その正規名で写す */
+typedef struct {
+    const char *fd;     /* FD 上のパス (小文字で書く。比較は大小文字を無視) */
+    const char *hdd;    /* HDD (配備マニフェスト) の正規名 */
+} FdRename;
+
+static const FdRename fd_renames[] = {
+    { "/vmkrnl.lz4",           "/boot/vmkernel.lz4" },
+    { "/sys/boot_hdd.bin",     "/boot/boot_hdd.bin" },
+    { "/sys/loader_h.bin",     "/boot/loader_hdd.bin" },
+    { "/sys/font/default.kcg", "/sys/font/default.kcgfont" },
+    { "/etc/filetype",         "/etc/filetypes" }
+};
+
+/* FD だけの物 (fd.only)。HDD へ写さない。/etc/profile は FD 用の PATH
+ * (/usr/bin が無い)、/LOADER.BIN は FAT の IPL が読む 2 段目 */
+static const char *const fd_only[] = {
+    "/loader.bin",
+    "/etc/profile"
+};
+
+#define FD_DIM(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
+/* src_path (FD 上のパス、FAT は大文字で返す) を HDD のどこへ写すか。
+ * 戻り値: 1 = hdd_out に "/hd0" + 正規名、0 = 既定 (小文字にして同じ場所)、
+ *         -1 = 写さない */
+static int fd_map_to_hdd(const char *src_path, char *hdd_out)
 {
-    return str_eq(dst_dir, "/etc") && str_eq_lower(name, "profile");
+    int i;
+    for (i = 0; i < FD_DIM(fd_only); i++) {
+        if (str_eq_lower(src_path, fd_only[i])) return -1;
+    }
+    for (i = 0; i < FD_DIM(fd_renames); i++) {
+        const char *h = fd_renames[i].hdd;
+        if (!str_eq_lower(src_path, fd_renames[i].fd)) continue;
+        if (h[0] == '/' && h[1] == 'b' && h[2] == 'o' && h[3] == 'o' &&
+            h[4] == 't' && h[5] == '/') return -1;
+        str_cpy(hdd_out, "/hd0");
+        str_cat(hdd_out, h);
+        return 1;
+    }
+    return 0;
 }
 
 /* FDDのsrc_dir配下のファイル/ディレクトリを /hd0/dst_dir 配下にコピー。
@@ -330,18 +380,24 @@ static int copy_directory(const char *src_dir, const char *dst_dir, int depth)
             if (fl.names[i][1] == '.' && fl.names[i][2] == '\0') continue;
         }
 
-        if (skip_on_hdd(dst_dir, fl.names[i])) continue;
-
         /* ソースパス構築 (媒体の名前のまま開く) */
         str_cpy(src_path, src_dir);
         if (src_path[str_len(src_path) - 1] != '/') str_cat(src_path, "/");
         str_cat(src_path, fl.names[i]);
 
-        /* 宛先パス構築: /hd0 + dst_dir + / + 小文字にした名前 */
-        str_cpy(dst_path, "/hd0");
-        str_cat(dst_path, dst_dir);
-        if (dst_path[str_len(dst_path) - 1] != '/') str_cat(dst_path, "/");
-        str_cat_lower(dst_path, fl.names[i]);
+        /* 宛先パス構築: /hd0 + dst_dir + / + 小文字にした名前。FD だけの物は
+         * 写さず、fd.rename の物は正規名へ (上の表) */
+        {
+            int m = (fl.types[i] == OS32_FILE_TYPE_DIR) ? 0
+                                                        : fd_map_to_hdd(src_path, dst_path);
+            if (m < 0) continue;
+            if (m == 0) {
+                str_cpy(dst_path, "/hd0");
+                str_cat(dst_path, dst_dir);
+                if (dst_path[str_len(dst_path) - 1] != '/') str_cat(dst_path, "/");
+                str_cat_lower(dst_path, fl.names[i]);
+            }
+        }
 
         if (fl.types[i] == OS32_FILE_TYPE_DIR) {
             /* サブディレクトリ: HDD側にmkdirして再帰 */

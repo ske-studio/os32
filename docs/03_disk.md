@@ -50,14 +50,18 @@ LBA     用途
 11-1231 データ領域 (クラスタ2〜, 1024B/クラスタ)
 ```
 
-主要ファイル (`build/image.mk` の `images/os32_boot.d88` ターゲットが配置):
+主要ファイル (`build/image.mk` の `images/os32_boot.d88` ターゲットが配置)。
+**中身は CD の BOOT + MINIMAL と同じ集合**で、`build/packages.yaml` の `fd:` から
+`tools/mkpkg.py --fd-args` が作る (FD だけの物と 8.3 の置き場所は
+[08_build.md の「起動 FD と MINIMAL」](08_build.md#起動-fd-と-minimal)):
 
 | ファイル | 内容 |
 |---------|------|
 | `/LOADER.BIN` | 第2ステージローダー (`loader_fat_new.bin`) |
 | `/VMKRNL.LZ4` | LZ4圧縮カーネルイメージ (kernel.bin + sqlite.bin) |
 | `/sys/shell.bin`, `/sys/unicode.bin` | シェル・Unicodeテーブル |
-| `/bin/*.bin` | 必須コマンド (`FDD_MIN_CMDS` で定義) |
+| `/bin/*.bin` | 基本コマンド (配備マニフェストのタグ `base`) |
+| `/sys/font/default.kcg` | 既定フォント (HDD の `default.kcgfont` の 8.3 名) |
 | `/sbin/install.bin`, `/sbin/cdinst.bin` | HDD/CDインストーラ |
 ```
 ブート: IPL → /LOADER.BIN (0000:8000) → /VMKRNL.LZ4 展開 → kernel_main

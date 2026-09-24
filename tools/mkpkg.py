@@ -8,6 +8,10 @@
 #        のタグから決める (make packages)
 #    python3 tools/mkpkg.py --plan build/packages.yaml --check-plan
 #        振り分けの検査だけ (ファイルは読まない)
+#    python3 tools/mkpkg.py --plan build/packages.yaml --fd-args \
+#        --fd-loader boot/loader_fat_new.bin
+#        起動 FD の中身 (= BOOT + MINIMAL、packages.yaml の fd:) を
+#        mkfat12 --tree の引数で出す (build/image.mk)
 #    python3 tools/mkpkg.py --list packages/NORMAL.PKG
 #        PKG の中身の一覧
 #    python3 tools/mkpkg.py --defs defs.yaml --output out/
@@ -528,6 +532,91 @@ def expand_plan(plan, base_dir, manifest=None):
     return out, problems
 
 
+# ======================================================================== #
+#  起動 FD (build/image.mk) — 中身は CD の BOOT + MINIMAL と同じ集合
+# ======================================================================== #
+# FD の中身を手で並べると CD の MINIMAL とずれる (2026-09-24 まで image.mk の
+# FDD_MIN_CMDS が別の一覧だった)。packages.yaml の fd: が「どのパッケージを
+# 載せるか (from)」「FAT に置けないので名前を変える物 (rename)」「FD だけの
+# 起動用の物 (only)」を決め、それ以外は足しも引きもしない。
+
+FD_LOADER_TOKEN = '{loader}'
+# FatFs (FF_USE_LFN 0、CP437) の短い名前に使える文字 (英小文字は大文字に畳む)
+_FAT83_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-~!#$%&'(){}@^`")
+
+
+def fat83_ok(path):
+    """全成分が 8.3 に収まるか (mkfat12 は収まらない名前を黙って切り詰める)"""
+    parts = path.strip('/').split('/')
+    for p in parts:
+        base, dot, ext = p.partition('.')
+        if not (1 <= len(base) <= 8) or len(ext) > 3 or '.' in ext \
+                or (dot and not ext):
+            return False
+        if any(c.upper() not in _FAT83_CHARS for c in base + ext):
+            return False
+    return True
+
+
+def fd_plan(plan, base_dir, loader=None, manifest=None):
+    """FD に載せる [(fd_path, host_rel)] と problems (ファイルの有無は見ない)
+
+    並びは only (定義順) → from の各パッケージ (定義順)。LOADER.BIN を先頭に
+    置くのは IPL (boot/boot_fat*.asm) が読む回数を小さく保つため。
+    """
+    problems = []
+    fd = plan.get('fd')
+    if not isinstance(fd, dict):
+        return [], ['packages.yaml に fd: が無い']
+    pkgs, probs = plan_packages(plan, base_dir, manifest)
+    problems += probs
+    by_name = {n: f for n, _, f in pkgs}
+
+    rename = {}
+    for r in fd.get('rename') or []:
+        if not (r.get('reason') or '').strip():
+            problems.append(f"fd.rename {r.get('guest')!r} に理由 (reason:) が無い")
+        if r['guest'] in rename:
+            problems.append(f"fd.rename {r['guest']!r} が 2 回 ({rename[r['guest']]} と {r['fd']})")
+        rename[r['guest']] = r['fd']
+    used = set()
+
+    out = []
+    for o in fd.get('only') or []:
+        if not (o.get('reason') or '').strip():
+            problems.append(f"fd.only {o.get('fd')!r} に理由 (reason:) が無い")
+        host = o['host']
+        if host == FD_LOADER_TOKEN:
+            if not loader:
+                problems.append(f"fd.only {o['fd']}: ローダ ({FD_LOADER_TOKEN}) の指定が無い")
+                continue
+            host = loader
+        out.append((o['fd'], host))
+    for name in fd.get('from') or []:
+        if name not in by_name:
+            problems.append(f"fd.from {name!r} が packages: に無い")
+            continue
+        for g, h in by_name[name]:
+            if g in rename:
+                used.add(g)
+                g = rename[g]
+            out.append((g, h))
+    for g in rename:
+        if g not in used:
+            problems.append(f"fd.rename {g!r} が fd.from のどれにも無い (古い rename)")
+
+    seen = {}
+    for g, _ in out:
+        key = g.upper()
+        if key in seen:
+            problems.append(f"FD のパス {g} が 2 回 ({seen[key]})")
+        seen[key] = g
+        if not fat83_ok(g):
+            problems.append(f"FD のパス {g} が 8.3 に収まらない (FAT は LFN なし。"
+                            "fd.rename で短い名前を決めること)")
+    return out, problems
+
+
 def build_from_plan(plan_path, output_dir, base_dir):
     plan = load_plan(plan_path)
     resolved, problems = expand_plan(plan, base_dir)
@@ -721,6 +810,10 @@ def main():
                         help='CD 媒体の構成 (build/packages.yaml)。中身は配備マニフェストのタグから決める')
     parser.add_argument('--check-plan', action='store_true',
                         help='--plan の振り分けだけ検査する (ファイルは読まない)')
+    parser.add_argument('--fd-args', action='store_true',
+                        help='--plan の fd: から起動 FD の mkfat12 --tree 引数 (fd=host …) を出す')
+    parser.add_argument('--fd-loader',
+                        help='--fd-args の LOADER.BIN のもと (2HD / 1.44MB で違う)')
     parser.add_argument('--list', nargs='+', metavar='PKG',
                         help='PKG の中身を一覧する')
     parser.add_argument('--defs', action='append', default=None,
@@ -751,6 +844,15 @@ def main():
                     print(f"  {len(data):>9}  {name}")
                 else:
                     print(f"  {'<dir>':>9}  {name}")
+    elif args.plan and args.fd_args:
+        files, problems = fd_plan(load_plan(args.plan), args.base, args.fd_loader)
+        problems += [f"{h} not found (FD {g})" for g, h in files
+                     if not os.path.isfile(os.path.join(args.base, h))]
+        if problems:
+            for p in problems:
+                print(f"ERROR: {p}", file=sys.stderr)
+            sys.exit(1)
+        print(' '.join(f"{g}={h}" for g, h in files))
     elif args.plan and args.check_plan:
         resolved, problems = expand_plan(load_plan(args.plan), args.base)
         for p in problems:

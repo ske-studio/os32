@@ -20,6 +20,22 @@
 /* ======================================================================== */
 
 #define FL_FILETYPES_PATH   "/etc/filetypes"
+/* FD (FAT、LFN なし) では 8.3 の短い名前で置く (build/packages.yaml の fd.rename)。
+ * 短い名前を読むのは、/etc を載せているマウントが LFN の無い FS (FAT) のときだけ
+ * — HDD (ext2) で正規名が欠けたり壊れたりしたとき、残っている短い名前を黙って
+ * 掴まないように (Codex 実装レビュー往復 1 / 2)。
+ * KAPI にはパスから FS 種別を引く口が無い (vfs_devname はマウント点の完全一致で
+ * デバイス名を返すだけ、sys_stat の st_dev はマウントの番号だけ)。そこで確実に
+ * FAT と言える場合だけを拾う: 「/etc がルートと同じマウント (st_dev が同じ) で、
+ * ルートが FD」。FD 起動のルートは kernel.c が必ず FAT でマウントする
+ * (ルートのデバイス名と FS 名は tools/tests/test_packages.py が kernel.c と
+ * fs/fatfs_vfs.c に突き合わせる)。/etc に別のマウント (HDD の ext2 など) が
+ * 載っていれば st_dev が違うので読まない。FAT の HDD が /etc に載る場合も
+ * 読まない (安全側。短い名前を探さないだけ) */
+#define FL_ETC_DIR           "/etc"
+#define FL_FILETYPES_PATH_83 "/etc/filetype"
+#define FL_FD_DEV_PREFIX0    'f'   /* kernel.c の FD ルート "fd0" の先頭 2 文字 */
+#define FL_FD_DEV_PREFIX1    'd'
 #define FL_FILETYPES_MAXSZ  8192
 #define FL_MAX_ASSOC        128
 
@@ -57,6 +73,19 @@ static int ft_count = 0;
 /*  ファイルタイプ関連付け読み込み                                           */
 /* ======================================================================== */
 
+/* /etc を載せているマウントが FD のルート (= FAT) か。上の説明のとおり */
+static int ft_etc_on_fd_root(void)
+{
+    OS32_Stat st_root, st_etc;
+    const char *dev;
+
+    if (g_api->sys_stat("/", &st_root) != 0) return 0;
+    if (g_api->sys_stat(FL_ETC_DIR, &st_etc) != 0) return 0;
+    if (st_root.st_dev != st_etc.st_dev) return 0;
+    dev = g_api->vfs_devname("/");
+    return dev && dev[0] == FL_FD_DEV_PREFIX0 && dev[1] == FL_FD_DEV_PREFIX1;
+}
+
 static void ft_load(void)
 {
     int fd, sz, i, line_start, got_eq;
@@ -65,6 +94,7 @@ static void ft_load(void)
     ft_count = 0;
 
     fd = g_api->sys_open(FL_FILETYPES_PATH, O_RDONLY);
+    if (fd < 0 && ft_etc_on_fd_root()) fd = g_api->sys_open(FL_FILETYPES_PATH_83, O_RDONLY);
     if (fd < 0) return;
 
     ft_buf = (char *)g_api->mem_alloc(FL_FILETYPES_MAXSZ);
