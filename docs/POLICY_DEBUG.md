@@ -59,6 +59,26 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 - `kstring` / `kmalloc` / `kprintf` のプリミティブを触ったら、kselftest に項目を足す。
 - `userland/tests/klibc_test` は newlib をリンクするので、カーネル側の検証にはならない。
 
+### 実機では起動ログを `cat /var/log/boot.log` で読む
+
+実機では起動画面の `[selftest] N/N passed`・`[boot] Image CRC`・`[fdc]` などがすぐ流れて読めず、
+rshell が立つ前の kprintf はシリアルにも出ない。カーネルは最初の kprintf から常駐シェルを exec する
+直前までの出力 (文字だけ、16KB、あふれたら**後ろを**捨てる) を溜め、ルートが ext2 / FAT なら
+`/var/log/boot.log` に上書きで書く。前回の分は `/var/log/boot.log.1` (FD 起動 = FAT では 8.3 の
+`/var/log/bootlog.1`)。起動後にシリアルで **`cmd "cat /var/log/boot.log"`** を読めば、流れた行を全部見られる。
+
+- 1 行目がヘッダ `# OS32 boot log  Build … Commit … Image CRC … uptime-ticks N`、最終行が
+  `# end  kept N bytes  dropped M bytes`。`dropped` が 0 でなければ後ろが切れている。
+- 書き出しに失敗しても起動は続き、画面に `[bootlog] <段> failed rc=…` が 1 行だけ出る
+  (その行とシェル起動後の出力はファイルに入らない)。ルートが HostDrv / iso9660 なら書かない。
+- 今回分はまず `/var/log/boot.new` に書き (残っていたものは先に消す)、書けたと確かめてから
+  `boot.log` → `.1` → `boot.new` → `boot.log` と回す。`boot.log` が無ければ `.1` には触らない
+  (唯一の旧世代を残す)。途中で落ちてもそこで止め、**既存の `boot.log` は上書きしない** (今回分は
+  `boot.new` に残る)。`boot.new` が残っていたら、その起動の保存が途中で止まった印 (次の起動で消される)。
+  書けなかった後の後始末も落ちうるので、残存だけでは中身が完全とは限らない。
+- **いつの起動のログか**はヘッダの Commit / Image CRC を `ver` と突き合わせて決める。
+  実装: `kernel/bootlog.c`、記録: `tools/tests/bootlog_tdd.md`。
+
 ---
 
 ## §3. 仮説の提示と検証プロセス

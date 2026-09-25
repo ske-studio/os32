@@ -68,6 +68,12 @@ int serial_putchar(char c) { (void)c; return 0; }
 static u32 g_inject_pending;
 void kbd_inject_discard(void) { g_inject_pending = 0; }
 
+/* --- 起動ログ (kernel/bootlog.c) の代わり --------------------------------
+ * console.c の入口は con_sink と同じ 4 か所で bootlog_push も呼ぶ。この
+ * 試験が見るのはシンクなので、起動ログは受け流す (実物の試験は
+ * tools/tests/test_bootlog.py)。 */
+void bootlog_push(const char *buf, u32 len) { (void)buf; (void)len; }
+
 /* --- launch_req 表の launch_child の代わり (exec/launch.c は引けない) -----
  * 実物は「その ID の表が所有する子。不正 ID / 不在は 0」。ここでは読み手→子
  * の対応を 1 本の配列で持ち、同じ約束 (範囲外は 0) を守る。 */

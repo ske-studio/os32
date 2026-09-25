@@ -208,7 +208,7 @@ static int fatfs_vfs_write(void *ctx, const char *path, const void *data, u32 si
     int rc_path;
     char fpath[VFS_MAX_PATH];
     FIL fil;
-    FRESULT fr;
+    FRESULT fr, fr_close;
     UINT bw;
 
     rc_path = ff_make_path(fc, path, fpath, sizeof(fpath));
@@ -218,9 +218,16 @@ static int fatfs_vfs_write(void *ctx, const char *path, const void *data, u32 si
     if (fr != FR_OK) return ff_to_vfs(fr);
 
     fr = f_write(&fil, data, size, &bw);
-    f_close(&fil);
+    /* f_close は最後のセクタとディレクトリエントリ (サイズ・クラスタ鎖) を
+     * 書き戻す。ここが落ちると f_write が OK でも媒体には残らないので、
+     * その結果も返す (f_write の失敗が先)。以前は捨てていたので、起動ログの
+     * 最後のフラッシュが落ちても「保存成功」になっていた (2026-09-25)。
+     * fatfs_vfs_sync は無条件に OK を返すので、閉じる時の失敗をここで
+     * 拾わないと呼び手には見えない。 */
+    fr_close = f_close(&fil);
 
     if (fr != FR_OK) return ff_to_vfs(fr);
+    if (fr_close != FR_OK) return ff_to_vfs(fr_close);
     return (int)bw;
 }
 
