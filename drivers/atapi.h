@@ -38,15 +38,33 @@
 
 /* ======== センスキー (エラーレジスタの bit7-4) ======== */
 #define ATAPI_ERR_SENSE_SHIFT   4
+#define ATAPI_SK_NO_SENSE       0x00
 #define ATAPI_SK_NOT_READY      0x02
 #define ATAPI_SK_UNIT_ATTENTION 0x06   /* 媒体の交換・リセットの後の最初のコマンド */
 
+/* ======== ASC (REQUEST SENSE の byte 12) ======== */
+#define ATAPI_ASC_BECOMING_READY      0x04   /* NOT READY: 準備中 (回転の立ち上がり等) */
+#define ATAPI_ASC_MEDIUM_NOT_PRESENT  0x3A   /* NOT READY: 媒体が無い (これだけが確定) */
+#define ATAPI_SENSE_LEN               18     /* REQUEST SENSE で受け取る長さ */
+#define ATAPI_SENSE_MIN               14     /* byte 13 (ASCQ) まで要る */
+
+/* READ CAPACITY の出し直し: UNIT ATTENTION は REQUEST SENSE で消して、
+ * NOT READY (3Ah 以外) は ATAPI_READY_WAIT_US 待って、この回数まで */
+#define ATAPI_READY_RETRIES     16
+#define ATAPI_READY_WAIT_US     250000UL
+
+/* SRST を立てておく長さ (ALT_STATUS の空読みの回数)。規定は 5µs 以上 */
+#define ATAPI_SRST_HOLD_LOOP    50000
+
 /* ======== ATAPI / PACKET コマンド ======== */
 #define ATAPI_CMD_PACKET         0xA0   /* PACKETコマンド (CDB送出) */
+#define ATAPI_CMD_DEVICE_RESET   0x08   /* DEVICE RESET: 選んだ装置だけ。BSY でも受ける */
 #define ATAPI_CMD_IDENTIFY_PKT   0xA1   /* IDENTIFY PACKET DEVICE */
 
 /* ======== 装置の選択 (DRV_HEAD) ======== */
 #define ATAPI_DRV_SLAVE     0x10   /* bit4 = 1: スレーブ (セカンダリの 2 台目) */
+#define ATAPI_SEL_UNKNOWN   0xFF   /* バスがどちらを選んでいるか分からない (起動直後) */
+#define ATAPI_ST_FLOAT      0xFF   /* 居ない装置を選んだときの ALT_STATUS (浮いたバス) */
 
 /* ======== ATAPI シグネチャ (IDENTIFY時にCylLo/CylHiで返る) ======== */
 #define ATAPI_SIG_CYL_LO    0x14
@@ -122,6 +140,9 @@ typedef struct {
     u32 multi_fail;       /* 複数セクタの READ(10) が失敗して 1 セクタずつへ落ちた数 */
     u32 single_retry;     /* 落ちた後に 1 セクタずつ出した READ(10) の数 */
     u32 unit_attention;   /* UNIT ATTENTION / NOT READY を見た数 */
+    u32 dev_resets;       /* コマンドが終わらない装置へ出した DEVICE RESET の数 */
+    u32 soft_resets;      /* DEVICE RESET でも戻らず SRST した数 */
+    u32 ready_retries;    /* READ CAPACITY を UNIT ATTENTION / NOT READY で出し直した数 */
 } AtapiStats;
 
 void atapi_get_stats(AtapiStats *out);

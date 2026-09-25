@@ -98,6 +98,15 @@
 | `np2_empty` | 空のドライブ: 容量 1、READ(10) 失敗と `[atapi] ... sense=5` の行、媒体が入れば読める |
 | `np2_slave` | マスター CD / マスター空 CD + スレーブ CD / スレーブだけ / マスター CD + スレーブ空: 媒体のある方を選んで読む |
 | `cap_nodata` | READ CAPACITY がデータ無しで終われば失敗 |
+| `cap_len` | READ CAPACITY の応答が 7 / 9 / 6 バイトなら失敗、8 だけ通る (ワードで数えない) |
+| `np2_slave_strict` | `np2_slave` を実機寄り (BSY の装置は書き込みを無視) で |
+| `np2_sel_lag` | 選んだ直後に 7 回 BSY を見せる装置 × 4 構成: 選ぶ装置・読み・mount、規定違反 0、リセット 0 |
+| `np2_absent` | 居ない装置が 0x00 / 0x80 (BSY 付き) を返す × マスターだけ / スレーブだけ: 見つけて読む、待ち・リセット 0 |
+| `np2_sel_busy` | (白箱) バスが別の居る装置を BSY のまま選んでいる: 待ってから選ぶ / 固まったままなら DEVICE RESET (その装置だけ、UA が立つ) / DEVICE RESET を受けなければ SRST / 使う装置が選ばれた瞬間に固まり DEVICE RESET も受けない: SRST の後に使う装置を選び直してから PACKET |
+| `np2_stuck` | 使っている装置が LBA 17 を渡した後に固まる: 複数セクタが期限切れ → 1 セクタずつ (DEVICE RESET で戻す) → 17 で失敗、行は `lba=17 n=1 ret=-1 st=d0 ... got=2048 req=16+4`、その後 16〜17 は読める |
+| `np2_ua_init` | 空のマスター + 媒体のあるスレーブ、両方が UNIT ATTENTION (報告で消える / REQUEST SENSE でだけ消える): スレーブを選ぶ |
+| `np2_becoming_ready` | スレーブが 3 回 NOT READY / 04h: 3 回待って (cpu_delay_us × 3) スレーブを選ぶ |
+| `np2_no_medium` | マスターが NOT READY / 3Ah: READ CAPACITY 1 回で確定 (待たない)、スレーブを選ぶ。公開の `atapi_read_capacity` も `ATAPI_ERR_NO_MEDIA` を 1 回で |
 | `replay` | pkg.c の読み方 (28 回、559KB) を再生: **READ(10) 19 回** (274 セクタ ÷ 16 = 17.2 + 根 + 端)、パスの解決 1 回 |
 
 参考 (机上): 直す前の形 (4KB ずつ、根から引き直し、1 セクタずつ) では、同じ 559KB で
@@ -151,6 +160,44 @@ SURVIVED でなければ試験が不安定。変異の一覧と結果は `test_c
 - 試験: `np2_read` / `np2_async` / `np2_empty` (空のドライブで容量 1・sense=5 の行・入れば読める) / `np2_slave`
   (4 通りの構成で選ぶ装置と読み) / `cap_nodata`。変異 38〜43 は全部 RED
 
+## 3-4. Codex レビュー 2 (2dc3c7f) の P1 / P2 × 3 / P3
+
+- **P1** 初期化中の容量確認が、対象装置を選ぶ前に旧装置の BSY を待ち Features / Byte Count を書き、
+  選んだ直後に PACKET を出していた。→ PACKET の共通路 `atapi_send_cdb` が毎回 `atapi_select_device`
+  (DRV_HEAD → 400ns → 選んだ装置の BSY/DRQ クリア待ち) を済ませてからレジスタを書く。
+  `atapi_select_bank(1)` はバンクを切り替えるだけ
+- **P2** BSY タイムアウトの後も無条件で DRV_HEAD を書いていた。→ 書く前に ALT_STATUS を見て、
+  0xFF (浮いたバス) と**シグネチャの出なかった装置**の値は待たず、居る装置の BSY/DRQ だけを
+  「コマンド未完了」として待つ。期限切れなら `atapi_recover`: **DEVICE RESET (08h)** — PACKET 装置が
+  BSY でも受ける唯一のコマンドで、その装置だけを戻す (NP21/W `ideio_o64e` case 0x08 = drvreset) —
+  それでも戻らなければ **SRST** (バンクで選んだバスの 2 台とも。UNDOCUMENTED io_ide 074Ch bit2、
+  NP21/W `ideio_o74c` は `getidedev()` = そのバンクだけなので、プライマリの HDD には届かない)。
+  選んだ後の待ちが期限切れでも同じ回復を 1 回だけ試す
+- **P2** UNIT ATTENTION (6) を媒体なしと扱っていた。→ `atapi_capacity_ready`: UA は REQUEST SENSE で消して
+  出し直す、NOT READY (2) は REQUEST SENSE の ASC が **3Ah (媒体なし) のときだけ確定**、それ以外 (04h 準備中など)
+  は `cpu_delay_us(250ms)` 置いて出し直す。`ATAPI_READY_RETRIES` (16) まで。公開の `atapi_read_capacity` も同じ経路
+- **P2** `got` が `total_read += 2` (ワード) 由来で、Byte Count=7 の応答を 8 と数えていた。→ ポートから読むワード数
+  `(xfer+1)/2` と有効バイト数 `xfer_size` を分け、`total_read = end`
+- **P3** 診断の行の lba / n が呼び手の範囲で、st / err / got は最後の 1 セクタの試行のものだった。→ `atapi_read10` が
+  落ちたコマンドの (lba, n) を `s_diag_lba / s_diag_n` に残し、行はそれと `req=<範囲>` を出す。
+  `atapi_status()` が待ちで読んだ ALT_STATUS を毎回 `s_diag_st` に残し、期限切れの早期 return でも `s_diag_got` を更新
+- 模型 (NP21/W の写し) に **実機寄りの strict** を足した: BSY の装置はレジスタ書き込みを無視する (NP21/W は
+  `atapi_dataread_asyncwait` で先に完了を待つ = 0 のときの振る舞い)、選んだ直後に `sel_lag` 回 BSY、居ない装置の値
+  `absent_status` (0x00 / 0x80)、UA (報告で消える / REQUEST SENSE でだけ消える)、NOT READY / 04h・3Ah、固まる装置
+  (DEVICE RESET / SRST で戻る、`ignore_devreset`)、REQUEST SENSE (`atapicmd.c` case 0x03 の写し)。
+  規定違反 (BSY 中の DRV_HEAD / コマンド / レジスタ書き込み、Byte Count を書かない PACKET) を数えて 0 を見る
+- 変異 44〜56 (直す前の順序、選んだ後に待たない、選ばれている装置の BSY を待たない、リセットしない、SRST の後に
+  使う装置を選び直さない、居ない装置の BSY も待つ、UA を媒体なし、UA を REQUEST SENSE 無しで出し直す、NOT READY を
+  待たない、3Ah も待つ、ワードで数える、行が呼び手の範囲、期限切れで got を残さない、st を残さない) は全部 RED。
+  全 56 本 RED / 0 SURVIVED (対照は SURVIVED)
+- 組んでいて見つけた自分の穴: 選んだ後の待ちが期限切れで SRST まで行くと、SRST はマスターを選び直すので、
+  そのまま Byte Count / PACKET を書くと**マスターへ行く**。`atapi_recover` が SRST の後に使う装置を選び直す
+  (`np2_sel_busy` (4) = 選ばれた瞬間に固まって DEVICE RESET も受けない装置、変異 47)
+- 白箱の `np2_sel_busy` はバスの選択 (`s_cursel`) を試験が直接動かす — 「別の居る装置が BSY のまま選ばれている」は
+  今の atapi.c の経路では作れない (装置を替えるのは atapi_init だけ) が、`atapi_select_device` の規則そのものを見る
+- `atapi_read10` の UA の出し直しは REQUEST SENSE を挟まない (報告で UA が消える装置を前提。SPC の既定)。
+  REQUEST SENSE でだけ消える装置では読みの UA の出し直しが 1 回では足りない — 未対応 (容量確認だけ直した)
+
 ## 4. 未検証
 
 - **実機・NP21/W での速さは測っていない** (PM が測る)。NP21/W は CD のシーク・回転を模擬しないので
@@ -158,4 +205,7 @@ SURVIVED でなければ試験が不安定。変異の一覧と結果は `test_c
 - 実機の CD ドライブが 16 セクタの READ(10) と 0x8000 の byte count limit を受けるか。困ったら
   `ATAPI_READ_MAX_SECTORS` を下げる
 - 実機のドライブが READ(10) で UNIT ATTENTION を返すか (返さなければ 2 秒規則だけが効く)
+- DEVICE RESET (08h) / SRST の回復と、NOT READY / 04h の待ち (250ms × 16) は実機でしか踏まない
+  (NP21/W は固まらず、READ CAPACITY で UA / NOT READY を返さない)。`atapi_get_stats` の
+  `dev_resets` / `soft_resets` / `ready_retries` で踏んだかが分かる
 - HDD (ext2) への書き込みの速さは見ていない。CD 側が速くなった後は、そちらが律速になりうる

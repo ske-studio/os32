@@ -41,6 +41,9 @@ char *kstrncpy(char *dst, const char *src, u32 n)
 }
 void *kmemcpy(void *dst, const void *src, u32 n) { return memcpy(dst, src, (size_t)n); }
 void *kmalloc(u32 size) { return g_kmalloc_fail ? (void *)0 : malloc((size_t)size); }
+/* 校正済みの µs 待ちの贋物: 待った合計を数えるだけ (NOT READY の出し直しの間) */
+static unsigned long g_delay_us;
+void cpu_delay_us(u32 us) { g_delay_us += us; }
 void *kzalloc(u32 size) { return calloc(1, (size_t)size); }
 void kfree(void *p) { free(p); }
 
@@ -217,7 +220,7 @@ static struct {
     u32 blk_size;
     int lag;           /* ブロックの境目の後、古い状態を見せる回数 */
     u8  lag_status;
-    u8  cap[8];
+    u8  cap[9];
     /* 設定 */
     u32 drq_max;       /* 1 回の DRQ の上限 (0 = bcl どおり) */
     int fail_multi;    /* count > 1 の READ(10) を MEDIUM ERROR で断る */
@@ -226,6 +229,7 @@ static struct {
     int ua_next;       /* 次のコマンドで UNIT ATTENTION を返し、媒体を B へ */
     int stale;         /* 境目の後の古い状態の回数 */
     int cap_nodata;    /* READ CAPACITY がデータ無しで終わる */
+    u32 cap_len;       /* READ CAPACITY の応答の長さ (0 = 8)。7 / 9 は規定外の装置 */
     /* 数 */
     u32 n_packets;
     u32 n_read10;
@@ -322,8 +326,9 @@ static void model_exec(void)
         M.cap[0] = (u8)(last >> 24); M.cap[1] = (u8)(last >> 16);
         M.cap[2] = (u8)(last >> 8);  M.cap[3] = (u8)last;
         M.cap[4] = 0; M.cap[5] = 0; M.cap[6] = (u8)(SEC >> 8); M.cap[7] = 0;
+        M.cap[8] = 0xAA;   /* 9 バイト目 (規定外の装置が余分に渡す屑) */
         M.data = M.cap;
-        M.data_len = 8;
+        M.data_len = M.cap_len ? M.cap_len : 8;
         M.pos = 0;
         model_start_block();
         return;
@@ -443,6 +448,21 @@ typedef struct {
     int changed;         /* IDEIO_MEDIA_CHANGED */
     int async_lag;       /* CD_ASYNC: 1 セクタの読みの後、BSY のまま見せる回数 */
     int busy_left;
+    /* ---- 実機寄りの振る舞い (NP21/W には無い。strict のときの試験用) ---- */
+    u8  asc;             /* REQUEST SENSE が返す ASC (NP21/W の drv->asc の下位) */
+    int ua;              /* UNIT ATTENTION が立っている (次のコマンドは sk 6) */
+    int ua_needs_sense;  /* 1 = REQUEST SENSE でだけ消える (0 = 報告で消える) */
+    int ua_on_reset;     /* DEVICE RESET / SRST の後に UNIT ATTENTION を立てる */
+    int ready_after;     /* この回数だけ NOT READY / ASC 04h (準備中) を返してから使える */
+    int no_medium;       /* トレイが空: 毎回 NOT READY / ASC 3Ah (NP21/W は容量 0 を返す) */
+    int stuck;           /* BSY のまま戻らない (DEVICE RESET / SRST で戻る) */
+    int stuck_on_select; /* 選ばれた瞬間に固まる (1 回だけ) */
+    long stuck_after_lba;/* このセクタを渡した後で stuck になる (-1 = なし) */
+    int stuck_pending;
+    int ignore_devreset; /* DEVICE RESET を無視する (SRST でだけ戻る) */
+    int cy_written;      /* 選ばれてから Byte Count を書かれた (PACKET の前に要る) */
+    u32 n_readcap;       /* 受けた READ CAPACITY の数 (断ったものも) */
+    u32 n_reqsense;      /* 受けた REQUEST SENSE の数 */
 } Np2Drv;
 
 static struct {
@@ -451,7 +471,27 @@ static struct {
     u8  ctrl;
     Np2Drv d[2];         /* セカンダリのマスター / スレーブ (NP21/W の ide2 / ide3) */
     u32 n_read10, n_read10_multi;
+    /* ---- 実機寄りの設定 (setup_np2_layout が g_np2cfg から写す) ---- */
+    int strict;          /* 1 = BSY の装置はレジスタ書き込みを無視する (ATA の規定。
+                          * NP21/W は書き込みの前に非同期の読みの完了を待つ = 0) */
+    int sel_lag;         /* 選ばれた装置が BSY を見せる回数 (選択の直後の整定) */
+    unsigned absent_status; /* 居ない装置を選んだときに読める値 (実機は 0xFF とは限らない) */
+    /* ---- 規定違反の数 (試験は 0 を見る) ---- */
+    u32 n_sel_while_bsy;    /* BSY の装置が選ばれているのに DRV_HEAD を書いた */
+    u32 n_cmd_while_bsy;    /* BSY の装置へ DEVICE RESET 以外のコマンドを書いた */
+    u32 n_reg_while_bsy;    /* BSY の装置へ Features / Byte Count を書いた */
+    u32 n_packet_stale_cy;  /* 選び直した後 Byte Count を書かずに PACKET を出した */
+    u32 n_devreset, n_srst;
 } N;
+
+static struct { int strict; int sel_lag; unsigned absent_status; } g_np2cfg = { 0, 0, 0xFF };
+static int g_np2cfg_no_init;   /* 1 = setup_np2_layout が atapi_init を呼ばない (装置を設定してから呼ぶ) */
+
+/* 装置がコマンドを受けられない (BSY) か */
+static int np2_busy(const Np2Drv *D)
+{
+    return D->stuck || D->busy_left > 0 || (D->status & NP2_STAT_BSY);
+}
 
 /* 選ばれている装置。居なければ NULL (getidedrv と同じ) */
 static Np2Drv *np2_cur(void)
@@ -504,6 +544,7 @@ static void np2_dataread(Np2Drv *D)
         return;
     }
     memcpy(D->buf, D->media->img + D->sector * SEC, SEC);
+    if (D->stuck_after_lba >= 0 && (long)D->sector == D->stuck_after_lba) D->stuck_pending = 1;
     D->sector++; D->nsectors--;
     D->sc = NP2_INTR_IO;
     D->cy = 2048;
@@ -522,6 +563,43 @@ static void np2_dataread(Np2Drv *D)
 static void np2_a0(Np2Drv *D)
 {
     u8 op = D->buf[0];
+    if (op == SCSI_CMD_READ_CAPACITY) D->n_readcap++;
+    if (op == SCSI_CMD_REQUEST_SENSE) {
+        /* atapicmd.c case 0x03: 直前のエラーの sk / asc を 18 バイトで */
+        u32 leng = D->buf[4];
+        D->n_reqsense++;
+        memset(D->buf, 0, 18);
+        D->buf[0] = 0x70;
+        D->buf[2] = D->sk;
+        D->buf[7] = 11;
+        D->buf[12] = D->asc;
+        D->buf[13] = 0;
+        D->ua = 0;                           /* 報告したので消える */
+        np2_senddata(D, 18, leng);
+        return;
+    }
+    /* 実機寄り: リセット・交換の後の最初のコマンドは UNIT ATTENTION (asc 29h) */
+    if (D->ua) {
+        np2_set_sk(D, ATAPI_SK_UNIT_ATTENTION);
+        D->asc = 0x29;
+        if (!D->ua_needs_sense) D->ua = 0;
+        np2_senderror(D);
+        return;
+    }
+    /* 実機寄り: トレイが空 (NOT READY / 3Ah)、準備中 (NOT READY / 04h) */
+    if (D->no_medium) {
+        np2_set_sk(D, ATAPI_SK_NOT_READY);
+        D->asc = ATAPI_ASC_MEDIUM_NOT_PRESENT;
+        np2_senderror(D);
+        return;
+    }
+    if (D->ready_after > 0) {
+        D->ready_after--;
+        np2_set_sk(D, ATAPI_SK_NOT_READY);
+        D->asc = ATAPI_ASC_BECOMING_READY;
+        np2_senderror(D);
+        return;
+    }
     if (op == SCSI_CMD_TEST_UNIT_READY) {
         if (!D->loaded) { np2_set_sk(D, 0x02); np2_senderror(D); return; }
         if (D->changed) { np2_set_sk(D, 0x02); D->changed = 0; np2_senderror(D); return; }
@@ -557,7 +635,7 @@ static unsigned int np2_inp(unsigned int port)
     Np2Drv *D;
     if (N.bank != 1) return 0xFF;
     D = np2_cur();
-    if (!D) return 0xFF;
+    if (!D) return N.absent_status;    /* 居ない装置: 浮いたバスの値 (どのポートも) */
     switch (port) {
     case IDE_ERROR:      D->status &= (u8)~NP2_STAT_CHK; return D->error;
     case IDE_SECT_CNT:   return D->sc;
@@ -565,6 +643,7 @@ static unsigned int np2_inp(unsigned int port)
     case IDE_CYL_HI:     return (u8)(D->cy >> 8);
     case IDE_STATUS:
     case IDE_ALT_STATUS:
+        if (D->stuck) return (u8)((D->status & ~NP2_STAT_DRQ) | NP2_STAT_BSY);
         if (D->busy_left > 0) {
             D->busy_left--;
             return (u8)((D->status & ~NP2_STAT_DRQ) | NP2_STAT_BSY);
@@ -580,29 +659,78 @@ static void np2_outp(unsigned int port, unsigned int v)
     int k;
     if (port == IDE_BANK1) { if (!(v & 0x80)) N.bank = (int)(v & 0x71); return; }
     if (N.bank != 1) return;
-    if (port == IDE_DRV_HEAD) { N.drivesel = (int)((v >> 4) & 1); return; }
+    if (port == IDE_DRV_HEAD) {
+        /* ideio_o64c: 書く前に非同期の読みの完了を待つ (asyncwait)。実機 (strict)
+         * では BSY の装置は書き込みを受けないので、選択は変わらない */
+        int newsel = (int)((v >> 4) & 1);
+        D = np2_cur();
+        if (D && np2_busy(D)) {
+            if (N.strict) { N.n_sel_while_bsy++; return; }
+            D->busy_left = 0;
+        }
+        if (newsel != N.drivesel) {
+            N.drivesel = newsel;
+            if (N.d[newsel].present) {
+                N.d[newsel].busy_left = N.sel_lag;   /* 選ばれた直後の整定 */
+                N.d[newsel].cy_written = 0;
+                if (N.d[newsel].stuck_on_select) {
+                    N.d[newsel].stuck_on_select = 0;
+                    N.d[newsel].stuck = 1;
+                }
+            }
+        }
+        return;
+    }
     if (port == IDE_DEV_CTRL) {
         u8 mod = (u8)(N.ctrl ^ v);
         N.ctrl = (u8)v;
-        if (mod & 0x04) {
+        if (mod & IDE_SRST) {
             for (k = 0; k < 2; k++) {
                 D = &N.d[k];
                 if (!D->present) continue;
-                if (v & 0x04) { D->status = 0; D->error = 0; }
-                else { np2_drvreset(D); D->status = NP2_STAT_DRDY | NP2_STAT_DSC | NP2_STAT_CHK; D->error = 0x01; }
+                if (v & IDE_SRST) {
+                    D->status = 0; D->error = 0;
+                    D->stuck = 0; D->stuck_pending = 0; D->busy_left = 0;
+                } else {
+                    np2_drvreset(D);
+                    D->status = NP2_STAT_DRDY | NP2_STAT_DSC | NP2_STAT_CHK;
+                    D->error = 0x01;
+                    if (D->ua_on_reset) D->ua = 1;
+                }
             }
+            if (v & IDE_SRST) N.n_srst++;
+            else N.drivesel = 0;                 /* リセット後はマスター */
         }
         return;
     }
     D = np2_cur();
     if (!D) return;
+    if (port == IDE_COMMAND && v == ATAPI_CMD_DEVICE_RESET) {
+        /* ideio_o64e case 0x08: BSY でも受ける。その装置だけ戻す */
+        N.n_devreset++;
+        if (D->ignore_devreset) return;
+        np2_drvreset(D);
+        D->error = 0x01;
+        D->stuck = 0; D->stuck_pending = 0; D->busy_left = 0;
+        if (D->ua_on_reset) D->ua = 1;
+        return;
+    }
+    if (np2_busy(D)) {
+        if (N.strict) {
+            if (port == IDE_COMMAND) N.n_cmd_while_bsy++;
+            else N.n_reg_while_bsy++;
+            return;                              /* BSY の装置は書き込みを無視 */
+        }
+        if (port == IDE_COMMAND) D->busy_left = 0;   /* ideio_o64e の asyncwait */
+    }
     switch (port) {
     case IDE_SECT_CNT: D->sc = (u8)v; break;
-    case IDE_CYL_LO:   D->cy = (u16)((D->cy & 0xFF00) | (v & 0xFF)); break;
-    case IDE_CYL_HI:   D->cy = (u16)((D->cy & 0x00FF) | ((v & 0xFF) << 8)); break;
+    case IDE_CYL_LO:   D->cy = (u16)((D->cy & 0xFF00) | (v & 0xFF)); D->cy_written = 1; break;
+    case IDE_CYL_HI:   D->cy = (u16)((D->cy & 0x00FF) | ((v & 0xFF) << 8)); D->cy_written = 1; break;
     case IDE_COMMAND:
         D->cmd = (u8)v;
         if (v == ATAPI_CMD_PACKET) {
+            if (!D->cy_written) N.n_packet_stale_cy++;
             D->sc = (u8)((D->sc & ~NP2_INTR_IO) | NP2_INTR_CD);
             D->status &= (u8)~(NP2_STAT_BSY | NP2_STAT_CHK);
             D->status |= NP2_STAT_DRDY | NP2_STAT_DRQ | NP2_STAT_DSC;
@@ -624,13 +752,15 @@ static unsigned int np2_inpw(unsigned int port)
     if (port != IDE_DATA || N.bank != 1) return 0xFFFF;
     D = np2_cur();
     if (!D) return 0xFFFF;
-    if (D->busy_left > 0) return 0;          /* まだ DRQ が立っていない */
+    if (D->stuck || D->busy_left > 0) return 0;   /* まだ DRQ が立っていない */
     if ((D->status & NP2_STAT_DRQ) && D->bufdir_in) {
         ret = (unsigned int)D->buf[D->bufpos] | ((unsigned int)D->buf[D->bufpos + 1] << 8);
         D->bufpos += 2;
         if (D->bufpos >= D->bufsize) {
             D->status &= (u8)~NP2_STAT_DRQ;
             if (D->cmd == ATAPI_CMD_PACKET) {
+                /* 実機寄り: このセクタを渡し終えたところで固まる */
+                if (D->stuck_pending) { D->stuck_pending = 0; D->stuck = 1; return ret; }
                 if (D->status & NP2_STAT_BSY) return ret;
                 if (D->buftc == NP2_TC_READ) { np2_dataread(D); return ret; }
                 D->sc = NP2_INTR_IO | NP2_INTR_CD;
@@ -720,18 +850,34 @@ static void setup_np2_layout(int layout)
     build_media(&g_media_b, BIG_LBA_B, SUB_LBA_B, DEEP_SIZE_B, 2);
     M.m = &g_media_a;
     g_np2 = 1;
+    g_delay_us = 0;
+    N.strict = g_np2cfg.strict;
+    N.sel_lag = g_np2cfg.sel_lag;
+    N.absent_status = g_np2cfg.absent_status;
     N.d[0].present = (layout != 2);
     N.d[1].present = (layout != 0);
     for (k = 0; k < 2; k++) {
         N.d[k].media = &g_media_a;
+        N.d[k].stuck_after_lba = -1;
         np2_drvreset(&N.d[k]);
     }
     N.d[0].loaded = (layout == 0 || layout == 3);
     N.d[1].loaded = (layout == 1 || layout == 2);
-    CHECK(atapi_init() == 1);
+    if (!g_np2cfg_no_init) CHECK(atapi_init() == 1);
 }
 
 static void setup_np2(void) { setup_np2_layout(0); }
+
+/* 規定違反が無かったか (strict の試験の後に見る) */
+static void np2_check_protocol(void)
+{
+    if (N.n_sel_while_bsy || N.n_cmd_while_bsy || N.n_reg_while_bsy || N.n_packet_stale_cy) {
+        fprintf(stderr, "protocol: sel_bsy=%lu cmd_bsy=%lu reg_bsy=%lu stale_cy=%lu\n",
+                (unsigned long)N.n_sel_while_bsy, (unsigned long)N.n_cmd_while_bsy,
+                (unsigned long)N.n_reg_while_bsy, (unsigned long)N.n_packet_stale_cy);
+        CHECK(0);
+    }
+}
 
 /* 選んだ装置 (の構造体) */
 static Np2Drv *np2_chosen(void) { return &N.d[atapi_drive_index()]; }
@@ -1378,6 +1524,256 @@ static void t_cap_nodata(void)
     CHECK(cap.total_sectors == g_media_a.secs);
 }
 
+
+/* READ CAPACITY の応答の長さ: 8 バイトちょうどだけ通す。7 (Byte Count=7 →
+ * 4 ワード読むが有効は 7) と 9 (8 + 1 の 2 回の DRQ) は失敗 (Codex 2 回目の P2) */
+static void t_cap_len(void)
+{
+    static const u32 lens[] = { 7, 9, 6, 8 };
+    unsigned i;
+    setup();
+    for (i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+        AtapiCapacity cap;
+        int rc;
+        M.cap_len = lens[i];
+        rc = atapi_read_capacity(&cap);
+        if (lens[i] == 8) {
+            CHECK(rc == ATAPI_OK);
+            CHECK(cap.total_sectors == g_media_a.secs);
+        } else {
+            if (rc == ATAPI_OK) {
+                fprintf(stderr, "cap_len %lu accepted (total=%lu)\n",
+                        (unsigned long)lens[i], (unsigned long)cap.total_sectors);
+                CHECK(0);
+            }
+        }
+    }
+}
+
+/* 実機寄り: 選んだ直後の装置はしばらく BSY で、BSY の装置はレジスタ書き込みを
+ * 無視する。装置選択 → 整定 → BSY/DRQ クリア待ち → Byte Count → PACKET の順で
+ * ないと、旧装置に Byte Count を書き、BSY の装置に PACKET を書いて無視される
+ * (Codex 2 回目の P1)。4 通りの構成で選ぶ装置と読み、規定違反 0 */
+static void t_np2_sel_lag(void)
+{
+    static const int want[4] = { 0, 1, 1, 0 };
+    int k;
+    for (k = 0; k < 4; k++) {
+        AtapiCapacity cap;
+        u8 buf[4u * SEC];
+        Iso9660Ctx *c;
+        AtapiStats st;
+        g_np2cfg.strict = 1;
+        g_np2cfg.sel_lag = 7;
+        setup_np2_layout(k);
+        if (atapi_drive_index() != want[k]) {
+            fprintf(stderr, "layout %d: drive %d\n", k, atapi_drive_index());
+            CHECK(0);
+        }
+        np2_check_protocol();
+        CHECK(atapi_read_capacity(&cap) == ATAPI_OK && cap.total_sectors > 1);
+        CHECK(atapi_read_sectors(16, 4, buf) == ATAPI_OK);
+        CHECK(memcmp(buf, g_media_a.img + 16u * SEC, 4u * SEC) == 0);
+        c = (Iso9660Ctx *)iso9660_ops.mount(VFS_MOUNT_DEV_ENCODE(VFS_DEV_CD, 0));
+        CHECK(c != NULL);
+        stream_all(c, "/BIG.PKG", &g_media_a, 0, 32768);
+        iso9660_ops.umount(c);
+        np2_check_protocol();
+        atapi_get_stats(&st);
+        CHECK(st.dev_resets == 0 && st.soft_resets == 0);   /* 整定は待ちで足りる */
+    }
+}
+
+/* 実機寄り: 居ない装置を選ぶと 0xFF でなく 0x00 や BSY 付きの値が読める。
+ * 居ない装置の BSY は「コマンド未完了」ではないので待たず、リセットもしない */
+static void t_np2_absent(void)
+{
+    static const unsigned vals[2] = { 0x00, 0x80 };
+    static const int layouts[2] = { 0, 2 };      /* マスターだけ / スレーブだけ */
+    int i, k;
+    for (i = 0; i < 2; i++) {
+        for (k = 0; k < 2; k++) {
+            u8 buf[SEC];
+            AtapiStats st;
+            g_np2cfg.strict = 1;
+            g_np2cfg.sel_lag = 3;
+            g_np2cfg.absent_status = vals[i];
+            setup_np2_layout(layouts[k]);
+            CHECK(atapi_drive_index() == (layouts[k] == 2 ? 1 : 0));
+            CHECK(atapi_read_sectors(16, 1, buf) == ATAPI_OK);
+            CHECK(memcmp(buf, g_media_a.img + 16u * SEC, SEC) == 0);
+            np2_check_protocol();
+            atapi_get_stats(&st);
+            CHECK(st.dev_resets == 0 && st.soft_resets == 0);
+        }
+    }
+    g_np2cfg.absent_status = 0xFF;
+}
+
+/* バスが (居る) 別の装置を BSY のまま選んでいる: 終わるのを待ってから選ぶ。
+ * 待っても終わらなければ DEVICE RESET で戻してから選ぶ (Codex 2 回目の P2)。
+ * 白箱: バスの選択 (s_cursel / N.drivesel) を試験が直接スレーブへ向ける */
+static void t_np2_sel_busy(void)
+{
+    u8 buf[SEC];
+    AtapiStats st, st0;
+    g_np2cfg.strict = 1;
+    g_np2cfg.sel_lag = 0;
+    setup_np2_layout(3);                     /* マスターに媒体、スレーブは空 (居る) */
+    CHECK(atapi_drive_index() == 0);
+    /* (1) スレーブが選ばれていて、しばらく BSY (期限内に終わる) */
+    s_cursel = ATAPI_DRV_SLAVE; N.drivesel = 1; N.d[1].busy_left = 300000;
+    CHECK(atapi_read_sectors(16, 1, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 16u * SEC, SEC) == 0);
+    np2_check_protocol();
+    atapi_get_stats(&st);
+    CHECK(st.dev_resets == 0 && st.soft_resets == 0);
+    /* (2) スレーブが固まったまま: DEVICE RESET (スレーブだけ) → 選ぶ → 読める */
+    s_cursel = ATAPI_DRV_SLAVE; N.drivesel = 1; N.d[1].stuck = 1; N.d[1].ua_on_reset = 1;
+    CHECK(atapi_read_sectors(17, 1, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 17u * SEC, SEC) == 0);
+    np2_check_protocol();
+    atapi_get_stats(&st);
+    CHECK(st.dev_resets == 1 && st.soft_resets == 0);
+    CHECK(N.n_devreset == 1 && N.n_srst == 0);
+    CHECK(!N.d[1].stuck && N.d[1].ua);        /* スレーブは戻り、UA を立てている */
+    CHECK(!N.d[0].ua);                        /* マスターには触っていない */
+    /* (3) DEVICE RESET を受けない装置: SRST で戻す (2 台とも UA) */
+    s_cursel = ATAPI_DRV_SLAVE; N.drivesel = 1; N.d[1].stuck = 1; N.d[1].ignore_devreset = 1;
+    N.d[0].ua_on_reset = 1;
+    CHECK(atapi_read_sectors(18, 1, buf) == ATAPI_OK);   /* マスターの UA は出し直しで吸う */
+    CHECK(memcmp(buf, g_media_a.img + 18u * SEC, SEC) == 0);
+    np2_check_protocol();
+    atapi_get_stats(&st);
+    CHECK(st.dev_resets == 2 && st.soft_resets == 1);
+    CHECK(!N.d[1].stuck);
+    /* (4) 使っている装置 (スレーブ) が選ばれた瞬間に固まり、DEVICE RESET も
+     * 受けない: 選んだ後の待ちが期限切れ → SRST → SRST はマスターを選ぶので、
+     * スレーブを選び直してから PACKET (選び直さないと空のマスターへ READ(10) が行く)。
+     * バスはマスターを選んでいる (白箱) */
+    g_np2cfg.strict = 1;
+    setup_np2_layout(1);                     /* マスターは空、スレーブに媒体 */
+    CHECK(atapi_drive_index() == 1);
+    s_cursel = 0x00; N.drivesel = 0;
+    N.d[1].stuck_on_select = 1; N.d[1].ignore_devreset = 1; N.d[1].ua_on_reset = 1;
+    atapi_get_stats(&st0);                   /* 統計は起動から累積 */
+    CHECK(atapi_read_sectors(19, 1, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 19u * SEC, SEC) == 0);
+    np2_check_protocol();
+    atapi_get_stats(&st);
+    CHECK(st.dev_resets - st0.dev_resets == 1 && st.soft_resets - st0.soft_resets == 1);
+    CHECK(N.drivesel == 1 && !N.d[1].stuck);
+}
+
+/* 使っている装置が途中で固まる: 複数セクタの READ(10) が期限切れ → 1 セクタ
+ * ずつ (固まった装置は DEVICE RESET で戻す) → 固まるセクタで失敗。診断の行は
+ * 最後に落ちた 1 セクタのコマンドと、その終わり方 (期限切れ、BSY = d0、そこまでの
+ * バイト数) を出す (Codex 2 回目の P3)。呼び手の範囲は req= */
+static void t_np2_stuck(void)
+{
+    u8 *buf = (u8 *)malloc(8u * SEC);
+    AtapiStats st;
+    int rc;
+    g_np2cfg.strict = 1;
+    g_np2cfg.sel_lag = 0;
+    setup_np2_layout(0);
+    N.d[0].stuck_after_lba = 17;
+    g_klog_n = 0; g_klog[0] = '\0';
+    rc = atapi_read_sectors(16, 4, buf);
+    CHECK(rc == ATAPI_ERR_TIMEOUT);
+    atapi_get_stats(&st);
+    CHECK(st.multi_fail == 1);
+    CHECK(st.dev_resets >= 1);
+    if (strstr(g_klog, "[atapi] READ(10) drv=0 lba=17 n=1 ret=-1 st=d0 err=00 sense=0 got=2048 req=16+4") == NULL) {
+        fprintf(stderr, "klog: %s", g_klog);
+        CHECK(0);
+    }
+    /* 固まる前のセクタは読める (固まった装置は次の選択で戻す) */
+    N.d[0].stuck_after_lba = -1;
+    CHECK(atapi_read_sectors(16, 2, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 16u * SEC, 2u * SEC) == 0);
+    np2_check_protocol();
+    free(buf);
+}
+
+/* 電源投入・リセットの後の最初のコマンドは UNIT ATTENTION (仕様どおり)。
+ * 空のマスター + 媒体のあるスレーブで、スレーブの最初の READ CAPACITY が UA
+ * でも、REQUEST SENSE で消して出し直し、スレーブを選ぶ (Codex 2 回目の P2)。
+ * UA が REQUEST SENSE でだけ消える装置でも同じ */
+static void t_np2_ua_init(void)
+{
+    int needs;
+    for (needs = 0; needs < 2; needs++) {
+        u8 buf[SEC];
+        AtapiStats st;
+        g_np2cfg.strict = 1;
+        g_np2cfg.sel_lag = 3;
+        g_np2cfg_no_init = 1;
+        setup_np2_layout(1);
+        g_np2cfg_no_init = 0;
+        N.d[0].ua = 1; N.d[0].ua_needs_sense = needs;
+        N.d[1].ua = 1; N.d[1].ua_needs_sense = needs;
+        CHECK(atapi_init() == 1);
+        if (atapi_drive_index() != 1) {
+            fprintf(stderr, "needs_sense=%d: drive %d\n", needs, atapi_drive_index());
+            CHECK(0);
+        }
+        CHECK(N.d[1].n_reqsense >= 1 && !N.d[1].ua);
+        atapi_get_stats(&st);
+        CHECK(st.ready_retries >= 1 && st.ready_retries <= 4);
+        CHECK(atapi_read_sectors(16, 1, buf) == ATAPI_OK);
+        CHECK(memcmp(buf, g_media_a.img + 16u * SEC, SEC) == 0);
+        np2_check_protocol();
+    }
+}
+
+/* NOT READY / ASC 04h (準備中) は短く待って出し直す。3 回準備中でも媒体のある
+ * スレーブを選ぶ。待ちは cpu_delay_us で 3 回 */
+static void t_np2_becoming_ready(void)
+{
+    AtapiStats st;
+    u8 buf[SEC];
+    g_np2cfg.strict = 1;
+    g_np2cfg.sel_lag = 0;
+    g_np2cfg_no_init = 1;
+    setup_np2_layout(1);
+    g_np2cfg_no_init = 0;
+    N.d[1].ready_after = 3;
+    CHECK(atapi_init() == 1);
+    CHECK(atapi_drive_index() == 1);
+    atapi_get_stats(&st);
+    CHECK(st.ready_retries == 3);
+    CHECK(g_delay_us == 3ul * ATAPI_READY_WAIT_US);
+    CHECK(N.d[1].n_readcap == 4);
+    CHECK(atapi_read_sectors(16, 1, buf) == ATAPI_OK);
+    np2_check_protocol();
+}
+
+/* NOT READY / ASC 3Ah (媒体なし) だけは待たずに確定する。空のマスター (実機の
+ * 空のトレイ) は READ CAPACITY 1 回で「媒体なし」、スレーブを選ぶ。公開の
+ * atapi_read_capacity も ATAPI_ERR_NO_MEDIA を 1 回で返す */
+static void t_np2_no_medium(void)
+{
+    AtapiCapacity cap;
+    g_np2cfg.strict = 1;
+    g_np2cfg.sel_lag = 0;
+    g_np2cfg_no_init = 1;
+    setup_np2_layout(1);
+    g_np2cfg_no_init = 0;
+    N.d[0].no_medium = 1;
+    CHECK(atapi_init() == 1);
+    CHECK(atapi_drive_index() == 1);
+    CHECK(N.d[0].n_readcap == 1);
+    CHECK(N.d[0].n_reqsense == 1);
+    CHECK(g_delay_us == 0);
+    np2_check_protocol();
+    /* 使っている装置 (スレーブ) のトレイが空いた */
+    N.d[1].no_medium = 1;
+    CHECK(atapi_read_capacity(&cap) == ATAPI_ERR_NO_MEDIA);
+    CHECK(N.d[1].n_readcap == 2);
+    CHECK(g_delay_us == 0);
+}
+
 int main(int argc, char **argv)
 {
     const char *cs = (argc > 1) ? argv[1] : "";
@@ -1408,6 +1804,15 @@ int main(int argc, char **argv)
     else if (!strcmp(cs, "np2_empty"))       t_np2_empty();
     else if (!strcmp(cs, "cap_nodata"))      t_cap_nodata();
     else if (!strcmp(cs, "np2_slave"))       t_np2_slave();
+    else if (!strcmp(cs, "np2_slave_strict")) { g_np2cfg.strict = 1; t_np2_slave(); }
+    else if (!strcmp(cs, "cap_len"))         t_cap_len();
+    else if (!strcmp(cs, "np2_sel_lag"))     t_np2_sel_lag();
+    else if (!strcmp(cs, "np2_absent"))      t_np2_absent();
+    else if (!strcmp(cs, "np2_sel_busy"))    t_np2_sel_busy();
+    else if (!strcmp(cs, "np2_stuck"))       t_np2_stuck();
+    else if (!strcmp(cs, "np2_ua_init"))     t_np2_ua_init();
+    else if (!strcmp(cs, "np2_becoming_ready")) t_np2_becoming_ready();
+    else if (!strcmp(cs, "np2_no_medium"))   t_np2_no_medium();
     else { fprintf(stderr, "unknown case '%s'\n", cs); return 2; }
     return 0;
 }

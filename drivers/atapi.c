@@ -23,6 +23,12 @@ static int cdrom_present = 0;
 /* 使う装置の選択 (DRV_HEAD に書く値)。セカンダリのマスター = 0x00、
  * スレーブ = ATAPI_DRV_SLAVE。atapi_init が媒体の入っている方を選ぶ */
 static u8 s_drvsel = 0x00;
+/* セカンダリのバスが覚えている選択 (最後に DRV_HEAD へ書いた値)。バンクを
+ * 切り替えてもバスの側は変わらない。起動直後は ATAPI_SEL_UNKNOWN */
+static u8 s_cursel = ATAPI_SEL_UNKNOWN;
+/* シグネチャの出た装置 (bit0 = マスター、bit1 = スレーブ)。居ない装置が
+ * BSY らしい値を返しても、それを「コマンド未完了」とは見ない */
+static u8 s_present_mask = 0;
 
 /* 最後にエラーで終わったコマンドのセンスキー (エラーレジスタの bit7-4)。
  * 次のコマンドを出す前に読まないと消える */
@@ -31,29 +37,38 @@ static u8 s_last_sense = 0;
 static u32 s_media_gen = 0;
 static AtapiStats s_stats;
 
-/* 最後の PACKET の終わり方 (診断の行のため)。st = 最後に読んだステータス、
- * err = エラーレジスタ (ERR のときだけ)、got = 受け取ったバイト数 */
+/* 最後の PACKET の終わり方 (診断の行のため)。st = 最後に読んだステータス
+ * (待ちの期限切れでもその時点の値)、err = エラーレジスタ (ERR のときだけ)、
+ * got = 受け取った有効バイト数、lba / n = 落ちた READ(10) の引数 */
 static u8  s_diag_st = 0;
 static u8  s_diag_err = 0;
 static u32 s_diag_got = 0;
+static u32 s_diag_lba = 0;
+static u32 s_diag_n = 0;
 /* 読みの失敗の行を出した数 (ATAPI_DIAG_MAX で止める) */
 static u32 s_diag_lines = 0;
+
+/* 校正済みの µs 待ち (kernel/cpu_calibrate.c)。atapi_init は cpu_calibrate の後 */
+extern void cpu_delay_us(u32 us);
 
 /* ======================================================================== */
 /*  内部ヘルパー                                                             */
 /* ======================================================================== */
 
-/* バンク選択 (0=プライマリ/HDD, 1=セカンダリ/CD-ROM)。セカンダリへ切り替えた
- * ときは使う装置 (s_drvsel) も選び直してから 400ns 置く — 最初の BSY 待ちが
- * 別の装置 (居なければ 0xFF = BSY のまま) を見ないように */
+/* バンク選択 (0=プライマリ/HDD, 1=セカンダリ/CD-ROM)。装置 (マスター /
+ * スレーブ) の選択はここではせず、コマンドを出す直前に atapi_select_device が
+ * 行う — バスが BSY の装置を選んでいるかもしれないときに DRV_HEAD を書かない */
 static void atapi_select_bank(int bank)
 {
     outp(IDE_BANK1, (unsigned)(bank ? 0x01 : 0x00));
-    if (bank) {
-        int i;
-        outp(IDE_DRV_HEAD, s_drvsel);
-        for (i = 0; i < IDE_SEL_SETTLE; i++) (void)inp(IDE_ALT_STATUS);
-    }
+}
+
+/* ALT_STATUS を 1 回読む。診断の行のために最後の値を覚える */
+static u8 atapi_status(void)
+{
+    u8 st = (u8)inp(IDE_ALT_STATUS);
+    s_diag_st = st;
+    return st;
 }
 
 /* BSY=0 待ち */
@@ -61,8 +76,17 @@ static int atapi_wait_bsy(void)
 {
     int timeout = IDE_TIMEOUT_LOOP;
     while (timeout-- > 0) {
-        u8 st = (u8)inp(IDE_ALT_STATUS);
-        if (!(st & IDE_ST_BSY)) return ATAPI_OK;
+        if (!(atapi_status() & IDE_ST_BSY)) return ATAPI_OK;
+    }
+    return ATAPI_ERR_TIMEOUT;
+}
+
+/* BSY=0 かつ DRQ=0 待ち (コマンドを出せる状態) */
+static int atapi_wait_idle(void)
+{
+    int timeout = IDE_TIMEOUT_LOOP;
+    while (timeout-- > 0) {
+        if (!(atapi_status() & (IDE_ST_BSY | IDE_ST_DRQ))) return ATAPI_OK;
     }
     return ATAPI_ERR_TIMEOUT;
 }
@@ -74,19 +98,19 @@ static int atapi_wait_drq(void)
     u8 st;
 
     while (timeout-- > 0) {
-        st = (u8)inp(IDE_ALT_STATUS);
+        st = atapi_status();
         if (!(st & IDE_ST_BSY)) break;
     }
     if (timeout <= 0) return ATAPI_ERR_TIMEOUT;
 
-    st = (u8)inp(IDE_ALT_STATUS);
+    st = atapi_status();
     if (st & IDE_ST_ERR) return ATAPI_ERR_IO;
     if (st & IDE_ST_DRQ) return ATAPI_OK;
 
     /* DRQ追加待ち */
     timeout = IDE_TIMEOUT_BSY;
     while (timeout-- > 0) {
-        st = (u8)inp(IDE_ALT_STATUS);
+        st = atapi_status();
         if (st & IDE_ST_DRQ) return ATAPI_OK;
         if (st & IDE_ST_ERR) return ATAPI_ERR_IO;
     }
@@ -108,7 +132,8 @@ static void atapi_note_error(void)
 
 /* DRQ のブロックを読み終えた直後、デバイスが DRQ を落として BSY を上げる
  * までの 400ns を置く (ここを置かないと、前のブロックの DRQ=1 を読んで
- * もう 1 ブロックあると取り違える)。ALT_STATUS の空読みで待つ */
+ * もう 1 ブロックあると取り違える)。装置を選び直した直後も同じ。
+ * ALT_STATUS の空読みで待つ */
 static void atapi_settle(void)
 {
     int i;
@@ -122,6 +147,72 @@ static void atapi_clear_cdb(u8 *cdb)
     for (i = 0; i < 12; i++) cdb[i] = 0;
 }
 
+/* sel (DRV_HEAD の値) の装置はシグネチャが出た装置か */
+static int atapi_sel_present(u8 sel)
+{
+    if (sel == 0x00) return (s_present_mask & 0x01) ? 1 : 0;
+    if (sel == ATAPI_DRV_SLAVE) return (s_present_mask & 0x02) ? 1 : 0;
+    return 0;
+}
+
+/* SRST: セカンダリのバスの 2 台ともリセットする (バンクで選んだバスだけ。
+ * プライマリの HDD には届かない — UNDOCUMENTED io_ide 074Ch、NP21/W ideio_o74c)。
+ * リセット後はマスターが選ばれる */
+static void atapi_srst(void)
+{
+    int i;
+    outp(IDE_DEV_CTRL, IDE_NIEN | IDE_SRST);
+    for (i = 0; i < ATAPI_SRST_HOLD_LOOP; i++) (void)inp(IDE_ALT_STATUS);
+    outp(IDE_DEV_CTRL, IDE_NIEN);
+    s_cursel = 0x00;
+    s_stats.soft_resets++;
+}
+
+/* 選ばれている装置のコマンドが期限までに終わらなかった (BSY / DRQ のまま)。
+ * まず DEVICE RESET (08h) — PACKET 装置が BSY でも受ける唯一のコマンドで、
+ * その装置だけを戻す。それでも動かなければ SRST でバスの 2 台とも戻し、
+ * SRST はマスターを選び直すので使う装置を選び直す。
+ * どちらの後も装置は UNIT ATTENTION を立てるので、次のコマンドの出し直しは
+ * 呼び手 (atapi_read10 / atapi_capacity_ready) が行う */
+static void atapi_recover(void)
+{
+    outp(IDE_COMMAND, ATAPI_CMD_DEVICE_RESET);
+    s_stats.dev_resets++;
+    atapi_settle();
+    if (atapi_wait_idle() == ATAPI_OK) return;
+    atapi_srst();
+    outp(IDE_DRV_HEAD, s_drvsel);
+    s_cursel = s_drvsel;
+    atapi_settle();
+    (void)atapi_wait_idle();
+}
+
+/* 使う装置 (s_drvsel) を選ぶ。順序は ATA の規定どおり:
+ *   1. バスがいま選んでいる装置が BSY / DRQ なら、それが「居る装置のコマンド
+ *      未完了」のときだけ終わるのを待つ (期限切れならリセットで回復)。
+ *      浮いたバス (0xFF) や、シグネチャの出なかった装置の値は待たない
+ *   2. DRV_HEAD に書く → 400ns 置く
+ *   3. 選んだ装置の BSY / DRQ が落ちるのを待つ (落ちなければ回復して、
+ *      それでも落ちなければ期限切れ)
+ * この後で Features / Byte Count を書き、PACKET を出す */
+static int atapi_select_device(void)
+{
+    u8 st = atapi_status();
+
+    if (st != ATAPI_ST_FLOAT && (st & (IDE_ST_BSY | IDE_ST_DRQ))
+        && atapi_sel_present(s_cursel)) {
+        if (atapi_wait_idle() != ATAPI_OK) atapi_recover();
+    }
+    outp(IDE_DRV_HEAD, s_drvsel);
+    s_cursel = s_drvsel;
+    atapi_settle();
+    if (atapi_wait_idle() != ATAPI_OK) {
+        atapi_recover();
+        if (atapi_wait_idle() != ATAPI_OK) return ATAPI_ERR_TIMEOUT;
+    }
+    return ATAPI_OK;
+}
+
 /* ======================================================================== */
 /*  PACKETコマンドプロトコル                                                  */
 /*                                                                          */
@@ -131,34 +222,42 @@ static void atapi_clear_cdb(u8 *cdb)
 /*      → ホストが12バイトCDB書込み → atapicmd_a0() 呼び出し              */
 /* ======================================================================== */
 
+/* PACKET の共通路: 装置選択 → Features=0 (PIO) / Byte Count = bcl →
+ * PACKET → CDB 受付の DRQ 待ち → 12 バイト CDB を 6 ワード送出。
+ * 装置選択と待ちを済ませてからレジスタを書く (旧装置に書かない) */
+static int atapi_send_cdb(const u8 *cdb, u32 bcl)
+{
+    int ret;
+    int i;
+
+    ret = atapi_select_device();
+    if (ret != ATAPI_OK) return ret;
+
+    outp(IDE_FEATURES, 0x00);
+    outp(IDE_CYL_LO, (unsigned)(bcl & 0xFF));
+    outp(IDE_CYL_HI, (unsigned)((bcl >> 8) & 0xFF));
+    outp(IDE_COMMAND, ATAPI_CMD_PACKET);
+
+    ret = atapi_wait_drq();
+    if (ret == ATAPI_ERR_IO) atapi_note_error();
+    if (ret != ATAPI_OK) return ret;
+
+    for (i = 0; i < 6; i++) {
+        u16 w = (u16)cdb[i * 2] | ((u16)cdb[i * 2 + 1] << 8);
+        outpw(IDE_DATA, (unsigned)w);
+    }
+    atapi_settle();
+    return ATAPI_OK;
+}
+
 /* PACKETコマンド発行: CDB送出 → 完了ステータス待ち (データなし)
  * 戻り値: ATAPI_OK=成功 */
 static int atapi_packet_nodata(const u8 *cdb)
 {
     int ret;
-    int i;
 
-    ret = atapi_wait_bsy();
+    ret = atapi_send_cdb(cdb, 0);
     if (ret != ATAPI_OK) return ret;
-
-    /* Features=0 (PIOモード), ByteCount=0 (データなし) */
-    outp(IDE_FEATURES, 0x00);
-    outp(IDE_CYL_LO, 0x00);
-    outp(IDE_CYL_HI, 0x00);
-    outp(IDE_DRV_HEAD, s_drvsel);
-
-    /* PACKETコマンド発行 */
-    outp(IDE_COMMAND, ATAPI_CMD_PACKET);
-
-    /* DRQ待ち (デバイスがCDB受付準備完了) */
-    ret = atapi_wait_drq();
-    if (ret != ATAPI_OK) return ret;
-
-    /* 12バイトCDBを6ワードで送出 */
-    for (i = 0; i < 6; i++) {
-        u16 w = (u16)cdb[i * 2] | ((u16)cdb[i * 2 + 1] << 8);
-        outpw(IDE_DATA, (unsigned)w);
-    }
 
     /* コマンド完了待ち (BSY=0) */
     ret = atapi_wait_bsy();
@@ -167,6 +266,7 @@ static int atapi_packet_nodata(const u8 *cdb)
     /* エラーチェック */
     {
         u8 st = (u8)inp(IDE_STATUS);
+        s_diag_st = st;
         if (st & IDE_ST_ERR) {
             atapi_note_error();
             return ATAPI_ERR_IO;
@@ -180,17 +280,19 @@ static int atapi_packet_nodata(const u8 *cdb)
  *   cdb:      12バイトCDB
  *   buf:      データ受信バッファ
  *   buf_size: バッファサイズ
- *   actual:   デバイスが渡したバイト数 (NULLなら無視)。buf_size を超えた分は
+ *   actual:   デバイスが渡した有効バイト数 (NULLなら無視)。buf_size を超えた分は
  *             捨てるが、数には入れる (呼び手が「過不足なし」を確かめるため)
  * 戻り値: ATAPI_OK=成功
  *
  * データは 1 回以上の DRQ で来る。各 DRQ のバイト数は Cylinder Low/High に
- * 出る (byte count limit 以下、デバイスが決める)。DRQ が落ちるまで繰り返す。 */
+ * 出る (byte count limit 以下、デバイスが決める)。DRQ が落ちるまで繰り返す。
+ * ポートはワード単位なので奇数バイトの DRQ は 1 ワード多く読むが、有効な
+ * バイト数はバイト数のまま数える (7 バイトの応答を 8 と数えない)。
+ * 途中で落ちても s_diag_st / s_diag_got はその時点の値 */
 static int atapi_packet_read(const u8 *cdb, void *buf, u32 buf_size,
                              u32 *actual)
 {
     int ret;
-    int i;
     u32 total_read = 0;
     u32 bcl;
     u8 *p = (u8 *)buf;
@@ -200,44 +302,28 @@ static int atapi_packet_read(const u8 *cdb, void *buf, u32 buf_size,
     s_diag_err = 0;
     s_diag_got = 0;
 
-    ret = atapi_wait_bsy();
-    if (ret != ATAPI_OK) return ret;
-
     /* byte count limit: 1 回の DRQ の上限。偶数で、ATAPI_PIO_BCL_MAX 以下 */
     bcl = (buf_size < ATAPI_PIO_BCL_MAX) ? buf_size : ATAPI_PIO_BCL_MAX;
     bcl &= ~1UL;
     if (bcl == 0) bcl = 2;
 
-    /* Features=0 (PIOモード) */
-    outp(IDE_FEATURES, 0x00);
-    outp(IDE_CYL_LO, (unsigned)(bcl & 0xFF));
-    outp(IDE_CYL_HI, (unsigned)((bcl >> 8) & 0xFF));
-    outp(IDE_DRV_HEAD, s_drvsel);
-
-    /* PACKETコマンド発行 */
-    outp(IDE_COMMAND, ATAPI_CMD_PACKET);
-
-    /* DRQ待ち (CDB受付準備) */
-    ret = atapi_wait_drq();
+    ret = atapi_send_cdb(cdb, bcl);
     if (ret != ATAPI_OK) return ret;
-
-    /* 12バイトCDB送出 */
-    for (i = 0; i < 6; i++) {
-        u16 w = (u16)cdb[i * 2] | ((u16)cdb[i * 2 + 1] << 8);
-        outpw(IDE_DATA, (unsigned)w);
-    }
-    atapi_settle();
 
     /* データ転送ループ (DRQ ごとに 1 回) */
     while (1) {
         u16 xfer_size;
         u32 words;
+        u32 end;
         u32 k;
         u8 st;
 
         /* BSY=0になるまで待つ */
         ret = atapi_wait_bsy();
-        if (ret != ATAPI_OK) return ret;
+        if (ret != ATAPI_OK) {
+            s_diag_got = total_read;
+            return ret;
+        }
 
         /* ステータス確認 */
         st = (u8)inp(IDE_STATUS);
@@ -255,18 +341,17 @@ static int atapi_packet_read(const u8 *cdb, void *buf, u32 buf_size,
         xfer_size = (u16)inp(IDE_CYL_LO) | ((u16)inp(IDE_CYL_HI) << 8);
         if (xfer_size == 0) break;
 
-        /* ワード単位で読み出し。buf_size を超えた分は読み捨てる */
+        /* ワード単位で読み出す (奇数なら 1 ワード多い)。有効なのは xfer_size
+         * バイトまで。buf_size を超えた分は読み捨てる */
         words = ((u32)xfer_size + 1) / 2;
+        end = total_read + xfer_size;
         for (k = 0; k < words; k++) {
             u16 w = (u16)inpw(IDE_DATA);
-            if (total_read < buf_size) {
-                p[total_read] = (u8)(w & 0xFF);
-                if (total_read + 1 < buf_size) {
-                    p[total_read + 1] = (u8)(w >> 8);
-                }
-            }
-            total_read += 2;
+            u32 b = total_read + k * 2;
+            if (b < end && b < buf_size) p[b] = (u8)(w & 0xFF);
+            if (b + 1 < end && b + 1 < buf_size) p[b + 1] = (u8)(w >> 8);
         }
+        total_read = end;
         atapi_settle();
     }
 
@@ -288,11 +373,11 @@ static int atapi_packet_read(const u8 *cdb, void *buf, u32 buf_size,
 static int atapi_probe_sig(u8 sel)
 {
     u8 cl, ch;
-    int i;
 
     outp(IDE_DRV_HEAD, sel);
-    for (i = 0; i < IDE_SEL_SETTLE; i++) (void)inp(IDE_ALT_STATUS);
-    if ((u8)inp(IDE_ALT_STATUS) == 0xFF) return 0;
+    s_cursel = sel;
+    atapi_settle();
+    if (atapi_status() == ATAPI_ST_FLOAT) return 0;
     if (atapi_wait_bsy() != ATAPI_OK) return 0;
 
     /* NP21/W ideio.c: ATAPI デバイスはリセット後 CylLo=0x14, CylHi=0xEB */
@@ -312,7 +397,7 @@ static int atapi_capacity_raw(AtapiCapacity *cap)
     atapi_clear_cdb(cdb);
     cdb[0] = SCSI_CMD_READ_CAPACITY;
     ret = atapi_packet_read(cdb, buf, 8, &got);
-    /* 受け皿の残りを容量として読まない */
+    /* 受け皿の残りを容量として読まない (7 バイトも 9 バイトも失敗) */
     if (ret == ATAPI_OK && got != 8) ret = ATAPI_ERR_IO;
     if (ret != ATAPI_OK) return ret;
 
@@ -328,11 +413,70 @@ static int atapi_capacity_raw(AtapiCapacity *cap)
     return ATAPI_OK;
 }
 
+/* REQUEST SENSE: センスキーと ASC を読む。UNIT ATTENTION はこれで消える。
+ * 読めなければ ATAPI_ERR_IO (sk / asc は触らない) */
+static int atapi_request_sense(u8 *sk, u8 *asc)
+{
+    u8 cdb[12];
+    u8 buf[ATAPI_SENSE_LEN];
+    u32 got = 0;
+    int ret;
+
+    atapi_clear_cdb(cdb);
+    cdb[0] = SCSI_CMD_REQUEST_SENSE;
+    cdb[4] = ATAPI_SENSE_LEN;
+    ret = atapi_packet_read(cdb, buf, ATAPI_SENSE_LEN, &got);
+    if (ret != ATAPI_OK) return ret;
+    if (got < ATAPI_SENSE_MIN) return ATAPI_ERR_IO;
+    *sk  = (u8)(buf[2] & 0x0F);
+    *asc = buf[12];
+    return ATAPI_OK;
+}
+
+/* READ CAPACITY を、装置が準備中のあいだ出し直す (ATAPI_READY_RETRIES まで):
+ *   UNIT ATTENTION (6): 電源投入・リセット・媒体交換の後の最初のコマンドは
+ *       仕様どおりこれで落ちる。REQUEST SENSE で消して出し直す
+ *   NOT READY (2): ASC 3Ah (媒体なし) だけを ATAPI_ERR_NO_MEDIA と確定する。
+ *       それ以外 (04h 準備中など) は ATAPI_READY_WAIT_US 待って出し直す
+ *   他のエラー・期限切れ・長さ違い: そのまま返す
+ * 回数が尽きたら、最後が NOT READY なら ATAPI_ERR_NO_MEDIA、他は最後の結果 */
+static int atapi_capacity_ready(AtapiCapacity *cap)
+{
+    int tries;
+    int ret = ATAPI_ERR_IO;
+
+    for (tries = 0; tries < ATAPI_READY_RETRIES; tries++) {
+        u8 sk = ATAPI_SK_NO_SENSE;
+        u8 asc = 0;
+
+        s_last_sense = ATAPI_SK_NO_SENSE;
+        ret = atapi_capacity_raw(cap);
+        if (ret != ATAPI_ERR_IO) return ret;
+        if (s_last_sense == ATAPI_SK_UNIT_ATTENTION) {
+            (void)atapi_request_sense(&sk, &asc);
+            s_stats.ready_retries++;
+            continue;
+        }
+        if (s_last_sense == ATAPI_SK_NOT_READY) {
+            if (atapi_request_sense(&sk, &asc) == ATAPI_OK
+                && asc == ATAPI_ASC_MEDIUM_NOT_PRESENT) {
+                return ATAPI_ERR_NO_MEDIA;
+            }
+            s_stats.ready_retries++;
+            cpu_delay_us(ATAPI_READY_WAIT_US);
+            ret = ATAPI_ERR_NO_MEDIA;
+            continue;
+        }
+        return ret;
+    }
+    return ret;
+}
+
 /* 選んでいる装置に媒体が入っているか (容量が読めて 1 セクタより多い) */
 static int atapi_has_media(void)
 {
     AtapiCapacity cap;
-    return (atapi_capacity_raw(&cap) == ATAPI_OK && cap.total_sectors > 1) ? 1 : 0;
+    return (atapi_capacity_ready(&cap) == ATAPI_OK && cap.total_sectors > 1) ? 1 : 0;
 }
 
 int atapi_init(void)
@@ -351,21 +495,32 @@ int atapi_init(void)
     /* マスターとスレーブの両方を見る (2026-09-26: NP21/W の ide3 = セカンダリの
      * スレーブに ISO を付けると、マスターの空の CD ドライブだけを見ていて
      * 1 セクタも読めなかった) */
-    for (i = 0; i < 2; i++) if (atapi_probe_sig(sels[i])) found[n++] = sels[i];
+    s_present_mask = 0;
+    for (i = 0; i < 2; i++) {
+        if (atapi_probe_sig(sels[i])) {
+            found[n++] = sels[i];
+            s_present_mask |= (u8)(1 << i);
+        }
+    }
 
     if (n == 0) {
         /* シグネチャが出ない場合、ソフトリセット後に再確認 */
-        outp(IDE_DEV_CTRL, IDE_NIEN | 0x04); /* SRST */
-        for (i = 0; i < 50000; i++) inp(IDE_ALT_STATUS);
-        outp(IDE_DEV_CTRL, IDE_NIEN);         /* SRST解除 */
-        for (i = 0; i < 2; i++) if (atapi_probe_sig(sels[i])) found[n++] = sels[i];
+        atapi_srst();
+        for (i = 0; i < 2; i++) {
+            if (atapi_probe_sig(sels[i])) {
+                found[n++] = sels[i];
+                s_present_mask |= (u8)(1 << i);
+            }
+        }
     }
 
     if (n > 0) {
         cdrom_present = 1;
         s_drvsel = found[0];
         /* 2 台あれば、媒体の入っている方 (マスター優先)。どちらも空ならマスター。
-         * 容量を読むのはシグネチャを全部見た後 (PACKET で CylLo/Hi が変わる) */
+         * 容量を読むのはシグネチャを全部見た後 (PACKET で CylLo/Hi が変わる)。
+         * 装置の選び直しと待ちは PACKET の共通路 (atapi_select_device) が
+         * 容量確認ごとに行う */
         if (n == 2) {
             for (i = 0; i < n; i++) {
                 s_drvsel = found[i];
@@ -375,8 +530,7 @@ int atapi_init(void)
         }
     }
 
-    /* 最後に選んだのはスレーブかもしれないが、以後の操作は atapi_select_bank(1)
-     * で s_drvsel を選び直すので、ここでは戻さない */
+    /* バスの選択はそのまま (以後のコマンドは出す直前に選び直す) */
     /* プライマリバンクに戻す */
     atapi_select_bank(0);
 
@@ -422,7 +576,7 @@ int atapi_read_capacity(AtapiCapacity *cap)
     if (!cap) return ATAPI_ERR_IO;
 
     atapi_select_bank(1);
-    ret = atapi_capacity_raw(cap);
+    ret = atapi_capacity_ready(cap);
     atapi_select_bank(0);
     return ret;
 }
@@ -453,29 +607,36 @@ static int atapi_read10(u32 lba, u32 n, u8 *dst)
         s_last_sense = 0;
         s_stats.read10_cmds++;
         ret = atapi_packet_read(cdb, dst, n * ATAPI_SECTOR_SIZE, &got);
+        if (ret == ATAPI_OK && got != n * ATAPI_SECTOR_SIZE) ret = ATAPI_ERR_IO;
         if (ret == ATAPI_OK) {
-            if (got != n * ATAPI_SECTOR_SIZE) return ATAPI_ERR_IO;
             s_stats.read10_sectors += n;
             return ATAPI_OK;
         }
+        /* 落ちたコマンドの引数 (診断の行は最後に落ちたコマンドとその時点の状態) */
+        s_diag_lba = lba;
+        s_diag_n = n;
         if (s_last_sense != ATAPI_SK_UNIT_ATTENTION) break;
     }
     return ret;
 }
 
 /* 読みが失敗したときの 1 行 (ATAPI_DIAG_MAX 行まで)。NP21/W と実機で
- * 「どこで落ちたか」を画面で分けるため:
+ * 「どこで落ちたか」を画面で分けるため。lba / n は**最後に落ちた READ(10)**
+ * (複数セクタが落ちて 1 セクタずつ読み直したなら、その 1 セクタ) で、
+ * st / err / sense / got もそのコマンドの終わった時点の値。req は呼び手の範囲:
  *   sense=5 (ILLEGAL REQUEST) = 範囲外か、ドライブに媒体が無い (NP21/W は
  *            空のドライブへの READ(10) を ILLEGAL REQUEST / asc 21h で返す)
  *   sense=2 = NOT READY、sense=6 = UNIT ATTENTION (出し直しても落ちた)
- *   ret=-1 = BSY / DRQ の待ちの期限切れ、got が n*2048 未満 = 転送が足りない */
-static void atapi_diag_fail(u32 lba, u32 n, int ret)
+ *   ret=-1 = BSY / DRQ の待ちの期限切れ (st はそのときの ALT_STATUS)、
+ *   got が n*2048 未満 = 転送が足りない (期限切れならそこまで受け取った数) */
+static void atapi_diag_fail(u32 req_lba, u32 req_n, int ret)
 {
     if (s_diag_lines >= ATAPI_DIAG_MAX) return;
     s_diag_lines++;
-    kprintf(0x07, "[atapi] READ(10) drv=%d lba=%u n=%u ret=%d st=%02x err=%02x sense=%x got=%u\n",
-            atapi_drive_index(), (unsigned)lba, (unsigned)n, ret, (unsigned)s_diag_st,
-            (unsigned)s_diag_err, (unsigned)s_last_sense, (unsigned)s_diag_got);
+    kprintf(0x07, "[atapi] READ(10) drv=%d lba=%u n=%u ret=%d st=%02x err=%02x sense=%x got=%u req=%u+%u\n",
+            atapi_drive_index(), (unsigned)s_diag_lba, (unsigned)s_diag_n, ret,
+            (unsigned)s_diag_st, (unsigned)s_diag_err, (unsigned)s_last_sense,
+            (unsigned)s_diag_got, (unsigned)req_lba, (unsigned)req_n);
 }
 
 int atapi_read_sectors(u32 lba, u32 count, void *buf)
