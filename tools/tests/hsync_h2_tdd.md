@@ -249,3 +249,18 @@ MUTATE temp_names_synced          RED (期待どおり落ちた)
 - 贋 FS は「名前 = ノード」の模型なので、**ext2 の媒体の状態** (links_count の
   過大計上、漏れ、公開の 3 値判定) は見ていない。そこは
   `tools/tests/b8_open_host.c` の段 C / 段 H の掃引と `e2fsck -fn` が受け持つ。
+
+## 同期先がフロッピー (Codex 2026-09-25 P2)
+
+MINIMAL (= 起動 FD) に hsync を入れたので、FD 起動で引数なしの `hsync` を打つと宛先 `/`
+が FD になる。ファイル本体は FAT に O_EXCL が無く `replace_unsupported` で落ちるが、その前の
+`sys_mkdir` は通るので FD を空ディレクトリで埋め得た。`main` が掃除・名札・mkdir より前に
+`dst_on_floppy` で断る (KAPI は足さない: `vfs_devname` で宛先のパスを親へ遡り、最初のマウント
+点のデバイス名が `fd` で始まるか)。
+
+- `case_dst_fd`: FD 起動の全体 / `bin` / `-n` は非ゼロ終了で `dest_on_fd`、mkdir・write・rename
+  が 0 回、FD の中身は不変。HDD 起動で `/fd0` にフロッピーを載せた場合、`hsync fd0/x` は断り、
+  `hsync bin` は通る
+- 変異 `fd_dest_not_refused` (判定を常に 0) と `fd_dest_root_only` (遡らずルートだけ見る) は RED
+- 他の hsync ハーネス (h1 / h3 / h4) の贋 KAPI には、ルート hd0 を返す `vfs_devname` を足した
+

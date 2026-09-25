@@ -13,7 +13,8 @@ FDDからHDD (ext2) へOS32のシステムファイルをインストールす�
 
 起動 FD の中身は CD の Minimal (CUI のレスキュー兼インストーラ) と同じで、HDD にも
 同じ集合ができる (既定フォントと more / man などの一般コマンドは入らない。CD の
-Normal か hsync で入れる)。FD の FAT (8.3) に合わせて短くした名前 (`/etc/filetype`)
+Normal で入れるか、HDD から起動して `hsync` と `hsync sys` を実行してリセットする —
+`hsync` だけでは /sys のフォントと GUI の共有ライブラリが入らない)。FD の FAT (8.3) に合わせて短くした名前 (`/etc/filetype`)
 は正規名 (`filetypes`) に戻して写す。ブートセクタとローダは
 HDD のブート領域へ書き、FD 用の `/etc/profile` は写さない。
 

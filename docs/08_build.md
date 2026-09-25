@@ -407,7 +407,11 @@ diff / du / cal / man / sndctl。残すコマンド・FD の profile・インス
   `docs/tasks/realhw/TASK_FD144.md` §5-2)。
 - cdinst の選択肢に「GUI はあるが NORMAL が無い」組み合わせは無い (2 = GUI + NORMAL が
   一緒)。FD → install.bin の HDD は MINIMAL と同じ (フォントも移したコマンドも無い)。欲しければ
-  CD の Normal 以上か `hsync` で入れる。
+  CD の Normal 以上か、**HDD から起動して `hsync` と `hsync sys` (+ リセット)** で入れる。
+  全体同期の `hsync` はルート直下の `/sys` を既定で外す (稼働中のシェルと shlib) ので、
+  既定フォント (`/sys/font/`) と GUI の共有ライブラリ (`/sys/lib/`) は `hsync sys` でしか
+  入らない。**FD から起動して `hsync` は打てない** — 同期先 (宛先のマウント) がフロッピー
+  なら何も書かずに `dest_on_fd` で断る (`userland/system/hsync.c` の `dst_on_floppy`)。
 
 - **タグの規則**: 配備マニフェストの 1 行はちょうど 1 つのパッケージに当たるタグを持つ。
   `userland/tests/` 由来の行は必ず `test` (試験バイナリが NORMAL に混ざらないように)。

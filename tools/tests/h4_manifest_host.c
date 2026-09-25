@@ -207,6 +207,12 @@ static int fk_sys_is_mounted(const char *prefix)
     return strcmp(prefix, "/host") == 0;
 }
 
+/* vfs_devname: 同期先は HDD (ルート hd0)。FD の判定は hsync_h2_host.c が見る */
+static const char *fk_vfs_devname(const char *prefix)
+{
+    return strcmp(prefix, "/") == 0 ? "hd0" : "";
+}
+
 static int fk_vfs_sync(void) { return 0; }
 
 static int fk_sys_mkdir(const char *path)
@@ -388,6 +394,7 @@ static void fake_api_init(void)
     g_fake.sys_mkdir = fk_sys_mkdir;
     g_fake.sys_ls = fk_sys_ls;
     g_fake.sys_is_mounted = fk_sys_is_mounted;
+    g_fake.vfs_devname = fk_vfs_devname;
     g_fake.vfs_sync = fk_vfs_sync;
     g_fake.sys_open = fk_sys_open;
     g_fake.sys_close = fk_sys_close;

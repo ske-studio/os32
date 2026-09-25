@@ -268,6 +268,21 @@ static int fk_sys_is_mounted(const char *prefix)
     return strcmp(prefix, "/host") == 0;
 }
 
+/* vfs_devname: マウント点の完全一致でデバイス名、それ以外は ""
+ * (fs/vfs.c と同じ)。ルートと、任意で 1 つのサブマウントを持つ */
+static const char *fk_root_dev = "hd0";
+static const char *fk_sub_prefix = 0;
+static const char *fk_sub_dev = 0;
+static int fk_mkdir_calls;
+
+static const char *fk_vfs_devname(const char *prefix)
+{
+    if (strcmp(prefix, "/") == 0) return fk_root_dev;
+    if (strcmp(prefix, "/host") == 0) return "hostdrv";
+    if (fk_sub_prefix && strcmp(prefix, fk_sub_prefix) == 0) return fk_sub_dev;
+    return "";
+}
+
 static int fk_vfs_sync(void)
 {
     fk_sync_calls++;
@@ -277,6 +292,7 @@ static int fk_vfs_sync(void)
 
 static int fk_sys_mkdir(const char *path)
 {
+    fk_mkdir_calls++;
     if (fs_find(path) >= 0) return OS32_ERR_EXIST;
     if (fk_rofs) return OS32_ERR_ROFS;
     fs_add_dir(path);
@@ -578,6 +594,7 @@ static void fake_api_init(void)
     g_fake.sys_mkdir = fk_sys_mkdir;
     g_fake.sys_ls = fk_sys_ls;
     g_fake.sys_is_mounted = fk_sys_is_mounted;
+    g_fake.vfs_devname = fk_vfs_devname;
     g_fake.vfs_sync = fk_vfs_sync;
     g_fake.sys_open = fk_sys_open;
     g_fake.sys_close = fk_sys_close;
@@ -1652,6 +1669,46 @@ static void case_boot_old(void)
     g_fake.boot_image_info = 0;
 }
 
+/* ========================================================================= */
+/*  FD — 同期先がフロッピーなら何も作らずに断る (Codex 2026-09-25 P2)          */
+/* ========================================================================= */
+
+static void case_dst_fd(void)
+{
+    printf("== FD: 同期先がフロッピー -> mkdir も書き込みもせず断る ==\n");
+
+    /* FD 起動 (ルートが fd0)。/host に新しいディレクトリがある */
+    setup_pair(3000, 1, 111, 3000, 2, 222);
+    fs_add_dir("/host/newdir");
+    fk_root_dev = "fd0";
+    fk_mkdir_calls = 0;
+    check(run0() != 0, "FD 起動の hsync (全体): 非ゼロ終了");
+    check(log_has("dest_on_fd"), "理由 dest_on_fd を出す");
+    check(fk_mkdir_calls == 0 && fk_write_calls == 0 && fk_rename_calls == 0,
+          "mkdir / write / rename を 1 回も呼ばない");
+    check(node_of("/newdir") < 0 && dst_unchanged(), "FD の中身は変わらない");
+    fk_mkdir_calls = 0;
+    check(run1("bin") != 0 && fk_mkdir_calls == 0 && fk_write_calls == 0 &&
+          dst_unchanged(), "FD 起動の hsync bin も断る");
+    check(run1("-n") != 0 && log_has("dest_on_fd"), "dry-run でも同じ判定で断る");
+
+    /* HDD 起動 + /fd0 にフロッピー: /fd0 の下への同期だけ断る */
+    fk_root_dev = "hd0";
+    fk_sub_prefix = "/fd0";
+    fk_sub_dev = "fd0";
+    fs_add_dir("/host/fd0");
+    fs_add_dir("/host/fd0/x");
+    fs_add_dir("/fd0");
+    fk_mkdir_calls = 0;
+    check(run1("fd0/x") != 0 && log_has("dest_on_fd") && fk_mkdir_calls == 0 &&
+          node_of("/fd0/x") < 0, "HDD 起動の hsync fd0/x (FD のサブマウント) は断る");
+    check(run1("bin") == 0 && !log_has("dest_on_fd"),
+          "HDD 起動の hsync bin は通る (FD 判定は宛先のマウントだけを見る)");
+
+    fk_sub_prefix = 0;
+    fk_sub_dev = 0;
+}
+
 int main(void)
 {
     printf("=== 票 H2: hsync の置換安全化 (一時ファイル + 検証 + 置換) ===\n");
@@ -1671,6 +1728,7 @@ int main(void)
     case_regression();
     case_review_nb();
     case_boot_old();
+    case_dst_fd();
 
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

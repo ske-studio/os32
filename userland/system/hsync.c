@@ -159,6 +159,13 @@
 #define HS_MIN_KAPI_H2  53
 #define HR_BAD_NAME     "bad_name"          /* 名前に '\' が混じっている */
 #define HR_PATH_REJECT  "path_rejected"     /* 正規化できず判定もできない */
+#define HR_DST_ON_FD    "dest_on_fd"        /* 同期先がフロッピーのマウント */
+
+/* フロッピーのデバイス名の先頭 (drivers/dev.c の "fd0" / "fd1"、kernel.c の
+ * FD 起動のルート root_dev = "fd0")。同期先のマウントがこれなら断る */
+#define HS_FD_DEV_PREFIX0 'f'
+#define HS_FD_DEV_PREFIX1 'd'
+
 
 /* VFS が 1 パスで扱える要素数。**fs/vfs.h の VFS_MAX_PATH_DEPTH が正典**で、
  * 外部プログラムからはそのヘッダを引けないので写しを置く。ずれの検出は
@@ -2266,6 +2273,38 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
     }
 }
 
+/* ======== 同期先がフロッピーか (Codex 2026-09-25 P2) ========
+ * hsync は MINIMAL (= 起動 FD の中身) に入っている。FD から起動して引数なしで
+ * 打つと宛先 / は FD 自身になり、ファイル本体は FAT に O_EXCL が無いので
+ * replace_unsupported で落ちるが、その前の sys_mkdir は通って走査も続くので、
+ * FD を空のディレクトリで埋め得る。**掃除・mkdir・名札の読みより前に**断る。
+ *
+ * 判定は KAPI を足さずに vfs_devname (マウント点の**完全一致**でデバイス名を
+ * 返す、マウント点でなければ "") で行う: 宛先の正規化済みパスから親へ 1 段ずつ
+ * 遡り、最初に名前の返るマウント点 (= 最長一致のマウント) のデバイス名を見る。
+ * "/" まで来れば必ずルートのマウント。dst は "/" か "/a/b" (正規化済み)。
+ * 戻り値: 1 = FD の上、0 = それ以外。devout にデバイス名を返す。 */
+static int dst_on_floppy(const char *dst, const char **devout)
+{
+    char buf[OS32_MAX_PATH];
+    const char *dev;
+    int n;
+
+    if (!dst[0] || !str_ncpy(buf, dst, (int)sizeof(buf)))
+        str_ncpy(buf, "/", (int)sizeof(buf));
+    for (;;) {
+        dev = api->vfs_devname(buf);
+        if (dev && dev[0]) break;
+        if (buf[0] == '/' && buf[1] == '\0') { dev = ""; break; }
+        n = str_len(buf);
+        while (n > 1 && buf[n - 1] != '/') n--;   /* 最後の要素を落とす */
+        if (n <= 1) { buf[0] = '/'; buf[1] = '\0'; }
+        else buf[n - 1] = '\0';                  /* 末尾の '/' も落とす */
+    }
+    *devout = dev;
+    return dev[0] == HS_FD_DEV_PREFIX0 && dev[1] == HS_FD_DEV_PREFIX1;
+}
+
 /* ======== メイン ======== */
 
 static void usage(void)
@@ -2463,6 +2502,21 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
         }
     }
     g_root_sync = (subdir == NULL);
+
+    /* 同期先がフロッピーなら 1 件も触らずに断る (dry-run でも同じ判定) */
+    {
+        const char *dev;
+        if (dst_on_floppy(subdir ? norm : "/", &dev)) {
+            api->kprintf(ATTR_RED,
+                         "Error: 同期先 %s はフロッピー (%s) の上 reason=%s\n",
+                         subdir ? norm : "/", dev, HR_DST_ON_FD);
+            api->kprintf(ATTR_RED,
+                         "  hsync は HDD へ入れるもの。install / cdinst で HDD に入れ、"
+                         "HDD から起動して実行すること\n"
+                         "  (残りを取るなら `hsync` の後に `hsync sys` + リセット)\n");
+            return 1;
+        }
+    }
 
     /* バッファ確保。64KB を比較用 32KB x 2 に割って使う (設計書 §4.3) */
     file_buf = (u8 *)api->mem_alloc(FILE_BUF_SIZE);
