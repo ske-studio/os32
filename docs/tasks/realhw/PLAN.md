@@ -242,6 +242,8 @@ Cirrus は対照的に `cirrus_vga.c` が 247KB あり ini のキーで切り替
 **PEGC 自体も実機では 640x480 で桁がずれる** (2026-09-25、GUI を `gfxmode pegc` で起動したとき。pc98 は正しい)。
 v3 の票 [TASK_PEGC480_REALHW.md](TASK_PEGC480_REALHW.md) — 480 ラインの SYNC 値がエミュレータ由来なのが最有力、実機の ROM が流す値を V86 で記録して合わせる。
 
+ATAPI の待ち上限はループ回数 (約 1 秒) で、実機のスピンアップや SRST 後の BSY に足りない → [TASK_ATAPI_TIMEOUT.md](TASK_ATAPI_TIMEOUT.md) (秒単位に、SRST は 31 秒)。
+
 ## 8. 段取り (案)
 
 | 段 | やること | 前提 | 検証 |
