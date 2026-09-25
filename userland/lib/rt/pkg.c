@@ -8,6 +8,15 @@
 #include "pkg.h"
 #include <string.h>  /* memcpy, memset from newlib */
 
+/* 無圧縮の展開で 1 回に読む大きさ。CD (ISO 9660) では 1 回の読みがそのまま
+ * READ(10) 1〜2 回になるので大きく取る (4KB のころは実機の cdinst が 20KB/s を
+ * 切った)。取れなければ PKG_STREAM_SMALL のスタックのバッファへ落ちる */
+#define PKG_STREAM_CHUNK  32768U
+#define PKG_STREAM_SMALL  4096U
+/* 読みの区切りをこの倍数の位置に揃える (CD のセクタ)。データ部の先頭は
+ * セクタに揃っていないので、揃えないと毎回の読みの両端が半端なセクタになる */
+#define PKG_STREAM_ALIGN  2048U
+
 /* LZSS定数 (lib/lzss.c と同一) */
 #define LZSS_N         4096
 #define LZSS_F         18
@@ -250,7 +259,16 @@ int pkg_extract(KernelAPI *api, const char *path, const PkgInfo *info)
 
     if (!(info->header.flags & PKG_FLAG_LZSS)) {
         /* 無圧縮ストリーミング展開 (メモリ節約) */
-        u8 tbuf[4096];
+        u8 small[PKG_STREAM_SMALL];
+        u8 *tbuf = (u8 *)api->mem_alloc(PKG_STREAM_CHUNK);
+        u32 cap = PKG_STREAM_CHUNK;
+        u32 pos = info->data_offset;   /* ファイルの中の読み位置 */
+        int result = PKG_OK;
+
+        if (!tbuf) {
+            tbuf = small;
+            cap = PKG_STREAM_SMALL;
+        }
         api->sys_lseek(fd, (int)info->data_offset, SEEK_SET);
 
         for (i = 0; i < info->entry_count; i++) {
@@ -264,20 +282,24 @@ int pkg_extract(KernelAPI *api, const char *path, const PkgInfo *info)
             wfd = api->sys_open(ent->path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
             /* 失敗を飲み込まない (票 TASK_VFS_FD_PATH 方針 v2 の 9)。以前は
              * 開けなくても書けなくても PKG_OK を返し、cdinst は「OK」と出した */
-            if (wfd < 0) { api->sys_close(fd); return PKG_ERR_IO; }
+            if (wfd < 0) { result = PKG_ERR_IO; break; }
 
             while (remains > 0) {
-                int req = (remains > sizeof(tbuf)) ? sizeof(tbuf) : remains;
-                int r = api->sys_read(fd, tbuf, req);
+                /* 区切りの終わりを PKG_STREAM_ALIGN の倍数の位置に揃える */
+                u32 room = cap - (pos % PKG_STREAM_ALIGN);
+                u32 req = (remains > room) ? room : remains;
+                int r = api->sys_read(fd, tbuf, (int)req);
                 if (r <= 0) break;
                 if (api->sys_write(wfd, tbuf, r) != r) break;
-                remains -= r;
+                remains -= (u32)r;
+                pos += (u32)r;
             }
             api->sys_close(wfd);
-            if (remains > 0) { api->sys_close(fd); return PKG_ERR_IO; }
+            if (remains > 0) { result = PKG_ERR_IO; break; }
         }
         api->sys_close(fd);
-        return PKG_OK;
+        if (tbuf != small) api->mem_free(tbuf);
+        return result;
     }
 
     /* LZSS解凍 (全体をメモリにロード) */

@@ -286,6 +286,23 @@ CD-ROM上のISO 9660 Level 1ファイルシステムを読み取り専用でVFS�
 | `iso9660_get_file_size(ctx, path, size)` | ファイルサイズ取得 |
 | `iso9660_stat(ctx, path, st)` | ファイル情報取得 |
 
+**読みのキャッシュ** (実機の cdinst が 20KB/s を切った件、`tools/tests/cd_read_tdd.md`):
+
+- **直前に解決したパス 1 本** (LBA・サイズ・フラグ) を覚える。VFS は読みのたびにパスを渡すので、以前は区切り
+  (4KB) ごとに根からディレクトリを読み直し、データと離れたディレクトリのセクタへ毎回シークしていた
+- **ディレクトリのセクタは 4 本の LRU** (`ISO_SCACHE_SLOTS`)。`list_dir` は cb を呼ぶ前にセクタを手元へ写す
+  (cb がこの FS を読むとキャッシュが入れ替わる、§4-26)
+- **ファイルのデータは先読みの窓** (`ISO_RA_SECTORS` = `ATAPI_READ_MAX_SECTORS` 本、mount で kmalloc した 32KB)
+  を通す。窓より大きいセクタに揃った範囲は呼び手のバッファへ直接読む。窓はファイルの外へ広げない。
+  窓が取れなければ窓なしで動く (遅いだけ)。窓の先読みが要求の外の不良セクタで落ちても、要求のセクタだけを
+  読み直す (要求の中の不良だけが失敗)
+- **CD を入れ替えたら umount / mount する (約束)**。捨てる合図は (1) umount (ctx ごと)、(2) ATAPI の媒体の世代
+  (`atapi_media_gen`、UNIT ATTENTION / NOT READY で進む。読み・stat・get_file_size の途中で進んだら捨てて
+  1 回だけやり直す。list_dir は一覧の途中で進んだら VFS_ERR_IO で中断)、
+  (3) **最後に媒体を読んでから 2 秒 (`ISO_IDLE_TICKS` = 200 tick) を超えて空いたとき** (FD の §6-8 と同じ
+  「2 秒規則」。キャッシュの当たりは時刻を進めない)。**NP21/W は READ(10) で UNIT ATTENTION を返さない**ので、
+  エミュレータで効くのは (1) と (3) だけ。2 秒以内の入れ替えは保証しない
+
 ### §6-7 HostDrvFS (hostdrvfs.c / hostdrvfs.h)
 
 NP21/WエミュレータのHostDrv機能を利用し、ホストPC (Windows) のファイルシステムにゲストOSから直接アクセスする仮想ファイルシステム。セッションベースのhypercall I/Oモデルで動作する。
