@@ -33,14 +33,54 @@
  * セクタの倍数 (31 × 2048) にしておくと、DRQ の区切りがセクタの途中に来ない */
 #define ATAPI_PIO_BCL_MAX       0xF800U
 
+/* 読みの失敗の診断の行 ([atapi] READ(10) ...) を出す上限 (起動から数えて) */
+#define ATAPI_DIAG_MAX          8
+
 /* ======== センスキー (エラーレジスタの bit7-4) ======== */
 #define ATAPI_ERR_SENSE_SHIFT   4
+#define ATAPI_SK_NO_SENSE       0x00
 #define ATAPI_SK_NOT_READY      0x02
 #define ATAPI_SK_UNIT_ATTENTION 0x06   /* 媒体の交換・リセットの後の最初のコマンド */
 
+/* ======== ASC (REQUEST SENSE の byte 12) ======== */
+#define ATAPI_ASC_BECOMING_READY      0x04   /* NOT READY: 準備中 (回転の立ち上がり等) */
+#define ATAPI_ASC_MEDIUM_NOT_PRESENT  0x3A   /* NOT READY: 媒体が無い (これだけが確定) */
+#define ATAPI_SENSE_LEN               18     /* REQUEST SENSE で受け取る長さ */
+#define ATAPI_SENSE_MIN               14     /* byte 13 (ASCQ) まで要る */
+
+/* READ CAPACITY の出し直し: UNIT ATTENTION は REQUEST SENSE で消して、
+ * NOT READY (3Ah 以外) は ATAPI_READY_WAIT_US 待って、この回数まで。
+ * 待ちの合計は最大 20 × 250ms = 5 秒 — トレイを閉じた直後の becoming ready
+ * (2〜5 秒) を待ちきる長さ。待ちは atapi_delay_us が ATAPI_DELAY_CHUNK_US
+ * (cpu_delay_us の上限 100ms) 以下の塊に分けて回す */
+#define ATAPI_READY_RETRIES     20
+#define ATAPI_READY_WAIT_US     250000UL
+
+/* READ(10) が UNIT ATTENTION で落ちたときの出し直しの回数 (1 回目に加えて)。
+ * リセットと媒体交換など、UA を複数積む装置がある */
+#define ATAPI_UA_RETRIES        3
+
+/* cpu_delay_us を 1 回に呼ぶ長さの上限 (µs)。kernel/cpu_calibrate.h の
+ * CPU_DELAY_US_MAX (100ms、それより長い指定は丸められる) 以下であること —
+ * drivers/ はカーネルヘッダを見ないので値を写し、ホスト試験 (cd_read_host.c) が
+ * 両者を比べる */
+#define ATAPI_DELAY_CHUNK_US    100000UL
+
+/* SRST を立てておく長さ (ALT_STATUS の空読みの回数)。規定は 5µs 以上 */
+#define ATAPI_SRST_HOLD_LOOP    50000
+/* SRST を解いてからステータスを読むまで置く時間 (µs)。規定は 2ms 以上 —
+ * それより前は BSY がまだ立っていないことがあり、準備済みに見える */
+#define ATAPI_SRST_SETTLE_US    2000UL
+
 /* ======== ATAPI / PACKET コマンド ======== */
 #define ATAPI_CMD_PACKET         0xA0   /* PACKETコマンド (CDB送出) */
+#define ATAPI_CMD_DEVICE_RESET   0x08   /* DEVICE RESET: 選んだ装置だけ。BSY でも受ける */
 #define ATAPI_CMD_IDENTIFY_PKT   0xA1   /* IDENTIFY PACKET DEVICE */
+
+/* ======== 装置の選択 (DRV_HEAD) ======== */
+#define ATAPI_DRV_SLAVE     0x10   /* bit4 = 1: スレーブ (セカンダリの 2 台目) */
+#define ATAPI_SEL_UNKNOWN   0xFF   /* バスがどちらを選んでいるか分からない (起動直後) */
+#define ATAPI_ST_FLOAT      0xFF   /* 居ない装置を選んだときの ALT_STATUS (浮いたバス) */
 
 /* ======== ATAPI シグネチャ (IDENTIFY時にCylLo/CylHiで返る) ======== */
 #define ATAPI_SIG_CYL_LO    0x14
@@ -80,6 +120,10 @@ int atapi_init(void);
 /* CD-ROM 存在チェック */
 int atapi_present(void);
 
+/* 使っている装置: 0 = セカンダリのマスター、1 = スレーブ。atapi_init は
+ * 両方のシグネチャを見て、2 台あれば媒体の入っている方 (マスター優先) を選ぶ */
+int atapi_drive_index(void);
+
 /* TEST UNIT READY: メディア挿入確認
  * 戻り値: ATAPI_OK=メディアあり, ATAPI_ERR_NO_MEDIA=なし */
 int atapi_test_unit_ready(void);
@@ -112,6 +156,9 @@ typedef struct {
     u32 multi_fail;       /* 複数セクタの READ(10) が失敗して 1 セクタずつへ落ちた数 */
     u32 single_retry;     /* 落ちた後に 1 セクタずつ出した READ(10) の数 */
     u32 unit_attention;   /* UNIT ATTENTION / NOT READY を見た数 */
+    u32 dev_resets;       /* コマンドが終わらない装置へ出した DEVICE RESET の数 */
+    u32 soft_resets;      /* DEVICE RESET でも戻らず SRST した数 */
+    u32 ready_retries;    /* READ CAPACITY を UNIT ATTENTION / NOT READY で出し直した数 */
 } AtapiStats;
 
 void atapi_get_stats(AtapiStats *out);
