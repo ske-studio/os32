@@ -688,8 +688,10 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     /* インストールタイプ選択 (中身は build/packages.yaml の振り分け) */
     print(COL_NORMAL, "\n");
     println(COL_NORMAL, "Install type:");
-    println(COL_NORMAL, "  1. Minimal  (CUI only: shell + basic commands, same as the boot FD)");
-    println(COL_NORMAL, "  2. Normal   (+ GUI shell, commands, apps, manpages, IME dictionary, data)");
+    /* 1 は「起動して、HDD に入れて、壊れたときに直して、残りを取ってこられる」
+     * レスキュー兼インストーラ (2026-09-25)。既定フォントと一般コマンドは 2 */
+    println(COL_NORMAL, "  1. Minimal  (CUI rescue + installer, same as the boot FD)");
+    println(COL_NORMAL, "  2. Normal   (+ GUI shell, commands, apps, manpages, font, IME, data)");
     println(COL_NORMAL, "  3. Full     (+ test programs and test data)");
     println(COL_NORMAL, "  0. Cancel");
     print(COL_NORMAL, "\n");

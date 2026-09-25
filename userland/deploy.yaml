@@ -57,9 +57,12 @@ filesystem:
     - host: userland/system/cdinst.bin
       guest: /sbin/
       tags: [base]
+    # hsync は base (MINIMAL = 起動 FD)。MINIMAL で入れた機械が後から残りを
+    # 取ってこられるように (2026-09-25、MINIMAL = レスキュー兼インストーラ)。
+    # 同期元は /host (HostDrv) なので、今は NP21/W の上でだけ役に立つ
     - host: userland/system/hsync.bin
       guest: /sbin/
-      tags: [programs]
+      tags: [base]
     - host: userland/tests/bench_scale2x.bin
       guest: /usr/bin/
       tags: [test]
@@ -227,64 +230,31 @@ filesystem:
     # PKG 配布物でも起動対象になるものは必ずここに載せること。
     - host: userland/system/sndctl.bin
       guest: /bin/sndctl.bin
-      tags: [base]
+      tags: [programs]
     - host: userland/system/sndtest.bin
       guest: /bin/sndtest.bin
       tags: [programs]
     - host: userland/system/sndtest2.bin
       guest: /bin/sndtest2.bin
       tags: [programs]
-    # --- 基本コマンド (タグ base → CD の MINIMAL = FD。「シェル + 基本コマンド」) ---
+    # --- MINIMAL のコマンド (タグ base → CD の MINIMAL = 起動 FD) ---
+    # MINIMAL は「起動して、HDD に入れて、壊れたときに直して、残りを取ってこられる」
+    # レスキュー兼インストーラ (2026-09-25、ユーザー決定)。ここに挙げるのは直すときに
+    # 中身を見る less / grep / hexdump と設定を直す cfg だけ (install / cdinst / hsync は
+    # /sbin の行)。more / find / sort / head / tail / wc / tee / touch / sleep / diff / du /
+    # cal / man は下の glob (programs = NORMAL) に入る。2HD の起動 FD の空きのため
+    # (docs/08_build.md の「起動 FD と MINIMAL」)。
     # 下の glob から exclude: で外し、ここで 1 本ずつ挙げる。足すときは両方直す
     # (両方に残れば make check-packages-host がゲストパスの重複で、両方から
     # 消えれば make check-manifests の 3 が「配備に無いバイナリ」で知らせる)。
-    - host: userland/cmds/more.bin
-      guest: /bin/more.bin
-      tags: [base]
     - host: userland/cmds/less.bin
       guest: /bin/less.bin
       tags: [base]
     - host: userland/cmds/grep.bin
       guest: /bin/grep.bin
       tags: [base]
-    - host: userland/cmds/find.bin
-      guest: /bin/find.bin
-      tags: [base]
-    - host: userland/cmds/sort.bin
-      guest: /bin/sort.bin
-      tags: [base]
-    - host: userland/cmds/head.bin
-      guest: /bin/head.bin
-      tags: [base]
-    - host: userland/cmds/tail.bin
-      guest: /bin/tail.bin
-      tags: [base]
-    - host: userland/cmds/wc.bin
-      guest: /bin/wc.bin
-      tags: [base]
-    - host: userland/cmds/tee.bin
-      guest: /bin/tee.bin
-      tags: [base]
-    - host: userland/cmds/touch.bin
-      guest: /bin/touch.bin
-      tags: [base]
     - host: userland/cmds/hexdump.bin
       guest: /bin/hexdump.bin
-      tags: [base]
-    - host: userland/cmds/sleep.bin
-      guest: /bin/sleep.bin
-      tags: [base]
-    - host: userland/cmds/diff.bin
-      guest: /bin/diff.bin
-      tags: [base]
-    - host: userland/cmds/du.bin
-      guest: /bin/du.bin
-      tags: [base]
-    - host: userland/cmds/cal.bin
-      guest: /bin/cal.bin
-      tags: [base]
-    - host: userland/cmds/man.bin
-      guest: /bin/man.bin
       tags: [base]
     - host: userland/cmds/cfg.bin
       guest: /bin/cfg.bin
@@ -294,22 +264,9 @@ filesystem:
       guest: /bin/
       type: glob
       exclude:
-        - more.bin  # base (上で個別)
         - less.bin  # base (上で個別)
         - grep.bin  # base (上で個別)
-        - find.bin  # base (上で個別)
-        - sort.bin  # base (上で個別)
-        - head.bin  # base (上で個別)
-        - tail.bin  # base (上で個別)
-        - wc.bin  # base (上で個別)
-        - tee.bin  # base (上で個別)
-        - touch.bin  # base (上で個別)
         - hexdump.bin  # base (上で個別)
-        - sleep.bin  # base (上で個別)
-        - diff.bin  # base (上で個別)
-        - du.bin  # base (上で個別)
-        - cal.bin  # base (上で個別)
-        - man.bin  # base (上で個別)
         - cfg.bin  # base (上で個別)
         - shell.bin
         - install.bin
@@ -380,13 +337,15 @@ filesystem:
     # --- ビットマップフォント (KCG キャッシュ形式) ---
     # カーネルが起動時に /sys/font/default.kcgfont を読む
     # (kernel.c の kcg_load_font)。tools/gen_font16.py で生成する。
-    # 起動に要るので core (MINIMAL)。data だったころ CD の MINIMAL に入らず、
-    # CD インストール後の起動で `[KCG] kernel-init load failed` が出ていた。
-    # FD (FAT、LFN なし) には 8.3 の /sys/font/default.kcg として入る
-    # (build/packages.yaml の fd.rename)。カーネルはルートが FAT のときだけそれを読む。
+    # **data (NORMAL)。MINIMAL と起動 FD には入れない** (ユーザー決定 2026-09-25)。
+    # 無くても起動は止まらない — 画面に `FONT..NG` と `[KCG] kernel-init load
+    # failed: -1` が出て、漢字・ANK は本体のフォント ROM から読む (drivers/kcg.c。
+    # テキスト画面の文字は元から ROM)。184KB あり、入れていたころは 2HD の FD が
+    # カーネルの 4KB 増で溢れた (docs/08_build.md の「起動 FD と MINIMAL」)。
+    # FD (FAT) に置くなら 8.3 の /sys/font/default.kcg (kernel/boot_font.c)。
     - host: assets/fonts/ipaexg16.kcgfont
       guest: /sys/font/default.kcgfont
-      tags: [core]
+      tags: [data]
     # --- TrueType フォント ---
     - host: assets/fonts/ipaexg_subset.ttf
       guest: /data/ipaexg_subset.ttf

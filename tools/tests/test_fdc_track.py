@@ -40,8 +40,13 @@ CASES = ["split_2hd", "split_144", "readahead_count1", "cross_boundary",
          "sis_edge_limit", "write_nr_no_recover"]
 
 # font_replay の材料 (実物の FD イメージ)。make all が作る。
+# 読むファイル: もとは既定フォント /sys/font/default.kcg (188KB) だったが、
+# 2026-09-25 にフォントを MINIMAL から NORMAL へ移して FD に載らなくなった
+# (build/packages.yaml)。読み方 (kcg_load_font と同じ 16B → 1KB ずつ) はそのまま、
+# FD に残る大きいファイルで起動時にカーネルが FatFs で読む /sys/unicode.bin
+# (128KB、トラック 16 本分) に替えた。
 D88 = ROOT / "images/os32_boot.d88"
-FONT_GUEST = ("SYS", "FONT", "DEFAULT.KCG")
+FONT_GUEST = ("SYS", "UNICODE.BIN")
 _ENV = {}
 
 
@@ -217,6 +222,7 @@ def prepare_font(tmp):
     print(f"font_replay の上限: seek <= {seek_max}, multi <= {multi_max} ({desc})",
           flush=True)
     return {"FDC_TRACK_IMAGE": str(img), "FDC_TRACK_FONT": str(fnt),
+            "FDC_TRACK_PATH": "0:/" + "/".join(FONT_GUEST).lower(),
             "FDC_TRACK_SEEK_MAX": str(seek_max), "FDC_TRACK_MULTI_MAX": str(multi_max)}
 
 # fdc.c の fdc_motor_off() は元から未使用の static (test_fdc_seek.py と同じ)。

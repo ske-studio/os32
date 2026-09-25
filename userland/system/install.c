@@ -262,10 +262,11 @@ static int confirm_install(void) {
 /* ======== FD の名前 → HDD の正規名 (build/packages.yaml の fd: の逆) ========
  * FD の中身は CD の BOOT + MINIMAL と同じ集合で、FAT (LFN なし) に置けない名前と
  * 置き場所の違うものだけ fd.rename で名前を変えてある。install はそれを**逆に**
- * 当てて正規名で写す — そのまま写すと HDD に /sys/font/default.kcg や
- * /etc/filetype が残り、HDD 起動ではフォントも filetypes も失われる (実装レビュー
- * 往復 2)。この表は packages.yaml の fd.rename / fd.only と
- * tools/tests/test_packages.py case 9 が突き合わせる (足したら両方直す)。
+ * 当てて正規名で写す — そのまま写すと HDD に /etc/filetype が残り、HDD
+ * 起動では filetypes が失われる (実装レビュー往復 2。既定フォントも同じ扱い
+ * だったが、2026-09-25 に MINIMAL から NORMAL へ移して FD に載らなくなった)。
+ * この表は packages.yaml の fd.rename / fd.only と tools/tests/test_packages.py
+ * case 9 が突き合わせる (足したら両方直す)。
  *   hdd が /boot/ … : ファイルとしては写さない。ブート領域へ書く (boot_hdd /
  *                     loader) か、Phase 3 で別に写す (vmkernel.lz4)
  *   それ以外         : その正規名で写す */
@@ -278,7 +279,6 @@ static const FdRename fd_renames[] = {
     { "/vmkrnl.lz4",           "/boot/vmkernel.lz4" },
     { "/sys/boot_hdd.bin",     "/boot/boot_hdd.bin" },
     { "/sys/loader_h.bin",     "/boot/loader_hdd.bin" },
-    { "/sys/font/default.kcg", "/sys/font/default.kcgfont" },
     { "/etc/filetype",         "/etc/filetypes" }
 };
 

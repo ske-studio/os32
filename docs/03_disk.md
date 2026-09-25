@@ -60,9 +60,9 @@ LBA     用途
 | `/LOADER.BIN` | 第2ステージローダー (`loader_fat_new.bin`) |
 | `/VMKRNL.LZ4` | LZ4圧縮カーネルイメージ (kernel.bin + sqlite.bin) |
 | `/sys/shell.bin`, `/sys/unicode.bin` | シェル・Unicodeテーブル |
-| `/bin/*.bin` | 基本コマンド (配備マニフェストのタグ `base`) |
-| `/sys/font/default.kcg` | 既定フォント (HDD の `default.kcgfont` の 8.3 名) |
+| `/bin/*.bin` | 直す道具 less / grep / hexdump / cfg (配備マニフェストのタグ `base`) |
 | `/sbin/install.bin`, `/sbin/cdinst.bin` | HDD/CDインストーラ |
+| `/sbin/hsync.bin` | 残りを `/host` (HostDrv) から取ってくる |
 ```
 ブート: IPL → /LOADER.BIN (0000:8000) → /VMKRNL.LZ4 展開 → kernel_main
 ```

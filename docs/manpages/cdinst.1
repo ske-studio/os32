@@ -12,10 +12,11 @@ ATAPI CD-ROM 上のインストール ISO (`os32_install.iso`) から
 OS32 パッケージ (.PKG) を読み込み、HDD を ext2 でフォーマットして展開する。
 BOOT.PKG はブートセクタへ直接書く。インストールの型は 3 つ:
 
-- `1. Minimal` — BOOT + MINIMAL (CUI のみ: シェル + 基本コマンド、フォント、設定)。
-  起動 FD と同じ中身
+- `1. Minimal` — BOOT + MINIMAL (CUI のレスキュー兼インストーラ: シェル、install /
+  cdinst / hsync、less / grep / hexdump / cfg、設定)。起動 FD と同じ中身。既定フォントは
+  無く、字は本体のフォント ROM で出る
 - `2. Normal` — 1 + GUI + NORMAL (GUI シェルと GUI アプリ、コマンド、アプリ、man、
-  FEP 辞書、データ)
+  既定フォント、FEP 辞書、データ)
 - `3. Full` — 2 + DEBUG (試験プログラムと試験データ)
 
 展開は依存の順 BOOT → MINIMAL → GUI → NORMAL → DEBUG。Minimal だけの HDD は
