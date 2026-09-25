@@ -1729,6 +1729,25 @@ static void case_dst_fd(void)
               "hd0 側は通常どおり同期された (/bin/a.bin の更新、/newdir の作成)");
     }
 
+    /* /sys が別マウント (hd1) + 全体同期: 既定の sys 除外に隠れず other_mount の
+     * 1 行が出て、/sys の下は変わらない (Codex 2026-09-25 3 回目 P3) */
+    {
+        u8 *blob = make_blob(700, 5);
+        u8 *old = make_blob(700, 6);
+        fs_add_dir("/host/sys");
+        fs_add_file("/host/sys/k.bin", blob, 700);
+        fs_add_dir("/sys");
+        fs_add_file("/sys/k.bin", old, 700);
+        fk_sub_prefix = "/sys";
+        fk_sub_dev = "hd1";
+        check(run0() == 0, "/sys が別マウントの全体同期: 成功");
+        check(log_has("/sys reason=other_mount"),
+              "/sys を reason=other_mount で除外したと -v 無しで 1 行出す");
+        check(node_equal_bytes("/sys/k.bin", old, 700), "/sys の下は変わらない");
+        free(blob);
+        free(old);
+    }
+
     fk_sub_prefix = 0;
     fk_sub_dev = 0;
 }

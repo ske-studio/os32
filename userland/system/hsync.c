@@ -2212,6 +2212,28 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
             continue;
         }
 
+        /* ---- マウントをまたがない (rsync -x と同じ、Codex 2026-09-25 P2) ----
+         * 宛先の子がマウント点 (vfs_devname が完全一致で名前を返す = 別の
+         * マウントの根) なら、その下へは入らない — 掃除も mkdir もコピーもしない。
+         * 開始点の判定 (dst_on_floppy) だけでは、/ = hd0 のとき同期元の
+         * /host/fd0/x が /fd0 (FD の自動マウント) へ mkdir されて書かれた。
+         * FD に限らず全部のマウント (/host、/cd0、/hd1 …) に当てる。
+         * 失敗ではなく除外として数え、-v が無くても 1 行出す (配備元にその名前が
+         * あるのに黙って入らないと、なぜ入らないかの手がかりが無いので)。
+         * 開始点そのもの (`hsync sys` で /sys が別マウントの場合) は明示の指定
+         * なので対象にしない — 見るのは子だけ。
+         * 既定の sys 除外より**前**に見る — /sys が別マウントのとき、理由が
+         * default_sys_exclusion (-v でしか出ない) に隠れないように (Codex 3 回目)。 */
+        {
+            const char *mdev = api->vfs_devname(dst_path);
+            if (mdev && mdev[0]) {
+                g_excluded++;
+                api->kprintf(ATTR_YELLOW, "  EXCLUDE %s reason=%s (dev %s)\n",
+                             dst_path, HR_OTHER_MOUNT, mdev);
+                continue;
+            }
+        }
+
         /* ---- 範囲判定 (内容を開く処理や mkdir より**先**、設計書 §3.1) ----
          * ルート直下の sys は既定で飛ばす (稼働中のシェル・共有ライブラリ)。
          * **全体同期のときだけ**。`hsync usr` の usr/sys は対象に含める。
@@ -2222,26 +2244,6 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
                 api->kprintf(ATTR_YELLOW, "  EXCLUDE %s reason=%s\n",
                              dst_path, HR_DEFAULT_SYS);
             continue;
-        }
-
-        /* ---- マウントをまたがない (rsync -x と同じ、Codex 2026-09-25 P2) ----
-         * 宛先の子がマウント点 (vfs_devname が完全一致で名前を返す = 別の
-         * マウントの根) なら、その下へは入らない — 掃除も mkdir もコピーもしない。
-         * 開始点の判定 (dst_on_floppy) だけでは、/ = hd0 のとき同期元の
-         * /host/fd0/x が /fd0 (FD の自動マウント) へ mkdir されて書かれた。
-         * FD に限らず全部のマウント (/host、/cd0、/hd1 …) に当てる。
-         * 失敗ではなく除外として数え、-v が無くても 1 行出す (配備元にその名前が
-         * あるのに黙って入らないと、なぜ入らないかの手がかりが無いので)。
-         * 開始点そのもの (`hsync sys` で /sys が別マウントの場合) は明示の指定
-         * なので対象にしない — 見るのは子だけ。 */
-        {
-            const char *mdev = api->vfs_devname(dst_path);
-            if (mdev && mdev[0]) {
-                g_excluded++;
-                api->kprintf(ATTR_YELLOW, "  EXCLUDE %s reason=%s (dev %s)\n",
-                             dst_path, HR_OTHER_MOUNT, mdev);
-                continue;
-            }
         }
 
         /* ---- 保護判定 (同じく内容を開く前) ----
