@@ -202,6 +202,19 @@ int inst_hdd_getkey(KernelAPI *api)
     return ch;
 }
 
+/* 1 字で決まる問いの直後の問い (cdinst の [0-3] の後の y/N) 用。最初の 1 字が
+ * 行末 (CR / LF / CRLF) なら前の答えの行末として 1 回だけ捨てて次を返す
+ * (端末の「1 + Enter」の Enter が y/N の答え = 取り消しにならない)。2 つめの
+ * 行末はそのまま返す (= 取り消し)。NUL・ESC・その他の字は捨てない。
+ * 規則は ERASE の行 (ih_read_line の skip_eol) と同じ: 届いている分も後から
+ * 届く分も同じ扱いで、到着の時刻に左右されない */
+int inst_hdd_getkey_after_key(KernelAPI *api)
+{
+    int ch = inst_hdd_getkey(api);
+    if (ch == '\r' || ch == '\n') ch = inst_hdd_getkey(api);   /* CRLF の LF は捨て済み */
+    return ch;
+}
+
 /* 1 行読む (CR か LF で終わり)。表示できる ASCII だけをそのまま受け、
  * それ以外 (NUL・BS・ESC などの制御文字) や長すぎる行は「一致しない行」にする。
  * ESC はその場で打ち切る。CR の後にもう届いている LF は同じ行末として捨てる

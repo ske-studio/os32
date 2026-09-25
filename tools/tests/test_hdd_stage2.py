@@ -627,9 +627,11 @@ MUTATIONS = [
      "        api->kprintf(ATTR_WHITE, \"%s\", \"Installation aborted. Nothing was written.\\n\");\n        rc = 0;\n        goto end;",
      "        api->kprintf(ATTR_WHITE, \"%s\", \"Installation aborted. Nothing was written.\\n\");\n        rc = 0;",
      "install が N でも書く"),
-    ("userland/system/cdinst.c", "    return inst_hdd_getkey(api);",
-     "    int ch;\n    for (;;) {\n        ch = api->kbd_trygetchar();\n        if (ch > 0) return ch;\n"
-     "        ch = api->serial_trygetchar();\n        if (ch > 0) return ch;\n    }",
+    # y/N の読みは inst_hdd_getkey_after_key (選択 [0-3] の getkey は数字以外を読み飛ばすので、
+    # 旧の鍵読みに替えても区別できない — y/N の側に当てる)
+    ("userland/system/cdinst.c", "        int k = inst_hdd_getkey_after_key(api);",
+     "        int k;\n        for (;;) {\n            k = api->kbd_trygetchar();\n            if (k > 0) break;\n"
+     "            k = api->serial_trygetchar();\n            if (k > 0) break;\n        }",
      "cdinst の y/N が旧の鍵読み (serial の CRLF・NUL を共通部と別に扱う)"),
     # y の後の行末と ERASE の行 (Codex 2 回目 P2-1)
     ("userland/system/inst_hdd.c", "    if (ih_read_line(api, line, INST_LINE_MAX, 1) != 0",
@@ -645,6 +647,18 @@ MUTATIONS = [
      "            skip_eol = 0;                /* 最初の 1 字だけ */\n"
      "            if (ch == '\\r' || ch == '\\n') { api->kprintf(ATTR_WHITE, \"%s\", \"\\n\"); continue; }",
      "読み捨てた行末を映す (y の後に余計な改行)"),
+    # [0-3] の選択の後の行末と Continue (Codex 3 回目 P2)
+    ("userland/system/cdinst.c", "        int k = inst_hdd_getkey_after_key(api);", "        int k = getkey();",
+     "選択の行末を Continue の答え (取り消し) にする"),
+    ("userland/system/inst_hdd.c", "    if (ch == '\\r' || ch == '\\n') ch = inst_hdd_getkey(api);",
+     "    while (ch == '\\r' || ch == '\\n') ch = inst_hdd_getkey(api);",
+     "選択の後の行末を何度でも捨てる (Enter で取り消せない)"),
+    ("userland/system/inst_hdd.c", "    if (ch == '\\r' || ch == '\\n') ch = inst_hdd_getkey(api);",
+     "    if (ch == '\\r' || ch == '\\n' || ch == 0) ch = inst_hdd_getkey(api);",
+     "選択の後の NUL を捨てる (NUL は答え = 取り消し)"),
+    ("userland/system/inst_hdd.c", "    if (ch == '\\r' || ch == '\\n') ch = inst_hdd_getkey(api);",
+     "    if (ch == '\\r' || ch == '\\n' || ch == 0x1B) ch = inst_hdd_getkey(api);",
+     "選択の後の ESC を捨てる (ESC は答え = 取り消し)"),
     # umount の後の断りの表示 (Codex 2 回目 P2-2)
     ("userland/system/inst_hdd.c",
      "                 \"  Nothing was erased or formatted. (Unmounting may have flushed\\n\"\n"

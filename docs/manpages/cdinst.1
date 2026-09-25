@@ -38,14 +38,17 @@ BOOT.PKG はブートセクタへ直接書く。インストールの型は 3 �
 失われる」と出る。`y` の後に `Type ERASE:` と聞くので、`ERASE` (大文字 5 文字、完全一致) と Enter を
 打つと LBA 0 と 1 を 0 で埋めて読み戻し、空のディスクとして入れる (**hd0 の他の区画も全部失われる**)。
 `y` の後の最初の行末 (CR・LF・CRLF — 端末が `y` と一緒に送る分も、後から押した Enter も) は `y` の
-行末として読み捨てるので、「`y` + Enter → `ERASE` + Enter」で進む。`Type ERASE:` に Enter だけを
+行末として読み捨てるので、「`y` + Enter → `ERASE` + Enter」で進む。`[0-3]` の選択も同じで、選択の後の
+最初の行末は選択の行末として捨てる (「`1` + Enter → `y` + Enter」。`Continue? [y/N]` に Enter だけを打てば
+取り消し、`1` の後に Enter を押していなければ 2 回目の Enter)。`Type ERASE:` に Enter だけを
 打てば取り消し (`y` の後に Enter を押していなければ 2 回目の Enter)。
 それ以外の入力 (`N`、`ERASE` でない行、NUL などの制御文字を含む行) は何も書かずに終える。消すのは
 全検査と `y` の後なので、大きさや容量で断るときは区画表も残る。hd0 がルートや `/hd0` 以外に
 マウントされていれば確認の前に断り、`/hd0` にだけマウントされていれば `ERASE` の後に外してから消す。
-外せない・外した後もマウントが残るときは消さず format もせずに断る。このときは
-`Nothing was erased or formatted` と出す — 外す処理 (umount) は外す前にファイルシステムを書き出す
-(sync) ので、`Nothing was written` (1 セクタも書いていない) とは言えない。
+`ERASE` の入力を待つ間にマウントが変わった (`/hd0` の相手が替わった・別の場所にマウントされた) など、
+umount を呼ぶ前に断るときは `Nothing was written` のまま。umount を実行した後の失敗・外した後もマウントが
+残るときは消さず format もせずに断り、`Nothing was erased or formatted` と出す — 外す処理 (umount) は
+外す前にファイルシステムを書き出す (sync) ので、`Nothing was written` (1 セクタも書いていない) とは言えない。
 消した後で止まったとき (format の失敗) は `INCOMPLETE` と出し、もう一度実行すれば空のディスクとして
 入れられると案内する。
 

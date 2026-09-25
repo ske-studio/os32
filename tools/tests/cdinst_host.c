@@ -753,7 +753,7 @@ static void case_modes(void)
     setup();
     disk[1][0] = 0x80; disk[1][1] = 0xA1; disk[1][10] = 12; disk[1][14] = 100;
     memcpy(disk[1] + 16, "MS-DOS          ", 16);
-    KEYS("1\r");                                   /* 確認に Enter = 取り消し */
+    KEYS("1\r\r");            /* 選択の行末は捨て、確認に Enter = 取り消し */
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("OS32 did not create");
@@ -766,7 +766,7 @@ static void case_modes(void)
     /* 2 項目 */
     setup();
     disk[1][1] = 0xE2; disk[1][32 + 1] = 0xE2;
-    KEYS("1\r");
+    KEYS("1\n\n");
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("two or more");
@@ -1468,6 +1468,74 @@ static void case_erase(void)
                     CHECK(keys_pos == keys_len || (gap > 0 && keys_pos == keys_len - 1 &&
                                                    keybuf[keys_len - 1] == '\n'));
                 }
+            }
+        }
+    }
+
+    /* [0-3] の選択の後の行末 (Codex 3 回目 P2): 「1 + Enter」の Enter は選択の行末と
+     * して 1 回だけ捨てる (Continue の取り消しにしない)。1\r\n → y\r\n → ERASE\r\n で
+     * 消去まで進み、選択の行末の後に Enter だけなら取り消し。NUL・ESC・n は捨てずに
+     * 答え (= 取り消し)。kbd / serial × 鍵の間の「入力なし」0〜2 */
+    {
+        static const char *const ceol[] = { "1\r\n", "1\r", "1\n", "1" };
+        static const char *const yeol2[] = { "y\r\n", "y\n", "y" };
+        static const KeyStr ccancel[] = {
+            KS("1\r\n\r"), KS("1\r\r"), KS("1\n\n"), KS("1\r\n\n"), KS("1\n\r"),
+            KS("1\r\n\r\n"), KS("1\r\r\n"), KS("1\r\nn"), KS("1\r\n\x1b"), KS("1\r\n\0"),
+            KS("1\0"), KS("1\x1b")
+        };
+        static char pre[16];
+        int ser, gap, c, y, e, n;
+        const char *q;
+        for (ser = 0; ser < 2; ser++) {
+            for (gap = 0; gap < 3; gap++) {
+                for (c = 0; c < 4; c++) {
+                    for (y = 0; y < 3; y++) {
+                        for (e = 0; e < ERASE_OK; e++) {
+                            n = 0;
+                            for (q = ceol[c]; *q; q++) pre[n++] = *q;
+                            for (q = yeol2[y]; *q; q++) pre[n++] = *q;
+                            pre[n] = '\0';
+                            setup();
+                            bad_disk(BAD_FOREIGN);
+                            keys_serial = ser;
+                            keys_gap = gap;
+                            keys_line(pre, &erase_ok[e]);
+                            run();
+                            CHECK_STR("Type ERASE:");
+                            CHECK_STR("erased and verified (all zero)");
+                            CHECK_STR("Installation Complete");
+                            CHECK_NOSTR("Installation cancelled");
+                            CHECK_NOSTR("Not erased");
+                            CHECK(keys_pos == keys_len || (gap > 0 && keys_pos == keys_len - 1 &&
+                                                           keybuf[keys_len - 1] == '\n'));
+                        }
+                    }
+                }
+                for (y = 0; y < (int)(sizeof(ccancel) / sizeof(ccancel[0])); y++) {
+                    setup();
+                    bad_disk(BAD_FOREIGN);
+                    memcpy(keep, disk, sizeof(keep));
+                    keys_serial = ser;
+                    keys_gap = gap;
+                    keys_line("", &ccancel[y]);
+                    run();
+                    CHECK_NOTHING_WRITTEN();
+                    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+                    CHECK_STR("Installation cancelled. Nothing was written.");
+                    CHECK_NOSTR("Type ERASE:");
+                    /* 取り消しの CR の後の LF は読まずに終わってよい (もう聞かない) */
+                    CHECK(keys_pos == keys_len || (keys_pos == keys_len - 1 &&
+                                                   keybuf[keys_len - 1] == '\n'));
+                }
+                /* 空のディスク (ERASE を聞かない) でも「1 + Enter → y + Enter」で入る */
+                setup();
+                keys_serial = ser;
+                keys_gap = gap;
+                KEYS("1\r\ny\r\n");
+                run();
+                CHECK_STR("Installation Complete");
+                CHECK_NOSTR("Type ERASE:");
             }
         }
     }

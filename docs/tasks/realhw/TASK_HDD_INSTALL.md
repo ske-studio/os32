@@ -259,6 +259,10 @@
   ERASE の行の先頭の空行として 1 回だけ無視する」のと結果が同じで、到着の時刻に左右されない一つの規則に
   した。行末以外 (字・NUL・ESC) が先なら何も捨てない (NUL は入力のまま)。2 つめの行末は空行 = 取り消し
   (`y` の後に Enter を押していない人は Enter を 2 回押して取り消す: 安全側)。
+- **`[0-3]` の選択の行末 (Codex 往復 3 の P2)**: cdinst の選択も 1 字で決まるので、「`1` + Enter」の Enter が
+  `Continue? [y/N]` の答え (= 取り消し) になり、行送信では ERASE に届かなかった。同じ規則で、Continue の最初の
+  1 字が行末なら選択の行末として 1 回だけ捨てる (`inst_hdd_getkey_after_key`)。2 つめの行末は取り消し、
+  NUL・ESC・`n` などは捨てずに答え (取り消し)。install には選択が無いので `y/N` は今までどおり。
 - **鍵の読み方 (Codex P1・P2)**: `kbd_trygetchar` / `serial_trygetchar` は「入力なし」を -1、受けた NUL を 0 で
   返す。最初の実装は 0 を読み捨てていたので、シリアルから `ERA<NUL>SE<CR>` が届くと消えた。共通の
   `inst_hdd_getkey` は 0 以上をすべて入力として渡し、NUL を含む行は不一致にする。CR の直後の LF は 1 つの
@@ -284,7 +288,9 @@
   ERASE + CR・LF・CRLF で消去まで進み、`y` の行末の後に Enter だけ (7 通り) は取り消し — kbd / serial ×
   鍵の間の「入力なし」0〜2 (もう届いている / 後から届く)。umount の贋物は `inj_umount_sync` で「外す前の
   sync が書く」を数え、umount の後の断りが `Nothing was written` と言わないこと、umount の前の断りは
-  言うことを見る。変異は同じ `--mutate` (124 本)。
+  言うことを見る。cdinst の選択: `1\r\n`・`1\r`・`1\n`・`1` × `y\r\n`・`y\n`・`y` × ERASE + CR・LF・CRLF で
+  消去まで、選択の行末の後に Enter だけ・`n`・ESC・NUL (12 通り) は取り消し、空のディスクは `1\r\ny\r\n` で
+  入る — kbd / serial × 「入力なし」0〜2。変異は同じ `--mutate` (128 本)。
 
 ### 段 3 — CD インストール → HDD 起動
 

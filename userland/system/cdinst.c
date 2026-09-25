@@ -716,7 +716,10 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     println(COL_RED, "WARNING: This will format the OS32 area of hd0 and install OS32.");
     print(COL_YELLOW, "Continue? [y/N]: ");
     {
-        int k = getkey();
+        /* [0-3] は 1 字で決まるので、選択の後の Enter (端末が「1」と一緒に送る
+         * CR / LF / CRLF、後から押した Enter) が残る。その最初の 1 つは選択の
+         * 行末として捨てる (取り消しにしない)。次の Enter だけなら取り消し */
+        int k = inst_hdd_getkey_after_key(api);
         /* 表示できる字だけ映す (NUL や制御文字は答え = N として扱うが映さない) */
         api->kprintf(COL_NORMAL, "%c\n", (k >= 0x20 && k <= 0x7E) ? k : ' ');
         if (k != 'y' && k != 'Y') {

@@ -85,6 +85,9 @@ typedef struct {
 
 /* 1 鍵を待つ (kbd → serial)。0 以上 (NUL を含む) を返す。CR の直後の LF は捨てる */
 int  inst_hdd_getkey(KernelAPI *api);
+/* 1 字の答えの直後の問い用: 最初の 1 字が行末なら 1 回だけ捨てる (前の答えの
+ * Enter)。2 つめの行末・NUL・ESC・字はそのまま返す */
+int  inst_hdd_getkey_after_key(KernelAPI *api);
 
 int  inst_hdd_check(KernelAPI *api, InstTarget *t);
 int  inst_hdd_check_media(KernelAPI *api, const InstTarget *t,
