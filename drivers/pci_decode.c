@@ -84,6 +84,11 @@ const char *pci_class_name(u8 cls, u8 sub)
     case PCI_CLASS_DISPLAY:
         if (sub == 0x00) return "Display/VGA";
         return "Display";
+    case PCI_CLASS_MULTIMEDIA:
+        /* TV チューナー / キャプチャ (GV-MVP/HX2 など) はここに出る。 */
+        if (sub == 0x00) return "Multimedia/Video";
+        if (sub == 0x01) return "Multimedia/Audio";
+        return "Multimedia";
     case PCI_CLASS_BRIDGE:
         if (sub == PCI_SUB_BRIDGE_HOST) return "Bridge/Host";
         if (sub == PCI_SUB_BRIDGE_ISA) return "Bridge/ISA";
@@ -108,6 +113,13 @@ const char *pci_vendor_name(u16 vendor)
     case 0x9004: return "Adaptec";
     case 0x1023: return "Trident";
     case 0x1013: return "Cirrus";
+    /* ここから下は io_pci.md の表には無い。PCI の TV チューナー
+     * (I-O DATA GV-MVP/HX2 など) を `lspci -v` で識別するときに、
+     * カード自身か搭載チップのどちらのベンダが出ても名前が付くように。 */
+    case 0x10FC: return "I-O DATA";
+    case 0x14F1: return "Conexant";
+    case 0x1131: return "Philips";
+    case 0x109E: return "Brooktree";
     default: break;
     }
     return "";

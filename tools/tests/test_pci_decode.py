@@ -31,63 +31,84 @@ SRC = ROOT / "drivers/pci_decode.c"
 TARGET_SRCS = [
     ("drivers/pci_decode.c", []),
     ("drivers/pci.c", []),
+    ("userland/shell/pci_verbose.c", []),
 ]
 
 CASES = ["cfg_addr", "probe_values", "bar_kind", "bar_base", "header_type",
-         "extract", "names", "story_82557", "absent"]
+         "extract", "names", "story_82557", "absent",
+         "verbose_tuner", "verbose_bars", "verbose_bridge", "verbose_bounds",
+         "verbose_parse"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl="]
-INCLUDES = ["-I" + str(ROOT / p) for p in ("include", "drivers")]
+INCLUDES = ["-I" + str(ROOT / p) for p in ("include", "drivers")] + ["-I" + str(ROOT)]
 
 # 否定側。実装を 1 か所だけ壊して RED になることを見る。
 # どれも「仕様を素直に読むと書いてしまう形」= RED 段で実際に書いた形。
 # (パターン, 置換, 説明)
 MUTATIONS = [
-    (r"\(\(bus & PCI_BUS_MASK\) << PCI_CFG_ADDR_BUS_SHIFT\)",
+    ("drivers/pci_decode.c", r"\(\(bus & PCI_BUS_MASK\) << PCI_CFG_ADDR_BUS_SHIFT\)",
      "(bus << PCI_CFG_ADDR_BUS_SHIFT)",
      "bus/dev/fn をマスクせずに詰める (範囲外が隣の欄へ溢れ、別のデバイスを読む)"),
-    (r"if \(raw == 0\) return PCI_BAR_NONE;",
+    ("drivers/pci_decode.c", r"if \(raw == 0\) return PCI_BAR_NONE;",
      "if (raw == 0 || raw == PCI_BAR_SPACE_IO) return PCI_BAR_NONE;",
      "番地未割り当ての I/O BAR (生値 1) を「無い」に畳む (票 R1 が消える)"),
-    (r"return raw & PCI_BAR_IO_ADDR_MASK;",
+    ("drivers/pci_decode.c", r"return raw & PCI_BAR_IO_ADDR_MASK;",
      "return raw & PCI_BAR_MEM_ADDR_MASK;",
      "I/O BAR の番地を ~0xF で切る (0xE808 が 0xE800 に化ける)"),
-    (r"if \(\(raw & PCI_BAR_SPACE_IO\) != 0\) return 0;",
+    ("drivers/pci_decode.c", r"if \(\(raw & PCI_BAR_SPACE_IO\) != 0\) return 0;",
      "",
      "I/O BAR でも bit3 を prefetchable と読む (番地の一部を属性と取り違える)"),
-    (r"return \(int\)\(header_type & PCI_HDR_LAYOUT_MASK\);",
+    ("drivers/pci_decode.c", r"return \(int\)\(header_type & PCI_HDR_LAYOUT_MASK\);",
      "return (int)header_type;",
      "Header Type の bit7 を落とさない (マルチファンクションのブリッヂを見落とす)"),
-    (r"return \(u16\)\(dword >> \(\(reg & 2\) \* 8\)\);",
+    ("drivers/pci_decode.c", r"return \(u16\)\(dword >> \(\(reg & 2\) \* 8\)\);",
      "return (u16)(dword >> ((reg & 3) * 8));",
      "16 ビットの切り出しをバイト境界で行う (奇数オフセットで値がずれる)"),
-    (r'if \(sub == PCI_SUB_BRIDGE_ISA\) return "Bridge/ISA";',
+    ("drivers/pci_decode.c", r'if \(sub == PCI_SUB_BRIDGE_ISA\) return "Bridge/ISA";',
      "",
      "ブリッヂのサブクラスを見ない (Host / ISA / PCI が全部同じ名前になる)"),
+    # --- `lspci -v` (userland/shell/pci_verbose.c) ---
+    ("userland/shell/pci_verbose.c",
+     r"if \(layout == PCI_HDR_LAYOUT_BRIDGE\) return PCI_BRIDGE_BAR_COUNT;",
+     "if (layout == PCI_HDR_LAYOUT_BRIDGE) return PCI_CFG_BAR_COUNT;",
+     "ブリッヂにも BAR を 6 本読む (0x18 のバス番号を bar2 と偽って出す)"),
+    ("userland/shell/pci_verbose.c",
+     r"if \(pv_bar_is_mem64_hi\(bar, count, n\)\) \{",
+     "if (0 && pv_bar_is_mem64_hi(bar, count, n)) {",
+     "64 ビット BAR の上位半分を見分けない (上位の 0 が none に化ける)"),
+    ("userland/shell/pci_verbose.c",
+     r"if \(layout == PCI_HDR_LAYOUT_DEVICE\) \{\n            u32 sw",
+     "if (layout != PCI_HDR_LAYOUT_CARDBUS) {\n            u32 sw",
+     "ブリッヂでも 0x2C を Subsystem と読む (プリフェッチ窓の上位を ID と偽る)"),
 ]
 
 
-def host_build(tmp, source_text=None):
-    """ハーネスをコンパイルして実行ファイルのパスを返す。"""
+# ハーネスが #include する実物。変異のときはこれを一時の木へ写し、1 本だけ
+# 差し替える (ハーネスの "../../drivers/..." がそのまま一時の木を指す)。
+MIRROR = ["tools/tests/pci_decode_host.c",
+          "drivers/pci_decode.c", "drivers/pci_decode.h",
+          "userland/shell/pci_verbose.c", "userland/shell/pci_verbose.h"]
+
+
+def host_build(tmp, mutated=None):
+    """ハーネスをコンパイルして実行ファイルのパスを返す。
+    mutated = (相対パス, 本文) なら、そのファイルだけ差し替えた木で通す。"""
     src_dir = pathlib.Path(tmp)
     exe = src_dir / "pci-decode-host"
     cmd = ["gcc", *FLAGS, *INCLUDES, str(HARNESS), "-o", str(exe)]
-    if source_text is not None:
-        # 変異させた pci_decode.c を一時の drivers/ に置いて、そちらを先に引かせる。
-        mut = src_dir / "drivers"
-        mut.mkdir(exist_ok=True)
-        (mut / "pci_decode.c").write_text(source_text, encoding="utf-8")
-        (mut / "pci_decode.h").write_text(
-            (ROOT / "drivers/pci_decode.h").read_text(encoding="utf-8"),
-            encoding="utf-8")
-        shim = src_dir / "harness.c"
-        shim.write_text(
-            HARNESS.read_text(encoding="utf-8").replace(
-                '"../../drivers/pci_decode.c"', '"drivers/pci_decode.c"'),
-            encoding="utf-8")
-        cmd = ["gcc", *FLAGS, "-I" + str(ROOT / "include"), "-I" + str(src_dir),
-               "-I" + str(mut), str(shim), "-o", str(exe)]
+    if mutated is not None:
+        tree = src_dir / "tree"
+        for rel in MIRROR:
+            dst = tree / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            if rel == mutated[0]:
+                text = mutated[1]
+            dst.write_text(text, encoding="utf-8")
+        cmd = ["gcc", *FLAGS, "-I" + str(ROOT / "include"),
+               "-I" + str(tree / "drivers"), "-I" + str(tree),
+               str(tree / "tools/tests/pci_decode_host.c"), "-o", str(exe)]
     subprocess.run(cmd, cwd=ROOT, check=True)
     return exe
 
@@ -122,15 +143,15 @@ def build_target(tmp):
 
 def mutate(tmp):
     """実装を 1 か所ずつ壊して、どれも RED になることを見る。"""
-    original = SRC.read_text(encoding="utf-8")
     bad = 0
-    for i, (pattern, repl, why) in enumerate(MUTATIONS, 1):
+    for i, (rel, pattern, repl, why) in enumerate(MUTATIONS, 1):
+        original = (ROOT / rel).read_text(encoding="utf-8")
         mutated, n = re.subn(pattern, repl, original, count=1)
         if n != 1:
             print(f"MUTATION {i} NOT APPLICABLE: {why}", flush=True)
             bad += 1
             continue
-        exe = host_build(tmp, mutated)
+        exe = host_build(tmp, (rel, mutated))
         hits = sum(subprocess.run([str(exe), c], cwd=ROOT,
                                   stderr=subprocess.DEVNULL).returncode != 0
                    for c in CASES)

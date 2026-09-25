@@ -114,6 +114,7 @@ u32 pci_cfg_addr(u32 bus, u32 dev, u32 fn, u32 reg);
 #define PCI_CLASS_STORAGE       0x01
 #define PCI_CLASS_NETWORK       0x02
 #define PCI_CLASS_DISPLAY       0x03
+#define PCI_CLASS_MULTIMEDIA    0x04
 #define PCI_CLASS_BRIDGE        0x06
 #define PCI_SUB_NET_ETHERNET    0x00
 #define PCI_SUB_BRIDGE_HOST     0x00

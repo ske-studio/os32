@@ -47,6 +47,7 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 | コマンド | 書式 | 説明 |
 |---------|------|------|
 | `lspci` | `lspci` | PCI デバイス一覧 (vendor:device・クラス・Header Type・IRQ / Pin・BAR の生番地) を 1 行 1 デバイスで |
+| `lspci -v` | `lspci -v [bus:dev.fn \| bus dev fn]` | 1 デバイスを複数行で: Revision・Class/Subclass/ProgIF・Header Type (multi-function 明示)・Command (I/O / Mem / BusMaster)・Status・Subsystem (Type 0) またはバス番号 (Type 1)・**BAR の生値を 0 も含めて全部** (io / mem32 / mem64-lo・hi / prefetch と番地)・Interrupt Line / Pin。**読み取り専用** (BAR の大きさを調べる書き込みもしない)。未知の PCI カードの識別用。行づくりは `userland/shell/pci_verbose.c` (試験 `check-pci-decode-host`) |
 | `pcidump` | `pcidump bus dev fn` | そのファンクションのコンフィギュレーション空間 256 バイトを 16 進ダンプ (Command / Subsystem / Cap ポインタを実機から持ち帰る用) |
 
 **ディレクトリコマンド** (cmd_dir.c):

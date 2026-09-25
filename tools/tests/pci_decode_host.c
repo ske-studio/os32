@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../drivers/pci_decode.c"
+/* `lspci -v` の行づくり (userland/shell/pci_verbose.c) も実物をそのまま。 */
+#include "../../userland/shell/pci_verbose.c"
 
 #define CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #x); failed++; \
@@ -209,6 +211,10 @@ static void names(void)
     CHECK(!strcmp(pci_class_name(0x06, 0x80), "Bridge"));
     /* 知らない組み合わせは空欄にしない (欄がずれる)。 */
     CHECK(!strcmp(pci_class_name(0x7F, 0x00), "Unknown"));
+    /* TV チューナー / キャプチャのクラス (lspci -v で未知のカードを見る)。 */
+    CHECK(!strcmp(pci_class_name(0x04, 0x00), "Multimedia/Video"));
+    CHECK(!strcmp(pci_class_name(0x04, 0x01), "Multimedia/Audio"));
+    CHECK(!strcmp(pci_class_name(0x04, 0x80), "Multimedia"));
     CHECK(pci_class_name(0xFF, 0xFF)[0] != '\0');
 
     /* io_pci.md 271〜280 行 / 336〜345 行の表にあるベンダ。 */
@@ -217,6 +223,11 @@ static void names(void)
     CHECK(!strcmp(pci_vendor_name(0x102B), "Matrox"));
     CHECK(!strcmp(pci_vendor_name(0x9004), "Adaptec"));
     CHECK(!strcmp(pci_vendor_name(0x1023), "Trident"));
+    /* TV チューナーの候補 (カード自身 / 搭載チップ)。 */
+    CHECK(!strcmp(pci_vendor_name(0x10FC), "I-O DATA"));
+    CHECK(!strcmp(pci_vendor_name(0x14F1), "Conexant"));
+    CHECK(!strcmp(pci_vendor_name(0x1131), "Philips"));
+    CHECK(!strcmp(pci_vendor_name(0x109E), "Brooktree"));
     /* 知らないベンダは空文字 — 行には vendor:device の 16 進が既に出る。 */
     CHECK(pci_vendor_name(0x1234)[0] == '\0');
     /* 不在 (0xFFFF) に名前を付けない。 */
@@ -308,6 +319,213 @@ static void absent(void)
     CHECK(pci_extract16(0x00000000UL, PCI_CFG_VENDOR_ID) != PCI_VENDOR_NONE);
 }
 
+/* ------------------------------------------------------------------ */
+/*  (10) `lspci -v` — 偽の config 空間から出る行を丸ごと突き合わせる    */
+/* ------------------------------------------------------------------ */
+
+/* 全行を '\n' でつないで out へ (実機の画面と同じ順・同じ文字)。 */
+static void render(const u32 *cfg, u32 bus, u32 dev, u32 fn,
+                   char *out, size_t cap)
+{
+    char line[PCI_VERBOSE_LINE_MAX];
+    int k, r;
+    out[0] = '\0';
+    for (k = 0; k < 64; k++) {
+        r = pci_verbose_line(cfg, bus, dev, fn, k, line, (int)sizeof(line));
+        if (r == PCI_VERBOSE_END) break;
+        if (r == PCI_VERBOSE_SKIP) continue;
+        /* 1 行は PCI_VERBOSE_LINE_MAX に収まり、切れていない
+         * (切れていれば最後の欄が欠ける = 識別の材料が消える)。 */
+        if (strlen(line) + 1 >= sizeof(line)) failed++;
+        strncat(out, line, cap - strlen(out) - 1);
+        strncat(out, "\n", cap - strlen(out) - 1);
+    }
+    if (k >= 64) failed++;   /* END が返らない */
+}
+
+static void expect_text(const char *got, const char *want, int line)
+{
+    if (strcmp(got, want) != 0) {
+        fprintf(stderr, "FAIL verbose:%d\n--- want\n%s--- got\n%s---\n",
+                line, want, got);
+        failed++;
+    }
+}
+
+static void cfg_clear(u32 *cfg)
+{
+    int i;
+    for (i = 0; i < PCI_VERBOSE_CFG_DWORDS; i++) cfg[i] = 0;
+}
+
+/* TV チューナーの想定 (CX23880 = 14F1:8800 を載せた I-O DATA のカード)。
+ * **subsystem の値は仮** — 実機の GV-MVP/HX2 がどう名乗るかは未確認。
+ * ここで見るのは欄の並びと復号で、値の真偽ではない。 */
+static void verbose_tuner(void)
+{
+    u32 cfg[PCI_VERBOSE_CFG_DWORDS];
+    char out[2048];
+
+    cfg_clear(cfg);
+    cfg[0x00 / 4] = 0x880014F1UL;   /* Device 8800 : Vendor 14F1 */
+    cfg[0x04 / 4] = 0x02900006UL;   /* Status 0290 : Command 0006 (Mem+BM) */
+    cfg[0x08 / 4] = 0x04000005UL;   /* Class 04.00.00 : Rev 05 */
+    cfg[0x0C / 4] = 0x00802008UL;   /* Header 80 (multi-function, type 0) */
+    cfg[0x10 / 4] = 0xF8000000UL;   /* BAR0 mem32 */
+    cfg[0x2C / 4] = 0xD00310FCUL;   /* Subsystem D003 : SubVendor 10FC (仮) */
+    cfg[0x3C / 4] = 0x2804010BUL;   /* Pin A : Line 11 */
+
+    render(cfg, 0, 9, 0, out, sizeof(out));
+    expect_text(out,
+        "0:9.0 14f1:8800 Conexant\n"
+        "  revision 05\n"
+        "  class 04.00.00 Multimedia/Video\n"
+        "  header 80 type 0 (device) multi-function\n"
+        "  command 0006 I/O- Mem+ BusMaster+\n"
+        "  status 0290\n"
+        "  subsystem 10fc:d003\n"
+        "  bar0 f8000000 mem32 base 0xf8000000\n"
+        "  bar1 00000000 none\n"
+        "  bar2 00000000 none\n"
+        "  bar3 00000000 none\n"
+        "  bar4 00000000 none\n"
+        "  bar5 00000000 none\n"
+        "  interrupt line 11 pin A\n", __LINE__);
+
+    /* 読み取り専用: 渡した config が 1 ビットも変わっていない。 */
+    CHECK(cfg[0x10 / 4] == 0xF8000000UL);
+    CHECK(cfg[0x2C / 4] == 0xD00310FCUL);
+}
+
+/* BAR の種類を全部: mem64 の下位・上位、prefetch、io、未割り当ての io、
+ * 最後の欄の mem64 (上位の欄が無い)。 */
+static void verbose_bars(void)
+{
+    u32 cfg[PCI_VERBOSE_CFG_DWORDS];
+    char out[2048];
+
+    cfg_clear(cfg);
+    cfg[0x00 / 4] = 0x12298086UL;
+    cfg[0x04 / 4] = 0x02800007UL;
+    cfg[0x08 / 4] = 0x02000001UL;
+    cfg[0x0C / 4] = 0x00000000UL;
+    cfg[0x10 / 4] = 0xE000000CUL;   /* mem64 prefetch 下位 */
+    cfg[0x14 / 4] = 0x00000000UL;   /* その上位 = 0 (none ではない) */
+    cfg[0x18 / 4] = 0x0000E809UL;   /* io (bit3 は番地の一部) */
+    cfg[0x1C / 4] = 0x00000001UL;   /* io、番地未割り当て */
+    cfg[0x20 / 4] = 0x000F0002UL;   /* mem1m */
+    cfg[0x24 / 4] = 0xF0000004UL;   /* 最後の欄の mem64 */
+    cfg[0x2C / 4] = 0x00000000UL;
+    cfg[0x3C / 4] = 0x000000FFUL;   /* Line 255 = 未割り当て、Pin 0 */
+
+    render(cfg, 1, 31, 7, out, sizeof(out));
+    expect_text(out,
+        "1:31.7 8086:1229 Intel\n"
+        "  revision 01\n"
+        "  class 02.00.00 Network/Ethernet\n"
+        "  header 00 type 0 (device) single-function\n"
+        "  command 0007 I/O+ Mem+ BusMaster+\n"
+        "  status 0280\n"
+        "  subsystem 0000:0000\n"
+        "  bar0 e000000c mem64-lo base 0xe0000000 prefetch\n"
+        "  bar1 00000000 mem64-hi (bar0)\n"
+        "  bar2 0000e809 io base 0x0000e808\n"
+        "  bar3 00000001 io base 0x00000000 unassigned\n"
+        "  bar4 000f0002 mem1m base 0x000f0000\n"
+        "  bar5 f0000004 mem64-lo (no hi) base 0xf0000000\n"
+        "  interrupt line 255 (unassigned) pin - (none)\n", __LINE__);
+
+    /* 上位が 0 でなければ 4G 超と明示する (32 ビットの機械では届かない)。 */
+    cfg[0x14 / 4] = 0x00000001UL;
+    render(cfg, 1, 31, 7, out, sizeof(out));
+    CHECK(strstr(out, "  bar1 00000001 mem64-hi (bar0 above 4G)\n") != 0);
+}
+
+/* Type 1 (ブリッヂ): BAR は 2 本だけ、Subsystem の代わりにバス番号。 */
+static void verbose_bridge(void)
+{
+    u32 cfg[PCI_VERBOSE_CFG_DWORDS];
+    char out[2048];
+
+    cfg_clear(cfg);
+    cfg[0x00 / 4] = 0x00011033UL;
+    cfg[0x04 / 4] = 0x02200007UL;
+    cfg[0x08 / 4] = 0x06040002UL;
+    cfg[0x0C / 4] = 0x00810000UL;   /* Header 81 = multi-function bridge */
+    cfg[0x10 / 4] = 0x00000000UL;
+    cfg[0x14 / 4] = 0x00000000UL;
+    cfg[0x18 / 4] = 0x40020100UL;   /* SecLat 40 : Sub 2 : Sec 1 : Pri 0 */
+    cfg[0x1C / 4] = 0xE0E0F0F1UL;   /* BAR3 として読んではいけない */
+    cfg[0x2C / 4] = 0x12345678UL;   /* Type 1 では Subsystem ではない */
+    cfg[0x3C / 4] = 0x00000000UL;
+
+    render(cfg, 0, 1, 0, out, sizeof(out));
+    expect_text(out,
+        "0:1.0 1033:0001 NEC\n"
+        "  revision 02\n"
+        "  class 06.04.00 Bridge/PCI\n"
+        "  header 81 type 1 (pci bridge) multi-function\n"
+        "  command 0007 I/O+ Mem+ BusMaster+\n"
+        "  status 0220\n"
+        "  bus primary 0 secondary 1 subordinate 2\n"
+        "  bar0 00000000 none\n"
+        "  bar1 00000000 none\n"
+        "  interrupt line 0 pin - (none)\n", __LINE__);
+
+    /* CardBus (Type 2) は BAR 欄も Subsystem も出さない。 */
+    cfg[0x0C / 4] = 0x00020000UL;
+    render(cfg, 0, 1, 0, out, sizeof(out));
+    CHECK(strstr(out, "bar0") == 0);
+    CHECK(strstr(out, "subsystem") == 0);
+    CHECK(strstr(out, "type 2 (cardbus)") != 0);
+}
+
+/* 小さな buf でも溢れず、必ず NUL 終端される。 */
+static void verbose_bounds(void)
+{
+    u32 cfg[PCI_VERBOSE_CFG_DWORDS];
+    char small[8];
+    int i;
+
+    cfg_clear(cfg);
+    cfg[0x00 / 4] = 0x880014F1UL;
+    memset(small, 'Z', sizeof(small));
+    CHECK(pci_verbose_line(cfg, 0, 9, 0, 0, small, 6) == PCI_VERBOSE_LINE);
+    CHECK(!strcmp(small, "0:9.0"));
+    CHECK(small[6] == 'Z' && small[7] == 'Z');   /* cap の外は触らない */
+    CHECK(pci_verbose_line(cfg, 0, 9, 0, 0, small, 0) == PCI_VERBOSE_END);
+    CHECK(pci_verbose_line(cfg, 0, 9, 0, -1, small, 8) == PCI_VERBOSE_END);
+    /* 行の番号は有限 (呼び手の for が止まる)。 */
+    for (i = 0; i < 64; i++) {
+        char b[PCI_VERBOSE_LINE_MAX];
+        if (pci_verbose_line(cfg, 0, 0, 0, i, b, (int)sizeof(b))
+            == PCI_VERBOSE_END) break;
+    }
+    CHECK(i < 64);
+}
+
+static void verbose_parse(void)
+{
+    u32 b = 99, d = 99, f = 99;
+    CHECK(pci_parse_bdf("0:9.0", &b, &d, &f) == 0);
+    CHECK(b == 0 && d == 9 && f == 0);
+    CHECK(pci_parse_bdf("255:31.7", &b, &d, &f) == 0);
+    CHECK(b == 255 && d == 31 && f == 7);
+    /* 範囲外・形の違いは断る (隣の欄へ溢れた番地を読まない)。 */
+    CHECK(pci_parse_bdf("256:0.0", &b, &d, &f) != 0);
+    CHECK(pci_parse_bdf("0:32.0", &b, &d, &f) != 0);
+    CHECK(pci_parse_bdf("0:0.8", &b, &d, &f) != 0);
+    CHECK(pci_parse_bdf("0:9", &b, &d, &f) != 0);
+    CHECK(pci_parse_bdf("0.9:0", &b, &d, &f) != 0);
+    CHECK(pci_parse_bdf("0:9.0x", &b, &d, &f) != 0);
+    CHECK(pci_parse_bdf(":9.0", &b, &d, &f) != 0);
+    CHECK(pci_parse_bdf("", &b, &d, &f) != 0);
+    /* 断ったときは出力を書き換えない。 */
+    b = d = f = 42;
+    CHECK(pci_parse_bdf("0:99.0", &b, &d, &f) != 0);
+    CHECK(b == 42 && d == 42 && f == 42);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) return 2;
@@ -321,6 +539,11 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "names")) names();
     else if (!strcmp(argv[1], "story_82557")) story_82557();
     else if (!strcmp(argv[1], "absent")) absent();
+    else if (!strcmp(argv[1], "verbose_tuner")) verbose_tuner();
+    else if (!strcmp(argv[1], "verbose_bars")) verbose_bars();
+    else if (!strcmp(argv[1], "verbose_bridge")) verbose_bridge();
+    else if (!strcmp(argv[1], "verbose_bounds")) verbose_bounds();
+    else if (!strcmp(argv[1], "verbose_parse")) verbose_parse();
     else return 2;
     if (failed) return 1;
     printf("PASS %s\n", argv[1]);

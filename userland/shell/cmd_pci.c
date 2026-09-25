@@ -17,6 +17,7 @@
 
 #include "shell.h"
 #include "drivers/pci_decode.h"   /* PROGRAM_FLAGS の -I. で引く */
+#include "pci_verbose.h"          /* `lspci -v` の行づくり (純粋関数) */
 
 /* P-1: drivers/pci.h の struct pci_dev と**同じ並び**でなければならない。
  * `pci_get` はカーネル側の定義 (i386 で 40 バイト) で書くので、ここが
@@ -168,11 +169,94 @@ static int pci_parse_num(const char *s)
 /* ------------------------------------------------------------------ */
 /*  lspci — 1 行 1 デバイス                                            */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/*  lspci -v — 1 デバイスを複数行で (読み取り専用)                     */
+/*                                                                    */
+/*  config 0x00〜0x3F を `pci_cfg_read32` で DWORD 16 回読み、行の中身は */
+/*  pci_verbose.c (ホスト試験あり) が作る。**書き込みは一切しない** —   */
+/*  BAR の大きさを調べる 0xFFFFFFFF の書き込みもしない (BIOS の割り当て */
+/*  を一瞬でも壊さない)。1 行を `"%s\n"` の 1 引数で出すので、CPL=3 の   */
+/*  引数の窓 (64 バイト) に行の長さは効かない。                         */
+/* ------------------------------------------------------------------ */
+static void lspci_verbose_one(u32 bus, u32 dev, u32 fn)
+{
+    u32 cfg[PCI_VERBOSE_CFG_DWORDS];
+    char line[PCI_VERBOSE_LINE_MAX];
+    int k, r;
+
+    for (k = 0; k < PCI_VERBOSE_CFG_DWORDS; k++)
+        cfg[k] = g_api->pci_cfg_read32(bus, dev, fn, (u32)(k * 4));
+
+    for (k = 0; ; k++) {
+        r = pci_verbose_line(cfg, bus, dev, fn, k, line, (int)sizeof(line));
+        if (r == PCI_VERBOSE_END) break;
+        if (r == PCI_VERBOSE_SKIP) continue;
+        g_api->kprintf((k == 0) ? ATTR_CYAN : ATTR_WHITE, "%s\n", line);
+    }
+}
+
+/* `lspci -v` / `lspci -v B:D.F` / `lspci -v bus dev fn`。 */
+static int cmd_lspci_verbose(int argc, char **argv)
+{
+    int n, i;
+    PciDev d;
+
+    n = g_api->pci_count();
+    if (n <= 0) {
+        g_api->kprintf(ATTR_CYAN, "%s",
+                       "lspci: no PCI (mechanism #1 not present)\n");
+        return 0;
+    }
+
+    if (argc > 2) {
+        u32 bus, dev, fn, idw;
+        if (argc == 3) {
+            if (pci_parse_bdf(argv[2], &bus, &dev, &fn) != 0) goto usage;
+        } else if (argc == 5) {
+            int b = pci_parse_num(argv[2]);
+            int v = pci_parse_num(argv[3]);
+            int f = pci_parse_num(argv[4]);
+            if (b < 0 || b > (int)PCI_BUS_MASK ||
+                v < 0 || v > (int)PCI_DEV_MASK ||
+                f < 0 || f > (int)PCI_FN_MASK) goto usage;
+            bus = (u32)b; dev = (u32)v; fn = (u32)f;
+        } else {
+            goto usage;
+        }
+        idw = g_api->pci_cfg_read32(bus, dev, fn, PCI_CFG_VENDOR_ID);
+        if (pci_extract16(idw, PCI_CFG_VENDOR_ID) == PCI_VENDOR_NONE) {
+            g_api->kprintf(ATTR_YELLOW, "lspci: %u:%u.%u not present\n",
+                           bus, dev, fn);
+            return SH_STATUS_ERROR;
+        }
+        lspci_verbose_one(bus, dev, fn);
+        return 0;
+    }
+
+    for (i = 0; i < n; i++) {
+        if (g_api->pci_get((u32)i, &d) != 0) continue;
+        if (i > 0) g_api->kprintf(ATTR_WHITE, "%s", "\n");
+        lspci_verbose_one((u32)d.bus, (u32)d.dev, (u32)d.fn);
+    }
+    return 0;
+
+usage:
+    g_api->kprintf(ATTR_RED, "lspci: -v [bus:dev.fn | bus dev fn] "
+                   "(bus 0-%u dev 0-%u fn 0-%u)\n",
+                   (u32)PCI_BUS_MASK, (u32)PCI_DEV_MASK, (u32)PCI_FN_MASK);
+    return SH_STATUS_USAGE;
+}
+
 static int cmd_lspci(int argc, char **argv)
 {
     int n, i, b;
     PciDev d;
-    (void)argc; (void)argv;
+
+    if (argc >= 2) {
+        if (strcmp(argv[1], "-v") == 0) return cmd_lspci_verbose(argc, argv);
+        shell_print_help(argv[0]);
+        return SH_STATUS_USAGE;
+    }
 
     n = g_api->pci_count();
     if (n <= 0) {
@@ -277,7 +361,7 @@ static int cmd_pcidump(int argc, char **argv)
 
 /* 登録用テーブル */
 static const ShellCmd pci_cmds[] = {
-    { "lspci",   cmd_lspci,   "",          "List PCI devices (vendor, class, BAR, IRQ)" },
+    { "lspci",   cmd_lspci,   "[-v [b:d.f]]", "List PCI devices (-v: all fields, raw BARs)" },
     { "pcidump", cmd_pcidump, "bus dev fn","Hex dump of a PCI config space (256 bytes)" },
     { (const char *)0, 0, 0, 0 }
 };
