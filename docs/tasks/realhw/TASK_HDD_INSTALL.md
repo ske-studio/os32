@@ -260,3 +260,11 @@
 ## 4. しないこと
 
 8GB 全体・2GB 区画 (別票)、複数区画・既存区画との共存・再利用、hd1 起動、4KB ブロック、LBA 拡張 BIOS。
+
+## 実機の結果 (2026-09-25、PC-9821Ra266、CI e146022)
+
+- **H3**: `[hdd] bios da=80 … C/H/S=16382/16/63`、`ata0 … total=16514063 (8063 MB) io=1` (09-24 に記録済み)。
+- **cdinst (Full)**: 初回は `Refused: hd0 has a partition that OS32 did not create (code -40). Nothing was written.` — 以前の OS の区画表が残っていた (中身は不要なディスク)。ユーザーがノート側で先頭のセクタを消してから再実行し、**Installation Complete**。所要は 10 分を超えた (CD の読みが 1 セクタずつ + read_stream ごとのパス解決 → wt/cd-fast で改善中)。
+- **HDD 起動 (H5 の前半)**: シリアルで `ver` = `API: v65`、`Commit: e146022`、`Image CRC: 8b9f14c9 (447445 bytes, HDD loader)` (CI の vmkernel.lz4 と大きさ一致)。`/sys/lib/libos32gui.shlib`、`/boot/vmkernel.lz4` 447445 B、`hd0: block 16514063 sects`。
+- **未実施**: インストール後の HDD をホストで `e2fsck -fn` (H5 の後半、実機の HDD をホストにつなぐ手段が要る)。kselftest の件数は写真待ち。
+- **決めたこと**: 他 OS の区画が残るディスク向けに、打鍵 `ERASE` で LBA 0/1 を消してから入れる道を別票で用意 (wt/cdinst-wipe、N4 の例外)。
