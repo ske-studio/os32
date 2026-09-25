@@ -14,6 +14,7 @@
 #include "kprintf.h"
 #include "kstring.h"
 #include "con_sink.h"
+#include "bootlog.h"
 #include "kbd_inject.h"
 
 /* V86 セッション中の画面描画抑止 (kernel/v86.c)。
@@ -229,6 +230,7 @@ static void putchar_raw(char ch, u8 color)
 void shell_putchar(char ch, u8 color)
 {
     con_sink_push_print(&ch, 1, color);
+    bootlog_push(&ch, 1);             /* 起動ログ (色は捨てる) */
     if (!console_render_allowed()) return;   /* 票 K6C-2 / V86: 描画抑止 */
     putchar_raw(ch, color);
     console_hw_cursor_sync();
@@ -242,6 +244,7 @@ void shell_print(const char *str, u8 color)
      * shell_print_dec / shell_print_hex32 はここへ落ちるので、あちらに
      * 差し込みは要らない (二重に積むことになる)。 */
     con_sink_push_print(str, kstrlen(str), color);
+    bootlog_push(str, kstrlen(str));  /* 起動ログ (色は捨てる) */
     while (*str) {
         if (render) putchar_raw(*str, color);
         if (rshell_active) serial_putchar(*str);
@@ -280,6 +283,7 @@ void shell_print_utf8(const char *utf8_str, u8 color)
     const u8 *p = (const u8 *)utf8_str;
 
     con_sink_push_print(utf8_str, kstrlen(utf8_str), color);
+    bootlog_push(utf8_str, kstrlen(utf8_str));
     if (rshell_active) {
         const char *s = utf8_str;
         while (*s) serial_putchar(*s++);
@@ -355,6 +359,7 @@ void console_write(const char *buf, u32 size, u8 color)
     u32 remaining = size;
 
     con_sink_push_print(buf, size, color);
+    bootlog_push(buf, size);
     if (rshell_active) {
         u32 i;
         for (i = 0; i < size; i++) serial_putchar(buf[i]);

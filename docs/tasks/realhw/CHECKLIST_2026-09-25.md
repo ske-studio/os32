@@ -20,6 +20,7 @@
 | 5 | — | 展開 (数分) | 最後が `=== Installation Complete ===` か。`INCOMPLETE` なら写真 |
 | 6 | ユーザー | FD と CD を抜いて再起動 (HDD 起動) | `[boot] Image CRC: … src=hdd`、`[selftest] N/N passed` |
 | 7 | ノート | シリアルで `cmd ver`、`cmd "ls /sys/lib"`、`cmd uptime` | `Image CRC … HDD loader`、`libos32gui.shlib` |
+| 8 | ノート | シリアルで `cmd "cat /var/log/boot.log"` (起動ログ、**このカーネルを含む成果物から**。前回分は `boot.log.1`、FD 起動なら `bootlog.1`) | 流れて読めなかった `[selftest] N/N passed` などの行、ヘッダの `Commit` / `Image CRC` が手順 7 の `ver` と同じか、最終行の `dropped 0` |
 
 ### 手順 3 で出る行 (期待値)
 

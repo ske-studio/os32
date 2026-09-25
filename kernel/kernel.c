@@ -69,6 +69,7 @@ extern void fatfs_init(void);
 #include "pcm_cs4231.h"
 #include "os32_sqlite_vfs.h"
 #include "kapi_db.h"
+#include "bootlog.h"
 
 #define SHELL_RELOAD_DELAY 10
 
@@ -707,6 +708,12 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
      * 1 回だけ (票 K3)。ここより後だと pgalloc が帯域のページを配ってしまう。
      * ライブラリが無ければ静かに未ロードで続行し、CUI は従来どおり動く。 */
     shlib_init();
+
+    /* 最後の起動のログを /var/log/boot.log へ (前回分は .1、FAT は bootlog.1)。
+     * ルートのマウントと自己試験・shlib の読み込みが済み、常駐シェルを
+     * exec する直前。溜めるのはここまで (以後の出力は入らない)。ルートが
+     * ext2 / FAT でなければ書かない。どこで失敗しても起動は続ける。 */
+    bootlog_save();
 
     /* 外部シェル起動 — CUI(shell.bin) と GUI(gshell.bin) を同じシェル帯
      * (0x300000, Level 1) で入れ替えながら回す (契約 T9)。両者は同時に

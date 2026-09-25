@@ -32,6 +32,18 @@
 #define SYS_FONT_DEFAULT      "/sys/font/default.kcgfont"
 #define SYS_FONT_DEFAULT_83   "/sys/font/default.kcg"
 #define SYS_FONT_83_FSTYPE    "fat"      /* 短い名前を許す FS (vfs_fstype の名前) */
+/* 起動ログ (kernel/bootlog.c)。最初の kprintf から常駐シェルを exec する
+ * 直前までの出力を溜め、ルートが ext2 / FAT のときだけ書き出す。実機で
+ * 流れてしまう [selftest] などを `cat /var/log/boot.log` で読むため。
+ * FAT (FatFs、LFN なし) は 8.3 しか作れないので、前回分だけ名前が違う。 */
+#define SYS_BOOTLOG_VAR_DIR   "/var"
+#define SYS_BOOTLOG_DIR       "/var/log"
+#define SYS_BOOTLOG_FILE      "/var/log/boot.log"
+#define SYS_BOOTLOG_OLD       "/var/log/boot.log.1"   /* ext2 */
+#define SYS_BOOTLOG_OLD_83    "/var/log/bootlog.1"    /* FAT (8.3) */
+#define SYS_BOOTLOG_FS_EXT2   "ext2"     /* 書き出す FS (vfs_fstype の名前) */
+#define SYS_BOOTLOG_FS_FAT    "fat"
+#define SYS_BOOTLOG_TEXT_MAX  0x4000UL   /* 本文の容量 16KB (静的配列) */
 #define SYS_SHLIB_GUI         "/sys/lib/libos32gui.shlib"
                                                    /* GUI 共有ライブラリ (K3/C3)。
                                                     * MEM_SHLIB_BASE 常駐。無ければ
