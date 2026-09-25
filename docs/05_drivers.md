@@ -213,6 +213,15 @@ IDEセカンダリバンクに接続されたATAPI CD-ROMデバイスをPIOモ�
 - **PIO の受け取り**: byte count limit (Cylinder Low/High) には `min(バッファ, ATAPI_PIO_BCL_MAX = 0xF800)` を書き、
   データは DRQ ごとに Cylinder Low/High のバイト数だけ読む。各ブロックの後に ALT_STATUS の空読みで 400ns 置く
   (置かないと前のブロックの DRQ=1 を次のブロックと取り違える)。受け取ったバイト数がちょうど要求どおりでなければ失敗
+- **装置の選択**: `atapi_init` はセカンダリの**マスターとスレーブの両方**のシグネチャを見る (居ない装置は ALT_STATUS が
+  0xFF なので BSY を待たない)。2 台あれば READ CAPACITY で**媒体の入っている方** (マスター優先) を選ぶ。以後の操作は
+  `atapi_select_bank(1)` のたびに選んだ装置を選び直す。`atapi_drive_index()` = 0 マスター / 1 スレーブ。
+  2026-09-26 まではマスターしか見ず、NP21/W で ide2 が空の CD のまま ide3 (セカンダリのスレーブ) に ISO を付けると
+  `cd0: block 1 sects` (NP21/W は空のドライブの容量を 0 と答える) になり、1 セクタも読めなかった
+- **読みの失敗の行**: `[atapi] READ(10) drv= lba= n= ret= st= err= sense= got=` を起動から `ATAPI_DIAG_MAX` (8) 行まで出す。
+  `sense=5` は範囲外か空のドライブ (NP21/W は空のドライブへの READ(10) を ILLEGAL REQUEST で返す)、`ret=-1` は待ちの期限切れ、
+  `got` が n×2048 未満は転送が足りない
+- READ CAPACITY は 8 バイトちょうど来なければ失敗 (受け皿の残りを容量にしない)
 - **ドライブとの相性で困ったら `ATAPI_READ_MAX_SECTORS` を 1 にする** (`drivers/atapi.h` の 1 か所、旧来の 1 セクタずつに戻る)
 - **NP21/W は READ(10) で UNIT ATTENTION を返さない** (媒体の交換は TEST UNIT READY だけが報告する)。
   世代の経路は実機でしか踏まない。NP21/W の DRQ は 2048 バイトずつ

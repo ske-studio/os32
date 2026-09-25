@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "vfs.h"
 #include "dev.h"
@@ -42,6 +43,20 @@ void *kmemcpy(void *dst, const void *src, u32 n) { return memcpy(dst, src, (size
 void *kmalloc(u32 size) { return g_kmalloc_fail ? (void *)0 : malloc((size_t)size); }
 void *kzalloc(u32 size) { return calloc(1, (size_t)size); }
 void kfree(void *p) { free(p); }
+
+/* kprintf の贋物: 出した行を溜める ([atapi] の診断の行を見る) */
+static char g_klog[8192];
+static size_t g_klog_n;
+void kprintf(u8 attr, const char *fmt, ...)
+{
+    va_list ap;
+    (void)attr;
+    if (g_klog_n >= sizeof(g_klog) - 1) return;
+    va_start(ap, fmt);
+    g_klog_n += (size_t)vsnprintf(g_klog + g_klog_n, sizeof(g_klog) - g_klog_n, fmt, ap);
+    va_end(ap);
+    if (g_klog_n > sizeof(g_klog) - 1) g_klog_n = sizeof(g_klog) - 1;
+}
 
 /* ---- 実物 ---- */
 #include "../../drivers/atapi.c"
@@ -210,6 +225,7 @@ static struct {
     int short_multi;   /* count > 1 の READ(10) で 1 セクタ少なく渡す */
     int ua_next;       /* 次のコマンドで UNIT ATTENTION を返し、媒体を B へ */
     int stale;         /* 境目の後の古い状態の回数 */
+    int cap_nodata;    /* READ CAPACITY がデータ無しで終わる */
     /* 数 */
     u32 n_packets;
     u32 n_read10;
@@ -296,6 +312,11 @@ static void model_exec(void)
         model_start_block();
         return;
     }
+    if (op == SCSI_CMD_READ_CAPACITY && M.cap_nodata) {
+        M.status = ST_DRDY;
+        M.phase = 0;
+        return;
+    }
     if (op == SCSI_CMD_READ_CAPACITY) {
         u32 last = M.m->secs - 1;
         M.cap[0] = (u8)(last >> 24); M.cap[1] = (u8)(last >> 16);
@@ -321,7 +342,7 @@ static u8 model_status(void)
     return M.status;
 }
 
-unsigned int atapi_shim_inp(unsigned int port)
+static unsigned int m_inp(unsigned int port)
 {
     switch (port) {
     case IDE_STATUS:
@@ -334,7 +355,7 @@ unsigned int atapi_shim_inp(unsigned int port)
     }
 }
 
-void atapi_shim_outp(unsigned int port, unsigned int value)
+static void m_outp(unsigned int port, unsigned int value)
 {
     switch (port) {
     case IDE_BANK1:  M.bank = (int)(value & 1); break;
@@ -356,7 +377,7 @@ void atapi_shim_outp(unsigned int port, unsigned int value)
     }
 }
 
-unsigned int atapi_shim_inpw(unsigned int port)
+static unsigned int m_inpw(unsigned int port)
 {
     unsigned int w;
     if (port != IDE_DATA) return 0xFFFF;
@@ -380,13 +401,273 @@ unsigned int atapi_shim_inpw(unsigned int port)
     return w;
 }
 
-void atapi_shim_outpw(unsigned int port, unsigned int value)
+static void m_outpw(unsigned int port, unsigned int value)
 {
     if (port != IDE_DATA || M.phase != 1) return;
     M.cdb[M.cdb_words * 2] = (u8)value;
     M.cdb[M.cdb_words * 2 + 1] = (u8)(value >> 8);
     if (++M.cdb_words == 6) model_exec();
 }
+
+/* ======================================================================== */
+/*  NP21/W の ATAPI の写し (np21w-src/src/cbus/ideio.c + atapicmd.c)         */
+/*                                                                          */
+/*  同期の経路 (CD_ASYNC 無し) をレジスタの粒度でそのまま写す。上の模型は    */
+/*  試験のために意地悪 (古い DRQ・屑) にしてあるが、こちらは「NP21/W で      */
+/*  実際にどう返るか」の写しで、2026-09-26 の「NP21/W で 1 セクタも読めない」 */
+/*  の回帰を見る。g_np2 = 1 のときだけ使う。                                */
+/* ======================================================================== */
+
+#define NP2_STAT_BSY  0x80
+#define NP2_STAT_DRDY 0x40
+#define NP2_STAT_DSC  0x10
+#define NP2_STAT_DRQ  0x08
+#define NP2_STAT_CHK  0x01
+#define NP2_INTR_CD   0x01
+#define NP2_INTR_IO   0x02
+#define NP2_TC_END    0
+#define NP2_TC_READ   1
+
+static int g_np2;
+typedef struct {
+    int present;         /* device != IDETYPE_NONE */
+    Media *media;        /* 入っている媒体 (loaded のとき) */
+    u8  status, error, sc, sk, cmd;
+    u16 cy;
+    u8  buf[2048];
+    u32 bufpos, bufsize;
+    int bufdir_in;
+    int buftc;
+    u32 sector, nsectors;
+    int loaded;          /* IDEIO_MEDIA_LOADED */
+    int changed;         /* IDEIO_MEDIA_CHANGED */
+    int async_lag;       /* CD_ASYNC: 1 セクタの読みの後、BSY のまま見せる回数 */
+    int busy_left;
+} Np2Drv;
+
+static struct {
+    int bank;            /* ideio.bank[1] */
+    int drivesel;        /* dev->drivesel (DRV_HEAD bit4) */
+    u8  ctrl;
+    Np2Drv d[2];         /* セカンダリのマスター / スレーブ (NP21/W の ide2 / ide3) */
+    u32 n_read10, n_read10_multi;
+} N;
+
+/* 選ばれている装置。居なければ NULL (getidedrv と同じ) */
+static Np2Drv *np2_cur(void)
+{
+    Np2Drv *d = &N.d[N.drivesel];
+    return d->present ? d : (Np2Drv *)0;
+}
+
+
+static void np2_set_sk(Np2Drv *D, u8 sk) { D->error = (u8)((D->error & 0x0F) | (sk << 4)); D->sk = sk; }
+
+static void np2_drvreset(Np2Drv *D)
+{
+    D->sc = 0x01; D->cy = 0xEB14; D->status = 0;
+}
+
+static void np2_senderror(Np2Drv *D)
+{
+    D->sc = NP2_INTR_IO | NP2_INTR_CD;
+    D->status &= (u8)~(NP2_STAT_BSY | NP2_STAT_DRQ);
+    D->status |= NP2_STAT_CHK | NP2_STAT_DSC;
+}
+
+static void np2_cmddone(Np2Drv *D)
+{
+    D->sc = NP2_INTR_IO | NP2_INTR_CD;
+    D->status &= (u8)~(NP2_STAT_BSY | NP2_STAT_DRQ | NP2_STAT_CHK);
+    D->status |= NP2_STAT_DRDY | NP2_STAT_DSC;
+    D->error = 0; np2_set_sk(D, 0);
+}
+
+static void np2_senddata(Np2Drv *D, u32 size, u32 limit)
+{
+    if (size > limit) size = limit;
+    D->sc = NP2_INTR_IO;
+    D->cy = (u16)size;
+    D->status &= (u8)~(NP2_STAT_BSY | NP2_STAT_CHK);
+    D->status |= NP2_STAT_DRQ | NP2_STAT_DSC;
+    D->error = 0; np2_set_sk(D, 0);
+    D->bufdir_in = 1; D->buftc = NP2_TC_END; D->bufpos = 0; D->bufsize = size;
+}
+
+static void np2_dataread(Np2Drv *D)
+{
+    if (D->status & NP2_STAT_BSY) return;
+    if (D->nsectors == 0) { D->sk = 0x0B; D->error = 0x04; np2_senderror(D); return; }
+    if (!D->loaded || D->sector >= D->media->secs) {
+        np2_set_sk(D, 0x05);      /* ILLEGAL REQUEST, asc 0x21 */
+        np2_senderror(D);
+        return;
+    }
+    memcpy(D->buf, D->media->img + D->sector * SEC, SEC);
+    D->sector++; D->nsectors--;
+    D->sc = NP2_INTR_IO;
+    D->cy = 2048;
+    D->status &= (u8)~(NP2_STAT_BSY | NP2_STAT_CHK);
+    D->status |= NP2_STAT_DRQ;
+    D->error = 0; np2_set_sk(D, 0);
+    D->bufdir_in = 1;
+    D->buftc = D->nsectors ? NP2_TC_READ : NP2_TC_END;
+    D->bufpos = 0; D->bufsize = 2048;
+    M.n_sectors++;
+    /* CD_ASYNC (Windows 版): 読みは別スレッド。2ms で終わらなければ BSY の
+     * まま戻り、DRQ は次のフレームの atapi_dataread_asyncwait(0) で立つ */
+    D->busy_left = D->async_lag;
+}
+
+static void np2_a0(Np2Drv *D)
+{
+    u8 op = D->buf[0];
+    if (op == SCSI_CMD_TEST_UNIT_READY) {
+        if (!D->loaded) { np2_set_sk(D, 0x02); np2_senderror(D); return; }
+        if (D->changed) { np2_set_sk(D, 0x02); D->changed = 0; np2_senderror(D); return; }
+        np2_cmddone(D);
+        return;
+    }
+    if (op == SCSI_CMD_READ_CAPACITY) {
+        u32 t = D->loaded ? D->media->secs : 0;   /* NP21/W は最終 LBA ではなく総数を返す */
+        D->buf[0] = (u8)(t >> 24); D->buf[1] = (u8)(t >> 16);
+        D->buf[2] = (u8)(t >> 8);  D->buf[3] = (u8)t;
+        D->buf[4] = 0; D->buf[5] = 0; D->buf[6] = 0x08; D->buf[7] = 0;
+        np2_senddata(D, 8, 8);
+        return;
+    }
+    if (op == SCSI_CMD_READ_10) {
+        u32 lba = ((u32)D->buf[2] << 24) | ((u32)D->buf[3] << 16)
+                | ((u32)D->buf[4] << 8) | D->buf[5];
+        u32 len = ((u32)D->buf[7] << 8) | D->buf[8];
+        N.n_read10++;
+        M.n_read10++;
+        if (len > 1) { N.n_read10_multi++; M.n_read10_multi++; }
+        if (len > M.max_count) M.max_count = len;
+        if (M.n_log < LOG_MAX) { M.log_lba[M.n_log] = lba; M.log_cnt[M.n_log] = len; M.n_log++; }
+        D->sector = lba; D->nsectors = len;
+        np2_dataread(D);
+        return;
+    }
+    D->sk = 0x0B; D->error = 0x04; np2_senderror(D);   /* sendabort */
+}
+
+static unsigned int np2_inp(unsigned int port)
+{
+    Np2Drv *D;
+    if (N.bank != 1) return 0xFF;
+    D = np2_cur();
+    if (!D) return 0xFF;
+    switch (port) {
+    case IDE_ERROR:      D->status &= (u8)~NP2_STAT_CHK; return D->error;
+    case IDE_SECT_CNT:   return D->sc;
+    case IDE_CYL_LO:     return (u8)D->cy;
+    case IDE_CYL_HI:     return (u8)(D->cy >> 8);
+    case IDE_STATUS:
+    case IDE_ALT_STATUS:
+        if (D->busy_left > 0) {
+            D->busy_left--;
+            return (u8)((D->status & ~NP2_STAT_DRQ) | NP2_STAT_BSY);
+        }
+        return D->status;
+    default:             return 0xFF;
+    }
+}
+
+static void np2_outp(unsigned int port, unsigned int v)
+{
+    Np2Drv *D;
+    int k;
+    if (port == IDE_BANK1) { if (!(v & 0x80)) N.bank = (int)(v & 0x71); return; }
+    if (N.bank != 1) return;
+    if (port == IDE_DRV_HEAD) { N.drivesel = (int)((v >> 4) & 1); return; }
+    if (port == IDE_DEV_CTRL) {
+        u8 mod = (u8)(N.ctrl ^ v);
+        N.ctrl = (u8)v;
+        if (mod & 0x04) {
+            for (k = 0; k < 2; k++) {
+                D = &N.d[k];
+                if (!D->present) continue;
+                if (v & 0x04) { D->status = 0; D->error = 0; }
+                else { np2_drvreset(D); D->status = NP2_STAT_DRDY | NP2_STAT_DSC | NP2_STAT_CHK; D->error = 0x01; }
+            }
+        }
+        return;
+    }
+    D = np2_cur();
+    if (!D) return;
+    switch (port) {
+    case IDE_SECT_CNT: D->sc = (u8)v; break;
+    case IDE_CYL_LO:   D->cy = (u16)((D->cy & 0xFF00) | (v & 0xFF)); break;
+    case IDE_CYL_HI:   D->cy = (u16)((D->cy & 0x00FF) | ((v & 0xFF) << 8)); break;
+    case IDE_COMMAND:
+        D->cmd = (u8)v;
+        if (v == ATAPI_CMD_PACKET) {
+            D->sc = (u8)((D->sc & ~NP2_INTR_IO) | NP2_INTR_CD);
+            D->status &= (u8)~(NP2_STAT_BSY | NP2_STAT_CHK);
+            D->status |= NP2_STAT_DRDY | NP2_STAT_DRQ | NP2_STAT_DSC;
+            D->error = 0;
+            D->bufpos = 0; D->bufsize = 12; D->bufdir_in = 0; D->buftc = NP2_TC_END;
+            M.n_packets++;
+        } else {
+            D->error = 0x04; np2_senderror(D);
+        }
+        break;
+    default: break;
+    }
+}
+
+static unsigned int np2_inpw(unsigned int port)
+{
+    unsigned int ret = 0;
+    Np2Drv *D;
+    if (port != IDE_DATA || N.bank != 1) return 0xFFFF;
+    D = np2_cur();
+    if (!D) return 0xFFFF;
+    if (D->busy_left > 0) return 0;          /* まだ DRQ が立っていない */
+    if ((D->status & NP2_STAT_DRQ) && D->bufdir_in) {
+        ret = (unsigned int)D->buf[D->bufpos] | ((unsigned int)D->buf[D->bufpos + 1] << 8);
+        D->bufpos += 2;
+        if (D->bufpos >= D->bufsize) {
+            D->status &= (u8)~NP2_STAT_DRQ;
+            if (D->cmd == ATAPI_CMD_PACKET) {
+                if (D->status & NP2_STAT_BSY) return ret;
+                if (D->buftc == NP2_TC_READ) { np2_dataread(D); return ret; }
+                D->sc = NP2_INTR_IO | NP2_INTR_CD;
+                D->status &= (u8)~(NP2_STAT_BSY | NP2_STAT_CHK | NP2_STAT_DRQ);
+                D->status |= NP2_STAT_DRDY | NP2_STAT_DSC;
+                D->error = 0;
+            }
+        }
+    }
+    return ret;
+}
+
+static void np2_outpw(unsigned int port, unsigned int v)
+{
+    Np2Drv *D;
+    if (port != IDE_DATA || N.bank != 1) return;
+    D = np2_cur();
+    if (!D) return;
+    if ((D->status & NP2_STAT_DRQ) && !D->bufdir_in) {
+        D->buf[D->bufpos] = (u8)v;
+        D->buf[D->bufpos + 1] = (u8)(v >> 8);
+        D->bufpos += 2;
+        if (D->bufpos >= D->bufsize) {
+            D->status &= (u8)~NP2_STAT_DRQ;
+            if (D->cmd == ATAPI_CMD_PACKET) np2_a0(D);
+        }
+    }
+}
+
+unsigned int atapi_shim_inp(unsigned int port)
+{ return g_np2 ? np2_inp(port) : m_inp(port); }
+void atapi_shim_outp(unsigned int port, unsigned int value)
+{ if (g_np2) np2_outp(port, value); else m_outp(port, value); }
+unsigned int atapi_shim_inpw(unsigned int port)
+{ return g_np2 ? np2_inpw(port) : m_inpw(port); }
+void atapi_shim_outpw(unsigned int port, unsigned int value)
+{ if (g_np2) np2_outpw(port, value); else m_outpw(port, value); }
 
 /* ======================================================================== */
 /*  dev 層の贋物 (cd0 だけ)                                                 */
@@ -422,6 +703,38 @@ static void setup(void)
     M.m = &g_media_a;
     CHECK(atapi_init() == 1);
 }
+
+/* NP21/W の写しで立ち上げる。layout:
+ *   0 = マスターに CD (media A)、スレーブは居ない
+ *   1 = マスターに空の CD、スレーブに CD (media A) — NP21/W で ide2 も CD の
+ *       種別のまま ide3 に ISO を付けた形 (2026-09-26 の報告)
+ *   2 = マスターは居ない、スレーブに CD (media A)
+ *   3 = マスターに CD (media A)、スレーブに空の CD */
+static void setup_np2_layout(int layout)
+{
+    int k;
+    memset(&M, 0, sizeof(M));
+    memset(&N, 0, sizeof(N));
+    M.fail_lba = -1;
+    build_media(&g_media_a, BIG_LBA_A, SUB_LBA, DEEP_SIZE, 1);
+    build_media(&g_media_b, BIG_LBA_B, SUB_LBA_B, DEEP_SIZE_B, 2);
+    M.m = &g_media_a;
+    g_np2 = 1;
+    N.d[0].present = (layout != 2);
+    N.d[1].present = (layout != 0);
+    for (k = 0; k < 2; k++) {
+        N.d[k].media = &g_media_a;
+        np2_drvreset(&N.d[k]);
+    }
+    N.d[0].loaded = (layout == 0 || layout == 3);
+    N.d[1].loaded = (layout == 1 || layout == 2);
+    CHECK(atapi_init() == 1);
+}
+
+static void setup_np2(void) { setup_np2_layout(0); }
+
+/* 選んだ装置 (の構造体) */
+static Np2Drv *np2_chosen(void) { return &N.d[atapi_drive_index()]; }
 
 static Iso9660Ctx *do_mount(void)
 {
@@ -963,6 +1276,108 @@ static void t_replay(void)
     iso9660_ops.umount(c);
 }
 
+/* NP21/W の写しの上で、起動後の読み (2026-09-26 に「1 セクタも読めない」と
+ * 報告された形): 容量、LBA 16 の 1 セクタ、16 セクタ、半端な数、iso9660 の mount と読み */
+static void t_np2_read(void)
+{
+    AtapiCapacity cap;
+    u8 *buf = (u8 *)malloc(64u * SEC);
+    Iso9660Ctx *c;
+    setup_np2();
+    CHECK(atapi_read_capacity(&cap) == ATAPI_OK);
+    CHECK(cap.total_sectors >= g_media_a.secs);
+    CHECK(atapi_read_sectors(16, 1, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 16u * SEC, SEC) == 0);
+    CHECK(atapi_read_sectors(16, 16, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 16u * SEC, 16u * SEC) == 0);
+    CHECK(atapi_read_sectors(40, 37, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 40u * SEC, 37u * SEC) == 0);
+    CHECK(N.n_read10_multi > 0);
+    c = (Iso9660Ctx *)iso9660_ops.mount(VFS_MOUNT_DEV_ENCODE(VFS_DEV_CD, 0));
+    CHECK(c != NULL);
+    stream_all(c, "/BIG.PKG", &g_media_a, 0, 4096);
+    iso9660_ops.umount(c);
+    free(buf);
+}
+
+/* CD_ASYNC の形: 各セクタの後に BSY がしばらく続いても、待って読む */
+static void t_np2_async(void)
+{
+    u8 *buf = (u8 *)malloc(40u * SEC);
+    setup_np2();
+    np2_chosen()->async_lag = 7;
+    CHECK(atapi_read_sectors(16, 1, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 16u * SEC, SEC) == 0);
+    CHECK(atapi_read_sectors(40, 37 > 40 ? 40 : 37, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 40u * SEC, 37u * SEC) == 0);
+    free(buf);
+}
+
+/* 空のドライブ (NP21/W の CD 入れ替えの途中 = sxsi の totals 0): 容量は
+ * 「1 セクタ」になり (報告の cd0: block 1 sects と同じ)、READ(10) は ILLEGAL
+ * REQUEST。診断の行が出る。媒体が入れば、dev を作り直さずに読める */
+static void t_np2_empty(void)
+{
+    AtapiCapacity cap;
+    u8 buf[SEC];
+    Iso9660Ctx *c;
+    setup_np2();
+    N.d[0].loaded = 0;
+    CHECK(atapi_read_capacity(&cap) == ATAPI_OK);
+    CHECK(cap.total_sectors == 1);
+    g_klog_n = 0; g_klog[0] = '\0';
+    CHECK(atapi_read_sectors(16, 1, buf) != ATAPI_OK);
+    CHECK(strstr(g_klog, "[atapi] READ(10) drv=0 lba=16 n=1") != NULL);
+    CHECK(strstr(g_klog, "sense=5") != NULL);
+    CHECK(iso9660_ops.mount(VFS_MOUNT_DEV_ENCODE(VFS_DEV_CD, 0)) == NULL);
+    /* 入った */
+    N.d[0].loaded = 1;
+    CHECK(atapi_read_sectors(16, 1, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 16u * SEC, SEC) == 0);
+    c = (Iso9660Ctx *)iso9660_ops.mount(VFS_MOUNT_DEV_ENCODE(VFS_DEV_CD, 0));
+    CHECK(c != NULL);
+    iso9660_ops.umount(c);
+}
+
+/* セカンダリのスレーブの CD (マスターは空の CD / 居ない): 媒体の入っている方を
+ * 選んで読む。マスターに入っていればマスター (2026-09-26 の回帰) */
+static void t_np2_slave(void)
+{
+    static const int layouts[4] = { 0, 1, 2, 3 };
+    static const int want[4]    = { 0, 1, 1, 0 };
+    int k;
+    for (k = 0; k < 4; k++) {
+        AtapiCapacity cap;
+        u8 buf[SEC];
+        Iso9660Ctx *c;
+        setup_np2_layout(layouts[k]);
+        if (atapi_drive_index() != want[k]) {
+            fprintf(stderr, "layout %d: drive %d\n", layouts[k], atapi_drive_index());
+            CHECK(0);
+        }
+        CHECK(atapi_read_capacity(&cap) == ATAPI_OK);
+        CHECK(cap.total_sectors > 1);
+        CHECK(atapi_read_sectors(16, 1, buf) == ATAPI_OK);
+        CHECK(memcmp(buf, g_media_a.img + 16u * SEC, SEC) == 0);
+        c = (Iso9660Ctx *)iso9660_ops.mount(VFS_MOUNT_DEV_ENCODE(VFS_DEV_CD, 0));
+        CHECK(c != NULL);
+        stream_all(c, "/BIG.PKG", &g_media_a, 0, 32768);
+        iso9660_ops.umount(c);
+    }
+}
+
+/* READ CAPACITY がデータ無しで終わったら失敗 (受け皿の残りを容量にしない) */
+static void t_cap_nodata(void)
+{
+    AtapiCapacity cap;
+    setup();
+    M.cap_nodata = 1;
+    CHECK(atapi_read_capacity(&cap) != ATAPI_OK);
+    M.cap_nodata = 0;
+    CHECK(atapi_read_capacity(&cap) == ATAPI_OK);
+    CHECK(cap.total_sectors == g_media_a.secs);
+}
+
 int main(int argc, char **argv)
 {
     const char *cs = (argc > 1) ? argv[1] : "";
@@ -988,6 +1403,11 @@ int main(int argc, char **argv)
     else if (!strcmp(cs, "idle_rule"))       t_idle_rule();
     else if (!strcmp(cs, "no_window"))       t_no_window();
     else if (!strcmp(cs, "replay"))          t_replay();
+    else if (!strcmp(cs, "np2_read"))        t_np2_read();
+    else if (!strcmp(cs, "np2_async"))       t_np2_async();
+    else if (!strcmp(cs, "np2_empty"))       t_np2_empty();
+    else if (!strcmp(cs, "cap_nodata"))      t_cap_nodata();
+    else if (!strcmp(cs, "np2_slave"))       t_np2_slave();
     else { fprintf(stderr, "unknown case '%s'\n", cs); return 2; }
     return 0;
 }

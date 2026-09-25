@@ -41,9 +41,11 @@ TREE_FILES = ["drivers/atapi.c", "drivers/atapi.h", "fs/iso9660.c", "fs/iso9660.
 READ_CASES = ["stream_4k", "stream_odd", "stream_32k", "read_file", "multi_fallback",
               "short_transfer", "bad_outside", "bad_inside", "lru_order", "ua_mount", "multi_drq",
               "path_cache", "dir_lru", "list_reentrant", "unit_attention",
-              "idle_rule", "no_window", "stat_swap", "list_swap"]
+              "idle_rule", "no_window", "stat_swap", "list_swap",
+              "np2_read", "np2_async", "np2_empty", "cap_nodata", "np2_slave"]
 # N = 32 の版で回すもの (1 回 64KB)
-WIDE_CASES = ["stream_4k", "stream_32k", "read_file", "multi_drq", "multi_fallback"]
+WIDE_CASES = ["stream_4k", "stream_32k", "read_file", "multi_drq", "multi_fallback",
+              "np2_read", "np2_async"]
 PKG_CASES = ["aligned_chunks", "nomem", "open_fail_frees"]
 
 COMMON = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
@@ -295,6 +297,31 @@ MUTATIONS = [
      r"            cb\(&ent, user_ctx\);\n            /\* cb がこの FS を読んで媒体の交換を踏んだかもしれない \*/\n            if \(atapi_media_gen\(\) != gen0\) return VFS_ERR_IO;",
      "            cb(&ent, user_ctx);",
      "list_dir が cb の後に世代を見ない"),
+    # --- 2026-09-26 NP21/W で 1 セクタも読めない (セカンダリのスレーブの CD)
+    ("drivers/atapi.c",
+     r"    for \(i = 0; i < 2; i\+\+\) if \(atapi_probe_sig\(sels\[i\]\)\) found\[n\+\+\] = sels\[i\];\n\n    if \(n == 0\)",
+     "    for (i = 0; i < 1; i++) if (atapi_probe_sig(sels[i])) found[n++] = sels[i];\n\n    if (n == 0)",
+     "マスターしか見ない (直す前の姿: スレーブの ISO を読めない)"),
+    ("drivers/atapi.c",
+     r"                if \(atapi_has_media\(\)\) break;",
+     "                break;",
+     "2 台あるとき媒体を見ずにマスターを選ぶ (マスターが空の CD だと 1 セクタも読めない)"),
+    ("drivers/atapi.c",
+     r"        outp\(IDE_DRV_HEAD, s_drvsel\);\n        for \(i = 0; i < IDE_SEL_SETTLE; i\+\+\) \(void\)inp\(IDE_ALT_STATUS\);\n    \}",
+     "        (void)i;\n    }",
+     "セカンダリへ切り替えたときに装置を選び直さない (最初の BSY 待ちが居ないスレーブを見る)"),
+    ("drivers/atapi.c",
+     r"    if \(ret == ATAPI_OK && got != 8\) ret = ATAPI_ERR_IO;\n",
+     "",
+     "READ CAPACITY の 8 バイトを確かめない (受け皿の残りを容量にする)"),
+    ("drivers/atapi.c",
+     r"    if \(s_diag_lines >= ATAPI_DIAG_MAX\) return;",
+     "    return;",
+     "読みの失敗の診断の行を出さない"),
+    ("drivers/atapi.c",
+     r"        /\* BSY=0になるまで待つ \*/\n        ret = atapi_wait_bsy\(\);\n        if \(ret != ATAPI_OK\) return ret;\n",
+     "",
+     "DRQ の周の頭で BSY を待たない (NP21/W の CD_ASYNC で次のセクタを取りこぼす)"),
     # 対照: 何も変えない。SURVIVED でなければ試験が不安定 (偽の RED)。
     ("fs/iso9660.c", r"(#include \"iso9660\.h\")", r"\1", "対照 (何も変えない)"),
 ]

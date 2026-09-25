@@ -33,6 +33,9 @@
  * セクタの倍数 (31 × 2048) にしておくと、DRQ の区切りがセクタの途中に来ない */
 #define ATAPI_PIO_BCL_MAX       0xF800U
 
+/* 読みの失敗の診断の行 ([atapi] READ(10) ...) を出す上限 (起動から数えて) */
+#define ATAPI_DIAG_MAX          8
+
 /* ======== センスキー (エラーレジスタの bit7-4) ======== */
 #define ATAPI_ERR_SENSE_SHIFT   4
 #define ATAPI_SK_NOT_READY      0x02
@@ -41,6 +44,9 @@
 /* ======== ATAPI / PACKET コマンド ======== */
 #define ATAPI_CMD_PACKET         0xA0   /* PACKETコマンド (CDB送出) */
 #define ATAPI_CMD_IDENTIFY_PKT   0xA1   /* IDENTIFY PACKET DEVICE */
+
+/* ======== 装置の選択 (DRV_HEAD) ======== */
+#define ATAPI_DRV_SLAVE     0x10   /* bit4 = 1: スレーブ (セカンダリの 2 台目) */
 
 /* ======== ATAPI シグネチャ (IDENTIFY時にCylLo/CylHiで返る) ======== */
 #define ATAPI_SIG_CYL_LO    0x14
@@ -79,6 +85,10 @@ int atapi_init(void);
 
 /* CD-ROM 存在チェック */
 int atapi_present(void);
+
+/* 使っている装置: 0 = セカンダリのマスター、1 = スレーブ。atapi_init は
+ * 両方のシグネチャを見て、2 台あれば媒体の入っている方 (マスター優先) を選ぶ */
+int atapi_drive_index(void);
 
 /* TEST UNIT READY: メディア挿入確認
  * 戻り値: ATAPI_OK=メディアあり, ATAPI_ERR_NO_MEDIA=なし */
