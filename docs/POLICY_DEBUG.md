@@ -156,8 +156,8 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 - **現象**: `make deploy-kernel` / `deploy-nhd` が成功したように見えるのに、修正が実機に反映されない。何度デプロイ+再起動しても古いバイナリが動き続ける
 - **原因**: NP21/W が os32.nhd を開いたまま (実行中) の状態では、`nhd_deploy.py deploy` の NHD コピーが失敗またはサイレントに無効化される。パイプで出力を `tail` すると失敗メッセージも exit code も見えなくなる
 - **対策**:
-  1. NHD デプロイ前に必ず NP21/W を停止する: `taskkill.exe /F /IM np21x64w.exe`
-  2. `make deploy-kernel` → `tools/np21w_restart.py` の順で実行
+  1. NHD デプロイ前に必ず NP21/W を停止する: `python3 tools/np21w_ctl.py stop` (プロセスが消えるまで待つ)
+  2. `make deploy-kernel` → `python3 tools/np21w_ctl.py start --ini np21x64w.ini --wait-ready` の順で実行 (§5)
   3. デプロイ後は §2 のチェックリスト通り `ver` の Build タイムスタンプで反映を確認する
 - **教訓** (2026-08-05): この問題により「修正が効かない」調査サイクルを3回空転した。§2「バイナリ反映の確認」を最初に行っていれば1回で気づけた
 
@@ -286,7 +286,7 @@ NP21/W 上でコード変更が反映されていないように見える場合�
   `/usr/bin/gui_dem` で切れ「Launch failed」と誤診しかけた)。連打も 0.3s 間隔で。
 - 自己完結テストの終了は `int 0x80` で **eax=KAPI_SLOT_SYS_EXIT (84)**。eax=0 はスロット 0 = `gfx_init` で
   終了しない (ring3_guard がそれで GFX モードに入ったまま無限ループしていた)。
-- NP21/W の停止は `taskkill.exe /F /IM np21x64w.exe` (os32-cycle deploy と同じ) で PM が行える。ini の編集
+- NP21/W の停止・起動は `tools/np21w_ctl.py stop` / `start` (§5) で PM が行える。ini の編集
   ([D2]) と np21w-src の `make deploy` は停止中に。
 - **エミュレータは同時に 1 人**。コーダーに「CUI で再現してよい」と hotdeploy を許可したら、PM の GUI 検証と
   混ざってゲストのファイルが差し替わり、壊れたバイナリを判定してしまった (2026-09-06)。
@@ -675,6 +675,73 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 
 シリアル出力はコンソールを汚さないため、画面描画に影響するバグの調査に特に有用。
 
+### NP21/W の停止・起動 (`tools/np21w_ctl.py`)
+
+NP21/W の停止と起動はこの道具で行う。`taskkill` や `Start-Process` を手で打たない —
+落とした直後に起動すると媒体がまだロックされていて、起動が途中で止まる (§4-60)。
+停止はエミュレータ自身に頼む (ai-debug フォークの `/api/instance` → `/api/quit`、
+仕様は `np21w-src/docs/03-api-reference.md` の「アプリ層の口」)。
+
+```bash
+python3 tools/np21w_ctl.py stop                          # /api/quit save=0 → その pid が消えるまで待つ
+python3 tools/np21w_ctl.py start --ini np21x64w.ini      # プロセス 0 → 媒体が続けて 5 秒開ける → 起動 → pid/exe 照合 + 10 秒生存
+python3 tools/np21w_ctl.py start --ini np21w-trial-cdinst.ini --fd os32_boot.d88 --wait-ready
+python3 tools/np21w_ctl.py wait-ready                    # /api/tvram に "Waiting for commands" (既定 180 秒)
+python3 tools/np21w_ctl.py fdd --drive 1 --insert os32_boot.d88   # FD の出し入れ (--eject)。ini は変えない。/api/instance に反映されるまで待つ (--ready-wait 5)
+python3 tools/np21w_ctl.py status [--ini <name>]         # プロセス・aidebug (instance)・ダイアログ・媒体の free/locked/missing
+```
+
+- **トークン**: `/api/quit` と `/api/fdd` は NP21/W が起動時に exe の隣へ書く `np21w_aidebug_<port>.token`
+  (利用者だけが読める ACL) の中身を `X-Aidebug-Token` で要求する。ctl は `NP21W_AIDEBUG_TOKEN_FILE`
+  (WSL パス) → `/api/instance` の `token_file` → `NP21W_DIR/np21w_aidebug_8025.token` の順で読む。
+  中身は出力しない ([D3])。読めなければ `stop` は exe 一致の強制終了に落ち、`fdd` は失敗する。
+  `/api/state/save` (ホストにファイルを書く) も同じトークンが要り、`tools/np21w_mcp` の `emu_state_save`
+  は `np21w_client.token_headers()` で付ける。読み取り系の口 (`/api/status` `/api/cmd` `/api/key` など)
+  はトークン不要のまま。Origin ヘッダを付ける要求は 403 (ブラウザ経由を閉じる) — curl / urllib は
+  付けないので手順は変わらない。トークンは NP21/W がサーバを (再) 起動するたびに変わる (ini の再読込を含む)
+  ので、道具は要求のたびに読む。
+- `fdd --insert` の 200 は「受理」で、FD は 0.4 秒のエミュレーション時間の後に入る (`DISK_DELAY`)。
+  ctl は `/api/instance` の `fdd[].path` に現れるまで待って `ready` と言う。`pending` のまま
+  なら理由 (ブレーク中 / 一時停止 / 背景で停止) を出して失敗する。
+- `--api-timeout 0` は HTTP を 1 回も呼ばない (`/api/dialog` も)。HTTP の待ちには残り時間を渡し、
+  期限を過ぎてから届いた応答は成功に数えない。
+
+- **止める対象**: `NP21W_DIR` の exe (`--exe`、既定 `np21x64w.exe`) と CIM の `ExecutablePath` が
+  一致するプロセスだけ。名前に np21 を含むだけのもの、別の場所に入っている NP21/W、exe の
+  パスが読めないものには触らない (「対象外」と表示する)。
+- `stop` の順: `/api/instance` で pid と instance_id を得る → exe が一致すれば
+  `/api/quit` (`save=0`、ini と resume を書かない) → その pid が消えるまで待つ。API が応答しない・
+  quit が効かない・**フォークが古い** (`/api/instance` が 404 — 「make deploy が要る」と出す) ときだけ、
+  exe 一致のプロセスを `taskkill /F` する。
+- `start` の順: この exe のプロセスが無いか確かめる (残れば待つ) → 各媒体を Windows 側から
+  `[IO.File]::Open(path,'Open','ReadWrite','None')` で **続けて `--stable` 秒 (既定 5、1 秒おき)
+  開けるまで**待つ。**安定した媒体も毎回プローブし続け**、1 回でもロックされたら数え直す →
+  全部安定したら 2 秒置いて**全部をもう一度**プローブ (ロックされていれば数え直し) →
+  `Start-Process "<exe>" "/i<ini>" ["<fd>"]` → `/api/instance` の pid と exe が起動したものと一致し、
+  プロセスが `--alive` 秒 (既定 10) 生きていることを確かめ、成功を返す直前にもう一度 pid を見る。
+- `--timeout` (既定 60) は起動までの**全体の**期限。プローブには残り時間を渡し、期限を過ぎてから
+  得た結果は成功に数えない。`--timeout` < `--stable` は引数の誤り (2)。
+- `--api-timeout` (既定 60) は起動後に `/api/instance` の応答を待つ上限。**0 は「API を待たない」**
+  (プロセスの生存だけを `--alive` 秒見る。aidebug を切った ini 用)。
+- 起動の確認中に API が黙る・進まないときは `/api/dialog` を見る。NP21/W がモーダルの
+  ダイアログを出していれば、そのタイトル・本文・ボタンを出して 1 で終わる。ダイアログ中は
+  コアに触る口 (`/api/status` `/api/cmd` など) が即座に 503 `{"dialog":true}` を返す。
+  窓の見た目は `/api/appshot` (ゲスト画面の `/api/screenshot` とは別)。
+- 1 回開けただけで通さないのは、`make nhd-pull` の直後に Windows 側 (Defender の走査など) が
+  一時的に掴み直し、1 回だけのプローブがその隙間を通して NP21/W がすぐ終了したため (§4-60)。
+- 待つ媒体は ini の `[NekoProject21]` 節の `HDD1FILE`〜`HDD4FILE` / `CD1_FILE`〜`CD4_FILE` /
+  `FDD1FILE`〜`FDD4FILE` / `SCSIHDD0`〜`SCSIHDD3` と `--fd`。値は NP21/W と同じ規則で読む
+  (前後の空白、両端の `"` を 1 組外す、節内で最初の値)。ini が読めなければ既定の
+  `os32.nhd` / `os32_install.iso` / `os32_boot.d88`。時間切れのときは**ロックされたままの
+  ファイルを名指しして** 1 で終わる。
+- プローブそのものが壊れたとき (PowerShell の失敗、ロック以外の例外、報告の欠け) はロックと
+  区別して、stderr と例外の型名を添えて即座に 1 で終わる。
+- `--ini` / `--fd` / `--exe` / `--insert` は `NP21W_DIR` 直下の**名前**だけを受け付ける。ini は読むだけ ([D2])。
+  ini を変える trial は `tools/np21w_trial.py` の領分で、こちらは使わない (スキル `os32-emu-config`)。
+- 終了コード: 0 成功、1 失敗 (プロセスが残る・ロックが解けない・プローブが壊れた・起動直後に
+  終了した・ダイアログ・API が応答しない・起動完了しない)、2 引数の誤り。
+- ホスト試験: `make check-np21w-ctl-host` (変異 24 本 + 恒等の対照)。
+
 ### NP21/W リモート実行 (HTTP API)
 
 NP21/W (ai-debug フォーク) は内蔵のデバッグ HTTP サーバを持つ。`np21x64w.ini` で
@@ -725,13 +792,13 @@ curl -s http://127.0.0.1:8025/api/screenshot > screenshot.png
 |----------|------|:---:|
 | プログラムのみ (HostDrv実行) | `make all` → `make deploy` | 不要 |
 | プログラムのみ (ホット) | `make hotdeploy FILE=<path>` | 不要 |
-| カーネル / ブートFS | NP21/W停止 → `make all` → `make deploy && make deploy-kernel` → `np21w_restart.py` | **必要** |
+| カーネル / ブートFS | `np21w_ctl.py stop` → `make all` → `make deploy && make deploy-kernel` → `np21w_ctl.py start` | **必要** |
 
 ```bash
 # カーネル変更時のフルサイクル例
-taskkill.exe /F /IM np21x64w.exe
+python3 tools/np21w_ctl.py stop
 make all && make deploy && make deploy-kernel
-WIN_NP21W_DIR='C:\...\np21w' python3 tools/np21w_restart.py
+python3 tools/np21w_ctl.py start --ini np21x64w.ini --wait-ready
 curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"   # Build タイムスタンプ確認
 ```
 
@@ -1195,6 +1262,27 @@ read-modify-write で保つ。
 - **教訓**: **0035h は全体で書かない**。同居するビットの面倒を見られるのは BSR だけ。ポート C のように
   別機能が 1 バイトに同居するレジスタへの全体書きは、エミュレータで副作用が見えなくても実機で必ず表に出る。
   極性が資料で割れる出力ビットは、UNDOCUMENTED の信号レベルの記述を採り、名前と値を同じ行に書く。
+
+### 4-60. NP21/W を落とした直後に起動すると、媒体のロックで起動が途中で止まる (2026-09-24〜25)
+
+- **症状**: `taskkill` → すぐ `Start-Process` で NP21/W を起動すると、FD / HDD が読めずに起動が途中で止まる
+  (ユーザーから繰り返し指摘された)。
+- **原因**: プロセスが消えた直後も、前のプロセス (または Windows 側の後始末) が `os32.nhd` / ISO / FD イメージを
+  握ったままのことがある。新しい NP21/W はそれを開けないまま起動を進める。`taskkill` の成功やプロセスの消滅は
+  媒体が開けることの証拠にならない。**1 回開けたことも証拠にならない** — `make nhd-pull` (Windows の os32.nhd を
+  読んで写す) → 1 回のプローブで通過 → 起動、の順で NP21/W が立ち上がらずに終了した。後から見ると 3 つとも
+  free だったので、コピー直後に Windows 側 (Defender の走査など) が一時的に掴み直し、プローブがその隙間を
+  通したと見ている (2026-09-25、推定。掴んだ主体は未確認)。
+- **対策**: `tools/np21w_ctl.py` (§5)。プロセス 0 を確かめ、ini にある媒体と `--fd` が Windows 側から排他で
+  **続けて 5 秒**開けるまで待ってから起動し (途中でロックされたら数え直し)、起動後はプロセスが 10 秒生きていて
+  `/api/status` が応答することまで見る。解けなければロック中のファイルを名指しし、起動直後に消えたら
+  「起動直後に終了した」と言って失敗する。ホスト試験は `tools/tests/test_np21w_ctl.py` (`make check-tools-host`)。
+- **教訓**: 起動の前提は「プロセスが無い」でも「1 回開けた」でもなく「媒体を排他で**開け続けられる**」で
+  確かめる。起動の成否は Start-Process の戻りではなく、プロセスの生存と API の応答で確かめる。
+- **追記 (2026-09-25)**: `taskkill /F` による停止も、名前の部分一致で別の場所の NP21/W まで巻き込み、
+  起動直後の失敗がモーダルのダイアログで止まっていても外から見えなかった。NP21/W フォークに
+  `/api/instance` `/api/quit` `/api/fdd` `/api/dialog` `/api/appshot` を足し、np21w_ctl は
+  `/api/quit` で止め、強制終了は exe パス一致だけ、起動後は pid/exe の照合とダイアログの確認をする。
 
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 

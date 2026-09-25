@@ -313,7 +313,8 @@ def ensure_local_nhd():
         print("Error: NHD を取り込めません: {}".format(exc), file=sys.stderr)
         print("  NP21/W がロックしている場合は先に kill してください",
               file=sys.stderr)
-        print("  taskkill.exe /F /IM np21x64w.exe", file=sys.stderr)
+        print("  python3 tools/np21w_ctl.py stop   (プロセスが消えるまで待つ)",
+              file=sys.stderr)
         remove_pull_stamp()
         return False
     write_pull_stamp(NHD_LOCAL, NHD_REMOTE)
@@ -625,7 +626,8 @@ def do_deploy(force=False):
         print("Error: NHD をコピーできません: {}".format(exc), file=sys.stderr)
         print("  NP21/W がロックしている場合は先に kill してください",
               file=sys.stderr)
-        print("  taskkill.exe /F /IM np21x64w.exe", file=sys.stderr)
+        print("  python3 tools/np21w_ctl.py stop   (プロセスが消えるまで待つ)",
+              file=sys.stderr)
         return False
 
     # 書いた直後は remote == local。来歴を今の remote で取り直しておかないと、
@@ -1122,7 +1124,8 @@ def do_pull():
         print("Error: NHD を取り込めません: {}".format(exc), file=sys.stderr)
         print("  NP21/W がロックしている場合は先に kill してください",
               file=sys.stderr)
-        print("  taskkill.exe /F /IM np21x64w.exe", file=sys.stderr)
+        print("  python3 tools/np21w_ctl.py stop   (プロセスが消えるまで待つ)",
+              file=sys.stderr)
         return False
 
     size_mb = os.path.getsize(NHD_LOCAL) / (1024 * 1024)

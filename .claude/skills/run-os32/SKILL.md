@@ -34,7 +34,9 @@ HostDrv                  OK   /mnt/c/os32
 NP21/W                   OK   phase=p2 protected_mode=1 eip=0x0010d130
 ```
 
-`NP21/W NG` なら Windows 側で `np21x64w.exe` が動いていないか、`np21x64w.ini` の
+`NP21/W NG` なら Windows 側で `np21x64w.exe` が動いていないか
+(`python3 tools/np21w_ctl.py status` で見る。起動は `start --ini np21x64w.ini --wait-ready`、
+`docs/POLICY_DEBUG.md` §5)、`np21x64w.ini` の
 `aidebug=true` / `aidbport=8025` が落ちている。**`np21w.ini` ではない** —
 使われているのは `np21x64w.ini` のほう。
 
@@ -127,7 +129,9 @@ python3 .claude/skills/run-os32/driver.py deploy
 ## 人の道
 
 Windows 側で `np21x64w.exe` を起動すると窓が開く。WSL からは見えないので、
-このスキルの範囲では使わない。
+このスキルの範囲では使わない。WSL から起動・停止するときは `tools/np21w_ctl.py`
+(媒体のロックが解けるまで待ってから起動する) を使い、`taskkill` / `Start-Process` を
+手で打たない。
 
 ## Gotchas — ここで実際に踏んだもの
 

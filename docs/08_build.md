@@ -125,7 +125,7 @@ os32/
 │   └── out/        ビルド成果物 (kernel.bin, sqlite.bin, vmkernel.lz4, unicode.bin, kernel.elf/.map)
 ├── assets/         データアセット (DB, 辞書, profile 等)
 ├── tests/          テストスクリプト
-├── tools/          ホスト上でのイメージ生成・デプロイ・検査ツール (nhd_deploy, mkshlib, check_*, emu_agent/ (ローカル AI の実機操作), np21w_mcp/)
+├── tools/          ホスト上でのイメージ生成・デプロイ・検査ツール (nhd_deploy, mkshlib, check_*, emu_agent/ (ローカル AI の実機操作), np21w_mcp/, np21w_ctl (NP21/W の停止・起動))
 ├── packages/       生成された .PKG (make packages)
 ├── images/         生成されたブートイメージ (make all / iso)
 ├── Makefile        マスタービルドスクリプト (build/*.mk を include)
@@ -156,7 +156,7 @@ make deploy                                                # HostDrv 同期 → 
 
 > ⚠️ **NP21/W 実行中は `deploy` が反映されない**: NP21/W が os32.nhd を開いたままの
 > 状態ではコピーが失敗またはサイレントに無効化される。**必ず
-> `taskkill.exe /F /IM np21x64w.exe` → `make deploy-kernel` → `np21w_restart.py`
+> `tools/np21w_ctl.py stop` → `make deploy-kernel` → `tools/np21w_ctl.py start --ini np21x64w.ini`
 > の順で実行**し、デプロイ後は `ver` の Build タイムスタンプで反映を確認すること
 > (POLICY_DEBUG.md §2 / §4-9)。
 
@@ -650,8 +650,9 @@ NP21W_DIR=/mnt/c/Users/<user>/Documents/np21w
 HOSTDRV_DIR=/mnt/c/os32
 ```
 OS32の `Makefile` は、ここで指定された `$CROSS_DIR/i386-elf/include` や `$CROSS_DIR/i386-elf/lib` を参照してビルドを行います。
-なお `tools/np21w_restart.py` は環境変数 `WIN_NP21W_DIR` (Windowsパス形式,
-例 `C:\Users\<user>\Documents\np21w`) を参照する。
+なお `tools/np21w_ctl.py` (NP21/W の停止・起動、`docs/POLICY_DEBUG.md` §5) は `NP21W_DIR` を
+Windows 表記へ変換して使う。変換が合わない環境では環境変数 `WIN_NP21W_DIR` (Windowsパス形式,
+例 `C:\Users\<user>\Documents\np21w`) で上書きする。
 
 > [!NOTE]
 > **コンパイラのバージョンについて**
