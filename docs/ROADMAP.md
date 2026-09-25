@@ -10,7 +10,7 @@
 |---|---|---|---|
 | **カーネル** | **2.0** (タグ `v2.0`、2026-09-03) | リング 3 (CPL=3) ネイティブ。`ver` が `OS32 v2.0` と名乗るのはこれ | [archive/kernel_v2/PLAN.md](archive/kernel_v2/PLAN.md) (M1〜M3 の**完了記録**)、[CHANGELOG.md](../CHANGELOG.md) |
 | **GUI シェル** | **1.3 完了 → 1.4 進行中** | 本書 §1 の各節。カーネル 2.0 の上で動く | §1 |
-| **v2.1 (予定)** | 未 | **v3 へ分岐する前の区切り** (ユーザー決定 2026-09-24): カーネル層の既知の欠陥 (TASK_VFS_FD_PATH、TASK_KAPI_DATA_FIELDS = KAPI v63)、実機の HDD 運用 (TASK_HDD_INSTALL 段 1/2 + TASK_SERIAL_HOSTFS 部品 A)、実機の確認 (キーボード・段 0 の計測・桁ズレ) が済んだら、feat/gui を main へ合流してタグ `v2.1` | tasks/agents/HANDOVER_2026-09-22.md |
+| **v2.1 (予定)** | 未 | **v3 へ分岐する前の区切り** (ユーザー決定 2026-09-24): カーネル層の既知の欠陥 (TASK_VFS_FD_PATH、TASK_KAPI_DATA_FIELDS = KAPI v63)、実機の HDD 運用 (TASK_HDD_INSTALL 段 1/2 + TASK_SERIAL_HOSTFS 部品 A)、実機の確認 (キーボード・段 0 の計測・桁ズレ) が済んだら、feat/gui を main へ合流してタグ `v2.1`。**2026-09-25: 条件はすべて到達** (実機 Ra266 で HDD インストール・HDD 起動)。タグは進行中の 4 件 (ERASE、lspci -v、起動ログ、CD 高速化) を入れた版を実機で確かめてから付ける (案 A)。**GUI 1.4 の残り (About、R2 計測) は v2.1 に含めず、他にすることが無いときに実装** (ユーザー決定 2026-09-25)。**インストール後の HDD のホスト e2fsck は行わない** (同) | tasks/agents/HANDOVER_2026-09-22.md |
 | 次期カーネル | **v3 (未着手、未定義)** | 本書 §2 の長期項目 (プリエンプティブ寄りのマルチタスクなど)。**2026-09-15 のユーザー決裁で「v2」ではなく v3 と呼ぶ** (出荷済み 2.0 と衝突するため) | §2 |
 | ゲーム基盤 | v4 (草案) | [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md)。v3 の後 | — |
 
