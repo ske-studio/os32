@@ -294,9 +294,11 @@ CD-ROM上のISO 9660 Level 1ファイルシステムを読み取り専用でVFS�
   (cb がこの FS を読むとキャッシュが入れ替わる、§4-26)
 - **ファイルのデータは先読みの窓** (`ISO_RA_SECTORS` = `ATAPI_READ_MAX_SECTORS` 本、mount で kmalloc した 32KB)
   を通す。窓より大きいセクタに揃った範囲は呼び手のバッファへ直接読む。窓はファイルの外へ広げない。
-  窓が取れなければ窓なしで動く (遅いだけ)
+  窓が取れなければ窓なしで動く (遅いだけ)。窓の先読みが要求の外の不良セクタで落ちても、要求のセクタだけを
+  読み直す (要求の中の不良だけが失敗)
 - **CD を入れ替えたら umount / mount する (約束)**。捨てる合図は (1) umount (ctx ごと)、(2) ATAPI の媒体の世代
-  (`atapi_media_gen`、UNIT ATTENTION / NOT READY で進む。読みの途中で進んだら捨てて 1 回だけ読み直す)、
+  (`atapi_media_gen`、UNIT ATTENTION / NOT READY で進む。読み・stat・get_file_size の途中で進んだら捨てて
+  1 回だけやり直す。list_dir は一覧の途中で進んだら VFS_ERR_IO で中断)、
   (3) **最後に媒体を読んでから 2 秒 (`ISO_IDLE_TICKS` = 200 tick) を超えて空いたとき** (FD の §6-8 と同じ
   「2 秒規則」。キャッシュの当たりは時刻を進めない)。**NP21/W は READ(10) で UNIT ATTENTION を返さない**ので、
   エミュレータで効くのは (1) と (3) だけ。2 秒以内の入れ替えは保証しない

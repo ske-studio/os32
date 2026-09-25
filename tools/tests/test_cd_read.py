@@ -39,9 +39,9 @@ TREE_FILES = ["drivers/atapi.c", "drivers/atapi.h", "fs/iso9660.c", "fs/iso9660.
               READ_HARNESS, PKG_HARNESS, SHIM + "/io.h"]
 
 READ_CASES = ["stream_4k", "stream_odd", "stream_32k", "read_file", "multi_fallback",
-              "short_transfer", "bad_sector", "lru_order", "ua_mount", "multi_drq",
+              "short_transfer", "bad_outside", "bad_inside", "lru_order", "ua_mount", "multi_drq",
               "path_cache", "dir_lru", "list_reentrant", "unit_attention",
-              "idle_rule", "no_window"]
+              "idle_rule", "no_window", "stat_swap", "list_swap"]
 # N = 32 の版で回すもの (1 回 64KB)
 WIDE_CASES = ["stream_4k", "stream_32k", "read_file", "multi_drq", "multi_fallback"]
 PKG_CASES = ["aligned_chunks", "nomem", "open_fail_frees"]
@@ -246,7 +246,7 @@ MUTATIONS = [
      "            n = ISO_RA_SECTORS;\n",
      "窓をファイルの外 (媒体の終わりの先) まで広げる"),
     ("fs/iso9660.c",
-     r"&& left >= \(ctx->ra_buf \? ISO_RA_BYTES : \(u32\)ISO_SECTOR_SIZE\)\) \{",
+     r"&& left >= \(use_ra \? ISO_RA_BYTES : \(u32\)ISO_SECTOR_SIZE\)\) \{",
      "&& left >= ISO_SECTOR_SIZE) {",
      "窓より小さい揃った読みも直接読む (4KB ごとに READ(10))"),
     ("fs/iso9660.c",
@@ -278,6 +278,23 @@ MUTATIONS = [
      r"        if \(tbuf != small\) api->mem_free\(tbuf\);\n",
      "",
      "取ったバッファを返さない"),
+    # --- Codex レビュー 1 (P2 × 2)
+    ("fs/iso9660.c",
+     r"                use_ra = 0;\n                continue;",
+     "                return VFS_ERR_IO;",
+     "窓の先読みが要求の外の不良で落ちたら失敗にする (レビュー 1 の P2-1 の姿)"),
+    ("fs/iso9660.c",
+     r"        if \(atapi_media_gen\(\) == gen0\) \{\n            if \(gen_out\) \*gen_out = gen0;",
+     "        if (atapi_media_gen() == gen0 || 1) {\n            if (gen_out) *gen_out = gen0;",
+     "stat / get_file_size / list_dir の解決の途中で世代が進んでも引き直さない"),
+    ("fs/iso9660.c",
+     r"            if \(atapi_media_gen\(\) != gen0\) return VFS_ERR_IO;\n            kmemcpy",
+     "            kmemcpy",
+     "list_dir がセクタを読んだ後に世代を見ない (続きを別の媒体から一覧する)"),
+    ("fs/iso9660.c",
+     r"            cb\(&ent, user_ctx\);\n            /\* cb がこの FS を読んで媒体の交換を踏んだかもしれない \*/\n            if \(atapi_media_gen\(\) != gen0\) return VFS_ERR_IO;",
+     "            cb(&ent, user_ctx);",
+     "list_dir が cb の後に世代を見ない"),
     # 対照: 何も変えない。SURVIVED でなければ試験が不安定 (偽の RED)。
     ("fs/iso9660.c", r"(#include \"iso9660\.h\")", r"\1", "対照 (何も変えない)"),
 ]

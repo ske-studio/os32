@@ -58,12 +58,16 @@ void kfree(void *p) { free(p); }
 #define SEC        2048u
 #define ROOT_LBA   20u
 #define SUB_LBA    21u        /* SUB は 2 セクタ (21, 22) */
+#define SUB_LBA_B  24u        /* 媒体 B の SUB (24, 25)。B の 21, 22 には囮の SUB */
 #define TINY_LBA   30u
 #define DEEP_LBA   32u
 #define BIG_LBA_A  40u        /* 媒体 A の BIG.PKG */
 #define BIG_LBA_B  45u        /* 媒体 B (入れ替え後) の BIG.PKG */
 #define TINY_SIZE  100u
 #define DEEP_SIZE  5000u
+#define DEEP_SIZE_B 6000u     /* 媒体 B の DEEP.BIN */
+/* 媒体 B の LBA 21, 22 は囮の SUB で、2 セクタ目は空 (DEEP.BIN が無い)。
+ * 2 セクタ目を読んでも cb が呼ばれないので、読んだ後の世代の確認だけが頼り */
 #define BIG_SIZE_DEFAULT (600u * SEC + 777u)   /* 601 セクタ、末尾は半端 */
 
 static u32 g_big_size = BIG_SIZE_DEFAULT;
@@ -72,6 +76,8 @@ typedef struct {
     u8  *img;
     u32  secs;
     u32  big_lba;
+    u32  sub_lba;
+    u32  deep_size;
     u8   salt;      /* 中身の模様を媒体ごとに変える */
 } Media;
 
@@ -105,13 +111,32 @@ static u32 put_rec(u8 *p, u32 lba, u32 size, u8 flags, const char *name, int nle
     return len;
 }
 
-static void build_media(Media *m, u32 big_lba, u8 salt)
+/* 2 セクタの SUB を at に書く (記録上の自分の位置は self)。1 セクタ目は詰め物、
+ * DEEP.BIN (deep_size) は 2 セクタ目。deep_size = 0 なら 2 セクタ目は空 */
+static void put_sub(u8 *img, u32 at, u32 self, u32 deep_size)
+{
+    u8 *d = img + at * SEC;
+    u32 o = 0, i;
+    memset(d, 0, 2u * SEC);
+    o += put_rec(d + o, self, 2u * SEC, ISO_FLAG_DIRECTORY, "\0", 1);
+    o += put_rec(d + o, ROOT_LBA, SEC, ISO_FLAG_DIRECTORY, "\1", 1);
+    for (i = 0; o + 48u <= SEC; i++) {
+        char nm[16];
+        sprintf(nm, "F%04u.TXT;1", (unsigned)i);
+        o += put_rec(d + o, TINY_LBA, TINY_SIZE, 0, nm, 11);
+    }
+    if (deep_size) put_rec(d + SEC, DEEP_LBA, deep_size, 0, "DEEP.BIN;1", 10);
+}
+
+static void build_media(Media *m, u32 big_lba, u32 sub_lba, u32 deep_size, u8 salt)
 {
     u32 big_secs = (g_big_size + SEC - 1) / SEC;
     u8 *d;
     u32 o, i, k;
 
     m->big_lba = big_lba;
+    m->sub_lba = sub_lba;
+    m->deep_size = deep_size;
     m->salt = salt;
     m->secs = big_lba + big_secs;    /* BIG.PKG が媒体の最後 (その先は読めない) */
     m->img = (u8 *)calloc(m->secs, SEC);
@@ -136,21 +161,13 @@ static void build_media(Media *m, u32 big_lba, u8 salt)
     o += put_rec(d + o, ROOT_LBA, SEC, ISO_FLAG_DIRECTORY, "\0", 1);
     o += put_rec(d + o, ROOT_LBA, SEC, ISO_FLAG_DIRECTORY, "\1", 1);
     o += put_rec(d + o, big_lba, g_big_size, 0, "BIG.PKG;1", 9);
-    o += put_rec(d + o, SUB_LBA, 2u * SEC, ISO_FLAG_DIRECTORY, "SUB", 3);
+    o += put_rec(d + o, sub_lba, 2u * SEC, ISO_FLAG_DIRECTORY, "SUB", 3);
     o += put_rec(d + o, TINY_LBA, TINY_SIZE, 0, "TINY.TXT;1", 10);
 
-    /* SUB (2 セクタ)。1 セクタ目は詰め物、DEEP.BIN は 2 セクタ目 */
-    d = m->img + SUB_LBA * SEC;
-    memset(d, 0, 2u * SEC);
-    o = 0;
-    o += put_rec(d + o, SUB_LBA, 2u * SEC, ISO_FLAG_DIRECTORY, "\0", 1);
-    o += put_rec(d + o, ROOT_LBA, SEC, ISO_FLAG_DIRECTORY, "\1", 1);
-    for (i = 0; o + 48u <= SEC; i++) {
-        char nm[16];
-        sprintf(nm, "F%04u.TXT;1", (unsigned)i);
-        o += put_rec(d + o, TINY_LBA, TINY_SIZE, 0, nm, 11);
-    }
-    put_rec(d + SEC, DEEP_LBA, DEEP_SIZE, 0, "DEEP.BIN;1", 10);
+    /* SUB。SUB が 21 でない媒体では、21, 22 に中身の違う囮の SUB を置く
+     * (旧媒体の根で得た LBA 21 を新媒体で読むと、別の答えになる) */
+    put_sub(m->img, sub_lba, sub_lba, deep_size);
+    if (sub_lba != SUB_LBA) put_sub(m->img, SUB_LBA, SUB_LBA, 0);
 }
 
 /* 媒体 m の LBA lba から始まるファイルの off バイト目 */
@@ -400,8 +417,8 @@ static void setup(void)
     M.fail_lba = -1;
     M.stale = 3;         /* 400ns の整定を置かないと取り違える形 */
     M.bcl = 0xEB14;      /* 起動直後はシグネチャ */
-    build_media(&g_media_a, BIG_LBA_A, 1);
-    build_media(&g_media_b, BIG_LBA_B, 2);
+    build_media(&g_media_a, BIG_LBA_A, SUB_LBA, DEEP_SIZE, 1);
+    build_media(&g_media_b, BIG_LBA_B, SUB_LBA_B, DEEP_SIZE_B, 2);
     M.m = &g_media_a;
     CHECK(atapi_init() == 1);
 }
@@ -569,9 +586,10 @@ static void t_short_transfer(void)
     iso9660_ops.umount(c);
 }
 
-/* 読めないセクタ: 1 セクタずつの読み直しもそこで止まり、失敗を返す。
- * 窓は読む前に捨てる (途中まで上書きされた窓を前の範囲として当てない) */
-static void t_bad_sector(void)
+/* 窓の先読みが要求の外の不良セクタで落ちても、要求の範囲は読める
+ * (Codex レビュー 1 の P2)。窓は読む前に捨てる (途中まで上書きされた窓を
+ * 前の範囲として当てない) */
+static void t_bad_outside(void)
 {
     Iso9660Ctx *c;
     u8 buf[4096];
@@ -579,17 +597,47 @@ static void t_bad_sector(void)
     u32 i;
     setup(); c = do_mount();
     CHECK(iso9660_ops.read_stream(c, "/BIG.PKG", buf, sizeof(buf), 0) == (int)sizeof(buf));
+    /* 要求は窓 2 枚目の頭の 2 セクタ、不良は同じ窓の 6 本目 */
     M.fail_lba = (long)(BIG_LBA_A + ISO_RA_SECTORS + 5u);
     atapi_get_stats(&a0);
     CHECK(iso9660_ops.read_stream(c, "/BIG.PKG", buf, sizeof(buf),
-                                  ISO_RA_SECTORS * SEC) == VFS_ERR_IO);
+                                  ISO_RA_SECTORS * SEC) == (int)sizeof(buf));
+    for (i = 0; i < sizeof(buf); i++)
+        CHECK(buf[i] == file_byte(&g_media_a, BIG_LBA_A, ISO_RA_SECTORS * SEC + i));
     atapi_get_stats(&a1);
     CHECK(a1.multi_fail - a0.multi_fail == 1);
-    CHECK(a1.single_retry - a0.single_retry == 6);   /* 0..5 で止まる */
+    CHECK(c->ra_valid == 0);
+    /* 半端な位置から、不良の手前までは読める */
+    CHECK(iso9660_ops.read_stream(c, "/BIG.PKG", buf, 3000,
+                                  (ISO_RA_SECTORS + 3u) * SEC + 100u) == 3000);
+    for (i = 0; i < 3000; i++)
+        CHECK(buf[i] == file_byte(&g_media_a, BIG_LBA_A,
+                                  (ISO_RA_SECTORS + 3u) * SEC + 100u + i));
     M.fail_lba = -1;
     CHECK(iso9660_ops.read_stream(c, "/BIG.PKG", buf, sizeof(buf), 0) == (int)sizeof(buf));
     for (i = 0; i < sizeof(buf); i++)
         CHECK(buf[i] == file_byte(&g_media_a, BIG_LBA_A, i));
+    iso9660_ops.umount(c);
+}
+
+/* 要求の範囲の中の不良セクタは失敗。1 セクタずつの読み直しは不良で止まる */
+static void t_bad_inside(void)
+{
+    Iso9660Ctx *c;
+    u8 buf[4096];
+    AtapiStats a0, a1;
+    setup(); c = do_mount();
+    M.fail_lba = (long)(BIG_LBA_A + ISO_RA_SECTORS + 1u);
+    atapi_get_stats(&a0);
+    CHECK(iso9660_ops.read_stream(c, "/BIG.PKG", buf, sizeof(buf),
+                                  ISO_RA_SECTORS * SEC) == VFS_ERR_IO);
+    atapi_get_stats(&a1);
+    CHECK(a1.multi_fail - a0.multi_fail >= 1);
+    /* 窓の読み直し (RA, RA+1) と要るセクタの読み直し (RA, RA+1)。不良で止まる */
+    CHECK(a1.single_retry - a0.single_retry <= 4u);
+    /* 大きな揃った読み (窓を通さない) の中の不良も失敗 */
+    CHECK(iso9660_ops.read_stream(c, "/BIG.PKG", (u8 *)malloc(65536), 65536, 0)
+          == VFS_ERR_IO);
     iso9660_ops.umount(c);
 }
 
@@ -764,6 +812,81 @@ static void t_unit_attention(void)
     iso9660_ops.umount(c);
 }
 
+/* 解決の途中で媒体が替わる (Codex レビュー 1 の P2)。根は A のものがキャッシュに
+ * あり SUB = 21 と答える。SUB を読む READ(10) が UNIT ATTENTION → 出し直しで
+ * B の 21 (囮) を読む。世代を見て B の根から引き直し、B の本物 (24) の答えを返す */
+static void t_stat_swap(void)
+{
+    Iso9660Ctx *c;
+    OS32_Stat st;
+    u32 sz = 0;
+    setup(); c = do_mount();
+    CHECK(iso9660_ops.stat(c, "/TINY.TXT", &st) == VFS_OK);   /* A の根を LRU へ */
+    M.ua_next = 1;
+    CHECK(iso9660_ops.stat(c, "/SUB/DEEP.BIN", &st) == VFS_OK);
+    CHECK(st.st_size == DEEP_SIZE_B);
+    CHECK(lba_reads(SUB_LBA_B + 1u) == 1);
+
+    /* get_file_size も同じ */
+    iso9660_ops.umount(c);
+    setup(); c = do_mount();
+    CHECK(iso9660_ops.get_file_size(c, "/TINY.TXT", &sz) == VFS_OK && sz == TINY_SIZE);
+    M.ua_next = 1;
+    CHECK(iso9660_ops.get_file_size(c, "/SUB/DEEP.BIN", &sz) == VFS_OK);
+    CHECK(sz == DEEP_SIZE_B);
+    iso9660_ops.umount(c);
+}
+
+/* list_dir: 解決のあいだの交換は引き直す、一覧の途中 (cb の後) の交換は中断 */
+static Iso9660Ctx *g_sw_ctx;
+static int g_sw_calls, g_sw_arm, g_sw_read, g_sw_deep_b;
+static void sw_cb(const VfsDirEntry *e, void *u)
+{
+    (void)u;
+    g_sw_calls++;
+    if (strcmp(e->name, "DEEP.BIN") == 0 && e->size == DEEP_SIZE_B) g_sw_deep_b = 1;
+    if (g_sw_calls == 1 && g_sw_arm) {
+        M.ua_next = 1;
+        if (g_sw_read) {
+            u8 b[16];
+            /* cb の中で FS を読み、その読みが交換を踏む */
+            (void)iso9660_ops.read_stream(g_sw_ctx, "/BIG.PKG", b, 16, 300000);
+        }
+    }
+}
+
+static void t_list_swap(void)
+{
+    Iso9660Ctx *c;
+    OS32_Stat st;
+    /* (1) 解決の途中 (根の読み) で交換 → 引き直して B の SUB (24) を一覧する */
+    setup(); c = do_mount();
+    M.ua_next = 1;
+    g_sw_calls = g_sw_arm = g_sw_read = g_sw_deep_b = 0;
+    g_sw_ctx = c;
+    CHECK(iso9660_ops.list_dir(c, "/SUB", sw_cb, NULL) == VFS_OK);
+    CHECK(g_sw_deep_b);
+    iso9660_ops.umount(c);
+
+    /* (2) 2 セクタの SUB の 1 セクタ目を読んだ後、次のセクタの読みで交換 → 中断 */
+    setup(); c = do_mount();
+    g_sw_calls = g_sw_deep_b = 0; g_sw_arm = 1; g_sw_read = 0;
+    g_sw_ctx = c;
+    CHECK(iso9660_ops.list_dir(c, "/SUB", sw_cb, NULL) == VFS_ERR_IO);
+    CHECK(!g_sw_deep_b);
+    iso9660_ops.umount(c);
+
+    /* (3) 1 セクタの根: cb の中の読みが交換を踏む → 残りを読まずとも中断 */
+    setup(); c = do_mount();
+    g_sw_calls = 0; g_sw_arm = 1; g_sw_read = 1;
+    g_sw_ctx = c;
+    CHECK(iso9660_ops.list_dir(c, "/", sw_cb, NULL) == VFS_ERR_IO);
+    CHECK(g_sw_calls == 1);
+    /* 次の操作は新しい媒体で引き直す */
+    CHECK(iso9660_ops.stat(c, "/SUB/DEEP.BIN", &st) == VFS_OK && st.st_size == DEEP_SIZE_B);
+    iso9660_ops.umount(c);
+}
+
 /* 2 秒規則: 最後に媒体を読んでから ISO_IDLE_TICKS を超えたら捨てる (ちょうどは捨てない)。
  * 捨てるのはパス・LRU・先読みの窓の全部 */
 static void t_idle_rule(void)
@@ -851,7 +974,10 @@ int main(int argc, char **argv)
     else if (!strcmp(cs, "read_file"))       t_read_file();
     else if (!strcmp(cs, "multi_fallback"))  t_multi_fallback();
     else if (!strcmp(cs, "short_transfer"))  t_short_transfer();
-    else if (!strcmp(cs, "bad_sector"))      t_bad_sector();
+    else if (!strcmp(cs, "bad_outside"))     t_bad_outside();
+    else if (!strcmp(cs, "bad_inside"))      t_bad_inside();
+    else if (!strcmp(cs, "stat_swap"))       t_stat_swap();
+    else if (!strcmp(cs, "list_swap"))       t_list_swap();
     else if (!strcmp(cs, "lru_order"))       t_lru_order();
     else if (!strcmp(cs, "ua_mount"))        t_ua_mount();
     else if (!strcmp(cs, "multi_drq"))       t_multi_drq();

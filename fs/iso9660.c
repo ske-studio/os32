@@ -97,11 +97,14 @@ static const u8 *iso_get_sector(Iso9660Ctx *ctx, u32 lba)
  *   file_secs: ファイルのセクタ数 (窓をファイルの外へ広げない)
  * 窓に入っている部分は窓から写す。窓より大きい、セクタに揃った範囲は dst へ
  * 直接まとめて読む。それ以外は、要るセクタから窓 1 枚ぶん (1 回の READ(10)) を
- * 先読みしてから写す。窓が無ければ端のセクタは LRU を通す。 */
+ * 先読みしてから写す。窓が無ければ端のセクタは LRU を通す。
+ * 窓の先読みが落ちたら (要求の外の不良セクタかもしれない)、この呼び出しの
+ * 残りは窓なしと同じ経路 = 要るセクタだけを読む。要るセクタが読めなければ失敗。 */
 static int iso_read_extent(Iso9660Ctx *ctx, u32 file_lba, u32 file_secs,
                            u32 offset, u8 *dst, u32 len)
 {
     u32 done = 0;
+    int use_ra = (ctx->ra_buf != (u8 *)0);
 
     while (done < len) {
         u32 cur_off  = offset + done;
@@ -124,7 +127,7 @@ static int iso_read_extent(Iso9660Ctx *ctx, u32 file_lba, u32 file_secs,
 
         /* 2. 窓より大きい (窓なしなら 1 セクタ以上の) 揃った範囲は直接 */
         if (sect_off == 0
-            && left >= (ctx->ra_buf ? ISO_RA_BYTES : (u32)ISO_SECTOR_SIZE)) {
+            && left >= (use_ra ? ISO_RA_BYTES : (u32)ISO_SECTOR_SIZE)) {
             u32 n = left / ISO_SECTOR_SIZE;
             if (iso_dev_read(ctx, lba, n, dst + done) != 0)
                 return VFS_ERR_IO;
@@ -134,15 +137,18 @@ static int iso_read_extent(Iso9660Ctx *ctx, u32 file_lba, u32 file_secs,
         }
 
         /* 3. 要るセクタから窓 1 枚ぶんを先読み (次の周で 1. が写す) */
-        if (ctx->ra_buf) {
+        if (use_ra) {
             u32 n;
             /* 起きない (範囲は呼び手が見る) が、0 本の窓で回り続けないように */
             if (sect_idx >= file_secs) return VFS_ERR_IO;
             n = file_secs - sect_idx;
             if (n > ISO_RA_SECTORS) n = ISO_RA_SECTORS;
             ctx->ra_valid = 0;
-            if (iso_dev_read(ctx, lba, n, ctx->ra_buf) != 0)
-                return VFS_ERR_IO;
+            if (iso_dev_read(ctx, lba, n, ctx->ra_buf) != 0) {
+                /* 窓は無効のまま。要るセクタだけを読み直す (2. / 4.) */
+                use_ra = 0;
+                continue;
+            }
             ctx->ra_lba   = lba;
             ctx->ra_count = n;
             ctx->ra_valid = 1;
@@ -444,6 +450,30 @@ static int iso9660_is_mounted(void *ctx_raw)
     return (ctx_raw != (void *)0) ? 1 : 0;
 }
 
+/* 入口で媒体を確かめてからパスを解決する。解決のあいだに媒体の世代が進んだら
+ * (旧媒体のキャッシュで得た LBA を新媒体で読んだかもしれない)、捨てて 1 回だけ
+ * 解決し直す。2 回とも進んだら失敗。*gen_out には解決を始めた世代を返す。 */
+static int iso_resolve_checked(Iso9660Ctx *ctx, const char *path,
+                               u32 *out_lba, u32 *out_size, u8 *out_flags,
+                               u32 *gen_out)
+{
+    int attempt;
+
+    for (attempt = 0; attempt < 2; attempt++) {
+        u32 gen0;
+        int ret;
+
+        iso_check_media(ctx);
+        gen0 = ctx->media_gen;
+        ret = iso_resolve_path(ctx, path, out_lba, out_size, out_flags);
+        if (atapi_media_gen() == gen0) {
+            if (gen_out) *gen_out = gen0;
+            return ret;
+        }
+    }
+    return VFS_ERR_IO;
+}
+
 /* --- list_dir --- */
 static int iso9660_list_dir(void *ctx_raw, const char *path,
                             vfs_dir_cb cb, void *user_ctx)
@@ -454,12 +484,12 @@ static int iso9660_list_dir(void *ctx_raw, const char *path,
     u8 sector[ISO_SECTOR_SIZE];
     const u8 *cur = sector;
     u32 offset;
+    u32 gen0 = 0;
     int ret;
 
     if (!ctx) return VFS_ERR_NOMOUNT;
-    iso_check_media(ctx);
 
-    ret = iso_resolve_path(ctx, path, &dir_lba, &dir_size, &dir_flags);
+    ret = iso_resolve_checked(ctx, path, &dir_lba, &dir_size, &dir_flags, &gen0);
     if (ret != 0) return ret;
     if (!(dir_flags & ISO_FLAG_DIRECTORY)) return VFS_ERR_NOTDIR;
 
@@ -475,6 +505,9 @@ static int iso9660_list_dir(void *ctx_raw, const char *path,
         if (sect_off == 0) {
             const u8 *sec = iso_get_sector(ctx, sect_lba);
             if (!sec) return VFS_ERR_IO;
+            /* 途中で媒体が替わった: 続きは別の媒体。一覧は中断する
+             * (cb に渡した分は取り消せないので読み直さない) */
+            if (atapi_media_gen() != gen0) return VFS_ERR_IO;
             kmemcpy(sector, sec, ISO_SECTOR_SIZE);
             cur = sector;
         }
@@ -501,6 +534,8 @@ static int iso9660_list_dir(void *ctx_raw, const char *path,
             ent.type = (rec[25] & ISO_FLAG_DIRECTORY)
                      ? VFS_TYPE_DIR : VFS_TYPE_FILE;
             cb(&ent, user_ctx);
+            /* cb がこの FS を読んで媒体の交換を踏んだかもしれない */
+            if (atapi_media_gen() != gen0) return VFS_ERR_IO;
         }
 
         offset += rec_len;
@@ -574,8 +609,7 @@ static int iso9660_get_file_size(void *ctx_raw, const char *path, u32 *size)
     int ret;
 
     if (!ctx) return VFS_ERR_NOMOUNT;
-    iso_check_media(ctx);
-    ret = iso_resolve_path(ctx, path, &lba, &fsize, &flags);
+    ret = iso_resolve_checked(ctx, path, &lba, &fsize, &flags, (u32 *)0);
     if (ret != 0) return ret;
     if (size) *size = fsize;
     return VFS_OK;
@@ -590,8 +624,7 @@ static int iso9660_stat(void *ctx_raw, const char *path, OS32_Stat *st)
     int ret;
 
     if (!ctx) return VFS_ERR_NOMOUNT;
-    iso_check_media(ctx);
-    ret = iso_resolve_path(ctx, path, &lba, &fsize, &flags);
+    ret = iso_resolve_checked(ctx, path, &lba, &fsize, &flags, (u32 *)0);
     if (ret != 0) return ret;
 
     if (st) {
