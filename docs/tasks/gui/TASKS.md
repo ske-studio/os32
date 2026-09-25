@@ -27,6 +27,7 @@
 | **C** クライアント | Rust, `userland/rust/libos32gui/` | [TASK_C1_drawing.md](../../archive/gui_v11/TASK_C1_drawing.md) | G 描画 (Rect / Style / Surface / クリップ / 文字) を libos32gfx の上に |
 | | | [TASK_C2_client_loop_widgets.md](../../archive/gui_v11/TASK_C2_client_loop_widgets.md) | `gui_call` スタブ、U3 ループ、ウィジェット木、箱レイアウト、gui_demo 書き換え |
 | | | [TASK_C3_shared_lib.md](../../archive/gui_v11/TASK_C3_shared_lib.md) | 固定アドレス・ジャンプ表・バージョン照合の共有ライブラリ化 (K3 と同時) |
+| **W** (追加) | Rust, `userland/gshell/` | [TASK_KBD_NAV.md](TASK_KBD_NAV.md) | キーボードだけの GUI 操作 (WM ショートカット + KANA ラッチのマウスキー)。設計票、実機でバスマウスが無いため (2026-09-25) |
 | **PM** | Python, `tools/` | (票なし、本書 §5) | 共有定数の照合スクリプト、ゲート検証、`os32-cycle` の GUI 用サブコマンド |
 
 ## 2. 依存と順序
