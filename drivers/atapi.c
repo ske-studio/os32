@@ -20,6 +20,13 @@
 /* === 内部状態 === */
 static int cdrom_present = 0;
 
+/* 最後にエラーで終わったコマンドのセンスキー (エラーレジスタの bit7-4)。
+ * 次のコマンドを出す前に読まないと消える */
+static u8 s_last_sense = 0;
+/* 媒体の世代 (atapi_media_gen)。UNIT ATTENTION / NOT READY で進む */
+static u32 s_media_gen = 0;
+static AtapiStats s_stats;
+
 /* ======================================================================== */
 /*  内部ヘルパー                                                             */
 /* ======================================================================== */
@@ -65,6 +72,27 @@ static int atapi_wait_drq(void)
         if (st & IDE_ST_ERR) return ATAPI_ERR_IO;
     }
     return ATAPI_ERR_TIMEOUT;
+}
+
+/* ERR を見たときに呼ぶ。センスキーを覚え、媒体が替わった/替わりつつある
+ *印なら世代を進める。 */
+static void atapi_note_error(void)
+{
+    s_last_sense = (u8)(((u8)inp(IDE_ERROR)) >> ATAPI_ERR_SENSE_SHIFT);
+    if (s_last_sense == ATAPI_SK_UNIT_ATTENTION
+        || s_last_sense == ATAPI_SK_NOT_READY) {
+        s_media_gen++;
+        s_stats.unit_attention++;
+    }
+}
+
+/* DRQ のブロックを読み終えた直後、デバイスが DRQ を落として BSY を上げる
+ * までの 400ns を置く (ここを置かないと、前のブロックの DRQ=1 を読んで
+ * もう 1 ブロックあると取り違える)。ALT_STATUS の空読みで待つ */
+static void atapi_settle(void)
+{
+    int i;
+    for (i = 0; i < IDE_SEL_SETTLE; i++) (void)inp(IDE_ALT_STATUS);
 }
 
 /* 12バイトCDBを0クリア */
@@ -119,7 +147,10 @@ static int atapi_packet_nodata(const u8 *cdb)
     /* エラーチェック */
     {
         u8 st = (u8)inp(IDE_STATUS);
-        if (st & IDE_ST_ERR) return ATAPI_ERR_IO;
+        if (st & IDE_ST_ERR) {
+            atapi_note_error();
+            return ATAPI_ERR_IO;
+        }
     }
 
     return ATAPI_OK;
@@ -129,23 +160,35 @@ static int atapi_packet_nodata(const u8 *cdb)
  *   cdb:      12バイトCDB
  *   buf:      データ受信バッファ
  *   buf_size: バッファサイズ
- *   actual:   実際の受信バイト数 (NULLなら無視)
- * 戻り値: ATAPI_OK=成功 */
+ *   actual:   デバイスが渡したバイト数 (NULLなら無視)。buf_size を超えた分は
+ *             捨てるが、数には入れる (呼び手が「過不足なし」を確かめるため)
+ * 戻り値: ATAPI_OK=成功
+ *
+ * データは 1 回以上の DRQ で来る。各 DRQ のバイト数は Cylinder Low/High に
+ * 出る (byte count limit 以下、デバイスが決める)。DRQ が落ちるまで繰り返す。 */
 static int atapi_packet_read(const u8 *cdb, void *buf, u32 buf_size,
                              u32 *actual)
 {
     int ret;
     int i;
     u32 total_read = 0;
+    u32 bcl;
     u8 *p = (u8 *)buf;
+
+    if (actual) *actual = 0;
 
     ret = atapi_wait_bsy();
     if (ret != ATAPI_OK) return ret;
 
-    /* Features=0 (PIOモード), ByteCountにバッファサイズ上限を設定 */
+    /* byte count limit: 1 回の DRQ の上限。偶数で、ATAPI_PIO_BCL_MAX 以下 */
+    bcl = (buf_size < ATAPI_PIO_BCL_MAX) ? buf_size : ATAPI_PIO_BCL_MAX;
+    bcl &= ~1UL;
+    if (bcl == 0) bcl = 2;
+
+    /* Features=0 (PIOモード) */
     outp(IDE_FEATURES, 0x00);
-    outp(IDE_CYL_LO, (unsigned)(buf_size & 0xFF));
-    outp(IDE_CYL_HI, (unsigned)((buf_size >> 8) & 0xFF));
+    outp(IDE_CYL_LO, (unsigned)(bcl & 0xFF));
+    outp(IDE_CYL_HI, (unsigned)((bcl >> 8) & 0xFF));
     outp(IDE_DRV_HEAD, 0x00);
 
     /* PACKETコマンド発行 */
@@ -160,11 +203,13 @@ static int atapi_packet_read(const u8 *cdb, void *buf, u32 buf_size,
         u16 w = (u16)cdb[i * 2] | ((u16)cdb[i * 2 + 1] << 8);
         outpw(IDE_DATA, (unsigned)w);
     }
+    atapi_settle();
 
-    /* データ転送ループ */
+    /* データ転送ループ (DRQ ごとに 1 回) */
     while (1) {
         u16 xfer_size;
-        u16 words;
+        u32 words;
+        u32 k;
         u8 st;
 
         /* BSY=0になるまで待つ */
@@ -173,7 +218,10 @@ static int atapi_packet_read(const u8 *cdb, void *buf, u32 buf_size,
 
         /* ステータス確認 */
         st = (u8)inp(IDE_STATUS);
-        if (st & IDE_ST_ERR) return ATAPI_ERR_IO;
+        if (st & IDE_ST_ERR) {
+            atapi_note_error();
+            return ATAPI_ERR_IO;
+        }
 
         /* DRQが立っていなければ転送完了 */
         if (!(st & IDE_ST_DRQ)) break;
@@ -182,9 +230,9 @@ static int atapi_packet_read(const u8 *cdb, void *buf, u32 buf_size,
         xfer_size = (u16)inp(IDE_CYL_LO) | ((u16)inp(IDE_CYL_HI) << 8);
         if (xfer_size == 0) break;
 
-        /* ワード単位で読み出し */
-        words = (xfer_size + 1) / 2;
-        for (i = 0; i < words; i++) {
+        /* ワード単位で読み出し。buf_size を超えた分は読み捨てる */
+        words = ((u32)xfer_size + 1) / 2;
+        for (k = 0; k < words; k++) {
             u16 w = (u16)inpw(IDE_DATA);
             if (total_read < buf_size) {
                 p[total_read] = (u8)(w & 0xFF);
@@ -194,12 +242,13 @@ static int atapi_packet_read(const u8 *cdb, void *buf, u32 buf_size,
             }
             total_read += 2;
         }
+        atapi_settle();
     }
 
     /* IRQクリア */
     { u8 st = (u8)inp(IDE_STATUS); (void)st; }
 
-    if (actual) *actual = (total_read < buf_size) ? total_read : buf_size;
+    if (actual) *actual = total_read;
     return ATAPI_OK;
 }
 
@@ -319,39 +368,86 @@ int atapi_read_capacity(AtapiCapacity *cap)
     return ATAPI_OK;
 }
 
+/* READ(10) を 1 回出す (n セクタ、バンクは呼び手が選んでおく)。
+ * デバイスが渡したバイト数がちょうど n セクタでなければ失敗。
+ * UNIT ATTENTION なら媒体の世代を進めて 1 回だけ出し直す。 */
+static int atapi_read10(u32 lba, u32 n, u8 *dst)
+{
+    int attempt;
+    int ret = ATAPI_ERR_IO;
+
+    for (attempt = 0; attempt < 2; attempt++) {
+        u8 cdb[12];
+        u32 got = 0;
+
+        atapi_clear_cdb(cdb);
+        cdb[0] = SCSI_CMD_READ_10;
+        /* LBA (ビッグエンディアン, bytes 2-5) */
+        cdb[2] = (u8)(lba >> 24);
+        cdb[3] = (u8)(lba >> 16);
+        cdb[4] = (u8)(lba >> 8);
+        cdb[5] = (u8)(lba & 0xFF);
+        /* 転送セクタ数 (ビッグエンディアン, bytes 7-8) */
+        cdb[7] = (u8)(n >> 8);
+        cdb[8] = (u8)(n & 0xFF);
+
+        s_last_sense = 0;
+        s_stats.read10_cmds++;
+        ret = atapi_packet_read(cdb, dst, n * ATAPI_SECTOR_SIZE, &got);
+        if (ret == ATAPI_OK) {
+            if (got != n * ATAPI_SECTOR_SIZE) return ATAPI_ERR_IO;
+            s_stats.read10_sectors += n;
+            return ATAPI_OK;
+        }
+        if (s_last_sense != ATAPI_SK_UNIT_ATTENTION) break;
+    }
+    return ret;
+}
+
 int atapi_read_sectors(u32 lba, u32 count, void *buf)
 {
     u8 *p = (u8 *)buf;
-    u32 i;
 
     if (!cdrom_present) return ATAPI_ERR_NO_DRIVE;
 
     atapi_select_bank(1);
 
-    /* 1セクタずつ読み出し (シンプル + 安全) */
-    for (i = 0; i < count; i++) {
-        u8 cdb[12];
-        int ret;
+    /* 連続する範囲を ATAPI_READ_MAX_SECTORS ずつの READ(10) で読む */
+    while (count > 0) {
+        u32 n = (count < ATAPI_READ_MAX_SECTORS) ? count : ATAPI_READ_MAX_SECTORS;
+        int ret = atapi_read10(lba, n, p);
 
-        atapi_clear_cdb(cdb);
-        cdb[0] = SCSI_CMD_READ_10;
-        /* LBA (ビッグエンディアン, bytes 2-5) */
-        cdb[2] = (u8)((lba + i) >> 24);
-        cdb[3] = (u8)((lba + i) >> 16);
-        cdb[4] = (u8)((lba + i) >> 8);
-        cdb[5] = (u8)((lba + i) & 0xFF);
-        /* 転送セクタ数 (bytes 7-8) = 1 */
-        cdb[7] = 0;
-        cdb[8] = 1;
-
-        ret = atapi_packet_read(cdb, p + i * ATAPI_SECTOR_SIZE,
-                                ATAPI_SECTOR_SIZE, 0);
+        /* 複数セクタが失敗したら、その範囲を 1 セクタずつ読み直す
+         * (ドライブとの相性・範囲のどこかの読めないセクタ)。
+         * 1 セクタでも落ちたらそこで失敗を返す */
+        if (ret != ATAPI_OK && n > 1) {
+            u32 i;
+            s_stats.multi_fail++;
+            for (i = 0; i < n; i++) {
+                s_stats.single_retry++;
+                ret = atapi_read10(lba + i, 1, p + i * ATAPI_SECTOR_SIZE);
+                if (ret != ATAPI_OK) break;
+            }
+        }
         if (ret != ATAPI_OK) {
             atapi_select_bank(0);
             return ret;
         }
+        lba   += n;
+        count -= n;
+        p     += n * ATAPI_SECTOR_SIZE;
     }
 
     atapi_select_bank(0);
     return ATAPI_OK;
+}
+
+u32 atapi_media_gen(void)
+{
+    return s_media_gen;
+}
+
+void atapi_get_stats(AtapiStats *out)
+{
+    if (out) *out = s_stats;
 }

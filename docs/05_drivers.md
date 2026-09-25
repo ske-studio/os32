@@ -206,7 +206,17 @@ IDEセカンダリバンクに接続されたATAPI CD-ROMデバイスをPIOモ�
 | `atapi_present()` | CD-ROMドライブ存在チェック |
 | `atapi_test_unit_ready()` | メディア挿入確認 |
 | `atapi_read_capacity(cap)` | メディア容量取得 (AtapiCapacity構造体) |
-| `atapi_read_sectors(lba, count, buf)` | セクタ読み出し (2048B/セクタ, LBA指定) |
+| `atapi_read_sectors(lba, count, buf)` | セクタ読み出し (2048B/セクタ, LBA指定)。連続する count セクタを `ATAPI_READ_MAX_SECTORS` (既定 16 = 32KB) ずつの READ(10) で読む。複数セクタが失敗したらその範囲を 1 セクタずつ読み直し、1 セクタでも落ちればそこで失敗 |
+| `atapi_media_gen()` | 媒体の世代。エラーレジスタのセンスキーが UNIT ATTENTION (6) / NOT READY (2) のたびに進む。UNIT ATTENTION のコマンドは 1 回だけ出し直す |
+| `atapi_get_stats(out)` | READ(10) の数・セクタ数・1 セクタずつへ落ちた数 |
+
+- **PIO の受け取り**: byte count limit (Cylinder Low/High) には `min(バッファ, ATAPI_PIO_BCL_MAX = 0xF800)` を書き、
+  データは DRQ ごとに Cylinder Low/High のバイト数だけ読む。各ブロックの後に ALT_STATUS の空読みで 400ns 置く
+  (置かないと前のブロックの DRQ=1 を次のブロックと取り違える)。受け取ったバイト数がちょうど要求どおりでなければ失敗
+- **ドライブとの相性で困ったら `ATAPI_READ_MAX_SECTORS` を 1 にする** (`drivers/atapi.h` の 1 か所、旧来の 1 セクタずつに戻る)
+- **NP21/W は READ(10) で UNIT ATTENTION を返さない** (媒体の交換は TEST UNIT READY だけが報告する)。
+  世代の経路は実機でしか踏まない。NP21/W の DRQ は 2048 バイトずつ
+- 試験: `make check-cd-read-host` (`tools/tests/test_cd_read.py`、記録 `tools/tests/cd_read_tdd.md`)
 
 ### §5-7 マウス (mouse.c / mouse.h / mouse_bus.c / mouse_seamless.c)
 

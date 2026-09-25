@@ -167,7 +167,7 @@ MUTANTS = [
      "        if (prefix_len + n + 1 > PKG_MAX_PATH) return i;",
      "        if (prefix_len + n > PKG_MAX_PATH) return i;"),
     ("pkg_extract が開けない失敗を飲む", "lib/rt/pkg.c",
-     "            if (wfd < 0) { api->sys_close(fd); return PKG_ERR_IO; }",
+     "            if (wfd < 0) { result = PKG_ERR_IO; break; }",
      "            if (wfd < 0) continue;"),
     ("失効した SQLite FD を BUSY から外す", "fs/vfs_fd.c",
      "        if (!f->in_use || !f->sqlite_db || f->fs_ctx != fs_ctx) continue;",
