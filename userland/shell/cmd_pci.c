@@ -199,30 +199,39 @@ static void lspci_verbose_one(u32 bus, u32 dev, u32 fn)
 static int cmd_lspci_verbose(int argc, char **argv)
 {
     int n, i;
+    int one = 0;                /* 1 = 1 台だけ (B:D.F か bus dev fn) */
+    u32 bus = 0, dev = 0, fn = 0, idw;
     PciDev d;
+
+    /* **引数を先に検査する。** PCI の有無を先に見ると、NP21/W では
+     * `lspci -v 256:0.0` や `lspci -v garbage` が成功で終わり、打ち間違いが
+     * 実機へ持ち越される (Codex P3)。 */
+    if (argc == 3) {
+        if (pci_parse_bdf(argv[2], &bus, &dev, &fn) != 0) goto usage;
+        one = 1;
+    } else if (argc == 5) {
+        int b = pci_parse_num(argv[2]);
+        int v = pci_parse_num(argv[3]);
+        int f = pci_parse_num(argv[4]);
+        if (b < 0 || b > (int)PCI_BUS_MASK ||
+            v < 0 || v > (int)PCI_DEV_MASK ||
+            f < 0 || f > (int)PCI_FN_MASK) goto usage;
+        bus = (u32)b; dev = (u32)v; fn = (u32)f;
+        one = 1;
+    } else if (argc != 2) {
+        goto usage;
+    }
 
     n = g_api->pci_count();
     if (n <= 0) {
         g_api->kprintf(ATTR_CYAN, "%s",
                        "lspci: no PCI (mechanism #1 not present)\n");
-        return 0;
+        /* 一覧なら「0 台」は正しい答え (引数なしの lspci と同じ)。
+         * 1 台を名指ししたのに読めないのは失敗 (pcidump と同じ)。 */
+        return one ? SH_STATUS_ERROR : 0;
     }
 
-    if (argc > 2) {
-        u32 bus, dev, fn, idw;
-        if (argc == 3) {
-            if (pci_parse_bdf(argv[2], &bus, &dev, &fn) != 0) goto usage;
-        } else if (argc == 5) {
-            int b = pci_parse_num(argv[2]);
-            int v = pci_parse_num(argv[3]);
-            int f = pci_parse_num(argv[4]);
-            if (b < 0 || b > (int)PCI_BUS_MASK ||
-                v < 0 || v > (int)PCI_DEV_MASK ||
-                f < 0 || f > (int)PCI_FN_MASK) goto usage;
-            bus = (u32)b; dev = (u32)v; fn = (u32)f;
-        } else {
-            goto usage;
-        }
+    if (one) {
         idw = g_api->pci_cfg_read32(bus, dev, fn, PCI_CFG_VENDOR_ID);
         if (pci_extract16(idw, PCI_CFG_VENDOR_ID) == PCI_VENDOR_NONE) {
             g_api->kprintf(ATTR_YELLOW, "lspci: %u:%u.%u not present\n",

@@ -37,7 +37,12 @@ TARGET_SRCS = [
 CASES = ["cfg_addr", "probe_values", "bar_kind", "bar_base", "header_type",
          "extract", "names", "story_82557", "absent",
          "verbose_tuner", "verbose_bars", "verbose_bridge", "verbose_bounds",
-         "verbose_parse"]
+         "verbose_parse", "verbose_mem64", "verbose_longest"]
+# コマンド層 (userland/shell/cmd_pci.c) は別のハーネスで回す — 引数の検査の
+# 順番、config を読む先と回数、引数なしの `lspci` の回帰。
+CMD_HARNESS = ROOT / "tools/tests/lspci_cmd_host.c"
+CMD_CASES = ["lspci_noarg", "lspci_v_all", "lspci_v_one", "lspci_badargs"]
+ALL_CASES = CASES + CMD_CASES
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl="]
@@ -81,22 +86,39 @@ MUTATIONS = [
      r"if \(layout == PCI_HDR_LAYOUT_DEVICE\) \{\n            u32 sw",
      "if (layout != PCI_HDR_LAYOUT_CARDBUS) {\n            u32 sw",
      "ブリッヂでも 0x2C を Subsystem と読む (プリフェッチ窓の上位を ID と偽る)"),
+    ("userland/shell/pci_verbose.c",
+     r"if \(pci_bar_base\(raw\) == 0 && hi == 0\)",
+     "if (pci_bar_base(raw) == 0)",
+     "mem64 の未割り当てを下位だけで決める (4G 超の窓を未割り当てと偽る、Codex P2)"),
+    # --- コマンド層 (userland/shell/cmd_pci.c) ---
+    ("userland/shell/cmd_pci.c",
+     r"    /\* \*\*引数を先に検査する。\*\*",
+     "    if (g_api->pci_count() <= 0) {\n"
+     "        g_api->kprintf(ATTR_CYAN, \"%s\", \"lspci: no PCI\");\n"
+     "        return 0;\n"
+     "    }\n"
+     "    /* **引数を先に検査する。**",
+     "PCI の有無を引数の検査より先に見る (NP21/W で打ち間違いが成功になる、Codex P3)"),
+    ("userland/shell/cmd_pci.c",
+     r"for \(k = 0; k < PCI_VERBOSE_CFG_DWORDS; k\+\+\)\n        cfg\[k\]",
+     "for (k = 0; k < PCI_VERBOSE_CFG_DWORDS - 1; k++)\n        cfg[k]",
+     "config を 0x3C まで読まない (Interrupt Line / Pin が 0 に化ける)"),
 ]
 
 
 # ハーネスが #include する実物。変異のときはこれを一時の木へ写し、1 本だけ
 # 差し替える (ハーネスの "../../drivers/..." がそのまま一時の木を指す)。
-MIRROR = ["tools/tests/pci_decode_host.c",
+MIRROR = ["tools/tests/pci_decode_host.c", "tools/tests/lspci_cmd_host.c",
           "drivers/pci_decode.c", "drivers/pci_decode.h",
-          "userland/shell/pci_verbose.c", "userland/shell/pci_verbose.h"]
+          "userland/shell/pci_verbose.c", "userland/shell/pci_verbose.h",
+          "userland/shell/cmd_pci.c", "userland/shell/shell.h"]
 
 
 def host_build(tmp, mutated=None):
-    """ハーネスをコンパイルして実行ファイルのパスを返す。
+    """2 本のハーネスをコンパイルして {"decode": exe, "cmd": exe} を返す。
     mutated = (相対パス, 本文) なら、そのファイルだけ差し替えた木で通す。"""
     src_dir = pathlib.Path(tmp)
-    exe = src_dir / "pci-decode-host"
-    cmd = ["gcc", *FLAGS, *INCLUDES, str(HARNESS), "-o", str(exe)]
+    root, inc = ROOT, INCLUDES
     if mutated is not None:
         tree = src_dir / "tree"
         for rel in MIRROR:
@@ -106,17 +128,27 @@ def host_build(tmp, mutated=None):
             if rel == mutated[0]:
                 text = mutated[1]
             dst.write_text(text, encoding="utf-8")
-        cmd = ["gcc", *FLAGS, "-I" + str(ROOT / "include"),
-               "-I" + str(tree / "drivers"), "-I" + str(tree),
-               str(tree / "tools/tests/pci_decode_host.c"), "-o", str(exe)]
-    subprocess.run(cmd, cwd=ROOT, check=True)
-    return exe
+        root = tree
+        inc = ["-I" + str(ROOT / "include"), "-I" + str(tree / "drivers"),
+               "-I" + str(tree)]
+    exes = {}
+    for key, harness in (("decode", HARNESS), ("cmd", CMD_HARNESS)):
+        exe = src_dir / f"pci-{key}-host"
+        src = root / harness.relative_to(ROOT)
+        subprocess.run(["gcc", *FLAGS, *inc, str(src), "-o", str(exe)],
+                       cwd=ROOT, check=True)
+        exes[key] = exe
+    return exes
 
 
-def run_cases(exe, cases):
+def exe_for(exes, case):
+    return exes["cmd"] if case in CMD_CASES else exes["decode"]
+
+
+def run_cases(exes, cases):
     failed = 0
     for case in cases:
-        rc = subprocess.run([str(exe), case], cwd=ROOT).returncode
+        rc = subprocess.run([str(exe_for(exes, case)), case], cwd=ROOT).returncode
         print(f"EXIT {case}={rc}", flush=True)
         failed += rc != 0
     print(f"SUMMARY {len(cases) - failed}/{len(cases)} PASS", flush=True)
@@ -151,10 +183,10 @@ def mutate(tmp):
             print(f"MUTATION {i} NOT APPLICABLE: {why}", flush=True)
             bad += 1
             continue
-        exe = host_build(tmp, (rel, mutated))
-        hits = sum(subprocess.run([str(exe), c], cwd=ROOT,
+        exes = host_build(tmp, (rel, mutated))
+        hits = sum(subprocess.run([str(exe_for(exes, c)), c], cwd=ROOT,
                                   stderr=subprocess.DEVNULL).returncode != 0
-                   for c in CASES)
+                   for c in ALL_CASES)
         status = "RED" if hits else "**GREEN (見逃し)**"
         print(f"MUTATION {i} {status} ({hits} 件): {why}", flush=True)
         bad += not hits
@@ -164,12 +196,13 @@ def mutate(tmp):
 if __name__ == "__main__":
     args = sys.argv[1:]
     with tempfile.TemporaryDirectory(prefix="os32-pci-decode-") as tmp:
-        exe = host_build(tmp)
-        print("HOST GNU89 -Werror compile PASS (real drivers/pci_decode.c)",
+        exes = host_build(tmp)
+        print("HOST GNU89 -Werror compile PASS (real drivers/pci_decode.c, "
+              "userland/shell/pci_verbose.c, userland/shell/cmd_pci.c)",
               flush=True)
         if "--target" in args:
             build_target(tmp)
-        rc = run_cases(exe, [a for a in args if not a.startswith("--")] or CASES)
+        rc = run_cases(exes, [a for a in args if not a.startswith("--")] or ALL_CASES)
         if "--mutate" in args:
             rc += mutate(tmp)
         sys.exit(bool(rc))

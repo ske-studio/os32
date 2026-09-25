@@ -112,6 +112,7 @@ static void pv_bar_line(PvOut *o, const u32 *cfg, int count, int n)
 {
     const u32 *bar = &cfg[PCI_CFG_BAR0 / 4];
     u32 raw = bar[n];
+    u32 hi = 0;                 /* mem64 の上位 32 ビット (それ以外は 0) */
     int kind;
 
     pv_str(o, "  bar");
@@ -131,7 +132,10 @@ static void pv_bar_line(PvOut *o, const u32 *cfg, int count, int n)
     kind = pci_bar_kind(raw);
     switch (kind) {
     case PCI_BAR_NONE:
-        pv_str(o, "none");
+        /* 生値 0 は、読むだけでは「実装していない」と「BIOS が番地 0 の
+         * まま置いた」を区別できない (区別するには全 1 を書いて読み戻す
+         * 必要があり、それはしない)。どちらとも言い切らない。 */
+        pv_str(o, "zero (unimplemented or unassigned)");
         return;
     case PCI_BAR_IO:
         pv_str(o, "io");
@@ -144,17 +148,28 @@ static void pv_bar_line(PvOut *o, const u32 *cfg, int count, int n)
         break;
     case PCI_BAR_MEM64:
         /* 最後の欄の MEM64 は上位の欄が無い (壊れた/未知の装置)。 */
-        pv_str(o, (n + 1 < count) ? "mem64-lo" : "mem64-lo (no hi)");
+        if (n + 1 < count) {
+            /* 上位は次の欄 (pv_bar_is_mem64_hi と同じ組み方: ここに来た
+             * n は上位半分ではないので、n と n+1 が 1 組)。 */
+            hi = bar[n + 1];
+            pv_str(o, "mem64-lo");
+        } else {
+            pv_str(o, "mem64-lo (no hi)");
+        }
         break;
     default:
         pv_str(o, "mem-rsv");
         break;
     }
     pv_str(o, " base 0x");
+    /* 上位が 0 でない mem64 は 64 ビットの番地で出す (4G 超)。 */
+    if (hi != 0) pv_hex(o, hi, 8);
     pv_hex(o, pci_bar_base(raw), 8);
     if (pci_bar_prefetchable(raw)) pv_str(o, " prefetch");
-    /* 番地 0 = BIOS が割り当てていない (大きさは読まないので出さない)。 */
-    if (pci_bar_base(raw) == 0) pv_str(o, " unassigned");
+    /* 番地 0 = BIOS が割り当てていない (大きさは読まないので出さない)。
+     * **mem64 は上位と下位の両方が 0 のときだけ**。下位だけ見ると
+     * 0x1_0000_0000 に置かれた窓を「未割り当て」と偽る。 */
+    if (pci_bar_base(raw) == 0 && hi == 0) pv_str(o, " unassigned");
 }
 
 /* ------------------------------------------------------------------ */

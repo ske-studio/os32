@@ -385,11 +385,11 @@ static void verbose_tuner(void)
         "  status 0290\n"
         "  subsystem 10fc:d003\n"
         "  bar0 f8000000 mem32 base 0xf8000000\n"
-        "  bar1 00000000 none\n"
-        "  bar2 00000000 none\n"
-        "  bar3 00000000 none\n"
-        "  bar4 00000000 none\n"
-        "  bar5 00000000 none\n"
+        "  bar1 00000000 zero (unimplemented or unassigned)\n"
+        "  bar2 00000000 zero (unimplemented or unassigned)\n"
+        "  bar3 00000000 zero (unimplemented or unassigned)\n"
+        "  bar4 00000000 zero (unimplemented or unassigned)\n"
+        "  bar5 00000000 zero (unimplemented or unassigned)\n"
         "  interrupt line 11 pin A\n", __LINE__);
 
     /* 読み取り専用: 渡した config が 1 ビットも変わっていない。 */
@@ -468,8 +468,8 @@ static void verbose_bridge(void)
         "  command 0007 I/O+ Mem+ BusMaster+\n"
         "  status 0220\n"
         "  bus primary 0 secondary 1 subordinate 2\n"
-        "  bar0 00000000 none\n"
-        "  bar1 00000000 none\n"
+        "  bar0 00000000 zero (unimplemented or unassigned)\n"
+        "  bar1 00000000 zero (unimplemented or unassigned)\n"
         "  interrupt line 0 pin - (none)\n", __LINE__);
 
     /* CardBus (Type 2) は BAR 欄も Subsystem も出さない。 */
@@ -526,6 +526,88 @@ static void verbose_parse(void)
     CHECK(b == 42 && d == 42 && f == 42);
 }
 
+/* Codex P2: mem64 は上位と下位の両方で「未割り当て」を決める。
+ * 下位 0x00000004 (番地 0) + 上位 0x00000001 = 0x1_0000_0000 に割り当て済み。
+ * また、上位が 0x00000004 (= mem64 の下位と同じ形) でも、その次の欄を
+ * 上位と取り違えない (組は先頭から歩いて決まる)。予約型の書式もここで。 */
+static void verbose_mem64(void)
+{
+    u32 cfg[PCI_VERBOSE_CFG_DWORDS];
+    char out[2048];
+
+    cfg_clear(cfg);
+    cfg[0x00 / 4] = 0x880014F1UL;
+    cfg[0x10 / 4] = 0x00000004UL;   /* mem64 下位、番地の下位 32 ビットは 0 */
+    cfg[0x14 / 4] = 0x00000001UL;   /* 上位 = 1 → 0x1_0000_0000 */
+    cfg[0x18 / 4] = 0xE0000004UL;   /* mem64 下位 */
+    cfg[0x1C / 4] = 0x00000004UL;   /* その上位 = 4 (下位と同じ形の値) */
+    cfg[0x20 / 4] = 0xF0000004UL;   /* 次の組の下位 — 上位ではない */
+    cfg[0x24 / 4] = 0x00000000UL;   /* その上位 */
+
+    render(cfg, 0, 9, 0, out, sizeof(out));
+    CHECK(strstr(out,
+        "  bar0 00000004 mem64-lo base 0x0000000100000000\n"
+        "  bar1 00000001 mem64-hi (bar0 above 4G)\n"
+        "  bar2 e0000004 mem64-lo base 0x00000004e0000000\n"
+        "  bar3 00000004 mem64-hi (bar2 above 4G)\n"
+        "  bar4 f0000004 mem64-lo base 0xf0000000\n"
+        "  bar5 00000000 mem64-hi (bar4)\n") != 0);
+    CHECK(strstr(out, "unassigned") == 0);
+    if (failed) fprintf(stderr, "%s", out);
+
+    /* 上位も下位も 0 のときだけ unassigned。 */
+    cfg[0x14 / 4] = 0x00000000UL;
+    render(cfg, 0, 9, 0, out, sizeof(out));
+    CHECK(strstr(out, "  bar0 00000004 mem64-lo base 0x00000000 unassigned\n") != 0);
+
+    /* 予約型 (bit2〜1 = 11b) と prefetch。 */
+    cfg_clear(cfg);
+    cfg[0x00 / 4] = 0x880014F1UL;
+    cfg[0x10 / 4] = 0xF800000EUL;
+    cfg[0x14 / 4] = 0x00000006UL;
+    render(cfg, 0, 9, 0, out, sizeof(out));
+    CHECK(strstr(out, "  bar0 f800000e mem-rsv base 0xf8000000 prefetch\n") != 0);
+    CHECK(strstr(out, "  bar1 00000006 mem-rsv base 0x00000000 unassigned\n") != 0);
+}
+
+/* 最長の行: 小さい buf へ書いても溢れず、先頭がそのまま残る。
+ * 最長の行も PCI_VERBOSE_LINE_MAX に余裕で収まる。 */
+static void verbose_longest(void)
+{
+    u32 cfg[PCI_VERBOSE_CFG_DWORDS];
+    char full[PCI_VERBOSE_LINE_MAX];
+    char part[PCI_VERBOSE_LINE_MAX + 8];
+    int k, r, cap, best = -1;
+    size_t bestlen = 0;
+
+    cfg_clear(cfg);
+    cfg[0x00 / 4] = 0xFFFF10FCUL;   /* I-O DATA (いちばん長いベンダ名) */
+    cfg[0x0C / 4] = 0x00800000UL;
+    cfg[0x10 / 4] = 0x0000000CUL;   /* mem64 prefetch、上位も */
+    cfg[0x14 / 4] = 0xFFFFFFFFUL;   /*   64 ビットの番地 = 最長の BAR 行 */
+    cfg[0x24 / 4] = 0x0000000CUL;   /* 最後の欄の mem64 prefetch unassigned */
+    cfg[0x3C / 4] = 0x000000FFUL;
+
+    for (k = 0; k < 64; k++) {
+        r = pci_verbose_line(cfg, 255, 31, 7, k, full, (int)sizeof(full));
+        if (r == PCI_VERBOSE_END) break;
+        if (r == PCI_VERBOSE_SKIP) continue;
+        if (strlen(full) > bestlen) { bestlen = strlen(full); best = k; }
+    }
+    CHECK(best >= 0);
+    CHECK(bestlen + 1 < (size_t)PCI_VERBOSE_LINE_MAX);
+    pci_verbose_line(cfg, 255, 31, 7, best, full, (int)sizeof(full));
+
+    for (cap = 1; cap <= (int)bestlen + 1; cap++) {
+        memset(part, 'Z', sizeof(part));
+        r = pci_verbose_line(cfg, 255, 31, 7, best, part, cap);
+        CHECK(r == PCI_VERBOSE_LINE);
+        CHECK(strlen(part) == (size_t)(cap - 1));
+        CHECK(strncmp(part, full, (size_t)(cap - 1)) == 0);
+        CHECK(part[cap] == 'Z');     /* cap の外は触らない */
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) return 2;
@@ -544,6 +626,8 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "verbose_bridge")) verbose_bridge();
     else if (!strcmp(argv[1], "verbose_bounds")) verbose_bounds();
     else if (!strcmp(argv[1], "verbose_parse")) verbose_parse();
+    else if (!strcmp(argv[1], "verbose_mem64")) verbose_mem64();
+    else if (!strcmp(argv[1], "verbose_longest")) verbose_longest();
     else return 2;
     if (failed) return 1;
     printf("PASS %s\n", argv[1]);
