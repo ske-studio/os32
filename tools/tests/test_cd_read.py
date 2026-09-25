@@ -216,9 +216,9 @@ MUTATIONS = [
      "    ctx->media_gen = gen;\n    ctx->last_tick = now;\n}",
      "キャッシュの当たりでも時刻を進める (読み続ける限り捨てない)"),
     ("fs/iso9660.c",
-     r"if \(atapi_media_gen\(\) == gen0\) \{",
-     "if (atapi_media_gen() == gen0 || 1) {",
-     "読みの途中で世代が進んでも読み直さない"),
+     r"if \(atapi_media_gen\(\) == gen0\) \{\n            return \(ret != 0\) \? ret : \(int\)to_read;",
+     "if (atapi_media_gen() == gen0 || 1) {\n            return (ret != 0) ? ret : (int)to_read;",
+     "読みの途中で世代が進んでも読み直さない (iso_read_range)"),
     # --- セクタの LRU
     ("fs/iso9660.c",
      r"if \(victim < 0 \|\| s->used < ctx->scache\[victim\]\.used\) victim = i;",
