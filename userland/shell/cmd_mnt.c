@@ -7,8 +7,18 @@
 static int cmd_mount(int argc, char **argv)
 {
     int ret;
-    if (argc < 4) {
+    /* 余分な引数も断る (票 TASK_SERIAL_HOSTFS §1-v3)。黙って捨てると
+     * `mount /host COM1 serialfs extra` が意図と違う形で通る。 */
+    if (argc != 4) {
         shell_print_help(argv[0]);
+        return SH_STATUS_USAGE;
+    }
+    /* SerialFS は `sfs run` のセッションの中だけで付く。単独のマウントは
+     * FS の口が断るので、理由を先に言う。 */
+    if (strcmp(argv[3], "serialfs") == 0) {
+        g_api->kprintf(ATTR_RED, "%s",
+                       "mount: serialfs is mounted only by 'sfs run' "
+                       "(from rshell_serial.py --serve-host)\n");
         return SH_STATUS_USAGE;
     }
     ret = g_api->sys_mount(argv[1], argv[2], argv[3]);

@@ -73,3 +73,110 @@ int serial_watchdog_leave(struct serial_watchdog *w)
     }
     return SER_WD_REVERT;
 }
+
+int rsh_esc_classify(int ch, int from_serial, int at_line_start, int followed)
+{
+    if (ch != 0x1B) return RSH_ESC_NONE;
+    if (!from_serial) return RSH_ESC_EXIT;          /* 本体の ESC */
+    if (at_line_start && !followed) return RSH_ESC_EXIT;
+    return RSH_ESC_JUNK;
+}
+
+static int rsh_is_space(char c)
+{
+    return c == ' ' || c == '\t';
+}
+
+const char *rsh_sfs_child(const char *line)
+{
+    const char *p = line;
+
+    if (!p) return (const char *)0;
+    while (rsh_is_space(*p)) p++;
+    if (p[0] != 's' || p[1] != 'f' || p[2] != 's' || !rsh_is_space(p[3]))
+        return (const char *)0;
+    p += 3;
+    while (rsh_is_space(*p)) p++;
+    if (p[0] != 'r' || p[1] != 'u' || p[2] != 'n' || !rsh_is_space(p[3]))
+        return (const char *)0;
+    p += 3;
+    while (rsh_is_space(*p)) p++;
+    if (*p == '\0') return (const char *)0;
+    return p;
+}
+
+void rsh_line_begin(struct rsh_line *l, char *buf, int cap)
+{
+    l->buf = buf;
+    l->cap = cap;
+    l->pos = 0;
+    l->overflow = 0;
+    l->junk = 0;
+    l->local = 0;
+    l->bytes = 0;
+    if (cap > 0) buf[0] = '\0';
+}
+
+int rsh_line_feed(struct rsh_line *l, int ch, int from_serial, int at_start,
+                  int followed)
+{
+    int cls;
+
+    if (ch == '\n' || ch == '\r') return RSH_LINE_DONE;
+    cls = rsh_esc_classify(ch, from_serial, at_start, followed);
+    /* 閉じる ESC は数えない (行頭の単独 ESC に EOT を返さないため) */
+    if (cls == RSH_ESC_EXIT) return RSH_LINE_EXIT;
+    l->bytes++;
+    if (!from_serial) l->local = 1;
+    if (cls == RSH_ESC_JUNK) {
+        l->junk = 1;
+        return RSH_LINE_MORE;
+    }
+    if (l->pos >= l->cap - 2) {
+        l->overflow = 1;
+    } else {
+        l->buf[l->pos++] = (char)ch;
+        l->buf[l->pos] = '\0';
+    }
+    return RSH_LINE_MORE;
+}
+
+int rsh_line_idle(const struct rsh_line *l)
+{
+    if (!l->junk) return RSH_LINE_DONE;
+    /* 拒否した行は沈黙では閉じない。行末 (\n / \r) が来るまで待つ */
+    return RSH_LINE_MORE;
+}
+
+int rsh_line_rest(struct rsh_line *l, int r, int ch, int fs,
+                  struct serial_watchdog *w, const struct rsh_io *io)
+{
+    while (r == RSH_LINE_MORE) {
+        /* **拒否した行を待つ間も番犬を見る** (Codex P2)。バイトが来続けても
+         * 見るよう、空回りの後だけでなく毎周見る。拒否していない行は短い
+         * 空回りで終わり、行頭の待ちが番犬を見るのでここでは触らない
+         * (ack の行を受けている途中で期限を切らない)。 */
+        if (l->junk && w &&
+            serial_watchdog_poll(w, io->tick(io->ctx)) == SER_WD_REVERT) {
+            /* 速度が変わった — 受けたバイト列には意味が無いので捨てる */
+            rsh_line_begin(l, l->buf, l->cap);
+            return RSH_LINE_REVERT;
+        }
+        if (ch < 0) {
+            int t = 0;
+            while (t < RSH_REST_SPIN) {
+                ch = io->getch(io->ctx, &fs);
+                if (ch >= 0) break;
+                t++;
+            }
+        }
+        if (ch < 0) {
+            r = rsh_line_idle(l);
+            if (r == RSH_LINE_MORE) io->idle(io->ctx);
+            continue;
+        }
+        r = rsh_line_feed(l, ch, fs, 0, 1);
+        ch = -1;
+    }
+    return r;
+}

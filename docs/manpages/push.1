@@ -10,7 +10,10 @@ SerialFS 経由でホストへファイルを送信する
 
 RS-232C (SerialFS) 経由で、ゲスト内のファイル LOCAL を
 ホスト側のパス PATH へアップロードする。
-事前に `serial` コマンドで RS-232C の初期化と SerialFS のマウントが必要。
+`/host` が要る。NP21/W では HostDrv、実機ではホストの
+`tools/rshell_serial.py --serve-host <dir> cmd "sfs run push ..."` が開く
+SerialFS のセッションの中 (`sfs` を参照)。SerialFS ではホストが
+`--allow-write <PATH>` で許したパスにしか書けない (既定は書き込み禁止)。
 
 ## EXAMPLES
 
@@ -18,4 +21,4 @@ RS-232C (SerialFS) 経由で、ゲスト内のファイル LOCAL を
 
 ## SEE ALSO
 
-recv, upload, send, serial
+recv, upload, send, serial, sfs

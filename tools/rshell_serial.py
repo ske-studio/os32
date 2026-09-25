@@ -33,11 +33,27 @@ Windows 側の Python (pyserial 入り) で動かす:
      `--baud N` で開く。実機 (2026-09-23) で戻し忘れたまま 9600 で開いて
      3 回続けて化けた。
 
+--serve-host DIR で **シリアル越しの /host** を出す (票 TASK_SERIAL_HOSTFS 部品 B):
+  ... --port COM3 --fast 115200 --serve-host ./hostdrv cmd sfs run hsync boot
+ゲストの `sfs run <コマンド行>` (常駐シェルの組込み) が SerialFS のセッションを
+開き、`/host` に DIR をマウントしてコマンドを走らせる。ホストは **`sfs run` の
+行を送ってから行末の EOT までだけ** フレームを解釈して答える (それ以外の行は
+従来どおり — セッション外の `cat` の本文で要求が動かない)。セッション中の
+ゲストの出力は溜められ、終わりに長さ付きのフレームで届く (`sfs: exit=N` を含む)。
+終了コードはゲストの子の終了コードが 0 なら 0、それ以外は 1。
+**ゲストからの書き込みは既定で禁止** — push の宛先などは `--allow-write <相対パス>`
+(複数可) で明示する (票 B-7')。`--serve-host` 無しの `sfs run` は送らずに断る。
+プロトコルは tools/serialfs_host.py と fs/sfs_proto.h。
+NP21/W (ai-debug) では `--port aidebug:http://127.0.0.1:8025` で COM1 を HTTP の
+/api/serial/read・write 越しに使える (ini は変えない。/api/cmd と同時に使わない)。
+⚠ 本文に EOT (0x04) を含む出力はセッション外では途中で切れる (既知の制約)。
+
 ⚠ 確認は **明示の合図** で行う。往復 1〜3 は `ver` の応答を本文とエコーで
 識別しようとして、遅れて届く EOT・本文の欠落・1 つずれた応答と穴が尽きなかった
 (票 §4 の「設計変更 (往復 6)」)。
 """
 import argparse
+import os
 import sys
 import time
 
@@ -50,6 +66,14 @@ except ImportError:  # pragma: no cover
     serial = None
 
 EOT = b"\x04"
+
+# SerialFS のホスト側 (同じディレクトリ)。pyserial と同じく import 時に
+# 落とさない — 無くても従来の cmd / repl は動く。
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import serialfs_host
+except ImportError:  # pragma: no cover
+    serialfs_host = None
 
 # `serial N` を送ってから閉じるまでの間合い [秒]。9600 で 14 文字 ≒ 15ms なので
 # 十分な余裕。短くすると行の途中でポートを閉じてゲストが切り替えを始めない。
@@ -96,7 +120,93 @@ SWITCH_PROBE_TIMEOUT_S = 5.0
 WATCHDOG_WAIT_S = 6.0
 
 
+class AidebugPort(object):
+    """NP21/W (ai-debug フォーク) の COM1 を HTTP で読み書きする口。
+
+    `--port aidebug:http://127.0.0.1:8025` で使う。aidebug=true の NP21/W は COM1 を
+    内部のリングにつなぎ、`GET /api/serial/read` (ゲスト → ホストの生バイト、16 進) と
+    `POST /api/serial/write` (ホスト → ゲスト、16 進) を出している
+    (np21w-src の aidebug_api.cpp)。**ini は変えない** ([D2])。pyserial の Serial の
+    うち、この道具が使う read / write / flush / reset_input_buffer / close だけを持つ。
+    ⚠ **NP21/W は通信速度を模擬しない** — ここで通っても実機の 115200 は別に確かめる。
+    ⚠ /api/cmd と同じリングを読むので、同時に /api/cmd を使わないこと。
+    """
+
+    def __init__(self, url, timeout=0.2, urlopen=None):
+        import urllib.request
+        self.url = url.rstrip("/")
+        self.timeout = timeout
+        self.pending = bytearray()
+        self._urlopen = urlopen or urllib.request.urlopen
+        self._cancel = False
+
+    def _read_once(self):
+        import json
+        with self._urlopen(self.url + "/api/serial/read", timeout=10) as r:
+            obj = json.loads(r.read().decode("utf-8"))
+        return bytes.fromhex(obj.get("hex", ""))
+
+    @property
+    def in_waiting(self):
+        return len(self.pending)
+
+    def read(self, n):
+        """来ている分が無ければ timeout まで待つ (pyserial と同じ)。待ちは 10ms
+        刻みで、cancel_read() が来たら空で戻る (受信スレッドを止めるため)。
+        pending に残った分は捨てない (次の read が返す)。"""
+        deadline = time.monotonic() + self.timeout
+        while not self.pending and not self._cancel:
+            self.pending += self._read_once()
+            if self.pending or time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        self._cancel = False
+        out = bytes(self.pending[:n])
+        del self.pending[:n]
+        return out
+
+    def cancel_read(self):
+        """待っている read を空で戻す (pyserial の Serial.cancel_read と同じ名)。"""
+        self._cancel = True
+
+    def write(self, data):
+        import urllib.request
+        req = urllib.request.Request(self.url + "/api/serial/write",
+                                     data=bytes(data).hex().encode("ascii"),
+                                     method="POST")
+        with self._urlopen(req, timeout=10) as r:
+            r.read()
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def reset_input_buffer(self):
+        self.pending = bytearray()
+        while self._read_once():
+            pass
+
+    def close(self):
+        pass
+
+
+AIDEBUG_PREFIX = "aidebug:"
+
+
+def read_size(port):
+    """来ている分 (in_waiting)、無ければ 1。serialfs_host.read_size と同じ規則
+    (こちらは serialfs_host が無くても動くように持つ)。"""
+    try:
+        n = int(getattr(port, "in_waiting", 0) or 0)
+    except Exception:  # noqa: BLE001
+        n = 0
+    return n if n > 0 else 1
+
+
 def open_port(name, baud):
+    if name.startswith(AIDEBUG_PREFIX):
+        # NP21/W の COM1 (速度は模擬されないので baud は使わない)
+        return AidebugPort(name[len(AIDEBUG_PREFIX):])
     return serial.Serial(name, baudrate=baud, bytesize=8, parity="N",
                          stopbits=1, timeout=0.2)
 
@@ -106,7 +216,9 @@ def read_until_eot(port, timeout_s):
     buf = bytearray()
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        chunk = port.read(256)
+        # **来ている分だけ読む。** read(256) は 256 バイト揃うか timeout (0.2s)
+        # まで戻らないので、短い応答ごとに 200ms 止まっていた (Fable M1)。
+        chunk = port.read(read_size(port))
         if chunk:
             i = chunk.find(EOT)
             if i >= 0:
@@ -314,7 +426,9 @@ def main():
         pass
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--port", required=True, help="COM3 など")
+    ap.add_argument("--port", required=True,
+                    help="COM3 / /dev/ttyUSB0 など。NP21/W の COM1 は "
+                         "aidebug:http://127.0.0.1:8025 (HTTP の /api/serial/*)")
     ap.add_argument("--baud", type=int, default=9600)
     ap.add_argument("--timeout", type=float, default=15.0,
                     help="EOT を待つ秒数 ([V3]: 15 以上、長いコマンドは 60+)")
@@ -325,6 +439,14 @@ def main():
     ap.add_argument("--keep-fast", action="store_true",
                     help="終わるときに --baud へ戻さず、ゲストを --fast の"
                          " 速度に残す (次の呼び出しは --baud N で開く)")
+    ap.add_argument("--serve-host", metavar="DIR", default=None,
+                    help="`sfs run ...` の行のあいだ DIR をゲストの /host として"
+                         "シリアル越しに出す (票 TASK_SERIAL_HOSTFS 部品 B)")
+    ap.add_argument("--allow-write", metavar="RELPATH", action="append",
+                    default=[],
+                    help="--serve-host の下でゲストが書いてよいパス (ルート相対、"
+                         "その下も含む。複数可)。**既定は書き込み禁止** — "
+                         "push の宛先はここに含める (票 B-7')")
     sub = ap.add_subparsers(dest="mode", required=True)
     p_cmd = sub.add_parser("cmd", help="1 コマンドを送って応答を出す")
     p_cmd.add_argument("line", nargs="+")
@@ -373,6 +495,69 @@ def main():
     return rc
 
 
+def run_line(args, port, line, server=None, out=None):
+    """1 行を送って応答を出す。戻り値 (終了コード, 応答の文字)。
+
+    **`--serve-host` があり、行が `sfs run ...` のときだけ** SerialFS の
+    フレームを解釈する (serve_line)。それ以外は従来どおり EOT まで読む
+    だけで、本文に `ENQ 'S' 'F'` が並んでいても何も答えない。
+    """
+    out = out or sys.stdout
+    is_sfs = (serialfs_host is not None and
+              serialfs_host.sfs_child(line) is not None)
+    if is_sfs and server is None:
+        # 答える者が居ないのに送ると、ゲストは HELLO の期限 (約 10 秒) まで
+        # 線を占有して断るだけ (Fable m4)。送らずに断る。
+        print("[rshell_serial] 'sfs run' needs --serve-host DIR "
+              "(not sent)")
+        return 2, ""
+    if is_sfs:
+        r = serialfs_host.serve_line(port, line, server, args.timeout, out)
+        text = r["text"].decode("utf-8", errors="replace")
+        if not r["eot"]:
+            print("\n[rshell_serial] timeout waiting for EOT (%.0fs without "
+                  "progress)" % args.timeout)
+            return 1, text
+        if not check_echo(text, line):
+            print("[rshell_serial] desync: expected echo of %r" % line)
+            return 1, text
+        if r["exit"] is None:
+            print("[rshell_serial] sfs: session did not run (no EXIT frame)")
+            return 1, text
+        code, dropped, flags = r["exit"]
+        print("[rshell_serial] sfs exit=%d sent=%d late=%d after_bye=%d "
+              "bad_frames=%d%s%s"
+              % (code, r["sent"], r["late"], r["after_bye"], r["bad_frames"],
+                 " log_dropped=%d" % dropped if dropped else "",
+                 " line_not_quiet" if flags & serialfs_host.XF_NOT_QUIET
+                 else ""))
+        return (0 if code == 0 else 1), text
+    text, ok = send_cmd(port, line, args.timeout)
+    out.write(text)
+    if not ok:
+        print("\n[rshell_serial] timeout waiting for EOT (%.0fs)" % args.timeout)
+        return 1, text
+    # **応答がこのコマンドのものか確かめる** (往復 2 B3)。EOT の対応が
+    # 1 つずれていると、以後ずっと前のコマンドの応答を読み続ける。
+    if not check_echo(text, line):
+        print("[rshell_serial] desync: expected echo of %r" % line)
+        return 1, text
+    return 0, text
+
+
+def make_server(args):
+    if not args.serve_host:
+        return None
+    if serialfs_host is None:
+        raise SystemExit("--serve-host には tools/serialfs_host.py が要る")
+    fs = serialfs_host.HostFS(args.serve_host,
+                              allow_write=args.allow_write or ())
+    print("[serve-host] %s (%s, writable: %s)" % (
+        args.serve_host, "fd-pinned" if fs.secure else "path-checked",
+        ", ".join(args.allow_write) if args.allow_write else "none"))
+    return serialfs_host.Server(fs, log=lambda m: print(m))
+
+
 def run_mode(args, port, baud):
     """sync / cmd / repl の本体。戻り値 (終了コード, port, baud)。
 
@@ -385,19 +570,11 @@ def run_mode(args, port, baud):
         sys.stdout.write(body.decode("utf-8", errors="replace"))
         print("\n[sync] EOT %s" % ("ok" if ok else "TIMEOUT"))
         return (0 if ok else 1), port, baud
+    server = make_server(args)
     if args.mode == "cmd":
         line = " ".join(args.line)
-        text, ok = send_cmd(port, line, args.timeout)
-        sys.stdout.write(text)
-        if not ok:
-            print("\n[rshell_serial] timeout waiting for EOT (%.0fs)" % args.timeout)
-            return 1, port, baud
-        # **応答がこのコマンドのものか確かめる** (往復 2 B3)。EOT の対応が
-        # 1 つずれていると、以後ずっと前のコマンドの応答を読み続ける。
-        if not check_echo(text, line):
-            print("[rshell_serial] desync: expected echo of %r" % line)
-            return 1, port, baud
-        return 0, port, baud
+        rc, _ = run_line(args, port, line, server)
+        return rc, port, baud
     # repl
     print("[rshell_serial] %s %dbps — 'exit' でゲストの rshell も閉じる" % (args.port, baud))
     while True:
@@ -418,16 +595,11 @@ def run_mode(args, port, baud):
             if not ok:
                 print("[rshell_serial] not sending 'exit' — guest speed unknown")
                 return 1, port, baud
-        text, ok = send_cmd(port, line, args.timeout)
-        sys.stdout.write(text)
+        # EOT の対応のずれ (往復 2 B3) と時間切れは run_line が表示する。
+        # 対話は続けられるが **黙って進まない**。
+        _, text = run_line(args, port, line, server)
         if not text.endswith("\n"):
             print()
-        if not ok:
-            print("[rshell_serial] timeout waiting for EOT")
-        elif not check_echo(text, line):
-            # EOT の対応が 1 つずれている (往復 2 B3)。対話は続けられるが
-            # **黙って進まない** — 読んでいる応答が別のコマンドのもの。
-            print("[rshell_serial] desync: expected echo of %r" % line)
         if line.strip() == "exit":
             return 0, port, baud
 

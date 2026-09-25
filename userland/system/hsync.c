@@ -85,6 +85,10 @@
  * 同じ .inc をこちら側でもコンパイルして同じ値を得る。 */
 #include "lib/crc32_core.inc"
 
+/* `/boot/vmkernel.old` を作ってよいかの純規則 (票 TASK_SERIAL_HOSTFS §1-v3)。
+ * ホスト試験は tools/tests/test_serialfs.py (hsync_bootold)。 */
+#include "hsync_bootold.inc"
+
 /* コピーは 64KB 単位。比較はその 64KB を 32KB x 2 に割って使う
  * (設計書 §4.3: ファイル全体を確保しない)。 */
 #define FILE_BUF_SIZE  (64 * 1024)
@@ -132,6 +136,12 @@
 #define HR_SYNC_FAILED     "sync_failed"      /* 置換後の vfs_sync が落ちた */
 #define HR_PROT_RESERVED   "protected"        /* 予約名だが保護対象の実体 */
 #define HR_RESERVED_NAME   "reserved_name"    /* コピー元に予約名 .hs~ が在る */
+/* ---- 票 TASK_SERIAL_HOSTFS (vmkernel の .old) ---- */
+#define HR_OLD_NO_INFO     "boot_image_unknown" /* 起動したイメージの記録が無い */
+#define HR_OLD_DISK        "boot_image_unreadable" /* 今の vmkernel.lz4 が VK32 v2 として読めない */
+#define HR_OLD_DIFF        "not_booted_image"   /* 今の vmkernel.lz4 は起動した版でない */
+#define HR_OLD_CORRUPT     "boot_image_corrupt" /* image_crc 欄と中身が合わない */
+#define HR_OLD_FAILED      "backup_failed"      /* .old の複製・検証・rename の失敗 */
 
 /* hsync の**予約接頭辞** (票 H2 §2-4、決裁 D3 (a'))。この接頭辞で始まる名前は
  * hsync が作り、hsync が消す。所有の根拠は「作った印」ではなく**予約された
@@ -196,6 +206,7 @@ static int g_root_sync;
 /* 更新した先に応じた再起動の案内 (設計書 §7.2)。自動では再起動しない */
 static int g_touched_sys;
 static int g_touched_boot;
+static int g_no_backup;              /* --no-backup (vmkernel.old を作らない) */
 
 /* ======== 文字列ユーティリティ ======== */
 
@@ -1602,6 +1613,127 @@ static int apply_mtime(const char *target, const char *label, u32 src_mtime)
     return -1;
 }
 
+/* ======== /boot/vmkernel.old (票 TASK_SERIAL_HOSTFS §1-v3) ======== */
+
+#define HS_KERNEL_PATH  "/boot/vmkernel.lz4"
+#define HS_KERNEL_OLD   "/boot/vmkernel.old"
+
+/* path の VK32 の CRC (image_crc 欄を 0 として) と、欄に書いてある値。0 / -1 */
+static int kernel_disk_crc(const char *path, u32 *out, u32 *stored)
+{
+    int fd, got, first = 1;
+    u32 state = CRC32_INIT, pos = 0, off = 0, k;
+
+    *stored = 0;
+    fd = api->sys_open(path, KAPI_O_RDONLY);
+    if (fd < 0) return -1;
+    for (;;) {
+        got = read_fill(fd, file_buf, FILE_BUF_SIZE);
+        if (got < 0) { api->sys_close(fd); return -1; }
+        if (first) {
+            if (hbo_crc_offset(file_buf, (u32)got, &off) != 0) {
+                api->sys_close(fd);
+                return -1;
+            }
+            first = 0;
+        }
+        if (got == 0) break;
+        /* 欄に書いてある値を拾う (欄がチャンクをまたいでも 1 バイトずつ) */
+        for (k = 0; k < 4; k++) {
+            if (off + k >= pos && off + k < pos + (u32)got)
+                *stored |= (u32)file_buf[off + k - pos] << (8 * k);
+        }
+        state = hbo_crc_update(state, file_buf, (u32)got, pos, off);
+        pos += (u32)got;
+        if (got < FILE_BUF_SIZE) break;
+    }
+    api->sys_close(fd);
+    *out = crc32_core_final(state);
+    return 0;
+}
+
+/* 置き換える前の門。0 = 進んでよい / -1 = 断った (表示と errors は済み)。
+ * **断るのは置き換えの前** — 旧宛先はそのまま残る。 */
+static int kernel_backup(const char *dst_path, const OS32_Stat *ds)
+{
+    BootImageInfo bi;
+    char tmp[OS32_MAX_PATH];
+    const char *reason = HR_IO;
+    u32 disk_crc = 0, stored = 0, crc = 0, total = 0;
+    int have = 0, disk_ok, dec, fd, rc;
+
+    if (!g_no_backup && api->version >= 65 &&
+        api->boot_image_info(&bi) == 0 && bi.crc_valid)
+        have = 1;
+    disk_ok = (!g_no_backup && have) ?
+              (kernel_disk_crc(dst_path, &disk_crc, &stored) == 0) : 0;
+    dec = hbo_decide(g_no_backup, have, have ? bi.image_crc : 0,
+                     disk_ok, disk_crc, stored);
+
+    if (dec == HBO_NO_BACKUP) {
+        api->kprintf(ATTR_YELLOW, "  NOTE %s: --no-backup なので %s は作らない\n",
+                     dst_path, HS_KERNEL_OLD);
+        return 0;
+    }
+    if (dec != HBO_MAKE) {
+        const char *why = (dec == HBO_REFUSE_INFO) ? HR_OLD_NO_INFO :
+                          (dec == HBO_REFUSE_DISK) ? HR_OLD_DISK :
+                          (dec == HBO_REFUSE_CORRUPT) ? HR_OLD_CORRUPT : HR_OLD_DIFF;
+        api->kprintf(ATTR_RED,
+                     "  FAIL %s reason=%s (booted crc=%08X disk crc=%08X%s)\n"
+                     "       起動した版と確かめられないので %s を作れず、置き換えない。\n"
+                     "       (FD 起動・前回の更新の後に未起動など。承知の上なら --no-backup)\n",
+                     dst_path, why, have ? bi.image_crc : 0, disk_crc,
+                     have ? "" : ", no boot record", HS_KERNEL_OLD);
+        g_errors++;
+        return -1;
+    }
+    if (g_dry_run) {
+        api->kprintf(ATTR_CYAN, "  PLAN %s reason=backup (booted crc=%08X)\n",
+                     HS_KERNEL_OLD, disk_crc);
+        return 0;
+    }
+
+    /* 複製 → 検証 → rename。本名 (.old) が存在しない時間を作らない */
+    if (!build_temp_path(HS_KERNEL_OLD, tmp, (int)sizeof(tmp))) {
+        fail_file(HS_KERNEL_OLD, HR_NAME_TOO_LONG, 0);
+        return -1;
+    }
+    fd = api->sys_open(tmp, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_EXCL);
+    if (fd == OS32_ERR_EXIST && remove_stale_temp(tmp) == 0)
+        fd = api->sys_open(tmp, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_EXCL);
+    if (fd < 0) {
+        fail_file(HS_KERNEL_OLD, HR_OLD_FAILED, fd);
+        return -1;
+    }
+    rc = copy_body(dst_path, fd, &crc, &total, &reason);
+    api->sys_close(fd);
+    if (rc != 0 || total != ds->st_size || api->vfs_sync() != 0 ||
+        verify_readback(tmp, crc, total) != 0) {
+        fail_before_publish(HS_KERNEL_OLD, tmp, HR_OLD_FAILED, 0);
+        return -1;
+    }
+    /* **公開する一時ファイル自身を**起動記録と突き合わせる (Codex 2)。
+     * 判定から複製までの間に本名が差し替わっていても、起動した版でない
+     * ものを .old として公開しない。既存の .old はここまで手付かず。 */
+    {
+        u32 tcrc = 0, tstored = 0;
+        int tok = (kernel_disk_crc(tmp, &tcrc, &tstored) == 0);
+        if (hbo_decide(0, 1, bi.image_crc, tok, tcrc, tstored) != HBO_MAKE) {
+            fail_before_publish(HS_KERNEL_OLD, tmp, HR_OLD_FAILED, 0);
+            return -1;
+        }
+    }
+    rc = api->sys_rename(tmp, HS_KERNEL_OLD);
+    if (rc != 0 || api->vfs_sync() != 0) {
+        fail_before_publish(HS_KERNEL_OLD, tmp, HR_OLD_FAILED, rc);
+        return -1;
+    }
+    api->kprintf(ATTR_GREEN, "  BACKUP %s -> %s size=%d crc=%08X\n",
+                 dst_path, HS_KERNEL_OLD, (int)total, disk_crc);
+    return 0;
+}
+
 static void sync_file(const char *src_path, const char *dst_path)
 {
     OS32_Stat ss;
@@ -1724,6 +1856,13 @@ static void sync_file(const char *src_path, const char *dst_path)
             api->kprintf(ATTR_WHITE, "  SAME %s size=%d reason=%s\n",
                          dst_path, (int)size, HR_SAME_CONTENT);
         return;
+    }
+
+    /* 票 TASK_SERIAL_HOSTFS: カーネルを置き換える前に、起動した版なら
+     * .old に残す。確かめられなければ**置き換えない** (--no-backup で進む)。
+     * dry-run では判定だけ出す (書かない)。 */
+    if (dst_exists && str_cmp(dst_path, HS_KERNEL_PATH) == 0) {
+        if (kernel_backup(dst_path, &ds) != 0) return;
     }
 
     if (g_dry_run) {
@@ -2144,6 +2283,7 @@ static void usage(void)
                  HS_MANIFEST_PATH);
     api->kprintf(ATTR_WHITE, "      --force-kapi 配備物の KAPI 配置・版を確かめられなくても続ける\n");
     api->kprintf(ATTR_WHITE, "                  (既定は名札の kapi= がカーネルと違う/新しい/無いなら断る)\n");
+    api->kprintf(ATTR_WHITE, "      --no-backup /boot/vmkernel.lz4 を置き換える前に vmkernel.old を作らない\n");
     api->kprintf(ATTR_WHITE, "  -h, --help      この表示\n");
     api->kprintf(ATTR_WHITE, "  dir             同期対象は 1 つだけ (例: bin, sys, usr/bin)\n");
     api->kprintf(ATTR_WHITE, "  既定: サイズか日時が違うものだけ内容を比較し、違えばコピーする\n");
@@ -2185,6 +2325,7 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     g_root_sync = 1;
     g_touched_sys = 0;
     g_touched_boot = 0;
+    g_no_backup = 0;
     g_abort = 0;
     file_buf = 0;
     /* 票 H4 */
@@ -2231,6 +2372,10 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
                     return 1;
                 }
                 g_expect_build = argv[++i];
+            } else if (str_cmp(a, "--no-backup") == 0) {
+                /* 票 TASK_SERIAL_HOSTFS: /boot/vmkernel.lz4 を置き換える前の
+                 * .old を作らない (起動した版と確かめられないときに進む口) */
+                g_no_backup = 1;
             } else if (str_cmp(a, "-n") == 0 ||
                        str_cmp(a, "--dry-run") == 0) {
                 g_dry_run = 1;

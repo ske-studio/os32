@@ -4,7 +4,7 @@ HostDrv同期コマンド
 
 ## SYNOPSIS
 
-`hsync [-f] [--verify] [-n] [-v] [--unsafe-overwrite] [--expect-build ID] [--force-kapi] [dir]`
+`hsync [-f] [--verify] [-n] [-v] [--unsafe-overwrite] [--expect-build ID] [--force-kapi] [--no-backup] [dir]`
 
 ## DESCRIPTION
 
@@ -344,6 +344,23 @@ STALE  /bin/.hs~wc (一時ファイルを消せない err=-15。次の実行が�
 旨を表示する。shlib は起動時ロード、カーネルはブート時ロードなので、
 **hsync の成功は稼働版の切替完了ではない**。再起動は自動では行わない。
 
+## カーネルの .old (票 TASK_SERIAL_HOSTFS §1-v3)
+
+`/boot/vmkernel.lz4` を置き換える前に、**ディスク上の今の vmkernel.lz4 の CRC**
+(VK32 v2 のファイル全体の CRC32、`image_crc` 欄を 0 として) と**起動したイメージの
+CRC** (ローダが検査して記録した値、`ver` の `Image CRC:`、KAPI v65
+`boot_image_info`) を比べる。
+
+- 一致 → `/boot/vmkernel.old` を**複製 → 読戻し検証 → rename** で作ってから置き換える
+  (`BACKUP` 行)。本名が存在しない時間は作らない
+- 一致しない / 記録が無い / 読めない → **置き換えない** (`reason=not_booted_image` /
+  `boot_image_unknown` / `boot_image_unreadable`)。FD で起動した・前回の更新の後に
+  まだ再起動していない、のどれか。承知の上なら `--no-backup`
+- 戻すのはカーネルだけ。起動しなくなったら FD で起動し、`/hd0/boot/vmkernel.old` を
+  `/hd0/boot/vmkernel.lz4` へ戻す。**KAPI が上がる更新 (`hsync sys` を伴う) では
+  カーネルだけを戻しても `/sys` と食い違うので、復旧は保証しない** (決裁 5)。
+  ext2 は非ジャーナルなので電源断での媒体破損までは保証しない
+
 ## OPTIONS
 
 - `-f`, `--force` — 同一判定 (サイズ・日時・内容比較) を省いて上書きする。
@@ -369,6 +386,8 @@ STALE  /bin/.hs~wc (一時ファイルを消せない err=-15。次の実行が�
   (`reason=manifest_absent` / `manifest_invalid`)、範囲を絞った同期のときは
   表示だけして続ける (名札はルートの世代であって、絞った範囲を保証しない)。
   **読めて不一致と分かった場合は絞り込みでも断る**
+- `--no-backup` — `/boot/vmkernel.lz4` を置き換える前に `/boot/vmkernel.old` を
+  作らない (下の「カーネルの .old」)。起動した版と確かめられないときに進む口
 - `--force-kapi` — KAPI の門 (上の表) で断る状態でも、理由を表示して続ける。
   配置違いのユーザーランドを持ち込むと、アプリは exec で
   `rebuild required (KAPI data layout)` と断られ、`/sys` の常駐シェルなら

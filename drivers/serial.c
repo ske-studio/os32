@@ -54,6 +54,34 @@ static volatile int ser_tail = 0;
 static volatile int ser_count = 0;
 
 /* ======================================================================== */
+/*  SerialFS セッションのゲート (票 TASK_SERIAL_HOSTFS §1-v3)                */
+/*                                                                          */
+/*  **呼び口で分ける。** ゲートが上がっているあいだ:                        */
+/*   - 送信: `serial_putchar` / `serial_puts` (console の複写・KAPI・        */
+/*     ime_dict・ISR の kprintf がすべてここを通る) は線へ出さずに下の保留   */
+/*     リングへ溜める。線へ出せるのは `serial_gate_put` (SerialFS 専用) と   */
+/*     `serial_puts_polled` (パニック・例外。そのときセッションは死んでいる) */
+/*     だけ                                                                 */
+/*   - 受信: `serial_getchar` / `serial_trygetchar` / `serial_peekchar` /    */
+/*     `serial_has_data` (KAPI と kbd.c の 4 か所) は「無い」。読めるのは    */
+/*     `serial_gate_get` (SerialFS の受信器) だけ                            */
+/*   - `serial_init` / `serial_init_vfast` (速度変更) は断る                 */
+/*  持ち主は fs/serialfs_session.c だけ (exec_exit / ring3_fault_kill は     */
+/*  触らない)。                                                             */
+/* ======================================================================== */
+static volatile int s_gate = 0;
+static u8  s_hold[SER_HOLD_SIZE];
+static u32 s_hold_head = 0;       /* いちばん古いバイト */
+static u32 s_hold_count = 0;
+static u32 s_hold_dropped = 0;    /* 溢れて捨てた古いバイト */
+
+/* 受信の誤り (§1-v2「ISR の計数」)。ISR がリセットする前に数える。
+ * 実機の切り分け用に `serial` コマンドが出す (KAPI serial_diag)。 */
+static u32 ser_err_oe = 0;
+static u32 ser_err_fe = 0;
+static u32 ser_err_pe = 0;
+
+/* ======================================================================== */
 /*  PITモード値 (RS-232C通信速度設定用)                                    */
 /*  PC9800Bible §2-3: カウンタ#2 = RS-232C通信速度                             */
 /* ======================================================================== */
@@ -392,6 +420,12 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
 
 void serial_init(unsigned long baud)
 {
+    /* **セッション中は速度を変えない** (§1-v3)。ホストは今の速度で
+     * フレームを待っている。報告の kprintf は保留リングへ入る。 */
+    if (s_gate) {
+        kprintf(0x0E, "[ser] refuse serial_init during SerialFS session\n");
+        return;
+    }
     /* **従来の経路のまま。** 票の決裁「起動時の既定 9600 は互換モード」。
      * V･FAST 中に呼べば 013Ah bit7=0 / 0138h=0 を書いて互換へ戻る。 */
     (void)serial_init_ex(baud, 0);
@@ -399,6 +433,10 @@ void serial_init(unsigned long baud)
 
 int serial_init_vfast(unsigned long baud)
 {
+    if (s_gate) {
+        kprintf(0x0E, "[ser] refuse serial_init during SerialFS session\n");
+        return SER_INIT_REFUSED;
+    }
     /* FIFO 非搭載 / 表に無い速度なら serial_plan が互換を返すので、
      * ここは「頼んだ」ことを渡すだけ。戻り -1 = 互換に落ちた。 */
     return serial_init_ex(baud, 1);
@@ -439,8 +477,13 @@ void serial_irq_handler(void)
          * 直に書くと「送信が空くたびに受信データを読む」形で静かに壊れる。 */
         sts = (u8)inp(s_port_cmd);
 
-        /* エラーがあればリセット */
+        /* エラーがあれば数えてからリセット。ビットの意味はモードで違うので
+         * serial_plan の選択子で引く (FIFO の 0132h は資料と NP21/W が
+         * 食い違う — 数は目安)。 */
         if (sts & s_mask_err) {
+            if (sts & serial_oe_mask(s_setup.mode)) ser_err_oe++;
+            if (sts & serial_fe_mask(s_setup.mode)) ser_err_fe++;
+            if (sts & serial_pe_mask(s_setup.mode)) ser_err_pe++;
             outp(s_port_cmd, CMD_TXE | CMD_DTR | CMD_RXE | CMD_RTS | CMD_ER);
         }
 
@@ -496,6 +539,7 @@ int serial_is_initialized(void)
 
 int serial_has_data(void)
 {
+    if (s_gate) return 0;          /* 受信はセッションの受信器だけのもの */
     return ser_count > 0;
 }
 
@@ -503,6 +547,7 @@ int serial_has_data(void)
 int serial_trygetchar(void)
 {
     int ch;
+    if (s_gate) return -1;         /* rshell / kbd.c / KAPI にフレームを渡さない */
     if (ser_count == 0) return -1;
 
     RING_DEQUEUE(ch, ser_buf, ser_head, ser_count, SER_BUF_SIZE);
@@ -516,6 +561,7 @@ int serial_trygetchar(void)
  * IRQ4 は tail 側にしか触らないので、ser_count > 0 なら先頭は動かない。 */
 int serial_peekchar(void)
 {
+    if (s_gate) return -1;
     if (ser_count == 0) return -1;
     return (int)ser_buf[ser_head];
 }
@@ -524,7 +570,10 @@ int serial_peekchar(void)
 int serial_getchar(void)
 {
     int ch;
+    /* セッション中は待たずに「無い」(待つと SerialFS の応答を盗む) */
+    if (s_gate) return -1;
     while (ser_count == 0) {
+        if (s_gate) return -1;
         _halt();
     }
 
@@ -560,7 +609,7 @@ int serial_getchar(void)
 /*  そのときは予算の tick が尽きるまで素のスピンになるだけで、待ち時間       */
 /*  そのものは変わらない (これも tick で測る利点)。                          */
 /* ======================================================================== */
-int serial_putchar(char c)
+static int ser_tx_byte(char c)
 {
     u32 start;
     u32 spin;
@@ -599,6 +648,143 @@ int serial_putchar(char c)
      * 「EOT を送り終えた」ことを往復の証拠にしているので、ここで黙って
      * 捨てると「応答したつもり」で番犬を解除してしまう (Codex ③)。 */
     return SER_TX_DROPPED;
+}
+
+/* 保留リングへ 1 バイト。溢れたら**いちばん古い**バイトを捨てて数える
+ * (hsync の結果行と終了コードは最後に来るので、残すのは新しい方)。
+ * ISR の kprintf からも来るので IF を落として触る。 */
+static void ser_hold_push(u8 c)
+{
+    unsigned int f = irq_save();
+    if (s_hold_count >= (u32)SER_HOLD_SIZE) {
+        s_hold_head = (s_hold_head + 1) % (u32)SER_HOLD_SIZE;
+        s_hold_count--;
+        s_hold_dropped++;
+    }
+    s_hold[(s_hold_head + s_hold_count) % (u32)SER_HOLD_SIZE] = c;
+    s_hold_count++;
+    irq_restore(f);
+}
+
+int serial_putchar(char c)
+{
+    /* セッション中は線へ出さずに溜める (後で長さ付きのフレームで運ぶ) */
+    if (s_gate) {
+        ser_hold_push((u8)c);
+        return SER_TX_OK;
+    }
+    return ser_tx_byte(c);
+}
+
+/* ======================================================================== */
+/*  ゲートの口 (fs/serialfs_session.c だけが使う)                          */
+/* ======================================================================== */
+void serial_gate_set(int on)
+{
+    unsigned int f = irq_save();
+    if (on) {
+        s_hold_head = 0;
+        s_hold_count = 0;
+        s_hold_dropped = 0;
+    }
+    /* 上げるときも下ろすときも受信リングを空にする。上げるとき = 前の
+     * 会話の残り、下ろすとき = 隔離の後に届いたセッションの残り
+     * (rshell にフレームの断片を 1 バイトも渡さない)。
+     * **UART / FIFO に残っているバイトも先に読み捨てる** — ISR がまだ汲んで
+     * いない分 (FIFO モードの閾値未満の末尾) は、下ろした直後に ISR が
+     * リングへ入れて rshell に渡してしまう (レビュー往復 1、Codex 6)。 */
+    {
+        int n;
+        for (n = 0; n < SER_GATE_DRAIN_MAX; n++) {
+            u8 sts = (u8)inp(s_port_cmd);
+            if (sts & s_mask_err)
+                outp(s_port_cmd, CMD_TXE | CMD_DTR | CMD_RXE | CMD_RTS | CMD_ER);
+            if (!(sts & s_mask_rxrdy)) break;
+            (void)inp(s_port_data);
+        }
+    }
+    ser_head = 0;
+    ser_tail = 0;
+    ser_count = 0;
+    s_gate = on ? 1 : 0;
+    irq_restore(f);
+}
+
+int serial_gate_active(void)
+{
+    return s_gate;
+}
+
+int serial_gate_put(const u8 *buf, u32 n)
+{
+    u32 i;
+    for (i = 0; i < n; i++) {
+        if (ser_tx_byte((char)buf[i]) != SER_TX_OK) return SER_TX_DROPPED;
+    }
+    return SER_TX_OK;
+}
+
+/* RxRDY を**直接**見て、FIFO に残った末尾も汲み出してから 1 バイト返す
+ * (FIFO モードでは ISR が閾値未満の数バイトを取り残す。NP21/W では出ない)。
+ * ISR と同じポートを読むので IF を落として行う。 */
+int serial_gate_get(void)
+{
+    unsigned int f;
+    int ch = -1;
+    int n;
+
+    f = irq_save();
+    for (n = 0; n < SER_FIFO_DEPTH; n++) {
+        u8 sts = (u8)inp(s_port_cmd);
+        if (sts & s_mask_err) {
+            if (sts & serial_oe_mask(s_setup.mode)) ser_err_oe++;
+            if (sts & serial_fe_mask(s_setup.mode)) ser_err_fe++;
+            if (sts & serial_pe_mask(s_setup.mode)) ser_err_pe++;
+            outp(s_port_cmd, CMD_TXE | CMD_DTR | CMD_RXE | CMD_RTS | CMD_ER);
+        }
+        if (!(sts & s_mask_rxrdy)) break;
+        {
+            u8 data = (u8)inp(s_port_data);
+            if (ser_count < SER_BUF_SIZE) {
+                ser_buf[ser_tail] = data;
+                ser_tail = (ser_tail + 1) % SER_BUF_SIZE;
+                ser_count++;
+            } else {
+                ser_overflow_n++;
+            }
+        }
+    }
+    if (ser_count > 0) {
+        RING_DEQUEUE(ch, ser_buf, ser_head, ser_count, SER_BUF_SIZE);
+    }
+    irq_restore(f);
+    return ch;
+}
+
+u32 serial_hold_take(u8 *buf, u32 max)
+{
+    unsigned int f = irq_save();
+    u32 n = 0;
+    while (n < max && s_hold_count > 0) {
+        buf[n++] = s_hold[s_hold_head];
+        s_hold_head = (s_hold_head + 1) % (u32)SER_HOLD_SIZE;
+        s_hold_count--;
+    }
+    irq_restore(f);
+    return n;
+}
+
+u32 serial_hold_dropped(void)
+{
+    return s_hold_dropped;
+}
+
+void serial_diag_get(u32 *oe, u32 *fe, u32 *pe, u32 *overflow)
+{
+    if (oe) *oe = ser_err_oe;
+    if (fe) *fe = ser_err_fe;
+    if (pe) *pe = ser_err_pe;
+    if (overflow) *overflow = ser_overflow_n;
 }
 
 /* 文字列送信。

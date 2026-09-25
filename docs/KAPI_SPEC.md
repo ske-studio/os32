@@ -1,4 +1,4 @@
-# KernelAPI v65 仕様書
+# KernelAPI v66 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -109,6 +109,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v64 | **実装済み (2026-09-24、手元ビルドのみ)** | HDD の一時置き場 (票 TASK_HDD_INSTALL 段 1): `ext2_format_at` / `dev_mount_count` / `sys_umount_checked` / `hdd_geom_info` の 4 本 (slot 230〜233 = 0x3A0〜0x3AC。データ欄は v63 で固定済みなので動かない、crt の `kapi` の実名も `os32_kapi_v63` のまま)。`ext2_format_at` は区画表を読まずに範囲だけに作る (ディスク総数超過・LBA 0〜17・桁あふれは 1 バイトも書かずに断る)、`sys_umount_checked` は sync を先に呼んで失敗なら外さない、`hdd_geom_info` は BIOS 幾何 (INT 1Bh AH=84h) と IDENTIFY と I/O の方式を `HddGeom` (32 バイト) に写す。同じ版で ATA I/O を LBA28 (word 49 bit9) に、区画表を PC-98 標準配置に、ext2 の区画探索を「見つからなければ失敗」に変えた — **旧配置の NHD は `make nhd-migrate-pt` で移す** ([08_build.md](08_build.md) §8-4)。配備は**カーネルを先** | [tasks/realhw/TASK_HDD_INSTALL.md](tasks/realhw/TASK_HDD_INSTALL.md) 段 1 |
 | v62 | **実装済み (2026-09-23、手元ビルドのみ)** | キーボード 8251 の診断 `kbd_diag` 1 本 (slot 229 = 0x39C、data_fields は 0x3A0 / 0x3A4 へ)。`KbdDiag` (24 バイト、`os32_kapi_shared.h`) を呼び手のバッファへ写す — IRQ1 回数・空 IRQ (RxRDY = 0)・エラー (PE/FE)・オーバーラン (OE だけ、バイトは使う)・起動時に読み捨てたバイト数・`kbd_init` の前後の 0043h・直近の 0043h とスキャンコード・書いたコマンド語・呼んだ時点の 0043h。戻り 0 / `OS32_ERR_INVAL` (`out` が NULL)。出力は生成ラッパの `out` 検査 (読み取り専用の USER ページなら `ring3_fault_kill`)。シェルの `kbdstat` が 1 行で出す。同じ変更でカーネルが 0043h に書くコマンド語を **0x14 → 0x16** (DTR = 1 = RTY# HIGH、BIOS の定常値) に直した — 実機 PC-9821Ra266 で打鍵が一切届かなかった件。実体は `drivers/kbd.c` / `drivers/kbd_status.c` | [POLICY_DEBUG.md](POLICY_DEBUG.md) §4-57 |
 | v65 | **実装済み (2026-09-24、手元ビルドのみ)** | 起動したイメージの識別 (票 TASK_SERIAL_HOSTFS 部品 A-4): `boot_image_info` 1 本 (slot 234 = 0x3B0)。`BootImageInfo` (40 バイト) に**ローダが検査して起動した** `vmkernel.lz4` のファイル全体の CRC32・長さ・記録の有無・どのローダか (FD / HDD) と、カーネルを組んだ git のコミット ID を写す。0 / `OS32_ERR_INVAL` (`out` が NULL)。同じ版で **VK32 を v2** (エントリごとの展開後 CRC32 + 完全長 + ファイル全体の CRC32、`boot/boot_defs.h`) に、**ブート情報域を v2** (0x30〜0x3F のイメージ欄、`include/bootinfo.h`) にした — v1 のイメージはどちらのローダも `VK32: unknown version` で止まる。**ローダ (FD イメージ / HDD の LBA 2〜17) と `vmkernel.lz4` を同時に入れ替える** (旧ローダと新イメージ・新ローダと旧イメージはどちらも起動しない)。`ver` と起動画面に `Commit:` / `Image CRC:` | [tasks/realhw/TASK_SERIAL_HOSTFS.md](tasks/realhw/TASK_SERIAL_HOSTFS.md) 部品 A-4 |
+| v66 | **実装済み (2026-09-25、手元ビルドとホスト試験のみ)** | シリアル越しの /host (票 TASK_SERIAL_HOSTFS 部品 B): `sfs_begin` / `sfs_end` / `serial_diag` の 3 本 (slot 235〜237 = 0x3B4〜0x3BC)。常駐シェルの `sfs run <コマンド行>` だけがセッションを開き (送受信のゲート → HELLO → `/host` に SerialFS)、子がどう終わっても BYE → アンマウント → 隔離 → 溜めた出力と終了コードを長さ付きのフレームで送る → ゲートを下ろす。`serial_diag` は受信の OE / FE / PE と受信リング溢れの数。同じ版で `vfs_mount` が同じ prefix の二重登録を断る | [tasks/realhw/TASK_SERIAL_HOSTFS.md](tasks/realhw/TASK_SERIAL_HOSTFS.md) 部品 B |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -177,7 +178,7 @@ v62 まではデータ欄 (`sbrk_heap_limit` / `shm_base`) を関数表の**直�
 |---|---|---|
 | 関数表の容量 R | **300** スロット (`KAPI_FUNC_CAPACITY`) | `sdk/kapi.json` の `func_capacity` |
 | データ欄の先頭 | **0x4B8** = 8 + 4 × R (`KAPI_DATA_FIELDS_OFF`) | `sdk/gen_kapi.py` が生成 |
-| 予約スロット | 235〜299 (`kapi_reserved[65]`、v65 時点。v64 は 234〜299、v63 は 230〜299)。カーネルの表は `kapi_reserved_nosys` (= `OS32_ERR_NOSYS`)、CPL=3 のトランポリンは int 0x80 のスタブ (ディスパッチャが `slot >= KAPI_FUNC_COUNT` で kill)。**NULL にしない** | `exec/exec.c` |
+| 予約スロット | 238〜299 (`kapi_reserved[62]`、v66 時点。v65 は 235〜299、v64 は 234〜299、v63 は 230〜299)。カーネルの表は `kapi_reserved_nosys` (= `OS32_ERR_NOSYS`)、CPL=3 のトランポリンは int 0x80 のスタブ (ディスパッチャが `slot >= KAPI_FUNC_COUNT` で kill)。**NULL にしない** | `exec/exec.c` |
 | R の上限 | トランポリン 1 ページ: `sizeof(KernelAPI)` + スタブ 8B × R + 写し場 256B ≤ 4096 → **R ≤ 318** (`STATIC_ASSERT`) | `exec/exec.c` |
 
 関数を足すときは `kapi_reserved[]` が 1 本減るだけで、データ欄は動かない。**関数数が R を
@@ -1094,6 +1095,43 @@ LBA28、無ければ word 53 bit0 の現在の CHS、それも無ければ既定
 | 12 | `char[24]` | `commit` | NUL 終端 |
 | 36 | `u32` | `reserved2` | 0 |
 
+### シリアル越しの /host (v66)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x3B4 | sfs_begin | `int(void)` |
+| 0x3B8 | sfs_end | `int(int exit_code)` |
+| 0x3BC | serial_diag | `int(SerialDiag *out)` |
+
+票 [TASK_SERIAL_HOSTFS](tasks/realhw/TASK_SERIAL_HOSTFS.md) 部品 B (§1-v3)。呼ぶのは
+常駐シェルの `sfs run <コマンド行>` だけ (owner 1 以外は `OS32_ERR_INVAL`)。
+ホストは `tools/rshell_serial.py --serve-host <dir> cmd "sfs run ..."`、形式の正典は
+`fs/sfs_proto.h` (ホスト側の写しは `tools/serialfs_host.py`)。
+
+- **`sfs_begin`** — `/host` が空いていることを確かめ、送受信のゲート
+  (`drivers/serial.c`) を上げ、HELLO でセッション ID を得て、`/host` に SerialFS を
+  マウントする。0 / `OS32_ERR_INVAL` (owner 1 以外・シリアル未初期化・IF=0) /
+  `OS32_ERR_BUSY` (セッション中・`/host` 使用中) / `OS32_ERR_IO` (HELLO に答えが無い。
+  相手がセッションを始めている可能性を前提に隔離 (500ms 静まるまで、上限 5 秒) を
+  済ませてからゲートを下ろし、溜めた文字を生で流して戻る) / `vfs_mount` の負値
+  (BYE してゲートを下ろして戻る)。
+  `vfs_mount` は cwd を `/` に戻すので、呼び手が元へ戻す。
+- **`sfs_end`** — BYE → アンマウント (線が死んでいても手元は解放) → 隔離 (受信を捨てて
+  500ms 静まるのを待つ。上限 5 秒で打ち切って警告、決裁 1B) → 溜めた出力と
+  `sfs: exit=N` を LOG / EXIT フレームで送る (決裁 2A) → ゲートを下ろす (受信リングも
+  空にする)。0 / `KAPI_SFS_END_NOT_QUIET` (1) / `OS32_ERR_INVAL` (セッションが無い)。
+- セッション中は `serial_putchar` / `serial_puts` (console の複写・KAPI・ime_dict・ISR の
+  kprintf) の出力は線へ出ずカーネルの保留リング (8KB、溢れたら古い方を捨てて数える) に
+  溜まり、`serial_trygetchar` / `kbd.c` の読み口は「無い」(-1) を返し、
+  **`serial_getchar` (ブロッキング) も待たずに -1 を返す** (待つと SerialFS の応答を
+  盗む。セッションの外では従来どおり 1 バイト来るまで待つ)。
+  `serial_init` / `serial_init_vfast` は断る。`serial_puts_polled` (パニック) は通る。
+- **`serial_diag`** — `SerialDiag` (16 バイト: `oe` / `fe` / `pe` / `overflow`) を写す。
+  受信の誤りは ISR (と SerialFS の受信器) がリセットする前に数える。V･FAST の 0132h は
+  資料と NP21/W でビットの並びが食い違うので FE / PE は目安。0 / `OS32_ERR_INVAL`。
+- 同じ版で `vfs_mount` が**同じ prefix の二重登録**を `OS32_ERR_EXIST` で断るようにした
+  (末尾の `/` の有無は同じ場所として比べる)。
+
 ### 排他的作成 (v53)
 
 **スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
@@ -1228,7 +1266,7 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 ### 予約スロット (v63〜)
 
-0x3B4〜0x4B4 (slot 235〜299、65 本、v65 時点) は `kapi_reserved[]`。関数を足すと先頭から使う
+0x3C0〜0x4B4 (slot 238〜299、62 本、v66 時点) は `kapi_reserved[]`。関数を足すと先頭から使う
 (§4-0)。カーネルの表は `kapi_reserved_nosys` (`OS32_ERR_NOSYS`)、トランポリンは
 int 0x80 のスタブで、CPL=3 からの呼び出しはアプリを kill する。
 

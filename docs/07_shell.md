@@ -90,11 +90,12 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 
 | コマンド | 書式 | 説明 |
 |---------|------|------|
-| `serial` | `serial [baud]` | 引数なし = 現在の設定 (mode / 実効速度 / FIFO の有無) を表示。`serial 9600` = 互換モードで初期化 + SerialFS マウント、`serial 115200` = V･FAST (FIFO 搭載機のみ)。**出せない速度は適用せず拒否する**。rshell 中の切替は 5 秒無音で元の速度へ自動で戻る (票 TASK_SERIAL_VFAST) |
+| `serial` | `serial [baud]` | 引数なし = 現在の設定 (mode / 実効速度 / FIFO の有無) を表示。`serial 9600` = 互換モードで初期化 (SerialFS は自動でマウントしない — `sfs run` の中だけ)、受信の誤り (overrun / framing / parity / リング溢れ) の数も出す、`serial 115200` = V･FAST (FIFO 搭載機のみ)。**出せない速度は適用せず拒否する**。rshell 中の切替は 5 秒無音で元の速度へ自動で戻る (票 TASK_SERIAL_VFAST) |
 | `terminal` | `terminal` | ターミナルモード (ESCで終了) |
 | `rshell` | `rshell` | リモートシェルモード開始 (ESCで終了) |
 | `send` | `send TEXT...` | RS-232C文字列送信 |
 | `hotdeploy` | `hotdeploy [PATH LEN CRC32]` | ステージング領域の内容をファイル化 (引数なしで領域の番地を報告)。ホスト側は `tools/hotdeploy.py` から使う |
+| `sfs` | `sfs run COMMAND...` | **常駐シェルだけ**。ホストが rshell へ送った 1 行が丸ごと `sfs run ...` のときだけ動き、シリアル越しの `/host` (SerialFS) を開いて COMMAND を走らせる。ホストは `tools/rshell_serial.py --serve-host <dir>`。セッション中の出力は溜めて終わりに長さ付きのフレームで送る (`sfs: exit=N` を含む)。rshell のシリアルの ESC は行頭の単独のときだけ閉じる (票 TASK_SERIAL_HOSTFS 部品 B、`man sfs`) |
 | `recv` | `recv [host:PATH [LOCAL]]` | ファイル受信 (SerialFS または旧プロトコル) |
 | `push` | `push LOCAL host:PATH` | SerialFS 経由でホストへファイル送信 |
 | `tvdump` | `tvdump` | テキストVRAMダンプをシリアル送信 |

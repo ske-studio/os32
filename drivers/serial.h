@@ -112,6 +112,10 @@
  * どちらの並びでも「エラーが 1 つでも立ったらコマンドを打ち直す」だけなので、
  * 両方の解釈で共通して立ちうる bit3〜5 をエラーとして見る。 */
 #define SER_FSTS_ERR    0x38
+/* 内訳を数えるときは NP21/W の並びを採る (OE は資料とも一致、FE / PE は目安) */
+#define SER_FSTS_PE     0x08
+#define SER_FSTS_OE     0x10
+#define SER_FSTS_FE     0x20
 
 /* ---- 0136h 割り込み参照 / FIFO 搭載識別 ---- */
 #define SER_IIR_ID1     0x40    /* bit6: 読むたびに反転する = 搭載の印 */
@@ -278,6 +282,32 @@ int  serial_trygetchar(void);  /* ノンブロッキング: -1=なし */
 int  serial_peekchar(void);    /* 覗くだけ (取り出さない): -1=なし */
 int  serial_has_data(void);    /* 受信バッファにデータがあるか */
 int  serial_is_initialized(void);
+
+/* ======================================================================== */
+/*  SerialFS セッションのゲート (票 TASK_SERIAL_HOSTFS §1-v3、serial.c の注記) */
+/*  使うのは fs/serialfs_session.c だけ。                                   */
+/* ======================================================================== */
+/* セッション中の出力を溜める保留リング (溢れたら古い方を捨てて数える) */
+#define SER_HOLD_SIZE   8192
+/* ゲートの上げ下げで UART / FIFO から読み捨てる上限 (FIFO 16 バイト + 8251 の
+ * 保持の余裕。相手が送り続けていても抜ける) */
+#define SER_GATE_DRAIN_MAX  64
+
+/* ゲートを上げ下げする。どちらでも受信リングを空にする。上げると保留
+ * リングも空にする (下ろしても保留リングは残す — 呼び手が汲む)。 */
+void serial_gate_set(int on);
+int  serial_gate_active(void);
+/* ゲートを通らずに線へ出す (SerialFS のフレーム)。SER_TX_OK / DROPPED */
+int  serial_gate_put(const u8 *buf, u32 n);
+/* ゲートを通らずに 1 バイト受ける (RxRDY を直接見て FIFO の残りも汲む)。
+ * -1 = 無い */
+int  serial_gate_get(void);
+/* 保留リングから最大 max バイト取り出す */
+u32  serial_hold_take(u8 *buf, u32 max);
+/* 保留リングが溢れて捨てたバイト数 (ゲートを上げると 0) */
+u32  serial_hold_dropped(void);
+/* 受信の誤りの計数 (ISR とゲートの受信器が数える)。NULL は飛ばす */
+void serial_diag_get(u32 *oe, u32 *fe, u32 *pe, u32 *overflow);
 
 /* IRQ4ハンドラ (ASMスタブから呼ばれる) */
 void serial_irq_handler(void);

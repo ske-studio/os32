@@ -19,6 +19,11 @@
   - `fat` — FAT12/FAT16/FAT32 (FDD/HDD汎用)
   - `iso9660` — CD-ROM
   - `hostdrv` — NP21/W HostDrv
+  - `serialfs` — **単独ではマウントできない**。シリアル越しの `/host` は `sfs run`
+    のセッションの中だけで付く (`sfs` を参照)
+
+同じ PREFIX への二重のマウントは断る (`/host` に HostDrv が居るところへ重ねない)。
+引数は 3 つちょうど (余分な引数は断る)。
 
 ## EXAMPLES
 

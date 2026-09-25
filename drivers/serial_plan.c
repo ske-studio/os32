@@ -222,3 +222,18 @@ u8 serial_err_mask(int mode)
     return (u8)((mode == SER_MODE_VFAST) ? SER_FSTS_ERR
                                          : (u8)(STS_PE | STS_OE | STS_FE));
 }
+
+u8 serial_oe_mask(int mode)
+{
+    return (u8)((mode == SER_MODE_VFAST) ? SER_FSTS_OE : STS_OE);
+}
+
+u8 serial_fe_mask(int mode)
+{
+    return (u8)((mode == SER_MODE_VFAST) ? SER_FSTS_FE : STS_FE);
+}
+
+u8 serial_pe_mask(int mode)
+{
+    return (u8)((mode == SER_MODE_VFAST) ? SER_FSTS_PE : STS_PE);
+}

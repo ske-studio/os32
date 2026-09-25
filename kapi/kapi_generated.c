@@ -40,6 +40,7 @@
 #include "pci.h"
 #include "pcm_cs4231.h"
 #include "bootinfo.h"
+#include "serialfs.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -49,11 +50,12 @@ extern int gfx_lease_palette(int first, int count, const u8 *rgb);
 extern int kapi_sys_set_mtime(const char *path, u32 mtime);
 extern int kapi_sys_time_now(u32 *lo, u32 *hi);
 extern int kapi_pci_bind_info(u32 idx, void *out);
+extern int kapi_serial_diag(SerialDiag *out);
 
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[235];
+volatile u32 kapi_hits[238];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -294,6 +296,9 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     4,  /* sys_umount_checked */
     8,  /* hdd_geom_info */
     4,  /* boot_image_info */
+    0,  /* sfs_begin */
+    4,  /* sfs_end */
+    4,  /* serial_diag */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -534,6 +539,9 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0001,  /* sys_umount_checked: prefix */
     0x0002,  /* hdd_geom_info: out */
     0x0001,  /* boot_image_info: out */
+    0x0000,  /* sfs_begin */
+    0x0000,  /* sfs_end */
+    0x0001,  /* serial_diag: out */
 };
 
 /* ---- 出力ポインタの書き込み可検査 (票 TASK_KAPI_OUTPUT_GUARD) --------
@@ -2180,5 +2188,28 @@ int __cdecl wrap_boot_image_info(BootImageInfo *out)
         ring3_fault_kill();   /* 戻らない */
     }
     return boot_image_info((void *)out);
+}
+
+int __cdecl wrap_sfs_begin(void)
+{
+    KAPI_HIT(235);
+    return serialfs_session_begin();
+}
+
+int __cdecl wrap_sfs_end(int exit_code)
+{
+    KAPI_HIT(236);
+    return serialfs_session_end(exit_code);
+}
+
+int __cdecl wrap_serial_diag(SerialDiag *out)
+{
+    KAPI_HIT(237);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)out, KAPI_OUT_LEN(out, sizeof(SerialDiag)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
+    return kapi_serial_diag(out);
 }
 

@@ -91,6 +91,11 @@ static int fk_write_fail_at;     /* n 回目の sys_write を落とす (0 = し�
 static int fk_write_fail_rc;
 static int fk_write_calls;
 static int fk_read_fail_at;
+/* n 回目の sys_read の直後に、ファイルの 1 バイトを書き換える (大きさ・日時は
+ * そのまま)。票 TASK_SERIAL_HOSTFS: 判定の後に本名の中身が差し替わる形 */
+static int  fk_poke_at;
+static char fk_poke_path[FS_PATH_CAP];
+static u32  fk_poke_off;
 static int fk_read_calls;
 static int fk_unlink_rc;         /* != 0 … sys_unlink がこの値を返す */
 static int fk_set_mtime_rc;
@@ -144,6 +149,7 @@ static void fs_reset(void)
     fk_write_fail_rc = OS32_ERR_IO;
     fk_write_calls = 0;
     fk_read_fail_at = 0;
+    fk_poke_at = 0;
     fk_read_calls = 0;
     fk_unlink_rc = 0;
     fk_set_mtime_rc = 0;
@@ -384,6 +390,12 @@ static int fk_sys_read(int fd, void *buf, u32 size)
 
     fk_read_calls++;
     if (fk_read_fail_at && fk_read_calls == fk_read_fail_at) return OS32_ERR_IO;
+    if (fk_poke_at && fk_read_calls == fk_poke_at) {
+        int m = fs_find(fk_poke_path);
+        if (m >= 0 && fk_poke_off < fs_nodes[m].size)
+            fs_nodes[m].data[fk_poke_off] ^= 0xFF;
+        fk_poke_at = 0;
+    }
     if (fd < 3 || fd - 3 >= FS_MAX_FDS || !fs_fds[fd - 3].used)
         return OS32_ERR_IO;
     h = &fs_fds[fd - 3];
@@ -1396,7 +1408,9 @@ static void case_review_nb(void)
     fs_add_file("/host/boot/vmkernel.lz4", (const u8 *)"NEWKERNEL", 9);
     fs_add_file("/boot/vmkernel.lz4", (const u8 *)"old", 3);
     fk_sync_fail_at = 2;
-    check(run1("boot") != 0, "非ゼロ終了");
+    /* 票 TASK_SERIAL_HOSTFS: この贋カーネル (v53) は起動したイメージを
+     * 答えないので、vmkernel.old の門は --no-backup で越える (門は case_boot_old) */
+    check(run2("--no-backup", "boot") != 0, "非ゼロ終了");
     check(log_has("/boot を更新した"), "**再起動の案内が出る**");
 
     /* 置換の前に落ちた回は案内を出さない (媒体は旧内容のまま) */
@@ -1481,6 +1495,163 @@ static void case_review_nb(void)
     check(fk_rename_calls == 0, "rename まで進まない");
 }
 
+/* ---- 票 TASK_SERIAL_HOSTFS §1-v3: /boot/vmkernel.old ------------------- */
+static u32   fk_boot_crc;
+static int   fk_boot_valid;
+static int __cdecl fk_boot_image_info(BootImageInfo *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->crc_valid = (u8)fk_boot_valid;
+    out->image_crc = fk_boot_valid ? fk_boot_crc : 0;
+    out->source = 2;
+    return 0;
+}
+
+/* VK32 v2 の小さな写し (entry 1 本)。image_crc 欄 (16 + 20 + 4 = 40) を 0 として
+ * 求めた CRC を返し、欄にも入れる。 */
+static u32 make_vk32(u8 *b, u32 len, u8 fill)
+{
+    u32 i, crc;
+    memset(b, fill, len);
+    memset(b, 0, 44);
+    b[0] = 'V'; b[1] = 'K'; b[2] = '3'; b[3] = '2';
+    b[4] = 44; b[8] = 2; b[12] = 1;
+    b[36] = (u8)len;                     /* image_size (飾り) */
+    crc = crc32_core_final(crc32_core_update(CRC32_INIT, b, len));
+    for (i = 0; i < 4; i++) b[40 + i] = (u8)(crc >> (8 * i));
+    return crc;
+}
+
+static void boot_pair(u32 *old_crc)
+{
+    static u8 oldk[200], newk[240];
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/boot");
+    fs_add_dir("/boot");
+    *old_crc = make_vk32(oldk, sizeof(oldk), 0x11);
+    (void)make_vk32(newk, sizeof(newk), 0x22);
+    fs_add_file("/host/boot/vmkernel.lz4", newk, sizeof(newk));
+    fs_add_file("/boot/vmkernel.lz4", oldk, sizeof(oldk));
+    fk_version = 65;              /* fs_reset が 53 に戻すので毎回 */
+}
+
+static void case_boot_old(void)
+{
+    u32 crc;
+
+    printf("== TASK_SERIAL_HOSTFS: /boot/vmkernel.old は起動した版のときだけ ==\n");
+    g_fake.boot_image_info = fk_boot_image_info;
+
+    /* 一致 → .old を作ってから置き換える */
+    boot_pair(&crc);
+    fk_version = 65;
+    fk_boot_valid = 1;
+    fk_boot_crc = crc;
+    check(run1("boot") == 0, "一致: 成功");
+    check(log_has("BACKUP /boot/vmkernel.lz4 -> /boot/vmkernel.old"), "一致: BACKUP 行");
+    check(node_size("/boot/vmkernel.old") == 200, "一致: .old は旧版 (200 バイト)");
+    check(node_size("/boot/vmkernel.lz4") == 240, "一致: 新版に置き換わった");
+    check(node_of("/boot/.hs~vmkernel.old") < 0, "一致: 一時名は残らない");
+
+    /* 一致しない (起動していない版) → 置き換えない */
+    boot_pair(&crc);
+    fk_boot_crc = crc ^ 1;
+    check(run1("boot") != 0, "不一致: 非ゼロ終了");
+    check(log_has("reason=not_booted_image"), "不一致: reason=not_booted_image");
+    check(node_size("/boot/vmkernel.lz4") == 200, "不一致: 旧版のまま");
+    check(node_of("/boot/vmkernel.old") < 0, "不一致: .old を作らない");
+
+    /* 記録が無い (FD 起動・旧カーネル) → 置き換えない */
+    boot_pair(&crc);
+    fk_boot_valid = 0;
+    check(run1("boot") != 0, "記録なし: 非ゼロ終了");
+    check(log_has("reason=boot_image_unknown"), "記録なし: reason=boot_image_unknown");
+    check(node_size("/boot/vmkernel.lz4") == 200, "記録なし: 旧版のまま");
+
+    /* --no-backup → 作らずに進む */
+    boot_pair(&crc);
+    check(run2("--no-backup", "boot") == 0, "--no-backup: 成功");
+    check(node_size("/boot/vmkernel.lz4") == 240, "--no-backup: 置き換わった");
+    check(node_of("/boot/vmkernel.old") < 0, "--no-backup: .old は無い");
+
+    /* dry-run は判定だけ (書かない) */
+    boot_pair(&crc);
+    fk_boot_valid = 1;
+    fk_boot_crc = crc;
+    check(run2("-n", "boot") == 0, "dry-run: 成功");
+    check(log_has("PLAN /boot/vmkernel.old reason=backup"), "dry-run: PLAN 行");
+    check(node_of("/boot/vmkernel.old") < 0 &&
+          node_size("/boot/vmkernel.lz4") == 200, "dry-run: 何も書かない");
+
+    /* 同じ内容なら置き換えない = .old も作らない */
+    boot_pair(&crc);
+    check(run1("boot") == 0, "1 回目");
+    check(run1("boot") == 0 && !log_has("BACKUP"), "同じ内容: .old を作り直さない");
+
+    /* ---- レビュー往復 1 (Codex 2): 欄だけが壊れた版を .old にしない ---- */
+    boot_pair(&crc);
+    {
+        int n = node_of("/boot/vmkernel.lz4");
+        fs_nodes[n].data[40] ^= 0x5A;        /* image_crc 欄だけ (中身は起動した版) */
+    }
+    fk_boot_valid = 1;
+    fk_boot_crc = crc;                        /* 欄を 0 として求めた値は一致 */
+    check(run1("boot") != 0, "欄の破損: 非ゼロ終了");
+    check(log_has("reason=boot_image_corrupt"), "欄の破損: reason=boot_image_corrupt");
+    check(node_size("/boot/vmkernel.lz4") == 200, "欄の破損: 置き換えない");
+    check(node_of("/boot/vmkernel.old") < 0, "欄の破損: .old を作らない");
+
+    /* ---- 既存の .old がある状態で、各段で落とす: 旧 .old も本名も残る ---- */
+    {
+        static const char *names[] = { "書き込み", "sync", "読戻し",
+                                       "判定の後に本名が変わる", "rename" };
+        int k;
+        for (k = 0; k < 5; k++) {
+            char what[96];
+            boot_pair(&crc);
+            fk_boot_valid = 1;
+            fk_boot_crc = crc;
+            fs_add_file("/boot/vmkernel.old", (const u8 *)"PREVOLD", 7);
+            switch (k) {
+            case 0: fk_write_fail_at = 1; break;          /* .old の複製の最初の書き込み */
+            case 1: fk_sync_fail_at = 1; break;           /* 複製の後の sync */
+            case 2: fk_read_fail_at = 5; break;           /* 読戻しの読み */
+            case 3:                                        /* 判定 (読み 2 回) の後 */
+                fk_poke_at = 2;
+                strcpy(fk_poke_path, "/boot/vmkernel.lz4");
+                fk_poke_off = 100;
+                break;
+            case 4: fk_rename_mode = RN_FAIL_BEFORE; fk_rename_rc = OS32_ERR_IO; break;
+            }
+            sprintf(what, "既存の .old + %s の失敗: ", names[k]);
+            {
+                char m[160];
+                sprintf(m, "%s非ゼロ終了", what);
+                check(run1("boot") != 0, m);
+                sprintf(m, "%sreason=backup_failed", what);
+                check(log_has("reason=backup_failed"), m);
+                sprintf(m, "%s旧 .old はそのまま", what);
+                check(node_equal_bytes("/boot/vmkernel.old", (const u8 *)"PREVOLD", 7), m);
+                sprintf(m, "%s本名は置き換えない", what);
+                check(node_size("/boot/vmkernel.lz4") == 200, m);
+                sprintf(m, "%s一時名は残らない", what);
+                check(node_of("/boot/.hs~vmkernel.old") < 0, m);
+            }
+        }
+    }
+    /* 既存の .old があっても、通れば起動した版で置き換わる */
+    boot_pair(&crc);
+    fk_boot_valid = 1;
+    fk_boot_crc = crc;
+    fs_add_file("/boot/vmkernel.old", (const u8 *)"PREVOLD", 7);
+    check(run1("boot") == 0, "既存の .old: 成功");
+    check(node_size("/boot/vmkernel.old") == 200, "既存の .old: 起動した版に置き換わった");
+
+    fk_version = 53;
+    g_fake.boot_image_info = 0;
+}
+
 int main(void)
 {
     printf("=== 票 H2: hsync の置換安全化 (一時ファイル + 検証 + 置換) ===\n");
@@ -1499,6 +1670,7 @@ int main(void)
     case_unsupported();
     case_regression();
     case_review_nb();
+    case_boot_old();
 
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

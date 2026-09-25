@@ -165,5 +165,12 @@ unsigned int serial_cmd_port(int mode);
 u8 serial_txrdy_mask(int mode);
 u8 serial_rxrdy_mask(int mode);
 u8 serial_err_mask(int mode);
+/* 誤りの内訳 (ISR が数える、§1-v2「ISR の計数」)。互換 0032h は D4 OE /
+ * D5 FE / D3 PE。FIFO 0132h は **資料と NP21/W が食い違う** (serial.h の
+ * SER_FSTS_ERR の注記) ので NP21/W の並び (bit4 OE / bit5 FE / bit3 PE) を採る。
+ * OE (bit4) は両者一致、FE と PE は目安。 */
+u8 serial_oe_mask(int mode);
+u8 serial_fe_mask(int mode);
+u8 serial_pe_mask(int mode);
 
 #endif /* __SERIAL_PLAN_H */

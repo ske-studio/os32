@@ -8,6 +8,7 @@
 #include "exec.h"             /* ring3_user_range_ok (CPL=3 ポインタ検証) */
 #include "sys.h"              /* sys_time_now (票 TASK_HAL_WIRING §1-5) */
 #include "pci_bind.h"         /* pci_bind_info_get (票 TASK_HAL_WIRING §1-4) */
+#include "serial.h"           /* serial_diag_get (票 TASK_SERIAL_HOSTFS §1-v2) */
 
 /* カーネルビルド時の日時文字列を返す */
 void kapi_sys_get_build_info(char *buf, int size)
@@ -179,5 +180,16 @@ int kapi_pci_bind_info(u32 idx, void *out)
     src = (const u8 *)&snap;
     dst = (u8 *)out;
     for (i = 0; i < PCI_BIND_INFO_SIZE; i++) dst[i] = src[i];
+    return 0;
+}
+
+/* ======================================================================== */
+/*  serial_diag (KAPI v66、票 TASK_SERIAL_HOSTFS §1-v2「ISR の計数」)        */
+/*  受信の誤りの数を呼び手の SerialDiag へ写す。出力範囲の検査は生成ラッパ。 */
+/* ======================================================================== */
+int kapi_serial_diag(SerialDiag *out)
+{
+    if (!out) return OS32_ERR_INVAL;
+    serial_diag_get(&out->oe, &out->fe, &out->pe, &out->overflow);
     return 0;
 }
