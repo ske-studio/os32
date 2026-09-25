@@ -723,7 +723,8 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
         int k = getkey();
         api->kprintf(COL_NORMAL, "%c\n", k);
         if (k != 'y' && k != 'Y') {
-            println(COL_NORMAL, "Installation cancelled. Nothing was written.");
+            /* ERASE で消した後なら INCOMPLETE と入れ直しの案内 */
+            (void)inst_hdd_stopped(api, &tgt, "Installation cancelled.");
             boot_img_free(&boot);
             return;
         }

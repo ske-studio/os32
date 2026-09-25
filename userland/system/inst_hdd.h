@@ -18,6 +18,15 @@
 /*                           それぞれ読み戻して比較                          */
 /*   この後で呼び手が展開 → sync。                                           */
 /*                                                                          */
+/*  N4 の例外 (明示の消去、2026-09-25 ユーザー指示): inst_classify が他の    */
+/*  区画・2 項目以上・55AA・開始違い・壊れた項目で断ったときだけ、マウントの  */
+/*  検査を通した後で LBA 0/1 の要約を出し、ERASE (大文字 5 文字、完全一致)   */
+/*  の打鍵を求める。受けたら (/hd0 のマウントを外し) LBA 0 と 1 をゼロで埋め */
+/*  て読み戻し、空のディスクとして同じ手順に進む (y/N は別に取る)。それ以外  */
+/*  の入力は今までどおり断る。消した後の失敗・取り消しは INCOMPLETE と出し、 */
+/*  「区画表は消した、もう一度実行すれば空のディスクとして入れられる」と     */
+/*  案内する (InstTarget.erased)。                                           */
+/*                                                                          */
 /*  書いた後の失敗は "INCOMPLETE" と出して負を返す。書く前の失敗は           */
 /*  "Nothing was written" と出す。どちらの状態でも次の実行は通る: format の  */
 /*  失敗なら区画表はまだ空 (空のディスク)、区画表を書いた後なら OS32 の項目  */
@@ -42,7 +51,12 @@ typedef struct {
     int        mode;          /* INST_MODE_* */
     int        mounts;        /* 検査の時点の dev_mount_count(0) */
     int        umount_hd0;    /* hd0 は /hd0 に 1 つだけマウントされている (外す) */
+    int        erased;        /* この実行で ERASE を受けて LBA 0/1 をゼロにした */
 } InstTarget;
+
+/* 消去の打鍵 (大文字 5 文字、完全一致。前後の空白も許さない) */
+#define INST_ERASE_WORD   "ERASE"
+#define INST_LINE_MAX     16
 
 int  inst_hdd_check(KernelAPI *api, InstTarget *t);
 int  inst_hdd_check_media(KernelAPI *api, const InstTarget *t,
@@ -58,5 +72,9 @@ int  inst_hdd_write_boot(KernelAPI *api, const InstTarget *t,
                          const u8 *loader, u32 loader_len);
 /* 書いた後の失敗の表示 (展開・sync の失敗にも呼び手が使う) */
 void inst_hdd_incomplete(KernelAPI *api, const char *what, int rc);
+/* 承認の前に止まったときの表示: 消していなければ "<what> Nothing was written."、
+ * ERASE で消した後なら INCOMPLETE と「空のディスクとして入れ直せる」案内。
+ * 戻り値 = t->erased (呼び手が終了コードを決める) */
+int  inst_hdd_stopped(KernelAPI *api, const InstTarget *t, const char *what);
 
 #endif /* INST_HDD_H */

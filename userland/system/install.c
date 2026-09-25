@@ -562,18 +562,20 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
     api->kprintf(ATTR_WHITE, "Size: %u MB (%u sectors)\n", info.size_mb, info.total_sectors);
 
     /* === Phase 0: 全検査 (承認前 = まだ何も書いていない) ===
-     * 媒体の中身 → hd0 (幾何・区画表のモード・マウント) → 大きさと容量 */
+     * 媒体の中身 → FD の列挙 → hd0 (幾何・区画表のモード・マウント、断る表なら
+     * ERASE の申し出) → 大きさと容量 */
     if (precheck_media(sizes) != 0) {
         api->kprintf(0x4F, "%s",
                      "Nothing was written; use a complete install floppy.\n");
         goto end;
     }
-    if (inst_hdd_check(api, &tgt) != 0) goto end;
+    /* FD の列挙は hd0 の検査 (ERASE で消すことがある) より先に済ませる */
     if (measure_need(sizes[MEDIA_KERNEL], &need) != 0) {
         api->kprintf(0x4F, "%s",
                      "Error: cannot list the floppy. Nothing was written.\n");
         goto end;
     }
+    if (inst_hdd_check(api, &tgt) != 0) goto end;
     if (inst_hdd_check_media(api, &tgt, sizes[MEDIA_IPL], sizes[MEDIA_LOADER],
                              sizes[MEDIA_KERNEL], &need) != 0)
         goto end;
@@ -581,8 +583,8 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
     /* 安全ロック */
     inst_hdd_describe(api, &tgt);
     if (!confirm_install()) {
-        api->kprintf(0x07, "%s", "Installation aborted.\n");
-        rc = 0;                 /* 利用者が断っただけ = 失敗ではない */
+        /* 利用者が断っただけ = 失敗ではない。ERASE で消した後なら未完成 (1) */
+        if (!inst_hdd_stopped(api, &tgt, "Installation aborted.")) rc = 0;
         goto end;
     }
 

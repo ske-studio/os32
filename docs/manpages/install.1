@@ -16,6 +16,13 @@ FD の FAT (8.3) に合わせて短くした名前 (`/sys/font/default.kcg`、`/
 は正規名 (`default.kcgfont`、`filetypes`) に戻して写す。ブートセクタとローダは
 HDD のブート領域へ書き、FD 用の `/etc/profile` は写さない。
 
+入れる先は hd0 だけで、区画表の扱いは cdinst と同じ: 空のディスクには OS32 の区域を作り、
+OS32 の区域が 1 つだけのディスクは作り直す。それ以外 (他の OS の区画など) は既定では断り、
+LBA 0/1 の要約を出して `Type ERASE:` と聞く。`ERASE` (大文字、完全一致) + Enter で LBA 0 と 1 を
+0 にして空のディスクとして入れる (hd0 の他の区画も全部失われる、`y/N` は別に聞く)。それ以外の
+入力は何も書かずに断る。消した後で止まったら `INCOMPLETE` と出して終了コード 1 を返す
+(もう一度実行すれば空のディスクとして入れられる)。詳しくは cdinst。
+
 ## SEE ALSO
 
-format, mount
+cdinst, format, mount

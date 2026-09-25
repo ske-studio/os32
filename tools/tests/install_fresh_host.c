@@ -175,6 +175,7 @@ static int  inj_mount_stays;          /* umount しても hd0 のマウントが
 static int  inj_root_hd0;             /* ルート (/) が hd0 */
 static int  hd0_mounts;               /* dev_mount_count(0) */
 static int  hd0_at_hd0;               /* /hd0 にマウントされている */
+static int  first_write_mounts;       /* 最初の書き込みの時点の hd0 のマウント数 */
 
 /* ---- 贋の hd0: LBA 0〜31 だけを持つ (区画表・IPL・ローダの帯) ---- */
 #define DISK_MODEL_SECTS 32
@@ -198,6 +199,7 @@ static const char *inj_stat_big;      /* stat だけが大きい長さを名乗�
 static int  inj_stat_big_extra;
 
 static const char *key_script;        /* confirm_install に食わせる鍵 */
+static long key_idle;                 /* 鍵が尽きた後に読まれた回数 */
 
 static void rec_reset(void)
 {
@@ -228,6 +230,8 @@ static void rec_reset(void)
     inj_stat_big = NULL;
     inj_stat_big_extra = 0;
     key_script = "y";
+    key_idle = 0;
+    first_write_mounts = -1;
     cap_len = 0;
     cap_buf[0] = '\0';
 }
@@ -357,6 +361,7 @@ static int fake_ide_write_sector(int drv, u32 lba, const void *buf)
         rec_wr_n++;
     }
     CHECK(lba < DISK_MODEL_SECTS);            /* 区画の中へは ext2_format_at だけ */
+    if (rec_wr_n == 1) first_write_mounts = hd0_mounts;
     memcpy(disk[lba], buf, 512);
     if (inj_write_corrupt_lba >= 0 && (u32)inj_write_corrupt_lba == lba)
         disk[lba][10] ^= 0x01;                  /* 区画表なら開始シリンダが 1 ずれる */
@@ -569,9 +574,15 @@ static int fake_sys_stat(const char *path, OS32_Stat *st)
 
 static int fake_vfs_sync(void) { return inj_sync_fail ? -1 : 0; }
 
+/* 鍵が尽きた後の 0 を数える (1 行読みや y/N が鍵を待ち続けたら落とす) */
 static int fake_kbd_trygetchar(void)
 {
-    if (key_script && *key_script) return (int)*key_script++;
+    if (key_script && *key_script) { key_idle = 0; return (int)*key_script++; }
+    if (++key_idle > 100000L) {
+        fprintf(stderr, "FAIL: key script exhausted (the installer asked more)\n--- output ---\n%s",
+                cap_buf);
+        exit(1);
+    }
     return 0;
 }
 static int fake_serial_trygetchar(void) { return 0; }
@@ -1054,12 +1065,11 @@ static void check_disk(u32 start, u32 len, u32 heads, u32 spt, u32 total)
 }
 
 /* 手順の順序: [U] F W1 M W2..W17 W0 (format → 区画表 → マウント → ローダ → IPL) */
-static void check_order(int with_umount)
+static void check_order_pre(const char *prefix)
 {
     char want[256];
     int k;
-    want[0] = '\0';
-    if (with_umount) strcat(want, "U ");
+    strcpy(want, prefix);
     strcat(want, "F W1 M ");
     for (k = 2; k < 2 + LOADER_LEN / 512; k++) {
         char e[8];
@@ -1072,6 +1082,8 @@ static void check_order(int with_umount)
         exit(1);
     }
 }
+
+static void check_order(int with_umount) { check_order_pre(with_umount ? "U " : ""); }
 
 /* 8/17 の NHD: 開始 1632、IPL 8/17 */
 static void case_geom817(void)
@@ -1147,6 +1159,7 @@ static void case_modes(void)
     geom_1663();
     pt_legacy(12, 2000, 16, 63);
     ipl_sig();
+    key_script = "\r";                     /* ERASE の問いに空行 */
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("does not start where");
@@ -1161,6 +1174,7 @@ static void case_modes(void)
         CHECK(pc98pt_put(disk[1], 0, &e) == PC98PT_OK);
     }
     ipl_sig();
+    key_script = "\r";                     /* ERASE の問いに空行 */
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("OS32 did not create");
@@ -1171,6 +1185,7 @@ static void case_modes(void)
     setup();
     pt_std(0, PLAN817_START, 136u * 100u, 8, 17);
     disk[1][PC98PT_OFF_NAME] = 'X';
+    key_script = "\r";                     /* ERASE の問いに空行 */
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("OS32 did not create");
@@ -1179,6 +1194,7 @@ static void case_modes(void)
     setup();
     pt_std(0, PLAN817_START, 136u * 100u, 8, 17);
     pt_std(1, PLAN817_START + 136u * 100u, 136u * 100u, 8, 17);
+    key_script = "\r";                     /* ERASE の問いに空行 */
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("two or more partitions");
@@ -1188,6 +1204,7 @@ static void case_modes(void)
     /* OS32 の項目だが開始が期待値でない (シリンダ 13) */
     setup();
     pt_std(0, PLAN817_START + 136u, 136u * 100u, 8, 17);
+    key_script = "\r";                     /* ERASE の問いに空行 */
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("does not start where");
@@ -1195,6 +1212,7 @@ static void case_modes(void)
     /* 区画項目が無いのに LBA 0 に 55AA */
     setup();
     ipl_sig();
+    key_script = "\r";                     /* ERASE の問いに空行 */
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("55AA");
@@ -1204,6 +1222,7 @@ static void case_modes(void)
     disk[1][0] = 0x80; disk[1][1] = 0xE2;
     disk[1][8] = 200;       /* 標準: 開始セクタ 200 >= 17、旧: 開始シリンダ 200 > 終了 0 */
     memcpy(disk[1] + 16, "OS32            ", 16);
+    key_script = "\r";                     /* ERASE の問いに空行 */
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("entry is broken");
@@ -1467,15 +1486,24 @@ static void case_rerun(void)
     inj_write_corrupt_lba = 1;
     CHECK(run() == 1);
     CHECK_STR("INCOMPLETE: partition table");
-    CHECK_STR("cannot be repaired");
+    CHECK_STR("type ERASE at its");
     CHECK_STR("nhd-init");
     memcpy(keep, disk, sizeof(keep));
     setup();
     memcpy(disk, keep, sizeof(keep));
+    key_script = "\r";
     CHECK(run() == 1);
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("does not start where");      /* 中途半端な OS32 の項目 → ホスト側の手当て */
     CHECK_STR("nhd-init");
+    CHECK_STR("Type ERASE");
+    /* ゲストで直す道: ERASE で空のディスクにして入れる */
+    setup();
+    memcpy(disk, keep, sizeof(keep));
+    key_script = "ERASE\ry";
+    CHECK(run() == 0);
+    CHECK_STR("erased and verified");
+    check_disk(PLAN817_START, PLAN817_LEN, 8, 17, 409600);
 
     /* 完了した hd0 をもう一度入れ直す (再作成) */
     setup();
@@ -1533,6 +1561,279 @@ static void case_fdset(const char *list, const char *out)
     fclose(f);
 }
 
+/* ========================================================================= */
+/*  ERASE (N4 の例外): 断る表のときだけ要約を出して ERASE を求める           */
+/* ========================================================================= */
+
+#define BAD_FOREIGN 0
+#define BAD_MULTI   1
+#define BAD_MBRSIG  2
+#define BAD_BROKEN  3
+#define BAD_START   4
+#define BAD_KINDS   5
+
+static void put_entry(int idx, u8 mid, u8 sid, const char *name,
+                      u32 scyl, u32 ecyl, u32 heads, u32 spt)
+{
+    unsigned char *e = disk[1] + idx * 32;
+    int k;
+    memset(e, 0, 32);
+    e[0] = mid; e[1] = sid;
+    e[10] = (unsigned char)scyl; e[11] = (unsigned char)(scyl >> 8);
+    e[12] = (unsigned char)(spt - 1u); e[13] = (unsigned char)(heads - 1u);
+    e[14] = (unsigned char)ecyl; e[15] = (unsigned char)(ecyl >> 8);
+    for (k = 0; k < 16; k++) e[16 + k] = (unsigned char)(*name ? *name++ : ' ');
+}
+
+static void bad_disk(int kind)
+{
+    u32 h = geom.bios_heads, sp = geom.bios_spt;
+    int k;
+    for (k = 0; k < 510; k++) disk[0][k] = (unsigned char)(0xEB ^ k);
+    ipl_sig();
+    switch (kind) {
+    case BAD_FOREIGN:
+        put_entry(0, 0xA0, 0xA1, "MS-DOS 6.20", 1, 1000, h, sp);
+        break;
+    case BAD_MULTI:
+        put_entry(0, 0xA0, 0xA1, "MS-DOS 6.20", 1, 1000, h, sp);
+        put_entry(1, 0x20, 0xA1, "DATA", 1001, 1500, h, sp);
+        break;
+    case BAD_MBRSIG:
+        break;
+    case BAD_BROKEN:
+        disk[1][0] = 0x80; disk[1][1] = 0xE2; disk[1][8] = 200;
+        memcpy(disk[1] + 16, "OS32            ", 16);
+        break;
+    default:
+        put_entry(0, 0x80, 0xE2, "OS32", 40, 100, h, sp);
+        break;
+    }
+}
+
+static const char *const bad_reason[BAD_KINDS] = {
+    "OS32 did not create", "two or more", "LBA 0 ends with 55AA", "entry is broken",
+    "does not start where"
+};
+
+static const char *const not_erase[] = {
+    "\r", "erase\r", "ERASE \r", " ERASE\r", "y\r", "Erase\r", "ERAS\r", "ERASEE\r",
+    "ERA\bSE\r", "ERASE\x1b", "\n", "ERASEERASEERASEERASE\r"
+};
+#define NOT_ERASE ((int)(sizeof(not_erase) / sizeof(not_erase[0])))
+
+static int disk_zero(int lba)
+{
+    int k;
+    for (k = 0; k < 512; k++) if (disk[lba][k]) return 0;
+    return 1;
+}
+
+#define CHECK_NOSTR_AFTER(marker, bad) do { const char *m_ = strstr(cap_buf, (marker)); \
+    CHECK(m_ != NULL); CHECK(strstr(m_, (bad)) == NULL); } while (0)
+
+static void case_erase(void)
+{
+    static unsigned char keep[DISK_MODEL_SECTS][512];
+    int g, kind, i;
+
+    for (g = 0; g < 2; g++) {
+        for (kind = 0; kind < BAD_KINDS; kind++) {
+            for (i = 0; i < NOT_ERASE; i++) {
+                setup();
+                if (g) geom_1663();
+                bad_disk(kind);
+                memcpy(keep, disk, sizeof(keep));
+                key_script = not_erase[i];
+                CHECK(run() == 1);
+                CHECK_NOTHING_WRITTEN();
+                CHECK(memcmp(keep, disk, sizeof(keep)) == 0);
+                CHECK(strstr(cap_buf, bad_reason[kind]) != NULL);
+                CHECK_STR("Type ERASE");
+                CHECK_STR("Not erased. Nothing was written.");
+                CHECK_NOSTR("INCOMPLETE");
+                CHECK_NOSTR("was ERASED");
+                CHECK(*key_script == '\0');
+            }
+            setup();
+            if (g) geom_1663();
+            bad_disk(kind);
+            key_script = kind == BAD_MULTI ? "ERASE\ny" : "ERASE\ry";
+            CHECK(run() == 0);
+            CHECK(strstr(cap_buf, bad_reason[kind]) != NULL);
+            CHECK_STR("erased and verified (all zero)");
+            CHECK_STR("empty disk");
+            CHECK_STR("Installation complete");
+            CHECK_NOSTR("INCOMPLETE");
+            CHECK_NOSTR_AFTER("erased and verified", "WILL BE LOST");
+            check_order_pre("W0 W1 ");
+            if (g) check_disk(PLAN1663_START, PLAN1663_LEN, 16, 63, 16514063);
+            else   check_disk(PLAN817_START, PLAN817_LEN, 8, 17, 409600);
+        }
+    }
+
+    /* 実機 (16/63、総数 16514063) の FOREIGN の要約 */
+    setup();
+    geom_1663();
+    bad_disk(BAD_FOREIGN);
+    key_script = "\r";
+    CHECK(run() == 1);
+    CHECK_STR("hd0 ATA: present=1 total=16514063");
+    CHECK_STR("code -40");
+    CHECK_STR("first bytes eb ea e9 e8, boot signature 55AA: yes");
+    CHECK_STR("#0 mid a0 sid a1 name \"MS-DOS 6.20     \"");
+    CHECK_STR("cyl 1..1000 (start C/H/S 1/0/0, end C/H/S 1000/15/62)");
+    CHECK_STR("LBA 1008, 1008000 sectors (492 MB)");
+
+    /* 空のディスクでは ERASE を聞かない */
+    setup();
+    CHECK(run() == 0);
+    CHECK_NOSTR("Type ERASE");
+}
+
+static void case_erase_fail(void)
+{
+    static unsigned char keep[DISK_MODEL_SECTS][512];
+
+    /* y/N で断る → 1 (未完成) と消した旨。次の実行は空のディスクとして通る */
+    setup();
+    geom_1663();
+    bad_disk(BAD_FOREIGN);
+    key_script = "ERASE\rn";
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 2 && fmt_calls == 0 && disk_zero(0) && disk_zero(1));
+    CHECK_STR("INCOMPLETE: Installation aborted.");
+    CHECK_STR("partition table was ERASED");
+    CHECK_STR("installs onto hd0 as an empty disk");
+    CHECK_NOSTR_AFTER("erased and verified", "Nothing was written");
+    CHECK_NOSTR("Installation complete");
+    memcpy(keep, disk, sizeof(keep));
+    setup();
+    geom_1663();
+    memcpy(disk, keep, sizeof(keep));
+    CHECK(run() == 0);
+    CHECK_NOSTR("Type ERASE");
+    CHECK_STR("empty disk");
+    check_disk(PLAN1663_START, PLAN1663_LEN, 16, 63, 16514063);
+
+    /* 消した後の事前検査の失敗 (IPL 513 B) */
+    setup();
+    bad_disk(BAD_FOREIGN);
+    fx_put("/SYS/BOOT_HDD.BIN", 513);
+    key_script = "ERASE\r";
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 2 && fmt_calls == 0);
+    CHECK_STR("INCOMPLETE: refused after the erase");
+    CHECK_STR("larger than 512");
+    CHECK_STR("partition table was ERASED");
+    CHECK_NOSTR_AFTER("erased and verified", "Nothing was written");
+
+    /* format の失敗 */
+    setup();
+    bad_disk(BAD_BROKEN);
+    inj_format_fail = 1;
+    key_script = "ERASE\ry";
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 2 && disk_zero(0) && disk_zero(1));
+    CHECK_STR("INCOMPLETE: ext2_format_at failed");
+    CHECK_STR("partition table was ERASED");
+    CHECK(strstr(strstr(cap_buf, "INCOMPLETE") + 1, "INCOMPLETE") == NULL);
+
+    /* 消す書き込みの失敗・読み戻しの違い */
+    setup();
+    bad_disk(BAD_FOREIGN);
+    inj_ide_write_fail_lba = 1;
+    key_script = "ERASE\r";
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 1 && fmt_calls == 0);
+    CHECK_STR("INCOMPLETE: erasing LBA 0 and 1 of hd0 failed");
+    CHECK_STR("type ERASE again");
+    setup();
+    bad_disk(BAD_FOREIGN);
+    inj_readback_bad_lba = 0;
+    key_script = "ERASE\r";
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 1 && fmt_calls == 0);
+    CHECK_STR("INCOMPLETE: erasing LBA 0 and 1 of hd0 failed");
+    setup();
+    bad_disk(BAD_FOREIGN);
+    inj_write_corrupt_lba = 1;                /* 媒体に 0 でない 1 バイトが残る */
+    key_script = "ERASE\r";
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 2 && fmt_calls == 0);
+    CHECK_STR("INCOMPLETE: erasing LBA 0 and 1 of hd0 failed");
+
+    /* 区画表を書いた後の失敗 (sync) は「空のディスク」と言わない */
+    setup();
+    bad_disk(BAD_MULTI);
+    inj_sync_fail = 1;
+    key_script = "ERASE\ry";
+    CHECK(run() == 1);
+    CHECK_STR("INCOMPLETE: sync failed");
+    CHECK_NOSTR("was ERASED");
+}
+
+static void case_erase_mount(void)
+{
+    /* ルートが hd0 → 聞かずに断る */
+    setup();
+    bad_disk(BAD_FOREIGN);
+    inj_root_hd0 = 1;
+    hd0_mounts = 1;
+    key_script = "ERASE\ry";
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("root file system");
+    CHECK_NOSTR("Type ERASE");
+
+    /* 別の場所にマウント → 聞かずに断る */
+    setup();
+    bad_disk(BAD_MULTI);
+    hd0_mounts = 1; hd0_at_hd0 = 0;
+    key_script = "ERASE\ry";
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_NOSTR("Type ERASE");
+    setup();
+    bad_disk(BAD_MULTI);
+    hd0_mounts = 2; hd0_at_hd0 = 1;
+    key_script = "ERASE\ry";
+    CHECK(run() == 1);
+    CHECK_NOTHING_WRITTEN();
+    CHECK_NOSTR("Type ERASE");
+
+    /* umount の失敗 / 外したのに残る → 消さない */
+    setup();
+    bad_disk(BAD_MULTI);
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    inj_umount_fail = 1;
+    key_script = "ERASE\r";
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 0 && fmt_calls == 0);
+    CHECK_STR("umount /hd0 failed");
+    CHECK_NOSTR("INCOMPLETE");
+    setup();
+    bad_disk(BAD_MULTI);
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    inj_mount_stays = 1;
+    key_script = "ERASE\r";
+    CHECK(run() == 1);
+    CHECK(rec_wr_n == 0 && fmt_calls == 0);
+    CHECK_STR("still mounted");
+    CHECK_NOSTR("INCOMPLETE");
+
+    /* /hd0 にだけ → 外してから消し、入れる */
+    setup();
+    geom_1663();
+    bad_disk(BAD_MULTI);
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    key_script = "ERASE\ry";
+    CHECK(run() == 0);
+    CHECK(first_write_mounts == 0);
+    check_order_pre("U W0 W1 ");
+    check_disk(PLAN1663_START, PLAN1663_LEN, 16, 63, 16514063);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2 && !(argc == 4 && !strcmp(argv[1], "fdset"))) return 2;
@@ -1554,6 +1855,9 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "preflight")) case_preflight();
     else if (!strcmp(argv[1], "incomplete")) case_incomplete();
     else if (!strcmp(argv[1], "rerun")) case_rerun();
+    else if (!strcmp(argv[1], "erase")) case_erase();
+    else if (!strcmp(argv[1], "erase_fail")) case_erase_fail();
+    else if (!strcmp(argv[1], "erase_mount")) case_erase_mount();
     else if (!strcmp(argv[1], "fdset") && argc >= 4) case_fdset(argv[2], argv[3]);
     else return 2;
     printf("PASS %s\n", argv[1]);
