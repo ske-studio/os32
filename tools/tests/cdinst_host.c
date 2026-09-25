@@ -96,6 +96,7 @@ static u32  cap_len;
 
 static void cap_ch(char c)
 {
+    if (c == '\0') c = '?';                /* NUL で捕捉が切れないように (画面には映さない字) */
     if (cap_len + 1 < sizeof(cap)) { cap[cap_len++] = c; cap[cap_len] = '\0'; }
 }
 static void cap_num(unsigned long v, int base, int width, char pad, int neg)
@@ -214,8 +215,40 @@ static struct { int used; int fi; u32 pos; int wr; } fds[FD_MAX];
 static const char *inj_open_fail;     /* この /hd0 の名前は作れない */
 static const char *inj_stat_wrong;    /* この名前の stat は 1 バイト違う長さを名乗る */
 static int inj_sync_fail, inj_mount_fail, inj_format_fail, inj_readback_bad = -1;
+static int inj_readback_off = 3;      /* 読み戻しで違える位置 (3 か 511 = 末尾) */
+static int inj_write_fail_lba = -1;   /* この LBA の ide_write_sector が負 (媒体は変わらない) */
+static int inj_read_fail_lba = -1;    /* この LBA の ide_read_sector が負 */
+static int inj_read_fail_after_write; /* 1 = 最初の書き込みの後だけ (読み戻し) */
 static int hd0_mounts, hd0_at_hd0, inj_root_hd0, inj_umount_fail;
-static const char *keys;
+static int hd0_other_dev;             /* /hd0 には別のデバイス (hd1) がマウントされている */
+static int inj_mount_stays;           /* umount が成功しても hd0 のマウントが残る */
+/* 実物の umount (fs/vfs.c vfs_umount) は外す前に ops->sync() を呼び、ext2 の dirty な
+ * メタデータを書き出し得る (成否に関わらず)。inj_umount_sync = 1 でそれを再現し、
+ * umount_syncs に数える (インストーラの ide_write_sector = writes とは別) */
+static int inj_umount_sync, umount_syncs;
+
+/* ---- 鍵の台本: 長さ付きのバイト列 (NUL も 1 バイトの入力)。尽きたら「入力なし」
+ * = -1 (実物の kbd_trygetchar / serial_trygetchar と同じ)。台本の各鍵は書く前に
+ * 読まれるので、贋物の側で write・format・umount が 0 回であることを見る
+ * (行末を返す前に消す実装なら、ここで落ちる) ---- */
+static const u8 *keys;
+static int keys_len, keys_pos;
+static int keys_serial;               /* 台本を serial_trygetchar から出す (kbd は -1) */
+static int keys_gap;                  /* 各鍵の前に「入力なし」を何回返すか */
+static int keys_gap_left;
+static long keys_idle;                /* 尽きた後に読まれた回数 */
+static int keys_hook_at;              /* この鍵 (0 始まり) を渡す直前に keys_hook を呼ぶ */
+static void (*keys_hook)(void);
+
+static void set_keys(const void *p, int len)
+{
+    keys = (const u8 *)p;
+    keys_len = len;
+    keys_pos = 0;
+    keys_gap_left = keys_gap;
+    keys_idle = 0;
+}
+#define KEYS(lit) set_keys((lit), (int)sizeof(lit) - 1)
 
 static int __cdecl f_sys_open(const char *path, int mode)
 {
@@ -300,6 +333,7 @@ static HddGeom geom;
 static char ev[2048];
 static u32 ev_len;
 static int writes, fmt_calls;
+static int first_write_mounts;          /* 最初の書き込みの時点の hd0 のマウント数 */
 static u32 fmt_start, fmt_len;
 
 static void ev_add(const char *e)
@@ -321,6 +355,8 @@ static int __cdecl f_ide_write_sector(int drv, u32 lba, const void *buf)
 {
     CHECK(drv == 0);
     CHECK(lba < DISK_SECTS);
+    if (inj_write_fail_lba >= 0 && (u32)inj_write_fail_lba == lba) return -5;
+    if (writes == 0) first_write_mounts = hd0_mounts;
     memcpy(disk[lba], buf, 512);
     writes++;
     ev_lba(lba);
@@ -330,9 +366,12 @@ static int __cdecl f_ide_read_sector(int drv, u32 lba, void *buf)
 {
     CHECK(drv == 0);
     CHECK(lba < DISK_SECTS);
+    if (inj_read_fail_lba >= 0 && (u32)inj_read_fail_lba == lba &&
+        (!inj_read_fail_after_write || writes > 0))
+        return -5;
     memcpy(buf, disk[lba], 512);
     if (inj_readback_bad >= 0 && (u32)inj_readback_bad == lba && writes > 0)
-        ((u8 *)buf)[3] ^= 0x33;
+        ((u8 *)buf)[inj_readback_off] ^= 0x33;
     return 0;
 }
 static int __cdecl f_hdd_geom_info(int drv, HddGeom *out) { CHECK(drv == 0); *out = geom; return 0; }
@@ -359,26 +398,51 @@ static int __cdecl f_sys_mount(const char *pre, const char *dev, const char *fs)
 static int __cdecl f_sys_umount_checked(const char *pre)
 {
     ev_add("U");
+    if (inj_umount_sync && h_strcmp(pre, "/hd0") == 0 && hd0_at_hd0) umount_syncs++;
     if (inj_umount_fail) return -5;
-    if (h_strcmp(pre, "/hd0") == 0 && hd0_at_hd0) { hd0_at_hd0 = 0; hd0_mounts--; return 0; }
+    if (h_strcmp(pre, "/hd0") == 0 && hd0_at_hd0) {
+        hd0_at_hd0 = 0;
+        if (!inj_mount_stays) hd0_mounts--;
+        return 0;
+    }
     return -2;
 }
 static int __cdecl f_sys_is_mounted(const char *pre)
-{ return (h_strcmp(pre, "/hd0") == 0 && hd0_at_hd0) ? 1 : 0; }
+{ return (h_strcmp(pre, "/hd0") == 0 && (hd0_at_hd0 || hd0_other_dev)) ? 1 : 0; }
 static int __cdecl f_dev_mount_count(int drv) { CHECK(drv == 0); return hd0_mounts; }
 static const char *__cdecl f_vfs_devname(const char *pre)
 {
     if (h_strcmp(pre, "/") == 0) return inj_root_hd0 ? "hd0" : "fd0";
     if (h_strcmp(pre, "/hd0") == 0 && hd0_at_hd0) return "hd0";
+    if (h_strcmp(pre, "/hd0") == 0 && hd0_other_dev) return "hd1";
     return "";                              /* 実物 (fs/vfs.c) と同じく未マウントは "" */
 }
 static int __cdecl f_vfs_sync(void) { return inj_sync_fail ? -5 : 0; }
-static int __cdecl f_kbd_trygetchar(void)
+static int keys_next(void)
 {
-    if (!keys || !*keys) fail("key script exhausted (the installer asked more)", __LINE__);
-    return (int)(u8)*keys++;
+    int ch;
+    /* どの鍵も書く前に読まれる (行末を返す前も後も write・format・umount は 0 回) */
+    CHECK(writes == 0 && fmt_calls == 0 && !h_strstr(ev, "U"));
+    if (keys_gap_left > 0) { keys_gap_left--; return -1; }
+    keys_gap_left = keys_gap;
+    if (keys_pos >= keys_len) {
+        if (++keys_idle > 100000L) fail("key script exhausted (the installer asked more)", __LINE__);
+        return -1;
+    }
+    if (keys_hook && keys_pos == keys_hook_at) keys_hook();
+    keys_idle = 0;
+    ch = keys[keys_pos++];
+    return ch;
 }
-static int __cdecl f_serial_trygetchar(void) { return 0; }
+/* 台本を出さない側の -1 も数える (serial を読まない実装が kbd だけを回して
+ * 止まらないように: 尽きた後と同じ上限で落とす) */
+static int keys_none(void)
+{
+    if (++keys_idle > 100000L) fail("key script not read (the installer polls only one side)", __LINE__);
+    return -1;
+}
+static int __cdecl f_kbd_trygetchar(void) { return keys_serial ? keys_none() : keys_next(); }
+static int __cdecl f_serial_trygetchar(void) { return keys_serial ? keys_next() : keys_none(); }
 
 /* ======================================================================== */
 /*  実物                                                                     */
@@ -535,14 +599,23 @@ static void setup(void)
     ev_len = 0; ev[0] = '\0';
     memset(disk, 0, sizeof(disk));
     writes = fmt_calls = 0;
+    first_write_mounts = -1;
     fmt_start = fmt_len = 0;
     inj_open_fail = 0;
     inj_stat_wrong = 0;
     inj_sync_fail = inj_mount_fail = inj_format_fail = 0;
     inj_readback_bad = -1;
+    inj_readback_off = 3;
+    inj_write_fail_lba = inj_read_fail_lba = -1;
+    inj_read_fail_after_write = 0;
     hd0_mounts = hd0_at_hd0 = 0;
+    hd0_other_dev = 0;
     inj_root_hd0 = inj_umount_fail = 0;
-    keys = "1y";
+    inj_mount_stays = inj_umount_sync = umount_syncs = 0;
+    keys_serial = keys_gap = 0;
+    keys_hook = 0;
+    keys_hook_at = -1;
+    KEYS("1y");
     geom_817();
     boot_pkg(IPL_LEN, LOADER_LEN, 1, 0);
     minimal_pkg(KERNEL_LEN, 1, 1, 0);
@@ -650,7 +723,7 @@ static void case_ok1663(void)
     setup();
     geom_1663();
     boot_pkg(IPL_LEN - 12u, 5000u, 1, 0);
-    keys = "3y";
+    KEYS("3y");
     run();
     check_disk(2016u, 524160u, 16, 63, 16514063u);
     check_order("");
@@ -680,18 +753,25 @@ static void case_modes(void)
     setup();
     disk[1][0] = 0x80; disk[1][1] = 0xA1; disk[1][10] = 12; disk[1][14] = 100;
     memcpy(disk[1] + 16, "MS-DOS          ", 16);
+    KEYS("1\r\r");            /* 選択の行末は捨て、確認に Enter = 取り消し */
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("OS32 did not create");
-    CHECK_STR("This disk is not a");
+    CHECK_STR("holds another system's partitions");
     CHECK_NOSTR("nhd-init");
+    CHECK_STR("Current contents of hd0:");
+    CHECK_STR("After y, type ERASE");
+    CHECK_NOSTR("Type ERASE:");                     /* y でなければ ERASE は聞かない */
 
     /* 2 項目 */
     setup();
     disk[1][1] = 0xE2; disk[1][32 + 1] = 0xE2;
+    KEYS("1\n\n");
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("two or more");
+    CHECK_STR("holds another system's partitions");
+    CHECK_NOSTR("Type ERASE:");
 }
 
 /* ---- 事前検査の各失敗: 1 セクタも書かない ---- */
@@ -748,7 +828,7 @@ static void case_preflight(void)
     setup();                                        /* 容量: 13MB の区画に NORMAL が 30MB */
     geom.ata_total = 1632u + 136u * 200u;
     small_pkg("/cd0/NORMAL.PKG", "/usr/share/big.dat", 30u * 1024u * 1024u, 1);
-    keys = "2y";
+    KEYS("2y");
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("do not fit");
@@ -761,7 +841,7 @@ static void case_preflight(void)
 
     setup();                                        /* 1 ファイルの上限 + 1 (P2-4) */
     small_pkg("/cd0/NORMAL.PKG", "/usr/share/big.dat", 67383297u, 1);
-    keys = "2y";
+    KEYS("2y");
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("larger than ext2 can hold");
@@ -770,7 +850,7 @@ static void case_preflight(void)
     setup();
     small_pkg("/cd0/NORMAL.PKG", "/usr/bin/edit.bin", 3000, 0);
     pkg_truncate("/cd0/NORMAL.PKG", 10);
-    keys = "2y";
+    KEYS("2y");
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("truncated media");
@@ -815,7 +895,7 @@ static void case_preflight(void)
         longp[124] = '\0';
         small_pkg("/cd0/NORMAL.PKG", longp, 10, 0);
     }
-    keys = "2y";
+    KEYS("2y");
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("PATH TOO LONG");
@@ -827,9 +907,16 @@ static void case_preflight(void)
     CHECK_STR("no BIOS geometry");
 
     setup();                                        /* 断れば何も書かない */
-    keys = "1n";
+    KEYS("1n");
     run();
     CHECK_NOTHING_WRITTEN();
+
+    setup();                                        /* 確認への NUL は答え (= N)、読み捨てない */
+    KEYS("1\0y");
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("Installation cancelled");
+    CHECK(keys_pos == 2);
 
     setup();                                        /* ルートが hd0 */
     inj_root_hd0 = 1;
@@ -841,10 +928,29 @@ static void case_preflight(void)
     setup();                                        /* umount_checked の失敗 */
     hd0_mounts = 1; hd0_at_hd0 = 1;
     inj_umount_fail = 1;
+    inj_umount_sync = 1;                            /* 失敗する前に sync が書いた */
     run();
     CHECK(writes == 0 && fmt_calls == 0);
     CHECK_STR("umount /hd0 failed");
+    CHECK(umount_syncs == 1);                       /* umount の sync は書いた */
+    CHECK_STR("Nothing was erased or formatted");
+    CHECK_STR("Unmounting may have flushed");
+    CHECK_NOSTR("Nothing was written");
     CHECK_NOSTR("INCOMPLETE");
+    CHECK_NOSTR("Installation Complete");
+
+    /* umount は成功したのにマウントが残る: umount の後の断り (sync はあり得る) */
+    setup();
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    inj_mount_stays = 1;
+    inj_umount_sync = 1;
+    run();
+    CHECK(writes == 0 && fmt_calls == 0);
+    CHECK_STR("still mounted");
+    CHECK(umount_syncs == 1);                       /* umount の sync は書いた */
+    CHECK_STR("Nothing was erased or formatted");
+    CHECK_STR("Unmounting may have flushed");
+    CHECK_NOSTR("Nothing was written");
     CHECK_NOSTR("Installation Complete");
 
     setup();                                        /* 別の prefix にもマウント */
@@ -885,7 +991,7 @@ static void case_paths(void)
     for (k = 0; k < sizeof(bad) / sizeof(bad[0]); k++) {
         setup();
         small_pkg("/cd0/NORMAL.PKG", bad[k], 10, 0);
-        keys = "2y";
+        KEYS("2y");
         run();
         CHECK_NOTHING_WRITTEN();
         CHECK(!any_outside());
@@ -910,13 +1016,13 @@ static void case_paths(void)
     deep_path(p32, 32);
     setup();
     small_pkg("/cd0/NORMAL.PKG", p31, 10, 0);
-    keys = "2y";
+    KEYS("2y");
     run();
     CHECK_STR("Installation Complete");
     CHECK(hd0_size("/hd0/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z/a/b/c/d/e") == 10);
     setup();
     small_pkg("/cd0/NORMAL.PKG", p32, 10, 0);
-    keys = "2y";
+    KEYS("2y");
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("deeper than the VFS allows");
@@ -956,7 +1062,7 @@ static void case_incomplete(void)
 
     setup();                                        /* 追加パッケージ (NORMAL) の展開の失敗 */
     inj_open_fail = "/hd0/usr/bin/edit.bin";
-    keys = "2y";
+    KEYS("2y");
     run();
     CHECK_STR("INCOMPLETE: package installation failed");
     CHECK_NOSTR("Installation Complete");
@@ -966,6 +1072,87 @@ static void case_incomplete(void)
     run();
     CHECK_STR("INCOMPLETE");
     CHECK_STR("REBOOT, then run the installer again");
+    CHECK_NOSTR("Installation Complete");
+
+    /* ---- LBA ごとの write の失敗: その先は 1 セクタも書かない ---- */
+    setup();                                        /* 区画表 (LBA 1) */
+    inj_write_fail_lba = 1;
+    run();
+    CHECK(writes == 0 && h_strcmp(ev, "F ") == 0);
+    CHECK_STR("INCOMPLETE: partition table write/readback failed (rc=-5)");
+    CHECK_NOSTR("Installation Complete");
+    setup();                                        /* ローダの 1 本目 (LBA 2) */
+    inj_write_fail_lba = 2;
+    run();
+    CHECK(writes == 1 && h_strcmp(ev, "F W1 M ") == 0);
+    CHECK_STR("INCOMPLETE: loader write/readback failed (rc=-5)");
+    CHECK(disk[0][510] == 0);
+    setup();                                        /* ローダの途中 (LBA 5) */
+    inj_write_fail_lba = 5;
+    run();
+    CHECK(writes == 4 && h_strcmp(ev, "F W1 M W2 W3 W4 ") == 0);
+    CHECK_STR("INCOMPLETE: loader write/readback failed (rc=-5)");
+    CHECK(!h_strstr(ev, "W5 ") && !h_strstr(ev, "W0 "));
+    setup();                                        /* ローダの最後 (LBA 17) */
+    inj_write_fail_lba = 17;
+    run();
+    CHECK(writes == 16 && !h_strstr(ev, "W17 ") && !h_strstr(ev, "W0 "));
+    CHECK_STR("INCOMPLETE: loader write/readback failed (rc=-5)");
+    CHECK(disk[0][510] == 0);
+    setup();                                        /* IPL (LBA 0) */
+    inj_write_fail_lba = 0;
+    run();
+    CHECK(writes == 17 && disk[0][510] == 0);
+    CHECK_STR("INCOMPLETE: IPL write/readback failed (rc=-5)");
+    CHECK(hd0_size("/hd0/boot/vmkernel.lz4") < 0);
+    CHECK_NOSTR("Installation Complete");
+
+    /* ---- LBA ごとの read の失敗 (読み戻し): 同じく止まる ---- */
+    setup();
+    inj_read_fail_lba = 1; inj_read_fail_after_write = 1;
+    run();
+    CHECK(writes == 1 && !h_strstr(ev, "M"));
+    CHECK_STR("INCOMPLETE: partition table write/readback failed (rc=-5)");
+    setup();
+    inj_read_fail_lba = 5; inj_read_fail_after_write = 1;
+    run();
+    CHECK(writes == 5 && !h_strstr(ev, "W6 ") && !h_strstr(ev, "W0 "));
+    CHECK_STR("INCOMPLETE: loader write/readback failed (rc=-5)");
+    setup();
+    inj_read_fail_lba = 0; inj_read_fail_after_write = 1;
+    run();
+    CHECK(writes == 18);                            /* 区画表 + ローダ 16 + IPL */
+    CHECK_STR("INCOMPLETE: IPL write/readback failed (rc=-5)");
+    CHECK(hd0_size("/hd0/boot/vmkernel.lz4") < 0);
+    /* 検査の read (LBA 0 / 1) の失敗: 何も書かない */
+    setup();
+    inj_read_fail_lba = 0;
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("cannot read LBA 0/1 of hd0 (rc=-5)");
+    setup();
+    inj_read_fail_lba = 1;
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("cannot read LBA 0/1 of hd0 (rc=-5)");
+
+    /* ---- 読み戻しの 511 バイト目 (末尾) だけが違う: 区画表 / ローダ / IPL ---- */
+    setup();
+    inj_readback_bad = 1; inj_readback_off = 511;
+    run();
+    CHECK(writes == 1 && !h_strstr(ev, "M"));
+    CHECK_STR("INCOMPLETE: partition table");
+    setup();
+    inj_readback_bad = 5; inj_readback_off = 511;
+    run();
+    CHECK(writes == 5 && !h_strstr(ev, "W0 "));
+    CHECK_STR("INCOMPLETE: loader");
+    setup();
+    inj_readback_bad = 0; inj_readback_off = 511;
+    run();
+    CHECK(writes == 18);
+    CHECK_STR("INCOMPLETE: IPL");
+    CHECK(hd0_size("/hd0/boot/vmkernel.lz4") < 0);
     CHECK_NOSTR("Installation Complete");
 }
 
@@ -1007,7 +1194,7 @@ static void case_final(void)
     /* 後の NORMAL の大きさ 0 の shell が MINIMAL の shell を空にする */
     setup();
     small_pkg("/cd0/NORMAL.PKG", "/sys/shell.bin", 0, 0);
-    keys = "2y";
+    KEYS("2y");
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("leave /sys/shell.bin missing or empty");
@@ -1029,7 +1216,7 @@ static void case_final(void)
     /* 後の PKG が vmkernel を上限を超える大きさで置き換える → 断る */
     setup();
     small_pkg("/cd0/NORMAL.PKG", "/boot/vmkernel.lz4", 508u * 1024u + 1u, 1);
-    keys = "2y";
+    KEYS("2y");
     run();
     CHECK_NOTHING_WRITTEN();
     CHECK_STR("larger than 508 KiB");
@@ -1037,7 +1224,7 @@ static void case_final(void)
     /* 正しい上書き (NORMAL の 500 バイトの shell) は最終の大きさで入る */
     setup();
     small_pkg("/cd0/NORMAL.PKG", "/sys/shell.bin", 500, 0);
-    keys = "2y";
+    KEYS("2y");
     run();
     CHECK_STR("Installation Complete");
     CHECK(hd0_size("/hd0/sys/shell.bin") == 500);
@@ -1051,6 +1238,771 @@ static void case_final(void)
     CHECK_NOSTR("Installation Complete");
 }
 
+/* ======================================================================== */
+/*  ERASE (N4 の例外): 表が使えないディスクは要約を出して「消した後の空の     */
+/*  ディスク」として全検査 → 確認画面 → y → ERASE の打鍵 → 消去 → format   */
+/* ======================================================================== */
+
+#define BAD_FOREIGN 0
+#define BAD_MULTI   1
+#define BAD_MBRSIG  2
+#define BAD_BROKEN  3
+#define BAD_START   4
+#define BAD_KINDS   5
+
+static void put_entry(int idx, u8 mid, u8 sid, const char *name,
+                      u32 scyl, u32 ecyl, u32 heads, u32 spt)
+{
+    u8 *e = disk[1] + idx * 32;
+    u32 k;
+    memset(e, 0, 32);
+    e[0] = mid; e[1] = sid;
+    e[10] = (u8)scyl; e[11] = (u8)(scyl >> 8);
+    e[12] = (u8)(spt - 1u); e[13] = (u8)(heads - 1u);
+    e[14] = (u8)ecyl; e[15] = (u8)(ecyl >> 8);
+    for (k = 0; k < 16; k++) e[16 + k] = (u8)(*name ? *name++ : ' ');
+}
+
+/* 実機で見た形: 他の OS (MS-DOS) の区画と、その IPL (55AA) */
+static void bad_disk(int kind)
+{
+    u32 h = geom.bios_heads, sp = geom.bios_spt;
+    u32 k;
+    for (k = 0; k < 510; k++) disk[0][k] = (u8)(0xEB ^ k);
+    disk[0][510] = 0x55; disk[0][511] = 0xAA;
+    switch (kind) {
+    case BAD_FOREIGN:
+        put_entry(0, 0xA0, 0xA1, "MS-DOS 6.20", 1, 1000, h, sp);
+        break;
+    case BAD_MULTI:
+        put_entry(0, 0xA0, 0xA1, "MS-DOS 6.20", 1, 1000, h, sp);
+        put_entry(1, 0x20, 0xA1, "DATA", 1001, 1500, h, sp);
+        break;
+    case BAD_MBRSIG:
+        break;                                     /* 項目 0、LBA 0 に 55AA */
+    case BAD_BROKEN:
+        disk[1][0] = 0x80; disk[1][1] = 0xE2; disk[1][8] = 200;
+        memcpy(disk[1] + 16, "OS32            ", 16);
+        break;
+    default:                                       /* OS32 の項目だが開始が違う */
+        put_entry(0, 0x80, 0xE2, "OS32", 40, 100, h, sp);
+        break;
+    }
+}
+
+static const char *const bad_reason[BAD_KINDS] = {
+    "OS32 did not create", "two or more", "LBA 0 ends with 55AA", "entry is broken",
+    "does not start where"
+};
+
+typedef struct { const char *s; int len; } KeyStr;
+#define KS(lit) { lit, (int)sizeof(lit) - 1 }
+
+/* ERASE でない入力: 空行・小文字・末尾/先頭の空白・y・短い/長い・BS 入り・ESC・LF だけ・
+ * 20 文字・NUL 入り (先頭・途中・末尾: 実物のドライバは受けた NUL を 0 で返す。
+ * 0 を「入力なし」と読み捨てる実装は ERA<NUL>SE で消してしまう) */
+static const KeyStr not_erase[] = {
+    KS("\r"), KS("erase\r"), KS("ERASE \r"), KS(" ERASE\r"), KS("y\r"), KS("Erase\r"),
+    KS("ERAS\r"), KS("ERASEE\r"), KS("ERA\bSE\r"), KS("ERASE\x1b"), KS("\n"),
+    KS("ERASEERASEERASEERASE\r"), KS("ERA\0SE\r"), KS("\0ERASE\r"), KS("ERASE\0\r"),
+    KS("ERASE\0\n"), KS("\0\r")
+};
+#define NOT_ERASE ((int)(sizeof(not_erase) / sizeof(not_erase[0])))
+/* 通る行末: CR、LF、CRLF (LF は同じ行末の一部) */
+static const KeyStr erase_ok[] = { KS("ERASE\r"), KS("ERASE\n"), KS("ERASE\r\n") };
+#define ERASE_OK ((int)(sizeof(erase_ok) / sizeof(erase_ok[0])))
+
+static u8 keybuf[64];
+/* pre (NUL 終端) + 行 (長さ付き) を台本にする */
+static void keys_line(const char *pre, const KeyStr *k)
+{
+    int n = 0, i;
+    while (*pre) keybuf[n++] = (u8)*pre++;
+    for (i = 0; i < k->len; i++) keybuf[n++] = (u8)k->s[i];
+    set_keys(keybuf, n);
+}
+
+static int h_memeq(const u8 *a, const u8 *b, u32 n)
+{
+    u32 k;
+    for (k = 0; k < n; k++) if (a[k] != b[k]) return 0;
+    return 1;
+}
+
+static int disk_zero(u32 lba)
+{
+    u32 k;
+    for (k = 0; k < 512; k++) if (disk[lba][k]) return 0;
+    return 1;
+}
+
+/* a が b より前に出ている */
+static void check_before(const char *a, const char *b, int line)
+{
+    const char *pa = h_strstr(cap, a), *pb = h_strstr(cap, b);
+    if (!pa) fail("first marker missing", line);
+    if (!pb) fail("second marker missing", line);
+    if (pa > pb) fail("order of messages", line);
+}
+
+static void one_geom(int g) { if (g) geom_1663(); }
+
+/* 表が使えないディスクの共通の表示: 理由 → 要約 → 確認画面 (y の後に ERASE) */
+static void check_erase_screen(int kind)
+{
+    CHECK(h_strstr(cap, bad_reason[kind]) != 0);
+    CHECK_STR("cannot be used as it is");
+    CHECK_STR("Current contents of hd0:");
+    CHECK_STR("Target: hd0 (IDE drive 0 = BIOS DA 80h), empty disk: create the OS32 area");
+    CHECK_NOSTR("re-create");
+    CHECK_STR("After y, type ERASE");
+    CHECK_STR("EVERYTHING ON hd0 WILL BE LOST");
+    CHECK_STR("Continue? [y/N]");
+    check_before("Current contents of hd0:", "Continue? [y/N]", __LINE__);
+    if (kind == BAD_FOREIGN || kind == BAD_MULTI || kind == BAD_MBRSIG) {
+        CHECK_STR("holds another system's partitions");
+        CHECK_NOSTR("nhd-init");
+    } else {
+        CHECK_STR("nhd-init");
+    }
+}
+
+static void case_erase(void)
+{
+    static u8 keep[DISK_SECTS][512];
+    int g, kind, i;
+
+    for (g = 0; g < 2; g++) {
+        for (kind = 0; kind < BAD_KINDS; kind++) {
+            for (i = 0; i < NOT_ERASE; i++) {
+                setup();
+                one_geom(g);
+                bad_disk(kind);
+                memcpy(keep, disk, sizeof(keep));
+                keys_serial = i & 1;              /* kbd と serial を交互に */
+                keys_gap = i % 3;                 /* 鍵の間に「入力なし」 */
+                /* y の行末を付ける (y の後の最初の行末は y のものとして読み捨てる) */
+                keys_line(((i >> 1) & 1) ? "1y\n" : "1y\r\n", &not_erase[i]);
+                run();
+                CHECK_NOTHING_WRITTEN();
+                CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+                check_erase_screen(kind);
+                CHECK_STR("Type ERASE:");
+                CHECK_STR("Not erased. Nothing was written.");
+                check_before("Continue? [y/N]", "Type ERASE:", __LINE__);
+                CHECK_NOSTR("INCOMPLETE");
+                CHECK_NOSTR("erased and verified");
+                CHECK_NOSTR("Installing OS32");
+                CHECK(keys_pos == keys_len);       /* 行の終わりまで読んで、それ以上は聞かない */
+            }
+            /* ERASE → (y の後で) LBA 0/1 を 0 → 空のディスクとして最後まで */
+            for (i = 0; i < ERASE_OK; i++) {
+                setup();
+                one_geom(g);
+                bad_disk(kind);
+                keys_serial = i & 1;
+                keys_line("1y", &erase_ok[i]);
+                run();
+                check_erase_screen(kind);
+                CHECK_STR("Type ERASE:");
+                CHECK_STR("erased and verified (all zero)");
+                CHECK_STR("Installation Complete");
+                CHECK_NOSTR("INCOMPLETE");
+                CHECK_NOSTR("Not erased");
+                /* 順序: 確認 → ERASE の問い → 消去 → format */
+                check_before("Continue? [y/N]", "Type ERASE:", __LINE__);
+                check_before("Type ERASE:", "erased and verified", __LINE__);
+                check_before("erased and verified", "Formatting ext2", __LINE__);
+                check_order("W0 W1 ");
+                CHECK(keys_pos == keys_len);       /* CRLF の LF も同じ行末として読む */
+                if (g) check_disk(2016u, 524160u, 16, 63, 16514063u);
+                else   check_disk(1632u, 407864u, 8, 17, 409600u);
+            }
+        }
+    }
+
+    /* y の後の行末 (Codex 2 回目 P2): 端末が y と一緒に送る CR / LF / CRLF、または
+     * 後から押した Enter は y の行末として 1 回だけ読み捨てる。ERASE + 行末で消去まで
+     * 進む (kbd / serial、鍵の間の「入力なし」0〜2 = もう届いている / 後から届く) */
+    {
+        static const char *const yeol[] = { "1y\r\n", "1y\r", "1y\n", "1y" };
+        /* y の行末の後に Enter だけ = ERASE の空行 → 取り消し */
+        static const KeyStr ycancel[] = {
+            KS("1y\r\n\r"), KS("1y\r\r"), KS("1y\n\r"), KS("1y\n\n"),
+            KS("1y\r\n\n"), KS("1y\r\n\r\n"), KS("1y\r\r\n")
+        };
+        int ser, gap, y, e;
+        for (ser = 0; ser < 2; ser++) {
+            for (gap = 0; gap < 3; gap++) {
+                for (y = 0; y < 4; y++) {
+                    for (e = 0; e < ERASE_OK; e++) {
+                        setup();
+                        bad_disk(BAD_FOREIGN);
+                        keys_serial = ser;
+                        keys_gap = gap;
+                        keys_line(yeol[y], &erase_ok[e]);
+                        run();
+                        CHECK_STR("Type ERASE:");
+                        CHECK_STR("erased and verified (all zero)");
+                        CHECK_STR("Installation Complete");
+                        CHECK_NOSTR("Not erased");
+                        CHECK(keys_pos == keys_len || (gap > 0 && keys_pos == keys_len - 1 &&
+                                                       keybuf[keys_len - 1] == '\n'));
+                    }
+                }
+                for (y = 0; y < (int)(sizeof(ycancel) / sizeof(ycancel[0])); y++) {
+                    setup();
+                    bad_disk(BAD_FOREIGN);
+                    memcpy(keep, disk, sizeof(keep));
+                    keys_serial = ser;
+                    keys_gap = gap;
+                    keys_line("", &ycancel[y]);
+                    run();
+                    CHECK_NOTHING_WRITTEN();
+                    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+                    CHECK_STR("Not erased. Nothing was written.");
+                    CHECK_NOSTR("erased and verified");
+                    CHECK_NOSTR("Installing OS32");
+                    /* 2 つめの行末で止まり、それ以上は聞かない (末尾の CRLF の LF は、
+                     * 後から届くなら読まれずに残る) */
+                    CHECK(keys_pos == keys_len || (gap > 0 && keys_pos == keys_len - 1 &&
+                                                   keybuf[keys_len - 1] == '\n'));
+                }
+            }
+        }
+    }
+
+    /* [0-3] の選択の後の行末 (Codex 3 回目 P2): 「1 + Enter」の Enter は選択の行末と
+     * して 1 回だけ捨てる (Continue の取り消しにしない)。1\r\n → y\r\n → ERASE\r\n で
+     * 消去まで進み、選択の行末の後に Enter だけなら取り消し。NUL・ESC・n は捨てずに
+     * 答え (= 取り消し)。kbd / serial × 鍵の間の「入力なし」0〜2 */
+    {
+        static const char *const ceol[] = { "1\r\n", "1\r", "1\n", "1" };
+        static const char *const yeol2[] = { "y\r\n", "y\n", "y" };
+        static const KeyStr ccancel[] = {
+            KS("1\r\n\r"), KS("1\r\r"), KS("1\n\n"), KS("1\r\n\n"), KS("1\n\r"),
+            KS("1\r\n\r\n"), KS("1\r\r\n"), KS("1\r\nn"), KS("1\r\n\x1b"), KS("1\r\n\0"),
+            KS("1\0"), KS("1\x1b")
+        };
+        static char pre[16];
+        int ser, gap, c, y, e, n;
+        const char *q;
+        for (ser = 0; ser < 2; ser++) {
+            for (gap = 0; gap < 3; gap++) {
+                for (c = 0; c < 4; c++) {
+                    for (y = 0; y < 3; y++) {
+                        for (e = 0; e < ERASE_OK; e++) {
+                            n = 0;
+                            for (q = ceol[c]; *q; q++) pre[n++] = *q;
+                            for (q = yeol2[y]; *q; q++) pre[n++] = *q;
+                            pre[n] = '\0';
+                            setup();
+                            bad_disk(BAD_FOREIGN);
+                            keys_serial = ser;
+                            keys_gap = gap;
+                            keys_line(pre, &erase_ok[e]);
+                            run();
+                            CHECK_STR("Type ERASE:");
+                            CHECK_STR("erased and verified (all zero)");
+                            CHECK_STR("Installation Complete");
+                            CHECK_NOSTR("Installation cancelled");
+                            CHECK_NOSTR("Not erased");
+                            CHECK(keys_pos == keys_len || (gap > 0 && keys_pos == keys_len - 1 &&
+                                                           keybuf[keys_len - 1] == '\n'));
+                        }
+                    }
+                }
+                for (y = 0; y < (int)(sizeof(ccancel) / sizeof(ccancel[0])); y++) {
+                    setup();
+                    bad_disk(BAD_FOREIGN);
+                    memcpy(keep, disk, sizeof(keep));
+                    keys_serial = ser;
+                    keys_gap = gap;
+                    keys_line("", &ccancel[y]);
+                    run();
+                    CHECK_NOTHING_WRITTEN();
+                    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+                    CHECK_STR("Installation cancelled. Nothing was written.");
+                    CHECK_NOSTR("Type ERASE:");
+                    /* 取り消しの CR の後の LF は読まずに終わってよい (もう聞かない) */
+                    CHECK(keys_pos == keys_len || (keys_pos == keys_len - 1 &&
+                                                   keybuf[keys_len - 1] == '\n'));
+                }
+                /* 空のディスク (ERASE を聞かない) でも「1 + Enter → y + Enter」で入る */
+                setup();
+                keys_serial = ser;
+                keys_gap = gap;
+                KEYS("1\r\ny\r\n");
+                run();
+                CHECK_STR("Installation Complete");
+                CHECK_NOSTR("Type ERASE:");
+            }
+        }
+    }
+
+    /* 鍵の間に「入力なし」が挟まっても (シリアルの到着の間) ERASE は通る */
+    setup();
+    bad_disk(BAD_FOREIGN);
+    keys_gap = 3;
+    KEYS("1yERASE\r");
+    run();
+    CHECK_STR("erased and verified (all zero)");
+    CHECK_STR("Installation Complete");
+
+    /* 要約: 55AA、項目の数、mid・sid・名前・開始と終了のシリンダ、LBA (16/63) */
+    setup();
+    geom_1663();
+    bad_disk(BAD_FOREIGN);
+    KEYS("1n");
+    run();
+    CHECK_STR("first bytes eb ea e9 e8, boot signature 55AA: yes");
+    CHECK_STR("LBA 1 (partition table): 1 entry");
+    CHECK_STR("#0 mid a0 sid a1 name \"MS-DOS 6.20     \"");
+    CHECK_STR("cyl 1..1000 (start C/H/S 1/0/0, end C/H/S 1000/15/62)");
+    CHECK_STR("LBA 1008, 1008000 sectors (492 MB)");
+    CHECK_STR("code -40");
+    setup();
+    bad_disk(BAD_MULTI);
+    KEYS("1n");
+    run();
+    CHECK_STR("2 entries");
+    CHECK_STR("#1 mid 20 sid a1 name \"DATA            \"");
+    CHECK_STR("cyl 1001..1500");
+    setup();
+    bad_disk(BAD_MBRSIG);
+    KEYS("1n");
+    run();
+    CHECK_STR("boot signature 55AA: yes");
+    CHECK_STR("0 entries");
+    setup();
+    bad_disk(BAD_BROKEN);
+    KEYS("1n");
+    run();
+    CHECK_STR("sid e2 name \"OS32            \"");
+    CHECK_STR("not a valid range at 8 heads x 17 sectors");
+
+    /* 空のディスク・作り直しでは ERASE を聞かない */
+    setup();
+    run();
+    CHECK_NOSTR("Type ERASE");
+    CHECK_NOSTR("After y");
+    CHECK_STR("Installation Complete");
+    setup();
+    disk[1][0] = 0x80; disk[1][1] = 0xE2; disk[1][8] = 12;      /* 旧 cdinst の表 */
+    disk[1][10] = 16; disk[1][11] = 7;
+    disk[1][12] = (u8)((409600u / 136u - 1u) & 0xFF); disk[1][13] = (u8)((409600u / 136u - 1u) >> 8);
+    memcpy(disk[1] + 16, "OS32            ", 16);
+    disk[0][510] = 0x55; disk[0][511] = 0xAA;
+    run();
+    CHECK_NOSTR("Type ERASE");
+    CHECK_STR("Installation Complete");
+}
+
+/* 消す前に止まる (N・大きさ・容量・ERASE でない) と、消した後の失敗の案内 */
+static void case_erase_fail(void)
+{
+    static u8 keep[DISK_SECTS][512];
+    int off;
+
+    /* y/N で N → まだ何も消していない (ERASE も聞かない) */
+    setup();
+    geom_1663();
+    bad_disk(BAD_FOREIGN);
+    memcpy(keep, disk, sizeof(keep));
+    KEYS("1n");
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+    check_erase_screen(BAD_FOREIGN);
+    CHECK_STR("Installation cancelled. Nothing was written.");
+    CHECK_NOSTR("Type ERASE:");
+    CHECK_NOSTR("INCOMPLETE");
+    CHECK_NOSTR("ERASED");
+
+    /* 大きさの検査で断る (IPL 513 B) → 消す前 (確認も ERASE も無い) */
+    setup();
+    bad_disk(BAD_FOREIGN);
+    memcpy(keep, disk, sizeof(keep));
+    boot_pkg(513u, LOADER_LEN, 1, 0);
+    KEYS("1yERASE\r");
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+    CHECK_STR("larger than 512");
+    CHECK_STR("Current contents of hd0:");
+    CHECK_NOSTR("Continue? [y/N]");
+    CHECK_NOSTR("Type ERASE:");
+    CHECK_NOSTR("INCOMPLETE");
+
+    /* 容量の検査で断る (13MB の区画に NORMAL が 30MB) → 消す前 */
+    setup();
+    bad_disk(BAD_MULTI);
+    memcpy(keep, disk, sizeof(keep));
+    geom.ata_total = 1632u + 136u * 200u;
+    small_pkg("/cd0/NORMAL.PKG", "/usr/share/big.dat", 30u * 1024u * 1024u, 1);
+    KEYS("2yERASE\r");
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+    CHECK_STR("do not fit");
+    CHECK_NOSTR("Continue? [y/N]");
+    CHECK_NOSTR("Type ERASE:");
+
+    /* format の失敗 (消した後、区画表はまだ 0) → 空のディスクとして入れ直せる */
+    setup();
+    bad_disk(BAD_MULTI);
+    inj_format_fail = 1;
+    KEYS("1yERASE\r");
+    run();
+    CHECK(writes == 2 && disk_zero(0) && disk_zero(1));
+    CHECK_STR("erased and verified");
+    CHECK_STR("INCOMPLETE: ext2_format_at failed");
+    CHECK_STR("REBOOT");
+    CHECK_STR("partition table was ERASED");
+    CHECK_STR("installs onto hd0 as an empty disk");
+    CHECK_NOSTR("Installation Complete");
+    memcpy(keep, disk, sizeof(keep));
+    setup();                                        /* 次の実行は聞かずに空のディスク */
+    memcpy(disk, keep, sizeof(keep));
+    KEYS("1y");
+    run();
+    CHECK_NOSTR("Type ERASE");
+    CHECK_STR("empty disk");
+    CHECK_STR("Installation Complete");
+    check_disk(1632u, 407864u, 8, 17, 409600u);
+    /* 完了した後 (区画表を書いた後) の同じ起動でもう一度: 消して format が失敗 →
+     * 案内は今回の消去で決まる (前の実行の「区画表を書いた」を持ち越さない) */
+    setup();
+    bad_disk(BAD_MULTI);
+    inj_format_fail = 1;
+    KEYS("1yERASE\r");
+    run();
+    CHECK_STR("INCOMPLETE: ext2_format_at failed");
+    CHECK_STR("partition table was ERASED");
+    /* 消した実行の後の、消さない実行の format の失敗 → 「空のディスク」の案内は出ない */
+    setup();
+    inj_format_fail = 1;
+    run();
+    CHECK_STR("INCOMPLETE: ext2_format_at failed");
+    CHECK_NOSTR("was ERASED");
+
+    /* 消す書き込みの読み戻しが違う (LBA 1 / LBA 0、先頭側と 511 バイト目) → format に進まない */
+    for (off = 3; off <= 511; off += 508) {
+        setup();
+        bad_disk(BAD_FOREIGN);
+        inj_readback_bad = 1;
+        inj_readback_off = off;
+        KEYS("1yERASE\r");
+        run();
+        CHECK(writes == 2 && fmt_calls == 0);
+        CHECK_STR("INCOMPLETE: erasing LBA 0 and 1 of hd0 failed");
+        CHECK_STR("type ERASE again");
+        CHECK_NOSTR("Installation Complete");
+        setup();
+        bad_disk(BAD_FOREIGN);
+        inj_readback_bad = 0;
+        inj_readback_off = off;
+        KEYS("1yERASE\r");
+        run();
+        CHECK(writes == 1 && fmt_calls == 0);
+        CHECK_STR("INCOMPLETE: erasing LBA 0 and 1 of hd0 failed");
+    }
+    /* 消す書き込みの失敗 (LBA 0 / LBA 1) */
+    setup();
+    bad_disk(BAD_FOREIGN);
+    inj_write_fail_lba = 0;
+    KEYS("1yERASE\r");
+    run();
+    CHECK(writes == 0 && fmt_calls == 0);
+    CHECK_STR("INCOMPLETE: erasing LBA 0 and 1 of hd0 failed (rc=-5)");
+    setup();
+    bad_disk(BAD_FOREIGN);
+    inj_write_fail_lba = 1;
+    KEYS("1yERASE\r");
+    run();
+    CHECK(writes == 1 && fmt_calls == 0 && disk_zero(0) && !disk_zero(1));
+    CHECK_STR("INCOMPLETE: erasing LBA 0 and 1 of hd0 failed (rc=-5)");
+
+    /* 区画表を書いた後の失敗 (マウント・sync) は「空のディスク」と言わない
+     * (次の実行は OS32 の区域の作り直し) */
+    setup();
+    bad_disk(BAD_FOREIGN);
+    inj_mount_fail = 1;
+    KEYS("1yERASE\r");
+    run();
+    CHECK_STR("INCOMPLETE: mount /hd0");
+    CHECK_NOSTR("was ERASED");
+    setup();
+    bad_disk(BAD_FOREIGN);
+    inj_sync_fail = 1;
+    KEYS("1yERASE\r");
+    run();
+    CHECK_STR("INCOMPLETE");
+    CHECK_NOSTR("was ERASED");
+    CHECK_NOSTR("Installation Complete");
+}
+
+/* ERASE の入力中にマウントが変わる贋の手 */
+static void hook_mount_other(void) { hd0_mounts = 1; hd0_at_hd0 = 0; }
+static void hook_mount_hd0(void)   { hd0_mounts = 1; hd0_at_hd0 = 1; }
+static void hook_swap_hd0(void)    { hd0_at_hd0 = 0; hd0_other_dev = 1; }
+static void hook_gone_hd0(void)    { hd0_at_hd0 = 0; hd0_mounts = 0; }
+
+/* マウント中は消さない (今までのマウントの検査を先に通す) */
+static void case_erase_mount(void)
+{
+    static u8 keep[DISK_SECTS][512];
+
+    /* ルートが hd0: 確認も ERASE も無しに断る */
+    setup();
+    bad_disk(BAD_FOREIGN);
+    inj_root_hd0 = 1;
+    hd0_mounts = 1;
+    KEYS("1yERASE\r");
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("root file system");
+    CHECK_NOSTR("Continue? [y/N]");
+    CHECK_NOSTR("Type ERASE");
+
+    /* 別の prefix (だけ / にも) */
+    setup();
+    bad_disk(BAD_MULTI);
+    hd0_mounts = 1; hd0_at_hd0 = 0;
+    KEYS("1yERASE\r");
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK_STR("mounted somewhere other than /hd0");
+    CHECK_NOSTR("Type ERASE");
+    setup();
+    bad_disk(BAD_MULTI);
+    hd0_mounts = 2; hd0_at_hd0 = 1;
+    KEYS("1yERASE\r");
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK_NOSTR("Type ERASE");
+
+    /* /hd0 の umount が失敗 → 消さない */
+    setup();
+    bad_disk(BAD_MULTI);
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    memcpy(keep, disk, sizeof(keep));
+    KEYS("1yERASE\r");
+    inj_umount_fail = 1;
+    inj_umount_sync = 1;
+    run();
+    CHECK(writes == 0 && fmt_calls == 0);
+    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+    CHECK_STR("Type ERASE:");
+    CHECK_STR("umount /hd0 failed");
+    CHECK(umount_syncs == 1);                       /* umount の sync は書いた */
+    CHECK_STR("Nothing was erased or formatted");
+    CHECK_STR("Unmounting may have flushed");
+    CHECK_NOSTR("Nothing was written");
+    CHECK_NOSTR("INCOMPLETE");
+    CHECK_NOSTR("erased and verified");
+    /* umount の後もマウントが残る → 消さない (sync はあり得る) */
+    setup();
+    bad_disk(BAD_MULTI);
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    memcpy(keep, disk, sizeof(keep));
+    KEYS("1yERASE\r");
+    inj_mount_stays = 1;
+    inj_umount_sync = 1;
+    run();
+    CHECK(writes == 0 && fmt_calls == 0);
+    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+    CHECK_STR("still mounted");
+    CHECK(umount_syncs == 1);                       /* umount の sync は書いた */
+    CHECK_STR("Nothing was erased or formatted");
+    CHECK_STR("Unmounting may have flushed");
+    CHECK_NOSTR("Nothing was written");
+    CHECK_NOSTR("erased and verified");
+
+    /* /hd0 にだけマウント → 確認画面に「外す」、ERASE の後で外してから消し、そのまま入れる */
+    setup();
+    geom_1663();
+    bad_disk(BAD_MULTI);
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    KEYS("1yERASE\r");
+    run();
+    CHECK(first_write_mounts == 0);
+    check_order("U W0 W1 ");
+    check_disk(2016u, 524160u, 16, 63, 16514063u);
+    CHECK_STR("will be unmounted first");
+    CHECK_STR("Installation Complete");
+
+    /* ERASE の入力中に別の prefix / /hd0 にマウントされる → 消さない (何も書かない) */
+    setup();
+    bad_disk(BAD_FOREIGN);
+    memcpy(keep, disk, sizeof(keep));
+    KEYS("1yERASE\r");
+    keys_hook = hook_mount_other; keys_hook_at = 4;      /* "ERASE" の 'A' の前 */
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+    CHECK_STR("Type ERASE:");
+    CHECK_STR("still mounted");
+    CHECK_NOSTR("erased and verified");
+    setup();
+    bad_disk(BAD_FOREIGN);
+    memcpy(keep, disk, sizeof(keep));
+    KEYS("1yERASE\r");
+    keys_hook = hook_mount_hd0; keys_hook_at = 7;        /* CR の前 */
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+    CHECK_STR("still mounted");
+    CHECK_NOSTR("erased and verified");
+
+    /* ERASE の入力中に /hd0 の相手が差し替わる (hd1 になる / 外れる) → 消さない */
+    setup();
+    bad_disk(BAD_FOREIGN);
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    memcpy(keep, disk, sizeof(keep));
+    KEYS("1yERASE\r");
+    keys_hook = hook_swap_hd0; keys_hook_at = 3;
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+    CHECK_STR("/hd0 no longer holds hd0");
+    CHECK_NOSTR("Nothing was erased or formatted");   /* umount の前: 何も書いていない */
+    CHECK_NOSTR("erased and verified");
+    setup();
+    bad_disk(BAD_FOREIGN);
+    hd0_mounts = 1; hd0_at_hd0 = 1;
+    memcpy(keep, disk, sizeof(keep));
+    KEYS("1yERASE\r");
+    keys_hook = hook_gone_hd0; keys_hook_at = 7;
+    run();
+    CHECK_NOTHING_WRITTEN();
+    CHECK(h_memeq(&keep[0][0], &disk[0][0], sizeof(keep)));
+    CHECK_STR("/hd0 no longer holds hd0");
+    CHECK_NOSTR("Nothing was erased or formatted");   /* umount の前: 何も書いていない */
+    CHECK_NOSTR("erased and verified");
+}
+
+/* ======================================================================== */
+/*  鍵の読み方 (inst_hdd_getkey / ih_read_line を直に): 0 以上はすべて入力、  */
+/*  -1 は待つ、CR の直後の LF は捨てる (すぐ届いても後から届いても)          */
+/* ======================================================================== */
+
+static void keys_reset(void) { ih_last_cr = 0; ih_pushed = -1; }
+
+static void case_keys(void)
+{
+    static char line[INST_LINE_MAX];
+    int g;
+
+    setup();
+    keys_reset();
+    KEYS("\r\n\nx");                                /* CRLF → CR、次の LF は生きている */
+    CHECK(inst_hdd_getkey(&g_api) == '\r');
+    CHECK(inst_hdd_getkey(&g_api) == '\n');
+    CHECK(inst_hdd_getkey(&g_api) == 'x');
+    CHECK(keys_pos == keys_len);
+
+    keys_reset();
+    KEYS("\n\r\r\n");                               /* LF CR CR LF → LF CR CR */
+    CHECK(inst_hdd_getkey(&g_api) == '\n');
+    CHECK(inst_hdd_getkey(&g_api) == '\r');
+    CHECK(inst_hdd_getkey(&g_api) == '\r');
+    keys_gap = 0;
+    CHECK(keys_pos == keys_len - 1);
+
+    keys_reset();
+    KEYS("\0y\0");                                  /* NUL は 0 として届く */
+    CHECK(inst_hdd_getkey(&g_api) == 0);
+    CHECK(inst_hdd_getkey(&g_api) == 'y');
+    CHECK(inst_hdd_getkey(&g_api) == 0);
+
+    keys_reset();
+    keys_gap = 2;                                   /* 後から届く LF も捨てる */
+    KEYS("\r\nx");
+    CHECK(inst_hdd_getkey(&g_api) == '\r');
+    CHECK(inst_hdd_getkey(&g_api) == 'x');
+
+    keys_reset();
+    keys_gap = 0;
+    keys_serial = 1;                                /* serial からも同じ */
+    KEYS("a\0\r\nb");
+    CHECK(inst_hdd_getkey(&g_api) == 'a');
+    CHECK(inst_hdd_getkey(&g_api) == 0);
+    CHECK(inst_hdd_getkey(&g_api) == '\r');
+    CHECK(inst_hdd_getkey(&g_api) == 'b');
+    keys_serial = 0;
+
+    /* 1 行読み: CRLF は 1 つの行末、CR の後の別の字は次の読みに戻す、NUL 入りは不一致 */
+    keys_reset();
+    KEYS("ERASE\r\n");
+    CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 0) == 0 && h_strcmp(line, "ERASE") == 0);
+    CHECK(keys_pos == keys_len);
+    keys_reset();
+    KEYS("ERASE\rq");
+    CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 0) == 0 && h_strcmp(line, "ERASE") == 0);
+    CHECK(inst_hdd_getkey(&g_api) == 'q');
+    keys_reset();
+    KEYS("ERASE\n");
+    CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 0) == 0 && h_strcmp(line, "ERASE") == 0);
+    keys_reset();
+    KEYS("ERA\0SE\r");
+    CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 0) == -1);
+    CHECK(keys_pos == keys_len);
+    keys_reset();
+    keys_gap = 1;
+    KEYS("E\0RASE\n");
+    CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 0) == -1);
+    keys_gap = 0;
+    keys_reset();
+    KEYS("ERASE\x1b" "y");                          /* ESC はその場で打ち切り、y は残る */
+    CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 0) == -1);
+    CHECK(inst_hdd_getkey(&g_api) == 'y');
+
+    /* skip_eol (y の後の ERASE の行): 最初の行末 1 つだけ映さずに読み捨てる。
+     * もう届いていても後から届いても同じ。行末以外 (NUL・ESC・字) は捨てない */
+    for (g = 0; g < 3; g++) {
+        keys_gap = g;
+        keys_reset();
+        KEYS("\r\nERASE\r");
+        CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 1) == 0 && h_strcmp(line, "ERASE") == 0);
+        keys_reset();
+        KEYS("\rERASE\r");
+        CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 1) == 0 && h_strcmp(line, "ERASE") == 0);
+        keys_reset();
+        KEYS("\nERASE\n");
+        CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 1) == 0 && h_strcmp(line, "ERASE") == 0);
+        keys_reset();
+        KEYS("ERASE\r");
+        CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 1) == 0 && h_strcmp(line, "ERASE") == 0);
+        keys_reset();
+        KEYS("\r\r");                               /* 2 つめの行末は空行 */
+        CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 1) == 0 && line[0] == '\0');
+        CHECK(keys_pos == keys_len);
+        keys_reset();
+        KEYS("\r\n\n");                             /* CRLF の後の LF は空行 */
+        CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 1) == 0 && line[0] == '\0');
+        CHECK(keys_pos == keys_len);
+        keys_reset();
+        KEYS("\0\rERASE\r");                          /* NUL は入力: 捨てず、その行は不一致 */
+        CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 1) == -1);
+        CHECK(inst_hdd_getkey(&g_api) == 'E');      /* NUL の行で終わり、ERASE は次 */
+        keys_reset();
+        KEYS("E\rERASE\r");                           /* 最初の 1 字だけ: 後の行末は捨てない */
+        CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 1) == 0 && h_strcmp(line, "E") == 0);
+        keys_reset();
+        KEYS("\x1b" "ERASE\r");                       /* ESC は捨てずに打ち切り */
+        CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 1) == -1);
+        CHECK(keys_pos == 1);
+    }
+    keys_gap = 0;
+    /* 行末の読み捨ては映さない (y の後に余計な改行を出さない) */
+    keys_reset();
+    cap_len = 0; cap[0] = '\0';
+    KEYS("\r\nAB\r");
+    CHECK(ih_read_line(&g_api, line, INST_LINE_MAX, 1) == 0 && h_strcmp(line, "AB") == 0);
+    CHECK(h_strcmp(cap, "AB\n") == 0);
+}
+
 int os32_main(int argc, char **argv)
 {
     const char *c = argc > 1 ? argv[1] : "";
@@ -1061,6 +2013,10 @@ int os32_main(int argc, char **argv)
     else if (h_strcmp(c, "incomplete") == 0) case_incomplete();
     else if (h_strcmp(c, "paths") == 0) case_paths();
     else if (h_strcmp(c, "final") == 0) case_final();
+    else if (h_strcmp(c, "erase") == 0) case_erase();
+    else if (h_strcmp(c, "erase_fail") == 0) case_erase_fail();
+    else if (h_strcmp(c, "erase_mount") == 0) case_erase_mount();
+    else if (h_strcmp(c, "keys") == 0) case_keys();
     else { report("unknown case\n"); return 2; }
     report("cdinst: PASS (");
     report(c);

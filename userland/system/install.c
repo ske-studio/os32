@@ -26,7 +26,8 @@
 /*    inst_hdd.c / inst_disk.c に移した — 区画表は PC-98 標準配置、IPL の     */
 /*    [8]/[9] と区画の CHS は BIOS 幾何、区画は LBA 1632 以上の最初の BIOS    */
 /*    シリンダ境界から 256MiB まで。空のディスクか OS32 の項目 1 つ (再作成) */
-/*    だけを扱い、全検査 (媒体の大きさ・容量を含む) → ext2_format_at →      */
+/*    だけを扱い、全検査 (媒体の大きさ・容量を含む) → 確認と y/N → (表が    */
+/*    使えなければ ERASE の打鍵 → LBA 0/1 の消去) → ext2_format_at →        */
 /*    区画表 → 読み戻し → マウント → ローダ / IPL → 展開 → sync の順。       */
 /* ======================================================================== */
 
@@ -239,18 +240,18 @@ static int read_file_to_buf(const char *path, int max_size) {
 
 /* ======== 安全ロック ======== */
 
+/* 鍵は inst_hdd_getkey (0 以上はすべて入力、CR の直後の LF は捨てる) */
 static int confirm_install(void) {
     int key;
     g_api->kprintf(ATTR_RED, "%s", "\nWARNING: The OS32 area on hd0 will be ERASED during installation!\n");
     g_api->kprintf(ATTR_YELLOW, "%s", "Do you want to proceed? [y/N]: ");
     while (1) {
-        key = g_api->kbd_trygetchar();
-        if (key <= 0) key = g_api->serial_trygetchar();
+        key = inst_hdd_getkey(g_api);
 
         if (key == 'y' || key == 'Y') {
             g_api->kprintf(ATTR_YELLOW, "%s", "Y\n\n");
             return 1;
-        } else if (key == 'n' || key == 'N' || key == 0x0D || key == 0x1B) {
+        } else if (key == 'n' || key == 'N' || key == 0x0D || key == 0x0A || key == 0x1B) {
             g_api->kprintf(ATTR_YELLOW, "%s", "N\n\n");
             return 0;
         }
@@ -562,18 +563,20 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
     api->kprintf(ATTR_WHITE, "Size: %u MB (%u sectors)\n", info.size_mb, info.total_sectors);
 
     /* === Phase 0: 全検査 (承認前 = まだ何も書いていない) ===
-     * 媒体の中身 → hd0 (幾何・区画表のモード・マウント) → 大きさと容量 */
+     * 媒体の中身 → FD の列挙 → hd0 (幾何・区画表のモード・マウント。表が
+     * 使えなければ要約を出して「消した後の空のディスク」として続ける) →
+     * 大きさと容量 */
     if (precheck_media(sizes) != 0) {
         api->kprintf(0x4F, "%s",
                      "Nothing was written; use a complete install floppy.\n");
         goto end;
     }
-    if (inst_hdd_check(api, &tgt) != 0) goto end;
     if (measure_need(sizes[MEDIA_KERNEL], &need) != 0) {
         api->kprintf(0x4F, "%s",
                      "Error: cannot list the floppy. Nothing was written.\n");
         goto end;
     }
+    if (inst_hdd_check(api, &tgt) != 0) goto end;
     if (inst_hdd_check_media(api, &tgt, sizes[MEDIA_IPL], sizes[MEDIA_LOADER],
                              sizes[MEDIA_KERNEL], &need) != 0)
         goto end;
@@ -581,12 +584,16 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
     /* 安全ロック */
     inst_hdd_describe(api, &tgt);
     if (!confirm_install()) {
-        api->kprintf(0x07, "%s", "Installation aborted.\n");
-        rc = 0;                 /* 利用者が断っただけ = 失敗ではない */
+        /* 利用者が断っただけ = 失敗ではない (まだ何も書いていない) */
+        api->kprintf(ATTR_WHITE, "%s", "Installation aborted. Nothing was written.\n");
+        rc = 0;
         goto end;
     }
+    /* 表が使えないディスクは y の後に ERASE の打鍵 (受けなければ何も書かない) */
+    if (inst_hdd_ask_erase(api, &tgt) != 0) goto end;
 
-    /* === Phase 1: ext2 → 区画表 → 読み戻し → マウント (R3-1) === */
+    /* === Phase 1: (ERASE なら LBA 0/1 の消去 →) ext2 → 区画表 → 読み戻し →
+     * マウント (R3-1) === */
     api->kprintf(ATTR_YELLOW, "%s", "[1/3] Preparing the OS32 area on hd0...\n");
     if (inst_hdd_release(api, &tgt) != 0) goto end;
     if (inst_hdd_prepare(api, &tgt) != 0) goto end;
