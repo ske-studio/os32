@@ -147,3 +147,36 @@ int rsh_line_idle(const struct rsh_line *l)
     /* 拒否した行は沈黙では閉じない。行末 (\n / \r) が来るまで待つ */
     return RSH_LINE_MORE;
 }
+
+int rsh_line_rest(struct rsh_line *l, int r, int ch, int fs,
+                  struct serial_watchdog *w, const struct rsh_io *io)
+{
+    while (r == RSH_LINE_MORE) {
+        /* **拒否した行を待つ間も番犬を見る** (Codex P2)。バイトが来続けても
+         * 見るよう、空回りの後だけでなく毎周見る。拒否していない行は短い
+         * 空回りで終わり、行頭の待ちが番犬を見るのでここでは触らない
+         * (ack の行を受けている途中で期限を切らない)。 */
+        if (l->junk && w &&
+            serial_watchdog_poll(w, io->tick(io->ctx)) == SER_WD_REVERT) {
+            /* 速度が変わった — 受けたバイト列には意味が無いので捨てる */
+            rsh_line_begin(l, l->buf, l->cap);
+            return RSH_LINE_REVERT;
+        }
+        if (ch < 0) {
+            int t = 0;
+            while (t < RSH_REST_SPIN) {
+                ch = io->getch(io->ctx, &fs);
+                if (ch >= 0) break;
+                t++;
+            }
+        }
+        if (ch < 0) {
+            r = rsh_line_idle(l);
+            if (r == RSH_LINE_MORE) io->idle(io->ctx);
+            continue;
+        }
+        r = rsh_line_feed(l, ch, fs, 0, 1);
+        ch = -1;
+    }
+    return r;
+}

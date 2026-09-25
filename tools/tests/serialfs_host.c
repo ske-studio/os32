@@ -947,6 +947,154 @@ static void rshell_rules(void)
     }
 }
 
+/* rsh_line_rest の偽の線: 台本 (tick ごとに 1 バイト) と仮想の時計 */
+struct rio_fake {
+    unsigned long now;          /* 仮想 tick (idle で 1 進む) */
+    const int *script;          /* tick ごとに届くバイト (-1 = 無し) */
+    const int *script_fs;       /* そのバイトがシリアル由来か */
+    unsigned long script_n;
+    unsigned long taken_at;     /* 最後に渡した tick + 1 (同じ tick で 2 度渡さない) */
+    unsigned long idles;
+    unsigned long limit;        /* 暴走止め (これを越えたら本体の Enter を出す) */
+    int limit_hit;
+};
+static int rio_getch(void *ctx, int *from_serial)
+{
+    struct rio_fake *f = (struct rio_fake *)ctx;
+    if (f->idles >= f->limit) {             /* 暴走止め: 本体の Enter */
+        f->limit_hit = 1;
+        *from_serial = 0;
+        return '\r';
+    }
+    if (f->now < f->script_n && f->taken_at != f->now + 1 &&
+        f->script[f->now] >= 0) {
+        f->taken_at = f->now + 1;
+        *from_serial = f->script_fs ? f->script_fs[f->now] : 1;
+        return f->script[f->now];
+    }
+    *from_serial = 0;
+    return -1;
+}
+static unsigned long rio_tick(void *ctx)
+{
+    return ((struct rio_fake *)ctx)->now;
+}
+static void rio_idle(void *ctx)
+{
+    struct rio_fake *f = (struct rio_fake *)ctx;
+    f->now++;
+    f->idles++;
+}
+
+/* 番犬と拒否した行 (Codex P2): 行末を待つ間も期限で旧速度へ戻す */
+static void rshell_watchdog_junk(void)
+{
+    char b[16];
+    struct rsh_line l;
+    struct serial_watchdog w;
+    struct rio_fake f;
+    struct rsh_io io;
+    int r;
+    static int garbage[2000];
+    unsigned long i;
+
+    io.getch = rio_getch; io.tick = rio_tick; io.idle = rio_idle; io.ctx = &f;
+
+    /* 1) 番犬が動いている間に「ESC + 続き (改行なし)」→ 沈黙。
+     *    期限で REVERT、行は捨てられ (実行も EOT もしない)、番犬は下りる。 */
+    memset(&w, 0, sizeof(w));
+    serial_watchdog_arm(&w, 0, 1, 9600);
+    memset(&f, 0, sizeof(f));
+    f.limit = 5000;
+    rsh_line_begin(&l, b, (int)sizeof(b));
+    r = rsh_line_feed(&l, 0x1B, 1, 1, 1);
+    CHECK(r == RSH_LINE_MORE && l.junk);
+    r = rsh_line_rest(&l, r, 'x', 1, &w, &io);
+    CHECK(r == RSH_LINE_REVERT);
+    CHECK(!f.limit_hit);
+    CHECK(f.now >= SER_SWITCH_WATCHDOG_TICKS &&
+          f.now <= SER_SWITCH_WATCHDOG_TICKS + 2);
+    CHECK(l.pos == 0 && !l.junk && l.bytes == 0 && b[0] == '\0');
+    CHECK(!w.armed);
+    CHECK(serial_watchdog_poll(&w, f.now + 1000) == SER_WD_WAIT);
+
+    /* 2) 化けたバイトが改行なしで来続けても、期限で戻す (毎周見る) */
+    for (i = 0; i < sizeof(garbage) / sizeof(garbage[0]); i++)
+        garbage[i] = 'a' + (int)(i % 26);
+    serial_watchdog_arm(&w, 0, 1, 9600);
+    memset(&f, 0, sizeof(f));
+    f.limit = 5000;
+    f.script = garbage;
+    f.script_n = sizeof(garbage) / sizeof(garbage[0]);
+    rsh_line_begin(&l, b, (int)sizeof(b));
+    r = rsh_line_feed(&l, 0x1B, 1, 1, 1);
+    r = rsh_line_rest(&l, r, -1, 1, &w, &io);
+    CHECK(r == RSH_LINE_REVERT && !f.limit_hit);
+    CHECK(f.now <= SER_SWITCH_WATCHDOG_TICKS + 2);
+    CHECK(l.pos == 0 && !l.junk && !l.overflow);
+
+    /* 3) 番犬が居なければ従来どおり: 沈黙では解けず、行末で拒否のまま閉じる */
+    {
+        static int late_nl[1200];
+        for (i = 0; i < 1200; i++) late_nl[i] = -1;
+        late_nl[1100] = '\n';
+        memset(&w, 0, sizeof(w));
+        memset(&f, 0, sizeof(f));
+        f.limit = 5000;
+        f.script = late_nl;
+        f.script_n = 1200;
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        r = rsh_line_feed(&l, 0x1B, 1, 1, 1);
+        r = rsh_line_rest(&l, r, 'x', 1, &w, &io);
+        CHECK(r == RSH_LINE_DONE && l.junk && !f.limit_hit && f.now == 1100);
+        /* NULL の番犬も同じ */
+        memset(&f, 0, sizeof(f));
+        f.limit = 5000;
+        f.script = late_nl;
+        f.script_n = 1200;
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        r = rsh_line_feed(&l, 0x1B, 1, 1, 1);
+        r = rsh_line_rest(&l, r, 'x', 1, (struct serial_watchdog *)0, &io);
+        CHECK(r == RSH_LINE_DONE && l.junk && f.now == 1100);
+    }
+
+    /* 4) 期限の前なら本体の Enter / ESC で回復できる (番犬は仕掛かったまま) */
+    {
+        static int kb[50];
+        static int kb_fs[50];
+        for (i = 0; i < 50; i++) { kb[i] = -1; kb_fs[i] = 1; }
+        kb[40] = '\r'; kb_fs[40] = 0;
+        serial_watchdog_arm(&w, 0, 1, 9600);
+        memset(&f, 0, sizeof(f));
+        f.limit = 5000;
+        f.script = kb; f.script_fs = kb_fs; f.script_n = 50;
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        r = rsh_line_feed(&l, 0x1B, 1, 1, 1);
+        r = rsh_line_rest(&l, r, 'x', 1, &w, &io);
+        CHECK(r == RSH_LINE_DONE && l.junk && w.armed);
+        kb[40] = 0x1B;
+        serial_watchdog_arm(&w, 0, 1, 9600);
+        memset(&f, 0, sizeof(f));
+        f.limit = 5000;
+        f.script = kb; f.script_fs = kb_fs; f.script_n = 50;
+        rsh_line_begin(&l, b, (int)sizeof(b));
+        r = rsh_line_feed(&l, 0x1B, 1, 1, 1);
+        r = rsh_line_rest(&l, r, 'x', 1, &w, &io);
+        CHECK(r == RSH_LINE_EXIT && w.armed);
+    }
+
+    /* 5) 拒否していない行は番犬に触らない (ack の行を途中で切らない)。
+     *    期限を過ぎていても、行は短い空回りで終わって実行に回る。 */
+    serial_watchdog_arm(&w, 0, 1, 9600);
+    memset(&f, 0, sizeof(f));
+    f.now = SER_SWITCH_WATCHDOG_TICKS + 10;
+    f.limit = 5000;
+    rsh_line_begin(&l, b, (int)sizeof(b));
+    r = rsh_line_feed(&l, 's', 1, 1, 0);
+    r = rsh_line_rest(&l, r, -1, 1, &w, &io);
+    CHECK(r == RSH_LINE_DONE && l.pos == 1 && w.armed);
+}
+
 /* ======================================================================== */
 /*  案件: vmkernel.old の判定 (userland/system/hsync_bootold.inc)           */
 /* ======================================================================== */
@@ -1156,6 +1304,7 @@ int main(int argc, char **argv)
     else if (!strcmp(c, "hello_cases")) hello_cases();
     else if (!strcmp(c, "bad_host_replies")) bad_host_replies();
     else if (!strcmp(c, "rshell_rules")) rshell_rules();
+    else if (!strcmp(c, "rshell_watchdog_junk")) rshell_watchdog_junk();
     else if (!strcmp(c, "bootold_rules")) bootold_rules();
     else { fprintf(stderr, "unknown case %s\n", c); return 2; }
     return failed ? 1 : 0;

@@ -125,6 +125,36 @@ int  rsh_line_feed(struct rsh_line *l, int ch, int from_serial, int at_start,
  * 終わり) / RSH_LINE_MORE (拒否した行は行末まで待ち続ける)。 */
 int  rsh_line_idle(const struct rsh_line *l);
 
+/* ------------------------------------------------------------------------ */
+/*  行の残りを読むループ (Codex レビュー P2、rshell.c から移した)             */
+/*                                                                          */
+/*  拒否した行の行末を待つ間も**番犬を見る**。以前は行頭の待ちだけが番犬を   */
+/*  呼んでいたので、速度が合わずに「ESC + 続き (改行なし)」に化けた行を掴む */
+/*  と、期限を過ぎても旧速度へ戻らず、旧速度のホストの改行も `serial ack`  */
+/*  も読めないまま止まった。                                                */
+/*                                                                          */
+/*  見る判定は行頭と同じ serial_watchdog_poll。期限で REVERT が出たら、その */
+/*  行は**捨てる** (速度が変わったのでバイト列に意味が無い) — 実行もせず、 */
+/*  EOT も返さない (呼び手が戻した速度で返す EOT が合図になる)。拒否の規則 */
+/*  (行末まで実行しない・沈黙では解けない・本体の Enter / ESC で回復) は    */
+/*  変えない。番犬が仕掛かっていなければ従来と同じ動きになる。              */
+/* ------------------------------------------------------------------------ */
+#define RSH_LINE_REVERT 3         /* 番犬の期限切れ — 行を捨てた。速度を戻すこと */
+#define RSH_REST_SPIN   50000     /* 空回りでバイトを待つ回数 (行の区切りの目安) */
+
+struct rsh_io {
+    int  (*getch)(void *ctx, int *from_serial);  /* 無ければ -1 */
+    unsigned long (*tick)(void *ctx);            /* 番犬の時計 */
+    void (*idle)(void *ctx);                     /* 1 tick ほど休む */
+    void *ctx;
+};
+
+/* 行頭の 1 文字 (と ESC の続き) を rsh_line_feed に入れたあとから呼ぶ。
+ * r = その戻り、ch / fs = まだ入れていない先読みのバイト (無ければ ch = -1)。
+ * w = 番犬 (NULL 可)。戻りは RSH_LINE_DONE / _EXIT / _REVERT。 */
+int  rsh_line_rest(struct rsh_line *l, int r, int ch, int fs,
+                   struct serial_watchdog *w, const struct rsh_io *io);
+
 /* `sfs run <コマンド行>` の行から子のコマンド行を取り出す。行全体が
  * 空白* "sfs" 空白+ "run" 空白+ <1 文字以上> の形でなければ NULL。
  * (`a && sfs run b` のような入れ子は受けない — 決裁 3A「ホストから送った

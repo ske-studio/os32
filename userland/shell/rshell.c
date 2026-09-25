@@ -336,6 +336,31 @@ static void rshell_end_reply(void)
     }
 }
 
+/* rsh_line_rest (serial_watchdog.c) に渡す線と時計。行頭の待ちと同じ
+ * rsh_getch を通す (シリアルは 1 回しか読まない)。 */
+static int rsh_io_getch(void *ctx, int *from_serial)
+{
+    (void)ctx;
+    return rsh_getch(from_serial);
+}
+
+static unsigned long rsh_io_tick(void *ctx)
+{
+    (void)ctx;
+    return (unsigned long)g_api->get_tick();
+}
+
+static void rsh_io_idle(void *ctx)
+{
+    u32 w = g_api->get_tick() + 1;
+    (void)ctx;
+    while (g_api->get_tick() < w) g_api->sys_halt();
+}
+
+static const struct rsh_io rsh_io_real = {
+    rsh_io_getch, rsh_io_tick, rsh_io_idle, (void *)0
+};
+
 static int cmd_rshell(int argc, char **argv)
 {
     char rbuf[RSHELL_LINE_MAX];
@@ -404,27 +429,12 @@ static int cmd_rshell(int argc, char **argv)
          * (受信の間で解けると残りが次の行として実行される、Codex 8)。沈黙
          * では解かない (往復 2、Codex 3) — 閉じるのはホストの次の改行か
          * 本体の Enter、本体の ESC は rshell を抜ける。 */
-        {
-            while (r == RSH_LINE_MORE) {
-                if (ch < 0) {
-                    int t = 0;
-                    while (t < 50000) {
-                        ch = rsh_getch(&fs);
-                        if (ch >= 0) break;
-                        t++;
-                    }
-                }
-                if (ch < 0) {
-                    r = rsh_line_idle(&ln);
-                    if (r == RSH_LINE_MORE) {
-                        u32 w = g_api->get_tick() + 1;
-                        while (g_api->get_tick() < w) g_api->sys_halt();
-                    }
-                    continue;
-                }
-                r = rsh_line_feed(&ln, ch, fs, 0, 1);
-                ch = -1;
-            }
+        r = rsh_line_rest(&ln, r, ch, fs, &ser_wd, &rsh_io_real);
+        if (r == RSH_LINE_REVERT) {
+            /* 拒否した行を待つ間に番犬の期限が来た (Codex P2)。行はもう
+             * 捨ててある。戻した速度で EOT を返して行頭へ。 */
+            ser_wd_revert();
+            continue;
         }
         if (r == RSH_LINE_EXIT) goto rshell_exit;
 
