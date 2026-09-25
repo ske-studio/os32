@@ -17,6 +17,9 @@
 
 extern void kapi_sys_get_build_info(char *buf, int size);   /* kapi/kapi_sys.c */
 
+/* vfs_write の戻りは FS ごとに違う (ext2 は 0、FAT はバイト数、負は失敗)。
+ * 種別を知る bootlog_save_with が bootlog_write_ok で揃えるので、ここは
+ * 生のまま差す (include/bootlog.h の BootlogFsOps)。 */
 static const BootlogFsOps g_bootlog_vfs_ops = {
     vfs_mkdir, vfs_rm, vfs_rename, vfs_write, vfs_sync
 };

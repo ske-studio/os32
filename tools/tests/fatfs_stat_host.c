@@ -1,5 +1,6 @@
 /* S3-K: FAT の stat が「そのボリュームに存在しえない名前」を NOTFOUND と
- * 言えるかの回帰試験 (2026-09-13)。
+ * 言えるかの回帰試験 (2026-09-13)。列挙のエラー伝播 (S3I2-K) と、一括
+ * 書き込みの f_close の失敗 (起動ログ、2026-09-25) もここで見る。
  *
  * 実物の fs/fatfs_vfs.c をそのまま取り込み、境界 (FatFs の f_*、Device /
  * IDE、kmalloc、kprintf) だけを贋物に差し替える。実デバイス・実イメージ・
@@ -33,6 +34,15 @@ static FILINFO stub_stat_info;
 static char    stub_last_path[FF_MAX_LFN + 32];
 static int     stub_stat_calls;
 static FRESULT stub_open_rc = FR_OK;
+/* 書き込みの境界 (起動ログ、2026-09-25): f_write / f_close の戻りと回数。
+ * stub_write_bw < 0 なら btw をそのまま bw に (全部書けた)。 */
+static FRESULT stub_write_rc = FR_OK;
+static int     stub_write_bw = -1;
+static int     stub_write_calls;
+static FRESULT stub_close_rc = FR_OK;
+static int     stub_close_calls;
+static int     stub_unlink_calls;
+static int     stub_rename_calls;
 
 static void stub_record(const char *path)
 {
@@ -59,16 +69,21 @@ FRESULT f_open(FIL *fp, const TCHAR *path, BYTE mode)
     return stub_open_rc;
 }
 
-FRESULT f_close(FIL *fp) { (void)fp; return FR_OK; }
+FRESULT f_close(FIL *fp) { (void)fp; stub_close_calls++; return stub_close_rc; }
 FRESULT f_read(FIL *fp, void *buff, UINT btr, UINT *br)
 { (void)fp; (void)buff; (void)btr; if (br) *br = 0; return FR_OK; }
 FRESULT f_write(FIL *fp, const void *buff, UINT btw, UINT *bw)
-{ (void)fp; (void)buff; (void)btw; if (bw) *bw = btw; return FR_OK; }
+{
+    (void)fp; (void)buff;
+    stub_write_calls++;
+    if (bw) *bw = stub_write_bw < 0 ? btw : (UINT)stub_write_bw;
+    return stub_write_rc;
+}
 FRESULT f_lseek(FIL *fp, FSIZE_t ofs) { (void)fp; (void)ofs; return FR_OK; }
-FRESULT f_unlink(const TCHAR *path) { stub_record(path); return stub_open_rc; }
+FRESULT f_unlink(const TCHAR *path) { stub_unlink_calls++; stub_record(path); return stub_open_rc; }
 FRESULT f_mkdir(const TCHAR *path) { stub_record(path); return stub_open_rc; }
 FRESULT f_rename(const TCHAR *a, const TCHAR *b)
-{ (void)b; stub_record(a); return stub_open_rc; }
+{ (void)b; stub_rename_calls++; stub_record(a); return stub_open_rc; }
 
 /* ---- S3I2-K: 列挙の境界 ----
  * f_readdir は「台本」を 1 段ずつ返す。rc != FR_OK でその段は失敗、
@@ -182,6 +197,12 @@ int bootinfo_part_geom(int ide_drive, u16 *heads, u16 *spt)
 }
 #include "../../fs/fatfs_vfs.c"
 
+/* 起動ログの手順 (kernel/bootlog.c) を実物の fatfs_vfs_write に結ぶ。
+ * 錠はホストでは空 (回数は tools/tests/bootlog_host.c が見る)。 */
+#include "../../kernel/bootlog.c"
+unsigned int bootlog_lock(void) { return 0; }
+void bootlog_unlock(unsigned int f) { (void)f; }
+
 /* ---- 試験用コンテキスト (mount を通さず直接組む) ---- */
 static FatFsCtx test_ctx;
 
@@ -198,6 +219,13 @@ static void reset(void)
     stub_open_rc = FR_OK;
     stub_stat_calls = 0;
     stub_last_path[0] = '\0';
+    stub_write_rc = FR_OK;
+    stub_write_bw = -1;
+    stub_write_calls = 0;
+    stub_close_rc = FR_OK;
+    stub_close_calls = 0;
+    stub_unlink_calls = 0;
+    stub_rename_calls = 0;
 
     memset(stub_rd_script, 0, sizeof(stub_rd_script));
     stub_rd_len = 0;
@@ -458,6 +486,86 @@ static int case_list_empty_is_ok(void)
     return 0;
 }
 
+/* ======== 起動ログ (2026-09-25): 一括書き込みの最後のフラッシュ ======== */
+
+/* ケース 12: f_write は通り f_close だけが落ちる (最後のセクタとディレクトリ
+ * エントリの書き戻し)。直す前は f_close の結果を捨てて bw を返していたので、
+ * 媒体に残っていないのに「書けた」になっていた。 */
+static int case_write_close_fail_is_error(void)
+{
+    reset();
+    stub_close_rc = FR_DISK_ERR;
+    CHECK(fatfs_vfs_write(&test_ctx, "/var/log/boot.new", "abc", 3) == VFS_ERR_IO);
+    CHECK(stub_write_calls == 1);
+    CHECK(stub_close_calls == 1);
+
+    /* 正常なら書いたバイト数 (bw)、f_close は 1 回 */
+    reset();
+    CHECK(fatfs_vfs_write(&test_ctx, "/var/log/boot.new", "abcd", 4) == 4);
+    CHECK(stub_close_calls == 1);
+
+    /* 満杯: f_write は FR_OK で bw < btw。そのまま bw を返す (呼び手が比べる) */
+    reset();
+    stub_write_bw = 2;
+    CHECK(fatfs_vfs_write(&test_ctx, "/var/log/boot.new", "abcd", 4) == 2);
+    CHECK(stub_close_calls == 1);
+    return 0;
+}
+
+/* ケース 13: f_write の失敗が先。両方落ちても f_close は 1 回だけ (二重に
+ * 閉じない)。f_open が落ちたら閉じない。 */
+static int case_write_fail_wins_and_closes_once(void)
+{
+    reset();
+    stub_write_rc = FR_DENIED;            /* → IO */
+    stub_close_rc = FR_NO_FILE;           /* → NOTFOUND (来ないはず) */
+    CHECK(fatfs_vfs_write(&test_ctx, "/var/log/boot.new", "abc", 3) == VFS_ERR_IO);
+    CHECK(stub_close_calls == 1);
+
+    reset();
+    stub_open_rc = FR_NOT_READY;
+    CHECK(fatfs_vfs_write(&test_ctx, "/var/log/boot.new", "abc", 3) == VFS_ERR_IO);
+    CHECK(stub_write_calls == 0);
+    CHECK(stub_close_calls == 0);
+    return 0;
+}
+
+/* ---- 起動ログの手順を実物の fatfs_vfs_* に結ぶ (ctx は test_ctx) ---- */
+static int bl_mkdir(const char *p) { return fatfs_vfs_mkdir(&test_ctx, p); }
+static int bl_rm(const char *p) { return fatfs_vfs_unlink(&test_ctx, p); }
+static int bl_rename(const char *a, const char *b) { return fatfs_vfs_rename(&test_ctx, a, b); }
+static int bl_write(const char *p, const void *d, u32 n) { return fatfs_vfs_write(&test_ctx, p, d, n); }
+static int bl_sync(void) { return fatfs_vfs_sync(&test_ctx); }
+static const BootlogFsOps bl_ops = { bl_mkdir, bl_rm, bl_rename, bl_write, bl_sync };
+
+/* ケース 14: 起動ログの保存で、実物の FAT の close が落ちる。手順は WRITE で
+ * 止まり (rc は IO)、世代を動かさない (rename は 0 回)。消すのは途中で
+ * 切れた boot.new だけ (unlink 1 回、その名前)。 */
+static int case_bootlog_close_fail_keeps_logs(void)
+{
+    int st, rc = 0;
+
+    reset();
+    stub_close_rc = FR_DISK_ERR;
+    st = bootlog_save_with(&bl_ops, BOOTLOG_FS_FAT, "LOG\n", 4, &rc);
+    CHECK(st == BOOTLOG_ST_WRITE);
+    CHECK(rc == VFS_ERR_IO);
+    CHECK(stub_close_calls == 1);
+    CHECK(stub_rename_calls == 0);
+    CHECK(stub_unlink_calls == 1);
+    CHECK(strcmp(stub_last_path, "0:/var/log/boot.new") == 0);
+
+    /* 対照: close が通れば全段通る — unlink は .1、rename は 2 回 */
+    reset();
+    st = bootlog_save_with(&bl_ops, BOOTLOG_FS_FAT, "LOG\n", 4, &rc);
+    CHECK(st == BOOTLOG_ST_OK);
+    CHECK(stub_close_calls == 1);
+    CHECK(stub_unlink_calls == 1);
+    CHECK(stub_rename_calls == 2);
+    CHECK(strcmp(stub_last_path, "0:/var/log/boot.new") == 0);   /* 最後の rename の元 */
+    return 0;
+}
+
 struct case_ent { const char *name; int (*fn)(void); };
 static const struct case_ent cases[] = {
     { "stat_invalid_name_is_notfound",   case_stat_invalid_name_is_notfound },
@@ -470,7 +578,10 @@ static const struct case_ent cases[] = {
     { "list_ok_enumerates_all",          case_list_ok_enumerates_all },
     { "list_readdir_error_propagates",   case_list_readdir_error_propagates },
     { "list_opendir_error_propagates",   case_list_opendir_error_propagates },
-    { "list_empty_is_ok",                case_list_empty_is_ok }
+    { "list_empty_is_ok",                case_list_empty_is_ok },
+    { "write_close_fail_is_error",       case_write_close_fail_is_error },
+    { "write_fail_wins_and_closes_once", case_write_fail_wins_and_closes_once },
+    { "bootlog_close_fail_keeps_logs",   case_bootlog_close_fail_keeps_logs }
 };
 
 int main(int argc, char **argv)

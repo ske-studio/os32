@@ -1,4 +1,6 @@
 """S3-K: FAT の stat が FR_INVALID_NAME を NOTFOUND と言えるかの回帰試験。
+S3I2-K の列挙エラー伝播と、起動ログ (2026-09-25) の「f_close の失敗を
+fatfs_vfs_write が返す」も同じ贋物の FatFs で見る。
 
 実物の fs/fatfs_vfs.c をそのまま取り込み、FatFs の f_* / Device / IDE /
 kmalloc だけを差し替える。実デバイス・実イメージ・実 FatFs には触らない。
@@ -25,10 +27,14 @@ CASES = ["stat_invalid_name_is_notfound",
          "list_ok_enumerates_all",
          "list_readdir_error_propagates",
          "list_opendir_error_propagates",
-         "list_empty_is_ok"]
+         "list_empty_is_ok",
+         "write_close_fail_is_error",
+         "write_fail_wins_and_closes_once",
+         "bootlog_close_fail_keeps_logs"]
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wno-unused-parameter", "-Wno-sign-compare",
-         "-Wdeclaration-after-statement", "-D__cdecl="]
+         "-Wdeclaration-after-statement", "-D__cdecl=",
+         "-DBOOTLOG_NO_IRQ_LOCK"]     # kernel/bootlog.c の錠をホストで空にする
 INCLUDES = ["-I" + str(ROOT / p)
             for p in ("include", "fs", "lib", "kernel", "drivers",
                       "sdk/include/os32")]

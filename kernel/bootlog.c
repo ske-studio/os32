@@ -16,10 +16,12 @@
 #include "bootlog.h"
 
 /* 割込み禁止区間。ホスト試験は CPL=3 で走り cli/popfl を実行できないので、
- * そこだけ空の錠に差し替える (kernel/con_sink.c と同じ)。 */
+ * 錠は試験側が用意する (呼んだ回数と順序、lock が返した札を unlock が
+ * そのまま受け取ること = IF の復元を見る)。カーネルは kernel/con_sink.c と
+ * 同じ irq_save / irq_restore。 */
 #ifdef BOOTLOG_NO_IRQ_LOCK
-static unsigned int bootlog_lock(void)       { return 0; }
-static void bootlog_unlock(unsigned int f)   { (void)f; }
+unsigned int bootlog_lock(void);
+void bootlog_unlock(unsigned int f);
 #else
 #include "io.h"
 static unsigned int bootlog_lock(void)       { return irq_save(); }
@@ -39,6 +41,35 @@ static int  g_bl_stopped;      /* bootlog_stop 後は 1。BSS なので最初か
 /*  積む                                                                     */
 /* ------------------------------------------------------------------------ */
 
+/* UTF-8 の先頭バイトが示す文字の長さ (継続バイト 10xxxxxx は 0、不正は 1)。 */
+static u32 bl_utf8_len(u8 c)
+{
+    if ((c & 0xC0u) == 0x80u) return 0;
+    if ((c & 0xE0u) == 0xC0u) return 2;
+    if ((c & 0xF0u) == 0xE0u) return 3;
+    if ((c & 0xF8u) == 0xF0u) return 4;
+    return 1;
+}
+
+/* 本文の末尾が文字の途中で終わっていたら、その文字の頭まで戻す。戻した
+ * バイト数を返す。あふれた瞬間にだけ呼ぶ — 続きが来ないと分かったときだけ
+ * 途中の文字を捨てる (console.c は 1 バイトずつ積むので、あふれる前の本文が
+ * 文字の途中で終わるのは普通)。push をまたいだ文字 (残り 1 バイトに E3 が
+ * 収まり、次の 81 82 が捨てられる) もここで揃う。 */
+static u32 bl_trim_partial_tail(void)
+{
+    u32 cont = 0, need;
+    const char *t = &g_bl_buf[BL_TEXT_OFF];
+
+    while (cont < g_bl_len && cont < 3 &&
+           ((u8)t[g_bl_len - 1 - cont] & 0xC0u) == 0x80u) cont++;
+    if (cont >= g_bl_len) return 0;                 /* 頭が無い (不正) — 触らない */
+    need = bl_utf8_len((u8)t[g_bl_len - 1 - cont]);
+    if (need == 0 || cont + 1 >= need) return 0;    /* 完結している (か不正) */
+    g_bl_len -= cont + 1;
+    return cont + 1;
+}
+
 void bootlog_push(const char *buf, u32 len)
 {
     unsigned int f;
@@ -55,15 +86,14 @@ void bootlog_push(const char *buf, u32 len)
     room = BL_TEXT_MAX - g_bl_len;
     n = len;
     if (n > room) {
-        /* 入る分だけ写し、UTF-8 の文字の途中で切らない: 最初に捨てる
-         * バイトが継続バイト (10xxxxxx) なら、その文字の頭まで戻す。 */
         n = room;
-        while (n > 0 && ((u8)buf[n] & 0xC0u) == 0x80u) n--;
         g_bl_full = 1;
         g_bl_dropped += len - n;
     }
     for (i = 0; i < n; i++) g_bl_buf[BL_TEXT_OFF + g_bl_len + i] = buf[i];
     g_bl_len += n;
+    /* 入る分だけ写した後、末尾を文字の境界まで戻す (戻した分も「捨てた」) */
+    if (g_bl_full) g_bl_dropped += bl_trim_partial_tail();
     bootlog_unlock(f);
 }
 
@@ -192,25 +222,32 @@ const char *bootlog_stage_name(int stage)
     case BOOTLOG_ST_OK:        return "ok";
     case BOOTLOG_ST_MKDIR_VAR: return "mkdir " SYS_BOOTLOG_VAR_DIR;
     case BOOTLOG_ST_MKDIR_LOG: return "mkdir " SYS_BOOTLOG_DIR;
+    case BOOTLOG_ST_WRITE:     return "write " SYS_BOOTLOG_NEW;
     case BOOTLOG_ST_RM_OLD:    return "rm old";
     case BOOTLOG_ST_ROTATE:    return "rotate";
-    case BOOTLOG_ST_WRITE:     return "write";
+    case BOOTLOG_ST_PUBLISH:   return "publish";
     case BOOTLOG_ST_SYNC:      return "sync";
     default:                   return "?";
     }
 }
 
-/* 最初の失敗だけを覚える */
-static void bl_fail(int *first, int *first_rc, int stage, int rc)
+/* ops->write の生の戻り値が「全部書けて閉じられた」か。vfs_write は FS ごとに
+ * 約束が違う: ext2 (fs/ext2_vfs.c) は成功で VFS_OK (0)、FAT (fs/fatfs_vfs.c)
+ * は書いたバイト数 (f_write の bw、f_close の失敗は負)。負はどちらも失敗。
+ * 種別を知っているのはここなので、ここで揃える。 */
+int bootlog_write_ok(int kind, int rc, u32 len)
 {
-    if (*first == BOOTLOG_ST_OK) { *first = stage; *first_rc = rc; }
+    /* 負はどちらの式でも成功にならない (len は 0xFFFFFFFF に届かない) */
+    if (kind == BOOTLOG_FS_EXT2) return rc == 0;
+    if (kind == BOOTLOG_FS_FAT)  return rc >= 0 && (u32)rc == len;
+    return 0;
 }
 
 int bootlog_save_with(const BootlogFsOps *ops, int kind,
                       const char *data, u32 len, int *fail_rc)
 {
     const char *old = bootlog_old_path(kind);
-    int first = BOOTLOG_ST_OK, first_rc = 0, rc, rotate_ok = 1;
+    int rc;
 
     if (fail_rc) *fail_rc = 0;
     if (!ops || !old) return BOOTLOG_ST_OK;     /* 書かない種別 */
@@ -227,30 +264,45 @@ int bootlog_save_with(const BootlogFsOps *ops, int kind,
         return BOOTLOG_ST_MKDIR_LOG;
     }
 
-    /* 2. 前回分を消す。FatFs の rename は宛先があると断るので先に消す */
+    /* 2. 今回のログを**まず一時ファイル**へ。既存の boot.log / 前回分には
+     *    まだ触らない — ここで落ちても失うものは無い。残っていた boot.new
+     *    (前回の起動が世代の更新の途中で止まった) はここで上書きされる。
+     *    書けなかった (途中で切れた) 一時ファイルは消しておく (成否は問わ
+     *    ない): 残る boot.new は「完全な 1 本」だけにする。 */
+    rc = ops->write(SYS_BOOTLOG_NEW, data, len);
+    if (!bootlog_write_ok(kind, rc, len)) {
+        if (fail_rc) *fail_rc = rc;
+        (void)ops->rm(SYS_BOOTLOG_NEW);
+        return BOOTLOG_ST_WRITE;
+    }
+
+    /* 3. 前回分を消す。FatFs の rename は宛先があると断るので先に消す。
+     *    消せなければ世代を動かさない (boot.log は残り、今回分は boot.new) */
     rc = ops->rm(old);
     if (rc != 0 && rc != OS32_ERR_NOTFOUND) {
-        bl_fail(&first, &first_rc, BOOTLOG_ST_RM_OLD, rc);
-        rotate_ok = 0;
+        if (fail_rc) *fail_rc = rc;
+        return BOOTLOG_ST_RM_OLD;
     }
 
-    /* 3. 今の boot.log を前回分へ。宛先が空いていると分かったときだけ */
-    if (rotate_ok) {
-        rc = ops->rename(SYS_BOOTLOG_FILE, old);
-        if (rc != 0 && rc != OS32_ERR_NOTFOUND)
-            bl_fail(&first, &first_rc, BOOTLOG_ST_ROTATE, rc);
+    /* 4. 今の boot.log を前回分へ (無ければ初回)。落ちたら boot.log を残す */
+    rc = ops->rename(SYS_BOOTLOG_FILE, old);
+    if (rc != 0 && rc != OS32_ERR_NOTFOUND) {
+        if (fail_rc) *fail_rc = rc;
+        return BOOTLOG_ST_ROTATE;
     }
 
-    /* 4. 今回のログ。付け替えに失敗しても書く */
-    rc = ops->write(SYS_BOOTLOG_FILE, data, len);
-    if (rc < 0 || (u32)rc != len) {
-        bl_fail(&first, &first_rc, BOOTLOG_ST_WRITE, rc);
-    } else {
-        /* 5. 電源断に備えて書き戻す */
-        rc = ops->sync();
-        if (rc != 0) bl_fail(&first, &first_rc, BOOTLOG_ST_SYNC, rc);
+    /* 5. 今回分を公開。落ちても前回分は .1 に、今回分は boot.new に残る */
+    rc = ops->rename(SYS_BOOTLOG_NEW, SYS_BOOTLOG_FILE);
+    if (rc != 0) {
+        if (fail_rc) *fail_rc = rc;
+        return BOOTLOG_ST_PUBLISH;
     }
 
-    if (fail_rc) *fail_rc = first_rc;
-    return first;
+    /* 6. 電源断に備えて書き戻す */
+    rc = ops->sync();
+    if (rc != 0) {
+        if (fail_rc) *fail_rc = rc;
+        return BOOTLOG_ST_SYNC;
+    }
+    return BOOTLOG_ST_OK;
 }

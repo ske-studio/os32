@@ -39,6 +39,7 @@
 #define SYS_BOOTLOG_VAR_DIR   "/var"
 #define SYS_BOOTLOG_DIR       "/var/log"
 #define SYS_BOOTLOG_FILE      "/var/log/boot.log"
+#define SYS_BOOTLOG_NEW       "/var/log/boot.new"     /* 今回分の一時ファイル (8.3) */
 #define SYS_BOOTLOG_OLD       "/var/log/boot.log.1"   /* ext2 */
 #define SYS_BOOTLOG_OLD_83    "/var/log/bootlog.1"    /* FAT (8.3) */
 #define SYS_BOOTLOG_FS_EXT2   "ext2"     /* 書き出す FS (vfs_fstype の名前) */

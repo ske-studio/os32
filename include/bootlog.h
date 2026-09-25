@@ -35,20 +35,30 @@
 #define BOOTLOG_FS_EXT2    1
 #define BOOTLOG_FS_FAT     2
 
-/* 書き出しの段 (bootlog_save_with の戻り = 最初に失敗した段、0 = 全部通った) */
+/* 書き出しの段 (bootlog_save_with の戻り = 失敗した段、0 = 全部通った。
+ * 失敗した段で止めるので、失敗は必ず 1 つ) */
 #define BOOTLOG_ST_OK         0
 #define BOOTLOG_ST_MKDIR_VAR  1
 #define BOOTLOG_ST_MKDIR_LOG  2
-#define BOOTLOG_ST_RM_OLD     3
-#define BOOTLOG_ST_ROTATE     4
-#define BOOTLOG_ST_WRITE      5
-#define BOOTLOG_ST_SYNC       6
+#define BOOTLOG_ST_WRITE      3     /* boot.new に書く (write + close) */
+#define BOOTLOG_ST_RM_OLD     4     /* .1 を消す */
+#define BOOTLOG_ST_ROTATE     5     /* boot.log → .1 */
+#define BOOTLOG_ST_PUBLISH    6     /* boot.new → boot.log */
+#define BOOTLOG_ST_SYNC       7
 
+/* 本物は vfs_mkdir / vfs_rm / vfs_rename / vfs_write / vfs_sync をそのまま
+ * 差す (kernel/bootlog_save.c)。戻り値の約束は vfs_* と同じ:
+ *   - mkdir / rm / rename / sync: 0 = 成功、負 = OS32_ERR_* (EXIST / NOTFOUND
+ *     は手順の側で成功と読む)
+ *   - write: **FS ごとに違う** — ext2 は成功で 0 (fs/ext2_vfs.c の
+ *     ext2_to_vfs_err)、FAT は書いたバイト数 (fs/fatfs_vfs.c の f_write の bw、
+ *     f_close の失敗は負)。判定は bootlog_write_ok が種別で揃える。
+ *     偽の VFS (tools/tests/bootlog_host.c) も種別ごとにこの生の値を返す。 */
 typedef struct {
     int (*mkdir)(const char *path);
     int (*rm)(const char *path);
     int (*rename)(const char *oldpath, const char *newpath);
-    int (*write)(const char *path, const void *data, u32 size);  /* 書いたバイト数 */
+    int (*write)(const char *path, const void *data, u32 size);
     int (*sync)(void);
 } BootlogFsOps;
 
@@ -84,13 +94,22 @@ int bootlog_plan(const char *fstype);
 /* 種別ごとの前回分の名前 (FAT は 8.3)。SKIP なら 0 */
 const char *bootlog_old_path(int kind);
 
-/* 書き出しの手順:
+/* ops->write の生の戻り値 rc が「len バイト全部書けて閉じられた」なら 1。
+ * ext2 は rc == 0、FAT は rc == len、負はどちらも失敗 (BootlogFsOps 参照)。 */
+int bootlog_write_ok(int kind, int rc, u32 len);
+
+/* 書き出しの手順 (既存のログを失わない順):
  *   1. /var, /var/log を作る (EXIST は成功)。作れなければそこで止める
- *   2. 前回分 (.1) を消す (NOTFOUND は成功)
- *   3. boot.log → .1 に付け替える (NOTFOUND は成功)。2 が失敗したら飛ばす
- *   4. data を boot.log に書く (2・3 が失敗しても書く — 今回のログが優先)
- *   5. sync
- * 戻りは最初に失敗した段 (BOOTLOG_ST_*)、*fail_rc にその戻り値。 */
+ *   2. data を **boot.new** (一時ファイル、FAT でも 8.3) に書く。書けなければ
+ *      boot.new を消して (成否は問わない) 止める — boot.log と .1 は無傷
+ *   3. 前回分 (.1) を消す (NOTFOUND は成功)。落ちたら止める
+ *   4. boot.log → .1 (NOTFOUND = 初回は成功)。落ちたら止める
+ *   5. boot.new → boot.log。落ちたら止める (前回分は .1、今回分は boot.new)
+ *   6. sync
+ * 3〜5 で止まったときは boot.log を上書きせず、今回分は boot.new に残す。
+ * 残った boot.new は次の起動の 2 で上書きされる (誰も読まない。残っている
+ * = その起動の保存が世代の更新の途中で止まった、中身は完全な 1 本)。
+ * 戻りは失敗した段 (BOOTLOG_ST_*)、*fail_rc にその戻り値。 */
 int bootlog_save_with(const BootlogFsOps *ops, int kind,
                       const char *data, u32 len, int *fail_rc);
 const char *bootlog_stage_name(int stage);

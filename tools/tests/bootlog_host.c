@@ -2,8 +2,10 @@
 /*  bootlog_host.c — kernel/bootlog.c のホスト試験                           */
 /*                                                                          */
 /*  kernel/bootlog.c を 1 行も写さずに #include する (模型ではない)。        */
-/*  ホスト側だけ -DBOOTLOG_NO_IRQ_LOCK (CPL=3 では cli/popfl を実行できない) */
-/*  書き出しの手順は偽の VFS (呼ばれた順を記録し、段ごとに失敗を注入する)。 */
+/*  ホスト側だけ -DBOOTLOG_NO_IRQ_LOCK (CPL=3 では cli/popfl を実行できない): */
+/*  錠はここが用意し、呼んだ回数・順序・返した札の復元を数える。             */
+/*  書き出しの手順は偽の VFS (呼ばれた順を記録し、段ごとに失敗を注入する。   */
+/*  write の戻りは実物と同じく FS ごと: ext2 は 0、FAT はバイト数)。         */
 /*                                                                          */
 /*  使い方: bootlog_host <case>   (case は main() の表)                     */
 /*  記録: tools/tests/bootlog_tdd.md                                        */
@@ -13,6 +15,35 @@
 #include <string.h>
 
 #include "bootlog.c"
+
+/* ---- 偽の錠 (irq_save / irq_restore の代わり) ----
+ * lock は毎回違う札 (EFLAGS のつもり) を返す。unlock はその札を、入れ子
+ * なしで、直前の lock のものと同じ順で受け取らなければならない。 */
+static int g_lk_depth, g_lk_locks, g_lk_unlocks, g_lk_bad;
+static unsigned int g_lk_seq, g_lk_last;
+
+unsigned int bootlog_lock(void)
+{
+    if (g_lk_depth != 0) g_lk_bad++;          /* 入れ子 (cli の二重掛け) */
+    g_lk_depth++;
+    g_lk_locks++;
+    g_lk_last = 0x200u + (++g_lk_seq);
+    return g_lk_last;
+}
+
+void bootlog_unlock(unsigned int f)
+{
+    if (g_lk_depth != 1) g_lk_bad++;          /* 掛けていないのに戻す */
+    if (f != g_lk_last) g_lk_bad++;           /* 違う札で戻す (IF が化ける) */
+    g_lk_depth--;
+    g_lk_unlocks++;
+}
+
+static void lk_reset(void)
+{
+    g_lk_depth = g_lk_locks = g_lk_unlocks = g_lk_bad = 0;
+    g_lk_seq = g_lk_last = 0;
+}
 
 static int g_fail;
 
@@ -28,6 +59,7 @@ static void reset(void)
     g_bl_dropped = 0;
     g_bl_full = 0;
     g_bl_stopped = 0;
+    lk_reset();
 }
 
 static const char *text(void) { return &g_bl_buf[BL_TEXT_OFF]; }
@@ -107,6 +139,93 @@ static void case_utf8_latch(void)
     bootlog_push("ok", 2);
     CHECK(bootlog_len() == BL_TEXT_MAX - 2 && bootlog_dropped() == 8,
           "3e 空きが残っていても一度あふれたら後から来た行は捨てる");
+
+    /* push をまたぐ文字 (console.c の kputc は 1 バイトずつ積む) */
+    reset();
+    fill(BL_TEXT_MAX - 1);
+    bootlog_push("\xE3", 1);
+    CHECK(bootlog_len() == BL_TEXT_MAX && bootlog_dropped() == 0,
+          "3f 残り 1 バイトに文字の頭 E3 は収まる (続きが来るかもしれない)");
+    bootlog_push("\x81\x82", 2);
+    CHECK(bootlog_len() == BL_TEXT_MAX - 1, "3g 続きが捨てられたら、蓄えた頭 E3 も戻す");
+    CHECK(bootlog_dropped() == 3, "3h 戻した 1 バイトも捨てた数に入る (2 + 1)");
+    CHECK(text()[BL_TEXT_MAX - 2] == 'x', "3i 末尾は境界の手前の文字");
+
+    reset();
+    fill(BL_TEXT_MAX - 2);
+    bootlog_push("\xE3", 1);
+    bootlog_push("\x81", 1);
+    bootlog_push("\x82", 1);
+    CHECK(bootlog_len() == BL_TEXT_MAX - 2 && bootlog_dropped() == 3,
+          "3j 1 バイトずつ来た 3 バイト文字の 3 バイト目が入らなければ 2 バイト戻す");
+
+    reset();
+    fill(BL_TEXT_MAX - 3);
+    bootlog_push("\xF0\x9F\x98", 3);
+    bootlog_push("\x81", 1);
+    CHECK(bootlog_len() == BL_TEXT_MAX - 3 && bootlog_dropped() == 4,
+          "3k 4 バイト文字 (F0 9F 98 81) も頭まで戻す");
+
+    reset();
+    fill(BL_TEXT_MAX - 3);
+    bootlog_push("\xE3\x81\x82", 3);
+    bootlog_push("\xE3", 1);
+    CHECK(bootlog_len() == BL_TEXT_MAX && bootlog_dropped() == 1,
+          "3l 末尾が完結した文字なら戻さない");
+
+    reset();
+    fill(BL_TEXT_MAX - 2);
+    bootlog_push("\xC3\xA9", 2);        /* é */
+    bootlog_push("z", 1);
+    CHECK(bootlog_len() == BL_TEXT_MAX && bootlog_dropped() == 1,
+          "3m 2 バイト文字が完結していれば戻さない");
+
+    reset();
+    fill(BL_TEXT_MAX - 1);
+    bootlog_push("\x81", 1);             /* 頭の無い継続バイト (不正) */
+    bootlog_push("q", 1);
+    CHECK(bootlog_len() == BL_TEXT_MAX && bootlog_dropped() == 1,
+          "3n 頭の無い継続バイトは文字と見なさず、触らない");
+
+    reset();
+    bootlog_push("\xE3", 1);
+    bootlog_push("\x81", 1);
+    bootlog_push("\x82", 1);
+    CHECK(bootlog_len() == 3 && bootlog_dropped() == 0,
+          "3o あふれていなければ途中の文字も戻さない (続きが来る)");
+}
+
+/* ------------------------------------------------------------------------ */
+/*  3'. 錠 — 呼んだ回数と順序、札 (IF) の復元                                */
+/* ------------------------------------------------------------------------ */
+static void case_lock(void)
+{
+    u32 n;
+
+    reset();
+    bootlog_push("abc", 3);
+    CHECK(g_lk_locks == 1 && g_lk_unlocks == 1 && g_lk_depth == 0 && g_lk_bad == 0,
+          "L1 push は錠を 1 回掛けて 1 回戻す (同じ札で)");
+    fill(BL_TEXT_MAX);                    /* あふれる */
+    bootlog_push("more", 4);              /* 満杯の後の経路 */
+    CHECK(g_lk_depth == 0 && g_lk_bad == 0 && g_lk_locks == g_lk_unlocks,
+          "L2 あふれた経路も満杯の後の経路も戻す");
+    lk_reset();
+    bootlog_push(0, 3);
+    bootlog_push("x", 0);
+    CHECK(g_lk_locks == 0, "L3 NULL と長さ 0 は錠を掛けずに帰る");
+    bootlog_compose("# H\n", &n);
+    CHECK(g_lk_locks == 1 && g_lk_unlocks == 1 && g_lk_bad == 0,
+          "L4 compose は 1 回掛けて戻す");
+    lk_reset();
+    bootlog_stop();
+    CHECK(g_lk_locks == 1 && g_lk_unlocks == 1 && g_lk_bad == 0,
+          "L5 stop は 1 回掛けて戻す");
+    lk_reset();
+    bootlog_push("after", 5);
+    CHECK(g_lk_locks == 0, "L6 止めた後の push は錠を掛けない (費用は 1 回の読み)");
+    (void)bootlog_len(); (void)bootlog_dropped(); (void)bootlog_is_active();
+    CHECK(g_lk_locks == 0, "L7 読むだけの API は錠を掛けない");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -273,10 +392,16 @@ typedef struct { char path[40]; int isdir; char data[64]; u32 len; int used; } F
 
 static FkNode fk[FK_MAX];
 static char  fk_log[512];
-static int   fk_fat;          /* 1 = rename は宛先があると EXIST (FatFs) */
-static const char *fk_fail_op;  /* この名前の操作で fk_fail_rc を返す */
+static int   fk_fat;          /* 1 = FAT: rename は宛先があると EXIST、write はバイト数 */
+static const char *fk_fail_op;    /* この名前の操作で fk_fail_rc を返す */
+static const char *fk_fail_path;  /* (任意) このパスのときだけ */
 static int   fk_fail_rc;
-static int   fk_short;        /* write が 1 バイト少なく返す */
+static int   fk_short;        /* FAT: write が 1 バイト少なく返す (ディスク満杯) */
+
+#define P_LOG  "/var/log/boot.log"
+#define P_NEW  "/var/log/boot.new"
+#define P_OLD  "/var/log/boot.log.1"
+#define P_OLD8 "/var/log/bootlog.1"
 
 static void fk_reset(int fat)
 {
@@ -284,6 +409,7 @@ static void fk_reset(int fat)
     fk_log[0] = '\0';
     fk_fat = fat;
     fk_fail_op = 0;
+    fk_fail_path = 0;
     fk_fail_rc = 0;
     fk_short = 0;
 }
@@ -310,12 +436,23 @@ static FkNode *fk_add(const char *p, int isdir, const char *data)
     return 0;
 }
 
+/* 既定の /var /var/log と、指定の中身のファイル */
+static void fk_setup(int fat, const char *log, const char *old, const char *tmp)
+{
+    fk_reset(fat);
+    fk_add("/var", 1, 0); fk_add("/var/log", 1, 0);
+    if (log) fk_add(P_LOG, 0, log);
+    if (old) fk_add(fat ? P_OLD8 : P_OLD, 0, old);
+    if (tmp) fk_add(P_NEW, 0, tmp);
+}
+
 static int fk_logop(const char *op, const char *p)
 {
     strcat(fk_log, op);
     if (p) { strcat(fk_log, ":"); strcat(fk_log, p); }
     strcat(fk_log, ";");
-    return fk_fail_op && strcmp(fk_fail_op, op) == 0;
+    if (!fk_fail_op || strcmp(fk_fail_op, op) != 0) return 0;
+    return !fk_fail_path || (p && strcmp(fk_fail_path, p) == 0);
 }
 
 static int fk_mkdir(const char *p)
@@ -345,23 +482,30 @@ static int fk_rename(const char *a, const char *b)
     d = fk_find(b);
     if (d) {
         if (fk_fat) return OS32_ERR_EXIST;   /* FatFs f_rename は置き換えない */
-        d->used = 0;
+        d->used = 0;                          /* ext2_rename は宛先を消して置く */
     }
     strcpy(n->path, b);
     return 0;
 }
 
+/* 実物と同じ約束: 開いた時点で切り詰め (FA_CREATE_ALWAYS / ext2 の上書き)、
+ * 失敗はその後に起きる — 「切り詰めた後の失敗」で中身は空になる。
+ * 戻りは ext2 が 0、FAT が書いたバイト数 (fk_short なら 1 少ない = 満杯)。 */
 static int fk_write(const char *p, const void *data, u32 size)
 {
     FkNode *n;
-    if (fk_logop("write", p)) return fk_fail_rc;
+    int fail = fk_logop("write", p);
     n = fk_find(p);
     if (!n) n = fk_add(p, 0, 0);
+    n->data[0] = '\0';
+    n->len = 0;
+    if (fail) return fk_fail_rc;
     if (size >= sizeof(n->data)) size = sizeof(n->data) - 1;
+    if (fk_fat && fk_short && size > 0) size--;
     memcpy(n->data, data, size);
     n->data[size] = '\0';
     n->len = size;
-    return fk_short ? (int)size - 1 : (int)size;
+    return fk_fat ? (int)size : 0;
 }
 
 static int fk_sync(void)
@@ -378,6 +522,8 @@ static int fk_has(const char *p, const char *content)
     return n && strcmp(n->data, content) == 0;
 }
 
+static int fk_absent(const char *p) { return fk_find(p) == 0; }
+
 static void case_save(void)
 {
     int st, rc;
@@ -386,29 +532,23 @@ static void case_save(void)
     fk_reset(0);
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
     CHECK(st == BOOTLOG_ST_OK && rc == 0, "8a 初回は全段通る (EXIST / NOTFOUND は成功)");
-    CHECK(strcmp(fk_log, "mkdir:/var;mkdir:/var/log;rm:/var/log/boot.log.1;"
-                         "rename:/var/log/boot.log;write:/var/log/boot.log;sync;") == 0,
-          "8b 順序: mkdir → mkdir → rm .1 → rename → write → sync");
-    CHECK(fk_has("/var/log/boot.log", "NEW"), "8c boot.log に今回の中身");
+    CHECK(strcmp(fk_log, "mkdir:/var;mkdir:/var/log;write:" P_NEW ";rm:" P_OLD ";"
+                         "rename:" P_LOG ";rename:" P_NEW ";sync;") == 0,
+          "8b 順序: mkdir → mkdir → write boot.new → rm .1 → boot.log→.1 → boot.new→boot.log → sync");
+    CHECK(fk_has(P_LOG, "NEW") && fk_absent(P_NEW), "8c boot.log に今回の中身、boot.new は残らない");
 
     /* b. 前々回と前回がある ext2 */
-    fk_reset(0);
-    fk_add("/var", 1, 0); fk_add("/var/log", 1, 0);
-    fk_add("/var/log/boot.log", 0, "PREV");
-    fk_add("/var/log/boot.log.1", 0, "OLDER");
+    fk_setup(0, "PREV", "OLDER", 0);
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
     CHECK(st == BOOTLOG_ST_OK, "8d 2 回目以降も通る");
-    CHECK(fk_has("/var/log/boot.log", "NEW") && fk_has("/var/log/boot.log.1", "PREV"),
-          "8e 前回分は .1 へ、前々回は上書きされて消える");
+    CHECK(fk_has(P_LOG, "NEW") && fk_has(P_OLD, "PREV") && fk_absent(P_NEW),
+          "8e 前回分は .1 へ、前々回は消える");
 
     /* c. FAT: rename は宛先があると断るので、先に消していないと回らない */
-    fk_reset(1);
-    fk_add("/var", 1, 0); fk_add("/var/log", 1, 0);
-    fk_add("/var/log/boot.log", 0, "PREV");
-    fk_add("/var/log/bootlog.1", 0, "OLDER");
+    fk_setup(1, "PREV", "OLDER", 0);
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_FAT, "NEW", 3, &rc);
-    CHECK(st == BOOTLOG_ST_OK && fk_has("/var/log/bootlog.1", "PREV") &&
-          fk_has("/var/log/boot.log", "NEW"), "8f FAT は bootlog.1 へ回して書く");
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_OLD8, "PREV") && fk_has(P_LOG, "NEW") &&
+          fk_absent(P_NEW), "8f FAT は bootlog.1 へ回して書く (write はバイト数で成功)");
 
     /* d. /var が作れない → 書かずに止める */
     fk_reset(0);
@@ -417,64 +557,154 @@ static void case_save(void)
     CHECK(st == BOOTLOG_ST_MKDIR_VAR && rc == FK_ERR_IO && strstr(fk_log, "write") == 0,
           "8g /var が作れなければ MKDIR_VAR で止め、書かない");
 
-    /* f. 前回分を消せない → 付け替えを飛ばして今回分は書く */
-    fk_reset(0);
-    fk_add("/var", 1, 0); fk_add("/var/log", 1, 0);
-    fk_add("/var/log/boot.log", 0, "PREV");
-    fk_fail_op = "rm"; fk_fail_rc = FK_ERR_IO;
-    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
-    CHECK(st == BOOTLOG_ST_RM_OLD && rc == FK_ERR_IO, "8i rm の失敗は RM_OLD");
-    CHECK(strstr(fk_log, "rename") == 0, "8j rm が落ちたら付け替えない");
-    CHECK(fk_has("/var/log/boot.log", "NEW") && strstr(fk_log, "sync;") != 0,
-          "8k それでも今回分は書いて sync する");
-
-    /* g. 付け替えが落ちる → 書く */
-    fk_reset(0);
-    fk_add("/var", 1, 0); fk_add("/var/log", 1, 0);
-    fk_add("/var/log/boot.log", 0, "PREV");
-    fk_fail_op = "rename"; fk_fail_rc = FK_ERR_IO;
-    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
-    CHECK(st == BOOTLOG_ST_ROTATE && rc == FK_ERR_IO && fk_has("/var/log/boot.log", "NEW"),
-          "8l rename の失敗は ROTATE、今回分は書く");
-
-    /* h. 書けない → sync しない */
-    fk_reset(0);
+    /* e. boot.new が書けない (切り詰めた後の失敗) → 既存には触らない */
+    fk_setup(0, "PREV", "OLDER", 0);
     fk_fail_op = "write"; fk_fail_rc = FK_ERR_IO;
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
-    CHECK(st == BOOTLOG_ST_WRITE && rc == FK_ERR_IO && strstr(fk_log, "sync") == 0,
-          "8m write の失敗は WRITE、sync しない");
+    CHECK(st == BOOTLOG_ST_WRITE && rc == FK_ERR_IO, "8h write の失敗は WRITE");
+    CHECK(fk_has(P_LOG, "PREV") && fk_has(P_OLD, "OLDER"),
+          "8i 切り詰めた後に落ちても boot.log と .1 は無傷 (一時ファイルにしか書いていない)");
+    CHECK(strstr(fk_log, "rename") == 0 && strstr(fk_log, "sync") == 0 &&
+          strstr(fk_log, "rm:" P_OLD) == 0, "8j 書けなければ世代を動かさず sync もしない");
+    CHECK(strstr(fk_log, "write:" P_NEW ";rm:" P_NEW ";") != 0 && fk_absent(P_NEW),
+          "8k 途中で切れた boot.new は消す (成否は問わない)");
 
-    /* i. 書いた量が足りない */
-    fk_reset(0);
-    fk_short = 1;
+    /* f. 前回分を消せない → 止める。boot.log は残り、今回分は boot.new */
+    fk_setup(0, "PREV", "OLDER", 0);
+    fk_fail_op = "rm"; fk_fail_path = P_OLD; fk_fail_rc = FK_ERR_IO;
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
-    CHECK(st == BOOTLOG_ST_WRITE && rc == 2, "8n 書いた量が足りなければ WRITE (rc は書けた量)");
+    CHECK(st == BOOTLOG_ST_RM_OLD && rc == FK_ERR_IO, "8l rm の失敗は RM_OLD");
+    CHECK(strstr(fk_log, "rename") == 0 && strstr(fk_log, "sync") == 0,
+          "8m rm が落ちたら付け替えない");
+    CHECK(fk_has(P_LOG, "PREV") && fk_has(P_OLD, "OLDER") && fk_has(P_NEW, "NEW"),
+          "8n boot.log を上書きせず、今回分は boot.new に残す");
+
+    /* g. 付け替え (boot.log → .1) が落ちる → boot.log を残す */
+    fk_setup(0, "PREV", "OLDER", 0);
+    fk_fail_op = "rename"; fk_fail_path = P_LOG; fk_fail_rc = FK_ERR_IO;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
+    CHECK(st == BOOTLOG_ST_ROTATE && rc == FK_ERR_IO, "8o boot.log → .1 の失敗は ROTATE");
+    CHECK(fk_has(P_LOG, "PREV") && fk_has(P_NEW, "NEW") && fk_absent(P_OLD) &&
+          strstr(fk_log, "rename:" P_NEW) == 0 && strstr(fk_log, "sync") == 0,
+          "8p boot.log は残り、今回分は boot.new、公開も sync もしない");
+
+    /* h. 公開 (boot.new → boot.log) が落ちる → 前回分は .1、今回分は boot.new */
+    fk_setup(0, "PREV", "OLDER", 0);
+    fk_fail_op = "rename"; fk_fail_path = P_NEW; fk_fail_rc = FK_ERR_IO;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
+    CHECK(st == BOOTLOG_ST_PUBLISH && rc == FK_ERR_IO, "8q boot.new → boot.log の失敗は PUBLISH");
+    CHECK(fk_has(P_OLD, "PREV") && fk_has(P_NEW, "NEW") && fk_absent(P_LOG) &&
+          strstr(fk_log, "sync") == 0, "8r どのログも失わない (前回分は .1、今回分は boot.new)");
+
+    /* i. FAT で書いた量が足りない (満杯) */
+    fk_setup(1, "PREV", 0, 0);
+    fk_short = 1;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_FAT, "NEW", 3, &rc);
+    CHECK(st == BOOTLOG_ST_WRITE && rc == 2, "8s FAT で書いた量が足りなければ WRITE (rc は書けた量)");
+    CHECK(fk_has(P_LOG, "PREV") && fk_absent(P_NEW), "8t boot.log は無傷、欠けた boot.new は消す");
 
     /* j. sync が落ちる */
     fk_reset(0);
     fk_fail_op = "sync"; fk_fail_rc = FK_ERR_IO;
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
-    CHECK(st == BOOTLOG_ST_SYNC && rc == FK_ERR_IO, "8o sync の失敗は SYNC");
+    CHECK(st == BOOTLOG_ST_SYNC && rc == FK_ERR_IO && fk_has(P_LOG, "NEW"),
+          "8u sync の失敗は SYNC (ファイルは公開済み)");
 
-    /* k. 最初の失敗を報告する (rename と write の両方が落ちる) */
-    fk_reset(0);
-    fk_add("/var", 1, 0); fk_add("/var/log", 1, 0);
-    fk_add("/var/log/boot.log", 0, "PREV");
-    fk_add("/var/log/boot.log.1", 0, "X");
-    fk_fail_op = "rm"; fk_fail_rc = -9;
-    fk_short = 1;
+    /* k. 残っていた boot.new (前回の起動が世代の更新の途中で止まった) */
+    fk_setup(0, "PREV", 0, "STALE");
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
-    CHECK(st == BOOTLOG_ST_RM_OLD && rc == -9, "8p 失敗が重なっても最初の段と rc を返す");
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "NEW") && fk_has(P_OLD, "PREV") &&
+          fk_absent(P_NEW), "8v 残っていた boot.new は今回分で上書きされ、公開後に残らない");
+    fk_setup(1, "PREV", 0, "STALE");
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_FAT, "NEW", 3, &rc);
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "NEW") && fk_absent(P_NEW),
+          "8w FAT でも同じ (書き込みは CREATE_ALWAYS で上書き)");
 
     /* l. 書かない種別 */
     fk_reset(0);
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_SKIP, "NEW", 3, &rc);
-    CHECK(st == BOOTLOG_ST_OK && fk_log[0] == '\0', "8q 書かない種別は何も呼ばない");
+    CHECK(st == BOOTLOG_ST_OK && fk_log[0] == '\0', "8x 書かない種別は何も呼ばない");
 
     /* m. 段の名前 */
     CHECK(strcmp(bootlog_stage_name(BOOTLOG_ST_ROTATE), "rotate") == 0 &&
+          strcmp(bootlog_stage_name(BOOTLOG_ST_PUBLISH), "publish") == 0 &&
+          strcmp(bootlog_stage_name(BOOTLOG_ST_WRITE), "write /var/log/boot.new") == 0 &&
           strcmp(bootlog_stage_name(BOOTLOG_ST_MKDIR_LOG), "mkdir /var/log") == 0 &&
-          strcmp(bootlog_stage_name(99), "?") == 0, "8r 段の名前");
+          strcmp(bootlog_stage_name(99), "?") == 0, "8y 段の名前");
+    CHECK(is_83_path(SYS_BOOTLOG_NEW), "8z boot.new は 8.3 (FAT でも作れる)");
+}
+
+/* ------------------------------------------------------------------------ */
+/*  9. write の戻りの約束 (FS ごと)                                          */
+/* ------------------------------------------------------------------------ */
+static void case_write_rc(void)
+{
+    CHECK(bootlog_write_ok(BOOTLOG_FS_EXT2, 0, 100), "9a ext2 は 0 が成功 (fs/ext2_vfs.c)");
+    CHECK(!bootlog_write_ok(BOOTLOG_FS_EXT2, -7, 100), "9b ext2 の負は失敗");
+    CHECK(bootlog_write_ok(BOOTLOG_FS_FAT, 100, 100), "9c FAT は書いたバイト数 = len が成功");
+    CHECK(!bootlog_write_ok(BOOTLOG_FS_FAT, 99, 100), "9d FAT の不足は失敗 (満杯)");
+    CHECK(!bootlog_write_ok(BOOTLOG_FS_FAT, 0, 100), "9e FAT の 0 は「1 バイトも書けなかった」で失敗");
+    CHECK(!bootlog_write_ok(BOOTLOG_FS_FAT, -7, 100), "9f FAT の負は失敗 (f_close の失敗を含む)");
+    CHECK(!bootlog_write_ok(BOOTLOG_FS_SKIP, 0, 100), "9g 書かない種別に成功は無い");
+}
+
+/* ------------------------------------------------------------------------ */
+/*  10. 再起動をまたぐ (同じ偽 FS に何度も保存する)                           */
+/* ------------------------------------------------------------------------ */
+static void case_reboots(void)
+{
+    int st, rc;
+
+    /* 起動 1: 初回 */
+    fk_reset(0);
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B1", 2, &rc);
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B1") && fk_absent(P_OLD), "10a 起動 1: boot.log だけ");
+
+    /* 起動 2: 書き込みが落ちる (媒体の障害) → 唯一の旧ログ B1 が残る */
+    fk_log[0] = '\0';
+    fk_fail_op = "write"; fk_fail_rc = FK_ERR_IO;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B2", 2, &rc);
+    CHECK(st == BOOTLOG_ST_WRITE && fk_has(P_LOG, "B1") && fk_absent(P_OLD) && fk_absent(P_NEW),
+          "10b 起動 2 (write 失敗): 唯一の旧ログ B1 はそのまま");
+
+    /* 起動 3: .1 が消せない → B1 は残り、B3 は boot.new */
+    fk_log[0] = '\0';
+    fk_fail_op = "rm"; fk_fail_path = P_OLD; fk_fail_rc = FK_ERR_IO;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B3", 2, &rc);
+    CHECK(st == BOOTLOG_ST_RM_OLD && fk_has(P_LOG, "B1") && fk_has(P_NEW, "B3"),
+          "10c 起動 3 (rm 失敗): B1 は残り、B3 は boot.new");
+
+    /* 起動 4: 公開が落ちる → B1 は .1 へ、B4 は boot.new (B3 は上書きされた) */
+    fk_log[0] = '\0';
+    fk_fail_op = "rename"; fk_fail_path = P_NEW; fk_fail_rc = FK_ERR_IO;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B4", 2, &rc);
+    CHECK(st == BOOTLOG_ST_PUBLISH && fk_has(P_OLD, "B1") && fk_has(P_NEW, "B4") && fk_absent(P_LOG),
+          "10d 起動 4 (公開失敗): B1 は .1、B4 は boot.new、boot.log は無い");
+
+    /* 起動 5: .1 だけが残っている状態から正常に保存 → B5 が boot.log。
+     * .1 (B1) は今回分が boot.new に**書けてから**消えるので、書けなかった
+     * ときに (起動 2 のように) 唯一のログを先に失うことはない */
+    fk_log[0] = '\0';
+    fk_fail_op = 0; fk_fail_path = 0;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B5", 2, &rc);
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B5") && fk_absent(P_OLD) && fk_absent(P_NEW),
+          "10e 起動 5 (正常): B5 が boot.log、B1 (.1) は入れ替わって消える");
+    CHECK(strstr(fk_log, "write:" P_NEW ";rm:" P_OLD ";") != 0,
+          "10f .1 を消すのは今回分を書けた後");
+
+    /* 起動 6: .1 だけの状態で write が落ちる → .1 は残る */
+    fk_setup(0, 0, "ONLY", 0);
+    fk_fail_op = "write"; fk_fail_rc = FK_ERR_IO;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B6", 2, &rc);
+    CHECK(st == BOOTLOG_ST_WRITE && fk_has(P_OLD, "ONLY"),
+          "10g .1 だけが残っていて write が落ちても、その唯一のログは消えない");
+
+    /* 起動 7: 正常 → 2 世代 */
+    fk_fail_op = 0;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B7", 2, &rc);
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B7") && fk_absent(P_OLD), "10h 続く正常な起動で boot.log");
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B8", 2, &rc);
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B8") && fk_has(P_OLD, "B7"), "10i さらに 1 回で 2 世代");
 }
 
 /* /var/log だけが作れない (1 本目の mkdir は通し、2 本目で落とす) */
@@ -495,13 +725,17 @@ static void case_save_mkdir_log(void)
     g_mk_n = 0;
     st = bootlog_save_with(&ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
     CHECK(st == BOOTLOG_ST_MKDIR_LOG && rc == FK_ERR_IO && strstr(fk_log, "write") == 0,
-          "8s /var/log が作れなければ MKDIR_LOG で止め、書かない");
+          "8s' /var/log が作れなければ MKDIR_LOG で止め、書かない");
     fk_reset(0);
     fk_add("/var", 1, 0); fk_add("/var/log", 1, 0);
     g_mk_n = 0;
     ops.mkdir = fk_mkdir;
     st = bootlog_save_with(&ops, BOOTLOG_FS_EXT2, "NEW", 3, 0);
-    CHECK(st == BOOTLOG_ST_OK, "8t fail_rc が NULL でも落ちない");
+    CHECK(st == BOOTLOG_ST_OK, "8t' fail_rc が NULL でも落ちない");
+    fk_setup(0, "PREV", 0, 0);
+    fk_fail_op = "rename"; fk_fail_path = P_NEW; fk_fail_rc = FK_ERR_IO;
+    st = bootlog_save_with(&ops, BOOTLOG_FS_EXT2, "NEW", 3, 0);
+    CHECK(st == BOOTLOG_ST_PUBLISH, "8u' 途中の段で止まるときも fail_rc が NULL で落ちない");
 }
 
 int main(int argc, char **argv)
@@ -514,8 +748,11 @@ int main(int argc, char **argv)
         { "header",       case_header },
         { "compose",      case_compose },
         { "plan",         case_plan },
+        { "lock",         case_lock },
         { "save",         case_save },
         { "save_mkdir",   case_save_mkdir_log },
+        { "write_rc",     case_write_rc },
+        { "reboots",      case_reboots },
     };
     unsigned i;
     int ran = 0;
