@@ -159,6 +159,14 @@
 #define HS_MIN_KAPI_H2  53
 #define HR_BAD_NAME     "bad_name"          /* 名前に '\' が混じっている */
 #define HR_PATH_REJECT  "path_rejected"     /* 正規化できず判定もできない */
+#define HR_DST_ON_FD    "dest_on_fd"        /* 同期先がフロッピーのマウント */
+#define HR_OTHER_MOUNT  "other_mount"       /* 宛先が別のマウントの根 (またがない) */
+
+/* フロッピーのデバイス名の先頭 (drivers/dev.c の "fd0" / "fd1"、kernel.c の
+ * FD 起動のルート root_dev = "fd0")。同期先のマウントがこれなら断る */
+#define HS_FD_DEV_PREFIX0 'f'
+#define HS_FD_DEV_PREFIX1 'd'
+
 
 /* VFS が 1 パスで扱える要素数。**fs/vfs.h の VFS_MAX_PATH_DEPTH が正典**で、
  * 外部プログラムからはそのヘッダを引けないので写しを置く。ずれの検出は
@@ -2216,6 +2224,26 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
             continue;
         }
 
+        /* ---- マウントをまたがない (rsync -x と同じ、Codex 2026-09-25 P2) ----
+         * 宛先の子がマウント点 (vfs_devname が完全一致で名前を返す = 別の
+         * マウントの根) なら、その下へは入らない — 掃除も mkdir もコピーもしない。
+         * 開始点の判定 (dst_on_floppy) だけでは、/ = hd0 のとき同期元の
+         * /host/fd0/x が /fd0 (FD の自動マウント) へ mkdir されて書かれた。
+         * FD に限らず全部のマウント (/host、/cd0、/hd1 …) に当てる。
+         * 失敗ではなく除外として数え、-v が無くても 1 行出す (配備元にその名前が
+         * あるのに黙って入らないと、なぜ入らないかの手がかりが無いので)。
+         * 開始点そのもの (`hsync sys` で /sys が別マウントの場合) は明示の指定
+         * なので対象にしない — 見るのは子だけ。 */
+        {
+            const char *mdev = api->vfs_devname(dst_path);
+            if (mdev && mdev[0]) {
+                g_excluded++;
+                api->kprintf(ATTR_YELLOW, "  EXCLUDE %s reason=%s (dev %s)\n",
+                             dst_path, HR_OTHER_MOUNT, mdev);
+                continue;
+            }
+        }
+
         /* ---- 保護判定 (同じく内容を開く前) ----
          * /etc/settings.db* は通常配備で作らない・上書きしない (票 S0-D)。
          * ディレクトリ経路も同じ規則で見る (etc/settings.db/ の残骸を作らない)。 */
@@ -2264,6 +2292,38 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
             sync_file(src_path, dst_path);
         }
     }
+}
+
+/* ======== 同期先がフロッピーか (Codex 2026-09-25 P2) ========
+ * hsync は MINIMAL (= 起動 FD の中身) に入っている。FD から起動して引数なしで
+ * 打つと宛先 / は FD 自身になり、ファイル本体は FAT に O_EXCL が無いので
+ * replace_unsupported で落ちるが、その前の sys_mkdir は通って走査も続くので、
+ * FD を空のディレクトリで埋め得る。**掃除・mkdir・名札の読みより前に**断る。
+ *
+ * 判定は KAPI を足さずに vfs_devname (マウント点の**完全一致**でデバイス名を
+ * 返す、マウント点でなければ "") で行う: 宛先の正規化済みパスから親へ 1 段ずつ
+ * 遡り、最初に名前の返るマウント点 (= 最長一致のマウント) のデバイス名を見る。
+ * "/" まで来れば必ずルートのマウント。dst は "/" か "/a/b" (正規化済み)。
+ * 戻り値: 1 = FD の上、0 = それ以外。devout にデバイス名を返す。 */
+static int dst_on_floppy(const char *dst, const char **devout)
+{
+    char buf[OS32_MAX_PATH];
+    const char *dev;
+    int n;
+
+    if (!dst[0] || !str_ncpy(buf, dst, (int)sizeof(buf)))
+        str_ncpy(buf, "/", (int)sizeof(buf));
+    for (;;) {
+        dev = api->vfs_devname(buf);
+        if (dev && dev[0]) break;
+        if (buf[0] == '/' && buf[1] == '\0') { dev = ""; break; }
+        n = str_len(buf);
+        while (n > 1 && buf[n - 1] != '/') n--;   /* 最後の要素を落とす */
+        if (n <= 1) { buf[0] = '/'; buf[1] = '\0'; }
+        else buf[n - 1] = '\0';                  /* 末尾の '/' も落とす */
+    }
+    *devout = dev;
+    return dev[0] == HS_FD_DEV_PREFIX0 && dev[1] == HS_FD_DEV_PREFIX1;
 }
 
 /* ======== メイン ======== */
@@ -2463,6 +2523,21 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
         }
     }
     g_root_sync = (subdir == NULL);
+
+    /* 同期先がフロッピーなら 1 件も触らずに断る (dry-run でも同じ判定) */
+    {
+        const char *dev;
+        if (dst_on_floppy(subdir ? norm : "/", &dev)) {
+            api->kprintf(ATTR_RED,
+                         "Error: 同期先 %s はフロッピー (%s) の上 reason=%s\n",
+                         subdir ? norm : "/", dev, HR_DST_ON_FD);
+            api->kprintf(ATTR_RED,
+                         "  hsync は HDD へ入れるもの。install / cdinst で HDD に入れ、"
+                         "HDD から起動して実行すること\n"
+                         "  (残りを取るなら `hsync` の後に `hsync sys` + リセット)\n");
+            return 1;
+        }
+    }
 
     /* バッファ確保。64KB を比較用 32KB x 2 に割って使う (設計書 §4.3) */
     file_buf = (u8 *)api->mem_alloc(FILE_BUF_SIZE);

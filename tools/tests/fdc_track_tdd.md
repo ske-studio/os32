@@ -106,6 +106,10 @@ tmo=0 で IRQ の取りこぼしは消えたが、**まとめ読み 767 回・�
     を出し、ハーネスへ `FDC_TRACK_SEEK_MAX` / `FDC_TRACK_MULTI_MAX` で渡す (無ければ FAIL)。
     基点の配置で 14 / 27 (従来の値と同じ、実測 14 / 27)、ローダ 2648B の配置で 16 / 28 (実測 16 / 27)。
     往復の 2 は実測の経路 (`SEEK 64 -> 0 -> 64` が 1 回) から
+  - **2026-09-25: 読むファイルを `/SYS/UNICODE.BIN` (128KB) に替えた。** 既定フォントを
+    MINIMAL から NORMAL へ移して FD に載らなくなったため (build/packages.yaml)。読み方
+    (16B → 1KB ずつ、`FDC_TRACK_PATH` で渡す) と上限の出し方は同じ。そのときの値は
+    上限 seek ≦ 12 / multi ≦ 21 (データ 17 トラック / 9 シリンダ)、実測 seek=12 / multi=19
   - `images/os32_boot.d88` が無ければ `--require-image` で FAIL (make check)。
     check-fdc-track-host はイメージを前提にしない — 作り直すと kernel まで組み直され、
     check-par の他の試験と食い違うため。make all が先
@@ -161,7 +165,7 @@ DMA ch2 は閉じている) と変異「単発の WRITE の NR で回復とリ�
 | `single_nr_no_recover` | 単発の READ の NR で回復もリトライもしない |
 | `write_nr_no_recover` | 単発の WRITE の NR でも回復もリトライもしない (READ と同じ) |
 | `sis_edge_limit` | 上限ちょうどの別の通知の後ろの完了を期限切れにしない |
-| `font_replay` | 実物の FD イメージと実物の `ff.c` で、フォントの読み込みを VFS の読み方のまま再現する。multi / seek は配置から出した上限以下 (`font_bounds`)、single 0、期限切れ 0、中身がファイルと一致 |
+| `font_replay` | 実物の FD イメージと実物の `ff.c` で、フォントの読み込みを VFS の読み方のまま再現する (2026-09-25〜 フォントが FD から外れたので同じ読み方で `/sys/unicode.bin` を読む)。multi / seek は配置から出した上限以下 (`font_bounds`)、single 0、期限切れ 0、中身がファイルと一致 |
 | `seek_edge_foreign` | SEEK の完了の前に別ドライブの通知 / 自ドライブの Ready 変化が積まれていても、1 本のエッジで全部読んで期限切れを待たない。Ready 変化で世代が進む |
 | `drain_before_skip` | 取り残しの通知で INT 線が上がったままでも、省略の前の排水で下ろし、READ の完了のエッジが来る |
 | `readychange_invalidates` | SIS で Ready 変化を見たら、持っている先読みを入れ替え後の媒体に当てない |

@@ -25,10 +25,12 @@
 #define SYS_PROFILE_SYS       "/etc/profile"       /* システムプロファイル */
 #define SYS_UNICODE_BIN       "/sys/unicode.bin"   /* Unicodeテーブル */
 #define SYS_SQLITE_BIN        "/sys/sqlite.bin"    /* SQLite拡張域バイナリ */
-/* 既定の 16px フォント (KCG)。HDD / CD は長い名前、FD (FAT、FatFs は LFN なし)
- * は 8.3 の短い名前で置く (build/packages.yaml の fd.rename)。カーネルは長い
- * 名前が読めず、**かつルートが FAT (= FD 起動) のときだけ**短い名前を読む
- * (kernel/boot_font.c)。HDD で長い名前が欠けても短い名前は掴まない。 */
+/* 既定の 16px フォント (KCG)。HDD / CD は長い名前。FD (FAT、FatFs は LFN なし)
+ * に置くなら 8.3 の短い名前 — 2026-09-25 からフォントは NORMAL で、起動 FD
+ * (= MINIMAL) には載せていない (build/packages.yaml)。カーネルは長い名前が
+ * 読めず、**かつそのパスのマウントが FAT のときだけ**短い名前を読む
+ * (kernel/boot_font.c)。HDD で長い名前が欠けても短い名前は掴まない。
+ * どちらも無ければ本体のフォント ROM で描く (起動は止まらない)。 */
 #define SYS_FONT_DEFAULT      "/sys/font/default.kcgfont"
 #define SYS_FONT_DEFAULT_83   "/sys/font/default.kcg"
 #define SYS_FONT_83_FSTYPE    "fat"      /* 短い名前を許す FS (vfs_fstype の名前) */

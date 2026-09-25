@@ -364,18 +364,54 @@ python3 tools/mkpkg.py --list packages/NORMAL.PKG                # 中身の一�
 2026-09-24 までは一覧を別の YAML に手で写していて、配備 179 本のうち 27 本
 (gshell / libos32gui.shlib / 既定フォント …) が CD に入っていなかった。
 
-| パッケージ | 中身 (タグ) | cdinst の選択肢 | 2026-09-24 の実測 |
+| パッケージ | 中身 (タグ) | cdinst の選択肢 | 2026-09-25 の実測 |
 |---|---|---|---|
-| `BOOT.PKG` | IPL + ローダ (`type: boot`、セクタへ直接書く。分割しない、無圧縮) | 全部 | 2 本 / 4KB |
-| `MINIMAL.PKG` | `core` + `base` — **CUI だけ**。カーネル、unicode.bin、shell、既定フォント、filetypes、settings.tsv、基本コマンド (more / less / grep / find / sort / head / tail / wc / tee / touch / hexdump / sleep / diff / du / cal / man / cfg / sndctl)、install / cdinst + 媒体だけの settings.db。**起動 FD と同じ集合** (下) | 1. Minimal 以上 | 27 本 / 1,170,897 B |
-| `GUI.PKG` | `gui` — gshell、libos32gui.shlib、shlib を使うアプリ (filer / edit_gui)。shlib を使う試験アプリ (gui_demo / gdi_test / v12_api_test …) は `test` のまま DEBUG | 2. Normal 以上 | 4 本 / 394,250 B |
-| `NORMAL.PKG` | `programs` / `docs` / `data` — コマンドとアプリ (sh / hsync / ime / v86 …)、man、FEP 辞書、TTF、MGX サンプル | 2. Normal 以上 | 87 本 / 9,723,258 B |
-| `DEBUG.PKG` | `test` — 試験バイナリと試験用データ | 3. Full | 62 本 / 1,274,243 B |
+| `BOOT.PKG` | IPL + ローダ (`type: boot`、セクタへ直接書く。分割しない、無圧縮) | 全部 | 2 本 / 6,376 B |
+| `MINIMAL.PKG` | `core` + `base` — **CUI のレスキュー兼インストーラ** (下)。カーネル、unicode.bin、shell、filetypes、settings.tsv、install / cdinst / hsync、less / grep / hexdump / cfg + 媒体だけの settings.db。**起動 FD と同じ集合** (下) | 1. Minimal 以上 | 13 本 / 861,245 B |
+| `GUI.PKG` | `gui` — gshell、libos32gui.shlib、shlib を使うアプリ (filer / edit_gui)。shlib を使う試験アプリ (gui_demo / gdi_test / v12_api_test …) は `test` のまま DEBUG | 2. Normal 以上 | 4 本 / 394,056 B |
+| `NORMAL.PKG` | `programs` / `docs` / `data` — コマンドとアプリ (sh / more / find / sort / head / tail / wc / tee / touch / sleep / diff / du / cal / man / sndctl / ime / v86 …)、man ページ、**既定フォント (`/sys/font/default.kcgfont`)**、FEP 辞書、TTF、MGX サンプル | 2. Normal 以上 | 102 本 / 10,107,991 B |
+| `DEBUG.PKG` | `test` — 試験バイナリと試験用データ | 3. Full | 62 本 / 1,272,396 B |
 
 cdinst の展開は依存の順 BOOT → MINIMAL → GUI → NORMAL → DEBUG。Minimal だけの HDD で
 `/etc/system.cfg` が `GUI=1` でも、gshell が無いのでカーネルは `gshell load failed -> CUI shell`
 を出して CUI で上がる (`kernel/kernel.c` のシェル起動ループ。shlib が無いのは
 `[shlib] ... not found (GUI shlib disabled)` で、拒否理由は立たない)。
+
+**MINIMAL =「起動して、HDD に入れて、壊れたときに直して、残りを取ってこられる」
+レスキュー兼インストーラ** (2026-09-25、ユーザー決定)。起動 FD と同じ集合なので 2HD に
+収まる大きさに保つ。2026-09-24 までは「CUI のシェル + 基本コマンド」で既定フォント (184KB)
+と一般コマンドも入れていて、2HD の FD の残りが 55KB しかなく、カーネルが約 4KB 増えただけで
+FD が作れなくなった (`mkfat12.py` の「ディスク容量不足」)。
+
+| 残す (MINIMAL) | 理由 |
+|---|---|
+| カーネル、unicode.bin、shell.bin (組み込みコマンド)、filetypes、settings.tsv / settings.db (FD は profile も) | 起動と設定 |
+| install / cdinst | HDD へ入れる |
+| hsync | 残り (NORMAL 以降) を `/host` から取ってくる。**同期元は HostDrv なので今は NP21/W の上だけ** (実機は SerialFS 待ち) |
+| less / grep / hexdump | 壊れたファイルを見る |
+| cfg | 設定を直す |
+
+NORMAL へ移した物: 既定フォント、more / find / sort / head / tail / wc / tee / touch / sleep /
+diff / du / cal / man / sndctl。残すコマンド・FD の profile・インストーラはこれらを呼ばない。
+
+**既定フォントが無いとき** (MINIMAL の HDD と起動 FD):
+
+- カーネルは起動画面に `FONT..NG` (赤) と `[KCG] kernel-init load failed: -1` を出して先へ
+  進む (`kernel/kernel.c` → `kernel/boot_font.c`)。FD 起動では 8.3 の短い名前も試すので
+  `[KCG] loading:` が 2 行出る。ファイルが開けない失敗は KCG キャッシュに触る前に返る
+  (`drivers/kcg.c` の `kcg_load_font`)。
+- テキスト画面 (シェル・kprintf) の文字は元から本体の CG (テキスト VRAM) なので変わらない。
+  グラフィック画面に描く文字 (gshell / libos32gui の KCG 描画) はキャッシュに無い字を
+  本体の漢字 ROM から読む — IPAex ゴシックの代わりに ROM の字形になり、初めて描く字は
+  ポートを叩くぶん遅い。止まる経路は無い (2026-09-24 以前の FD はフォント無しで起動していた。
+  `docs/tasks/realhw/TASK_FD144.md` §5-2)。
+- cdinst の選択肢に「GUI はあるが NORMAL が無い」組み合わせは無い (2 = GUI + NORMAL が
+  一緒)。FD → install.bin の HDD は MINIMAL と同じ (フォントも移したコマンドも無い)。欲しければ
+  CD の Normal 以上か、**HDD から起動して `hsync` と `hsync sys` (+ リセット)** で入れる。
+  全体同期の `hsync` はルート直下の `/sys` を既定で外す (稼働中のシェルと shlib) ので、
+  既定フォント (`/sys/font/`) と GUI の共有ライブラリ (`/sys/lib/`) は `hsync sys` でしか
+  入らない。**FD から起動して `hsync` は打てない** — 同期先 (宛先のマウント) がフロッピー
+  なら何も書かずに `dest_on_fd` で断る (`userland/system/hsync.c` の `dst_on_floppy`)。
 
 - **タグの規則**: 配備マニフェストの 1 行はちょうど 1 つのパッケージに当たるタグを持つ。
   `userland/tests/` 由来の行は必ず `test` (試験バイナリが NORMAL に混ざらないように)。
@@ -391,7 +427,8 @@ cdinst の展開は依存の順 BOOT → MINIMAL → GUI → NORMAL → DEBUG。
 - 検査は `make check-packages-host` ([`tools/tests/test_packages.py`](../tools/tests/test_packages.py)):
   振り分けの否定側、分割、実物の mkpkg で作った PKG と ISO の中の PKG を読み戻して
   配備の全ファイルが同じバイト列で揃うこと、cdinst.c のベース名と展開順との一致、
-  GUI.PKG = `gui` タグ、起動 FD = BOOT + MINIMAL (下)。
+  GUI.PKG = `gui` タグ、既定フォントが NORMAL にあり MINIMAL に無いこと、
+  起動 FD = BOOT + MINIMAL と FD の空きの下限 (下)。
 - 試験用に `--defs` (ファイル一覧を直に書いた YAML) と `--name` (1 本) の形も残してある。
 
 ##### 起動 FD と MINIMAL
@@ -409,20 +446,26 @@ CD の MINIMAL とずれていた)。違いは `build/packages.yaml` の `fd:` �
 | `/VMKRNL.LZ4` | `/boot/vmkernel.lz4` | FAT ローダはルートから読む。install.bin が `/hd0/boot/` へ写す |
 | `/sys/boot_hdd.bin` | `/boot/boot_hdd.bin` (BOOT) | install.bin が LBA 0 へ書く元 |
 | `/sys/loader_h.bin` | `/boot/loader_hdd.bin` (BOOT) | 8.3。install.bin が LBA 2〜へ書く元 |
-| `/sys/font/default.kcg` | `/sys/font/default.kcgfont` | 8.3 (FatFs は LFN なし)。カーネルは長い名前が読めず、**そのパスを載せているマウントが FAT のときだけ**短い名前を読む (`kernel/boot_font.c`、親を遡って `vfs_fstype(prefix)` で最長一致のマウントを見る) |
 | `/etc/filetype` | `/etc/filetypes` | 8.3。シェルの filer は長い名前が無く、**`/etc` が FD のルートと同じマウントにあるときだけ**短い名前を読む (KAPI `sys_stat` の `st_dev` を `/` と `/etc` で比べ、`vfs_devname("/")` が FD。KAPI にパスから FS 種別を引く口が無いため) |
 
 短い名前へ落ちるのは LFN の無い FS (FAT) の上だけ — HDD で正規名が欠けたり壊れたりしても、
 FD ルートの上に HDD の ext2 を載せても、残っている短い名前を黙って掴まない (ホスト試験:
-`test_packages.py` case 8、`test_sh_truncation.py` 25n〜25q)。**install.bin (FD → HDD) は
+`test_packages.py` case 8、`test_sh_truncation.py` 25n〜25q)。既定フォントの 8.3 名
+`/sys/font/default.kcg` (`kernel/boot_font.c`、そのパスを載せているマウントが FAT のときだけ
+読む) も同じ作りで残してあるが、2026-09-25 にフォントを NORMAL へ移したので**今の FD には
+載っていない** (FD に手で置けば読む)。**install.bin (FD → HDD) は
 この表を逆に当てて正規名で写し**、ブート領域へ書く物と FD だけの物は写さない
 (`userland/system/install.c` の `fd_renames` / `fd_only`。case 9 が packages.yaml と
 突き合わせ、実物の install.c を回して HDD の集合 = MINIMAL を見る)。
 
 FD 上のパスはすべて 8.3 に収まること (mkfat12 は収まらない名前を黙って切り詰めるので、
-mkpkg が先に断る)。**`core` / `base` に足した物は FD にも入る** — 空きは 2026-09-24 に
-**2HD 55KB / 1221KB、1.44MB 267KB / 1424KB** (既定フォント 184KB を入れた後)。2HD が
-先に尽きるので、MINIMAL に足すときは `make all` の FD の行 (`クラスタ使用: … 残り …KB`) を見る。
+mkpkg が先に断る)。**`core` / `base` に足した物は FD にも入る** — 空きは 2026-09-25 に
+**2HD 359KB / 1221KB、1.44MB 568KB / 1424KB** (MINIMAL をレスキュー兼インストーラに絞った後。
+絞る前は 2HD が数 KB 溢れて作れず、1.44MB は 211KB)。2HD が先に尽きるので、MINIMAL に
+足すときは `make all` の FD の行 (`クラスタ使用: … 残り …KB`) を見る。**空きが 64KB
+(`tools/tests/test_packages.py` の `FD_MIN_FREE_KB`、2HD と 1.44MB の両方) を切ると
+`make check-packages-host` が落ちる** — 溢れて `make all` が割れる前に、MINIMAL に足す物を
+見直すか FD から外す物を決める合図。
 以前 FD にだけあった試験用の `/bin/timetest.bin` / `/bin/pcmtest.bin` は外した (DEBUG の
 `/usr/bin/time_test.bin` / `pcm_test.bin`)。検査は `make check-packages-host` の case 7 が
 実物の 2 つのイメージを FAT12 として読み戻し、構成とバイト列で等しいことを見る。case 7b は

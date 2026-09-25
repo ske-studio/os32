@@ -23,7 +23,8 @@ CD インストール (userland/system/cdinst.c) の .PKG は、配備の正典
      (+ fd.only) と**等しい**か。構成 (fd_plan) と、実物のイメージ
      (images/os32_boot.img = 2HD の D88 のもと、images/os32_boot144.img) を
      FAT12 として読み戻してバイト列で見る。否定側 (8.3 違反・理由なし・古い
-     rename) も。空きを表示する。配布物の D88 (images/os32_boot.d88) のセクタを
+     rename) も。空きを表示し、**FD_2HD_MIN_FREE_KB を切ったら落ちる** (否定側:
+     閾値の 1KB 下を落とす)。配布物の D88 (images/os32_boot.d88) のセクタを
      読み戻し、RAW (os32_boot.img) と一致するか (否定側: D88 を 1 セクタ壊すと落ちる)
   8. 8.3 の短い名前へのフォールバックは FD (FAT) のときだけ: 実物の
      kernel/boot_font.c をホストで取り込み、HDD (ext2) では正規名が無ければ
@@ -65,13 +66,25 @@ FD_IMAGES = [('2HD', os.path.join(ROOT, 'images', 'os32_boot.img'),
               'boot/loader_fat144.bin')]
 IMAGE_MK = os.path.join(ROOT, 'build', 'image.mk')
 
-# MINIMAL の外部コマンド (タグ base)。cdinst の「CUI only: shell + basic commands」。
-# 2026-09-24 までの FD の FDD_MIN_CMDS と同じ顔ぶれ (diff / du / cal / man / cfg は
-# そのとき FD にだけあった)
-MINIMAL_BASE_CMDS = ['more', 'less', 'grep', 'find', 'sort', 'head', 'tail', 'wc',
-                     'tee', 'touch', 'hexdump', 'sleep', 'diff', 'du', 'cal', 'man',
-                     'sndctl', 'cfg']
-# GUI.PKG (タグ gui) の中身。shlib を使う試験アプリは test (DEBUG) のまま
+# 起動 FD の空きの下限 (KB)。2HD (1232KB) と 1.44MB の両方に当てる (1.44MB は
+# 同じ中身で 2HD より約 200KB 広いので、実際に効くのは 2HD)。
+# 2026-09-25 にカーネルが CD 読みの高速化で約 4KB 増え、2HD の FD が前触れなく
+# 作れなくなった (mkfat12「ディスク容量不足」、残り 55KB → 溢れ)。既定フォント
+# (184KB) を MINIMAL から NORMAL へ移して空けたうえで、ここで見張る。
+# 64KB = カーネルの 1 回の増分 (数 KB) の 10 倍以上 + 小さなコマンド数本。これを
+# 切ったら MINIMAL に足す物を見直すか、何を FD から外すかを決める合図
+# (docs/08_build.md の「起動 FD と MINIMAL」)。
+FD_MIN_FREE_KB = 64
+
+# MINIMAL の外部コマンド (タグ base)。MINIMAL =「起動して、HDD に入れて、壊れた
+# ときに直して、残りを取ってこられる」レスキュー兼インストーラ (2026-09-25、
+# ユーザー決定。build/packages.yaml の冒頭)
+MINIMAL_BASE_CMDS = ['less', 'grep', 'hexdump', 'cfg']
+MINIMAL_SBIN = ['install', 'cdinst', 'hsync']
+# 2026-09-25 に MINIMAL (= 起動 FD) から NORMAL へ移したコマンド。2HD の FD の空きのため
+MOVED_TO_NORMAL_CMDS = ['more', 'find', 'sort', 'head', 'tail', 'wc', 'tee', 'touch',
+                        'sleep', 'diff', 'du', 'cal', 'man', 'sndctl']
+FONT_GUEST = '/sys/font/default.kcgfont'
 GUI_FILES = ['/bin/gshell.bin', '/sys/lib/libos32gui.shlib',
              '/usr/bin/filer.bin', '/usr/bin/edit_gui.bin']
 
@@ -99,11 +112,25 @@ def case_real_plan():
               f"{mkpkg.PKG_MAX_ENTRIES}")
     # Minimal =「CUI のシェル + 基本コマンド」(cdinst の選択肢 1 の文言)
     minimal = {g for n, _, _, fs in resolved if n == 'minimal' for g, _ in fs}
-    need = ['/sys/shell.bin', '/sbin/install.bin', '/sbin/cdinst.bin',
-            '/sys/font/default.kcgfont', '/boot/vmkernel.lz4', '/sys/unicode.bin'] + \
-        ['/bin/%s.bin' % c for c in MINIMAL_BASE_CMDS]
+    need = ['/sys/shell.bin', '/boot/vmkernel.lz4', '/sys/unicode.bin',
+            '/etc/filetypes', '/etc/settings.tsv', '/etc/settings.db'] + \
+        ['/bin/%s.bin' % c for c in MINIMAL_BASE_CMDS] + \
+        ['/sbin/%s.bin' % c for c in MINIMAL_SBIN]
     lack = [g for g in need if g not in minimal]
-    check(not lack, f"MINIMAL にシェルと基本コマンドと既定フォントが入っている (欠け {lack})")
+    check(not lack, f"MINIMAL にシェル・インストーラ・hsync・直す道具が入っている (欠け {lack})")
+    # MINIMAL の外部コマンドはちょうど上の顔ぶれ (足すなら FD の空きと相談して表も直す)
+    cmds = sorted(g for g in minimal if g.startswith(('/bin/', '/sbin/')))
+    want = sorted(['/bin/%s.bin' % c for c in MINIMAL_BASE_CMDS] +
+                  ['/sbin/%s.bin' % c for c in MINIMAL_SBIN])
+    check(cmds == want, f"MINIMAL のコマンドの顔ぶれ {cmds}")
+    # 既定フォント (184KB) は NORMAL (2026-09-25)。MINIMAL と起動 FD には入れない —
+    # 無ければカーネルは本体のフォント ROM で描く (kernel/boot_font.c、drivers/kcg.c)
+    normal = {g for n, _, _, fs in resolved if n.startswith('normal') for g, _ in fs}
+    check(FONT_GUEST not in minimal and FONT_GUEST in normal,
+          f"既定フォント {FONT_GUEST} は NORMAL にあり MINIMAL に無い")
+    moved = ['/bin/%s.bin' % c for c in MOVED_TO_NORMAL_CMDS]
+    check(all(g in normal for g in moved),
+          f"移したコマンドは NORMAL にある (無い {[g for g in moved if g not in normal]})")
     # GUI は MINIMAL に無く、GUI.PKG が gui タグの行とちょうど一致する
     gui = sorted(g for n, _, _, fs in resolved if n.startswith('gui') for g, _ in fs)
     check(not (set(GUI_FILES) & minimal), "MINIMAL に GUI (gshell / shlib / GUI アプリ) が無い")
@@ -534,6 +561,22 @@ def case_fd(plan, resolved):
               f"FD {label} の実物 = 構成 ({len(got)} ファイル、欠け {len(missing)}、"
               f"余分 {len(extra)}、違い {len(bad)})")
         print(f"  info FD {label}: 空き {free // 1024}KB / {total // 1024}KB")
+        p = fd_free_problem(label, free)
+        check(p is None, p or f"FD {label}: 空き {free // 1024}KB >= {FD_MIN_FREE_KB}KB")
+    # 否定側: 見張りが閾値の 1KB 下を落とし、ちょうどは通す
+    check(fd_free_problem('2HD', FD_MIN_FREE_KB * 1024 - 1024) is not None,
+          f"否定: 空き {FD_MIN_FREE_KB - 1}KB は下限割れとして落とす")
+    check(fd_free_problem('2HD', FD_MIN_FREE_KB * 1024) is None,
+          f"空き {FD_MIN_FREE_KB}KB ちょうどは通す")
+
+
+def fd_free_problem(label, free):
+    """空き free (バイト) が下限を切っていれば理由の文、足りていれば None"""
+    if free >= FD_MIN_FREE_KB * 1024:
+        return None
+    return (f"FD {label}: 空き {free // 1024}KB が下限 {FD_MIN_FREE_KB}KB を切った。"
+            "次の増分で FD が作れなくなる — MINIMAL (core / base) に足した物を見直すか、"
+            "FD から外す物を決めること (docs/08_build.md「起動 FD と MINIMAL」)")
 
 
 # ---------------------------------------------------------------- 7b. 配布物の D88

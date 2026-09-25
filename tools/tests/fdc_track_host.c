@@ -1393,7 +1393,9 @@ static void sis_edge_limit(void)
 /*                                                                          */
 /*  イメージ: images/os32_boot.d88 を LBA 順に直したもの (試験の Python が   */
 /*  作って FDC_TRACK_IMAGE で渡す)。期待する中身は Python が FAT をたどって  */
-/*  取り出したファイル (FDC_TRACK_FONT)。                                    */
+/*  取り出したファイル (FDC_TRACK_FONT)、その FatFs のパスは FDC_TRACK_PATH。*/
+/*  2026-09-25 に既定フォントが MINIMAL から外れて FD に載らなくなったので、*/
+/*  同じ読み方を FD に残る大きいファイル (/sys/unicode.bin) で回す。         */
 /*  読み方: kernel/boot_font.c → drivers/kcg.c の kcg_load_font と           */
 /*  fs/vfs_fd.c / fs/fatfs_vfs.c のとおり:                                  */
 /*    vfs_open        = stat + get_file_size (どちらも f_stat)               */
@@ -1404,7 +1406,7 @@ static void sis_edge_limit(void)
 /* ======================================================================== */
 static u8 *s_font;
 static long s_font_len;
-static const char *s_font_path = "0:/sys/font/default.kcg";
+static const char *s_font_path;
 /* 上限 (FDC_TRACK_SEEK_MAX / FDC_TRACK_MULTI_MAX)。無ければ 0 = 失敗にする */
 static long s_seek_max, s_multi_max;
 
@@ -1433,8 +1435,9 @@ static void font_replay(void)
     long off, total;
     int ok = 1, n;
 
-    if (!s_image || !s_font) {
-        fprintf(stderr, "font_replay: FDC_TRACK_IMAGE / FDC_TRACK_FONT が無い\n");
+    if (!s_image || !s_font || !s_font_path) {
+        fprintf(stderr, "font_replay: FDC_TRACK_IMAGE / FDC_TRACK_FONT / "
+                "FDC_TRACK_PATH が無い\n");
         failed++;
         return;
     }
@@ -1542,6 +1545,7 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "font_replay") == 0) {
         s_image = load_file("FDC_TRACK_IMAGE", &s_image_len);
         s_font = load_file("FDC_TRACK_FONT", &s_font_len);
+        s_font_path = getenv("FDC_TRACK_PATH");
         s_seek_max  = getenv("FDC_TRACK_SEEK_MAX") ? atol(getenv("FDC_TRACK_SEEK_MAX")) : 0;
         s_multi_max = getenv("FDC_TRACK_MULTI_MAX") ? atol(getenv("FDC_TRACK_MULTI_MAX")) : 0;
     }
