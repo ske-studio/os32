@@ -25,14 +25,18 @@
 
 - `hd0 BIOS (AH=84h): valid=1 C/H/S=16382/16/63 len=512`
 - `hd0 ATA: present=1 total=16514063 sectors …`
-- `Target: hd0 …, empty disk: create the OS32 area` (空のディスク) — 実機の 8GB に**他の OS の区画があれば**「This disk is not a target for the OS32 installer」と出る。
-- **`not a target` と出たら ERASE** (wt/cdinst-wipe 以降の cdinst / install): 続けて `Current contents of hd0:` の要約 (LBA 0 の 55AA、各区画の mid・sid・名前・開始と終了のシリンダ) が出るので**写真に**。消してよければ `Type ERASE:` に `ERASE` (大文字) + Enter → `LBA 0 and 1 of hd0 erased and verified (all zero)` → 確認画面は `empty disk` → 改めて `y`。それ以外の入力は何も書かずに断る。`y/N` で `N` にすると区画表は消えたまま止まる (`INCOMPLETE`、次の実行は空のディスクとして入れられる)。
+- `Target: hd0 …, empty disk: create the OS32 area` (空のディスク) — 実機の 8GB に**他の OS の区画があれば**その前に「hd0 cannot be used as it is: … (code -40)」と「hd0 holds another system's partitions or boot code」が出る。
+- **`hd0 cannot be used as it is` と出たら ERASE** (wt/cdinst-wipe 以降の cdinst / install): 続けて
+  `Current contents of hd0:` の要約 (LBA 0 の 55AA、各区画の mid・sid・名前・開始と終了のシリンダ) が出るので
+  **写真に**。検査はそのまま続き、確認画面に `empty disk` と「After y, type ERASE … EVERYTHING ON hd0 WILL BE
+  LOST」が出る。消してよければ `y` → `Type ERASE:` に `ERASE` (大文字) + Enter → `LBA 0 and 1 of hd0 erased and
+  verified (all zero)` → format へ。`N` か `ERASE` 以外の入力なら何も書かずに終わる (区画表も残る)。
 - `OS32 area: LBA 2016..526175 (256 MB), cyl 2..521 at 16 heads x 63 sectors`
 
 ### 止めるべき表示 (手順 4 で `N`)
 
 - 幾何が 16/63 でない、`valid=0`、LBA の範囲が上と大きく違う。
-- `empty disk` でも `re-create` でもない (他の区画・壊れた表)。
+- `hd0 cannot be used as it is` の要約に消してはいけない区画がある (`N` なら 1 セクタも書かない)。
 
 ## 起動しない・止まったとき
 

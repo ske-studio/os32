@@ -43,36 +43,20 @@ static void ih_erased_hint(KernelAPI *api)
                  "  installer again: it installs onto hd0 as an empty disk.\n");
 }
 
+/* 書く前に断る (消す前なので必ず「何も書いていない」) */
 static void ih_refuse(KernelAPI *api, int code)
 {
-    if (ih_erased) {
-        api->kprintf(ATTR_RED, "INCOMPLETE: refused after the erase: %s (code %d)\n",
-                     inst_reason(code), code);
-        ih_erased_hint(api);
-        return;
-    }
     api->kprintf(ATTR_RED, "Refused: %s (code %d). Nothing was written.\n",
                  inst_reason(code), code);
 }
 
-int inst_hdd_stopped(KernelAPI *api, const InstTarget *t, const char *what)
-{
-    if (!t || !t->erased) {
-        api->kprintf(ATTR_WHITE, "%s Nothing was written.\n", what);
-        return 0;
-    }
-    api->kprintf(ATTR_RED, "INCOMPLETE: %s\n", what);
-    ih_erased_hint(api);
-    return 1;
-}
-
-/* 他の OS の区画・起動域がある: このディスクは対象外 (表を消せとは言わない) */
+/* 他の OS の区画・起動域がある: そのままでは入れない。消す道は y の後の ERASE */
 static void ih_foreign_hint(KernelAPI *api)
 {
     api->kprintf(ATTR_YELLOW, "%s",
-                 "  hd0 holds another system's partitions or boot code. This disk is not a\n"
-                 "  target for the OS32 installer; install onto a disk that is empty or has\n"
-                 "  only the OS32 area.\n");
+                 "  hd0 holds another system's partitions or boot code. OS32 does not\n"
+                 "  install next to them: the only way onto this disk is to ERASE its whole\n"
+                 "  partition table (asked after the confirmation below).\n");
 }
 
 /* 区画表を直さずに作り直すときの案内 (ゲストの外の手当て。ゲストでは ERASE) */
@@ -170,34 +154,63 @@ static int ih_umount_hd0(KernelAPI *api)
     return 0;
 }
 
-/* ---- 消去 (N4 の例外) ------------------------------------------------------ */
+/* ---- 鍵 --------------------------------------------------------------- */
 
-static int ih_getkey(KernelAPI *api)
+/* CR を返した直後か (CRLF の LF を捨てる)、覗いて戻した 1 バイト (-1 = 無し)。
+ * inst_hdd_check が毎回戻す */
+static int ih_last_cr;
+static int ih_pushed = -1;
+
+/* 非ブロックで 1 バイト。kbd → serial。-1 = 入力なし。実物のドライバは受けた
+ * NUL を 0 で返すので、0 以上はすべて入力 (0 を「無し」と読むと NUL を含む
+ * 行が ERASE に化ける) */
+static int ih_poll(KernelAPI *api)
 {
     int ch;
-    for (;;) {
-        ch = api->kbd_trygetchar();
-        if (ch > 0) return ch;
-        ch = api->serial_trygetchar();
-        if (ch > 0) return ch;
-    }
+    if (ih_pushed >= 0) { ch = ih_pushed; ih_pushed = -1; return ch; }
+    ch = api->kbd_trygetchar();
+    if (ch < 0) ch = api->serial_trygetchar();
+    return ch;
+}
+
+/* ih_poll + CRLF: CR の直後の LF は行末の一部として捨てる (-1 を返す) */
+static int ih_poll_key(KernelAPI *api)
+{
+    int ch = ih_poll(api);
+    if (ch < 0) return -1;
+    if (ch == '\n' && ih_last_cr) { ih_last_cr = 0; return -1; }
+    ih_last_cr = (ch == '\r') ? 1 : 0;
+    return ch;
+}
+
+int inst_hdd_getkey(KernelAPI *api)
+{
+    int ch;
+    do { ch = ih_poll_key(api); } while (ch < 0);
+    return ch;
 }
 
 /* 1 行読む (CR か LF で終わり)。表示できる ASCII だけをそのまま受け、
- * それ以外 (BS・ESC などの制御文字) や長すぎる行は「一致しない行」にする。
- * ESC はその場で打ち切る。戻り値: 0 = buf に行 / -1 = 一致しない行 */
+ * それ以外 (NUL・BS・ESC などの制御文字) や長すぎる行は「一致しない行」にする。
+ * ESC はその場で打ち切る。CR の後にもう届いている LF は同じ行末として捨てる
+ * (後から届く LF は ih_poll_key が捨てる)。
+ * 戻り値: 0 = buf に行 / -1 = 一致しない行 */
 static int ih_read_line(KernelAPI *api, char *buf, int max)
 {
     int n = 0, bad = 0, ch;
 
     for (;;) {
-        ch = ih_getkey(api);
+        ch = inst_hdd_getkey(api);
         if (ch == '\r' || ch == '\n') break;
         if (ch == 0x1B) { bad = 1; break; }
         if (ch < 0x20 || ch > 0x7E) { bad = 1; continue; }
         api->kprintf(ATTR_WHITE, "%c", ch);
         if (n < max - 1) buf[n++] = (char)ch;
         else bad = 1;
+    }
+    if (ch == '\r') {
+        ch = ih_poll_key(api);           /* 届いている LF なら捨てる */
+        if (ch >= 0) ih_pushed = ch;     /* 別の字なら戻す */
     }
     buf[n] = '\0';
     api->kprintf(ATTR_WHITE, "%s", "\n");
@@ -252,42 +265,31 @@ static int ih_erasable(int code)
            code == INST_E_BROKEN || code == INST_E_START;
 }
 
-/* 要約を出して ERASE を求める。受けたら (外して) LBA 0/1 をゼロで埋めて読み
- * 戻し、空のディスクとして 0 を返す。受けなければ why (何も書いていない) */
-static int ih_offer_erase(KernelAPI *api, InstTarget *t, int why)
+int inst_hdd_ask_erase(KernelAPI *api, const InstTarget *t)
 {
     static char line[INST_LINE_MAX];
-    int rc, i;
 
-    api->kprintf(ATTR_CYAN, "%s", "Current contents of hd0:\n");
-    ih_show_disk(api, t);
+    if (!t->erase_needed) return 0;
     api->kprintf(ATTR_YELLOW, "%s",
-                 "  The installer can erase the whole partition table of hd0 (LBA 0 and 1)\n"
-                 "  and make it a disk for OS32 only. EVERYTHING ON hd0 WILL BE LOST,\n"
-                 "  including the partitions of other systems.\n"
-                 "  Type ERASE (capital letters) and press Enter to erase it. Anything else\n"
-                 "  leaves hd0 as it is.\n");
+                 "  hd0's whole partition table (LBA 0 and 1) will be erased first.\n"
+                 "  EVERYTHING ON hd0 WILL BE LOST, including the partitions of other\n"
+                 "  systems. Type ERASE (capital letters) and press Enter to erase it.\n"
+                 "  Anything else leaves hd0 as it is.\n");
     api->kprintf(ATTR_YELLOW, "%s", "Erase hd0's partition table? Type ERASE: ");
     if (ih_read_line(api, line, INST_LINE_MAX) != 0 || !ih_streq(line, INST_ERASE_WORD)) {
         api->kprintf(ATTR_WHITE, "%s", "Not erased. Nothing was written.\n");
-        return why;
+        return t->erase_code;
     }
+    return 0;
+}
 
-    /* マウント中のまま消さない: /hd0 の hd0 は外してから (検査は済んでいる) */
-    if (t->umount_hd0) {
-        rc = ih_umount_hd0(api);
-        if (rc != 0) return rc;
-        t->umount_hd0 = 0;
-    }
-    if (api->dev_mount_count(INST_DRIVE) != 0) {
-        ih_refuse(api, HDPREP_E_STILL_MOUNTED);
-        return HDPREP_E_STILL_MOUNTED;
-    }
-    t->mounts = 0;
+/* LBA 0 → LBA 1 をゼロで埋め、それぞれ読み戻して全部 0 を確かめる
+ * (ih_write_verify が 512 B を比べる)。0 の LBA 0/1 は inst_classify で
+ * 空のディスク (項目 0、55AA 無し)。マウントの検査 (inst_hdd_release) の後 */
+static int ih_erase(KernelAPI *api, InstTarget *t)
+{
+    int rc, i;
 
-    /* LBA 0 → LBA 1 をゼロで埋め、それぞれ読み戻して全部 0 を確かめる
-     * (ih_write_verify が 512 B を比べる)。0 の LBA 0/1 は inst_classify で
-     * 空のディスク (項目 0、55AA 無し) */
     ih_erased = 1;
     t->erased = 1;
     for (i = 0; i < IH_SECT; i++) ih_sect[i] = 0;
@@ -296,11 +298,10 @@ static int ih_offer_erase(KernelAPI *api, InstTarget *t, int why)
     if (rc != 0) {
         api->kprintf(ATTR_RED, "INCOMPLETE: erasing LBA 0 and 1 of hd0 failed (rc=%d)\n", rc);
         api->kprintf(ATTR_YELLOW, "%s",
-                     "  hd0's partition table may be partly erased. Run the installer again\n"
-                     "  and type ERASE again.\n");
+                     "  hd0's partition table may be partly erased. Run the installer again,\n"
+                     "  answer y and type ERASE again.\n");
         return rc < 0 ? rc : -1;
     }
-    t->mode = INST_MODE_EMPTY;
     api->kprintf(ATTR_GREEN, "%s",
                  "  LBA 0 and 1 of hd0 erased and verified (all zero). hd0 is now an empty disk.\n");
     return 0;
@@ -312,7 +313,11 @@ int inst_hdd_check(KernelAPI *api, InstTarget *t)
 
     ih_erased = 0;
     ih_pt_written = 0;
+    ih_last_cr = 0;
+    ih_pushed = -1;
     t->erased = 0;
+    t->erase_needed = 0;
+    t->erase_code = 0;
     t->umount_hd0 = 0;
 
     rc = api->hdd_geom_info(INST_DRIVE, &t->hg);
@@ -345,17 +350,25 @@ int inst_hdd_check(KernelAPI *api, InstTarget *t)
     rc = inst_classify(ih_lba0, ih_lba1, t->plan.heads, t->plan.spt,
                        t->g.ata_total, t->plan.start, &t->mode);
     if (rc != 0) {
-        int mr;
-        ih_refuse(api, rc);
+        if (!ih_erasable(rc)) { ih_refuse(api, rc); return rc; }
+        /* 消す道 (N4 の例外): まだ消さない。要約を出し、消した後の空のディスクと
+         * して残りの検査 (マウント・大きさ・容量) と確認画面まで進む。消すのは
+         * y と ERASE の後 (inst_hdd_release) */
+        api->kprintf(ATTR_RED, "hd0 cannot be used as it is: %s (code %d)\n",
+                     inst_reason(rc), rc);
         if (rc == INST_E_FOREIGN || rc == INST_E_MULTI || rc == HDPREP_E_MBR_SIG)
             ih_foreign_hint(api);
         else
             ih_host_hint(api);           /* OS32 の項目が中途半端 (開始違い・壊れ) */
-        if (!ih_erasable(rc)) return rc;
-        /* 消す道 (N4 の例外) もマウントの検査を先に通す */
-        mr = ih_check_mounts(api, t);
-        if (mr < 0) return mr;
-        return ih_offer_erase(api, t, rc);
+        api->kprintf(ATTR_CYAN, "%s", "Current contents of hd0:\n");
+        ih_show_disk(api, t);
+        api->kprintf(ATTR_YELLOW, "%s",
+                     "  The installer can erase the whole partition table of hd0 (LBA 0 and 1)\n"
+                     "  and install onto it as an empty disk. Nothing is erased unless you\n"
+                     "  answer y at the confirmation below and then type ERASE.\n");
+        t->erase_needed = 1;
+        t->erase_code = rc;
+        t->mode = INST_MODE_EMPTY;
     }
     return ih_check_mounts(api, t);
 }
@@ -395,9 +408,15 @@ void inst_hdd_describe(KernelAPI *api, const InstTarget *t)
     api->kprintf(ATTR_WHITE, "%s",
                  "  Writes: ext2 in the area, partition table (LBA 1), "
                  "loader (LBA 2..17), IPL (LBA 0)\n");
-    if (t->erased)
-        api->kprintf(ATTR_YELLOW, "%s",
-                     "  The old partition table was erased (ERASE): hd0 is an empty disk now.\n");
+    if (t->erase_needed) {
+        api->kprintf(ATTR_RED,
+                     "  hd0 holds another system's partitions or a table OS32 cannot use\n"
+                     "  (%s, code %d).\n", inst_reason(t->erase_code), t->erase_code);
+        api->kprintf(ATTR_RED, "%s",
+                     "  After y, type ERASE to erase the partition table (LBA 0 and 1) and\n"
+                     "  install onto hd0 as an empty disk. EVERYTHING ON hd0 WILL BE LOST.\n"
+                     "  Anything but ERASE writes nothing.\n");
+    }
     if (t->mode != INST_MODE_EMPTY)
         api->kprintf(ATTR_RED, "%s",
                      "  The existing OS32 area (the temporary storage, /hd0) is "
@@ -406,19 +425,25 @@ void inst_hdd_describe(KernelAPI *api, const InstTarget *t)
         api->kprintf(ATTR_YELLOW, "%s", "  hd0 is mounted at /hd0 and will be unmounted first.\n");
 }
 
-int inst_hdd_release(KernelAPI *api, const InstTarget *t)
+int inst_hdd_release(KernelAPI *api, InstTarget *t)
 {
     int rc;
 
-    /* ---- 使用中の検査 (N6): 書く前の最後の検査。失敗なら何も書かない ---- */
+    /* ---- 使用中の検査 (N6): 書く前の最後の検査。失敗なら何も書かない。
+     * ERASE の打鍵を待つ間にマウントが増えた・/hd0 の相手が替わったのも
+     * ここで分かる ---- */
     if (t->umount_hd0) {
         rc = ih_umount_hd0(api);
         if (rc != 0) return rc;
+        t->umount_hd0 = 0;
     }
     if (api->dev_mount_count(INST_DRIVE) != 0) {
         ih_refuse(api, HDPREP_E_STILL_MOUNTED);
         return HDPREP_E_STILL_MOUNTED;
     }
+    t->mounts = 0;
+    /* ---- 消す (N4 の例外): 全検査・y・ERASE の後、最初の書き込み ---- */
+    if (t->erase_needed) return ih_erase(api, t);
     return 0;
 }
 
@@ -448,8 +473,9 @@ int inst_hdd_prepare(KernelAPI *api, const InstTarget *t)
         inst_hdd_incomplete(api, "partition table write/readback failed", rc);
         /* 表が中途半端なら次の実行は「OS32 の項目ではない」と断る */
         api->kprintf(ATTR_YELLOW, "%s",
-                     "  If the next run refuses hd0's partition table, type ERASE at its\n"
-                     "  prompt to clear it (the guest cannot repair the table), or:\n");
+                     "  If the next run finds hd0's partition table unusable, answer y and\n"
+                     "  type ERASE at its prompt to clear it (the guest cannot repair the\n"
+                     "  table), or:\n");
         ih_host_hint(api);
         return rc < 0 ? rc : -1;
     }

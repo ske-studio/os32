@@ -219,36 +219,53 @@
 ユーザーは中身を捨ててよいので強制的に消したい。N4 の安全側の既定 (断る) は変えず、**明示の打鍵でだけ**
 消す道を共通部 `inst_hdd.c` に足した (cdinst・install の両方が同じ規則)。
 
+**順序 (Codex レビュー往復 1 の後の PM 決定)**: 全検査 → 確認画面と `y/N` → `ERASE` の打鍵 → 消去 → format → …。
+最初の実装は hd0 の検査の途中で消していたので、媒体の大きさや容量の不足が分かっているのに区画表だけを失う
+事態があり得た。今は表が使えないディスクでも**消した後の空のディスクとみなして**大きさ・容量・マウントの
+検査と確認画面まで進み、`y` の後に `ERASE` を求め、そこで初めて消す。`ERASE` 以外なら 1 セクタも書かない。
+
 - **いつ聞くか**: `inst_classify` が FOREIGN (-40)・MULTI (-41)・`HDPREP_E_MBR_SIG`・BROKEN (-43)・
-  START (-42) を返したときだけ。空のディスク・再作成では聞かない。幾何・ATA の範囲・計画の検査は
-  今までのものをそのまま先に通す (16/63、総数 16514063 なら開始 2016)。
-- **マウントの検査を先に通す**: ルートが hd0、または `/hd0` 以外にマウントされていれば、ERASE を聞かずに
-  今までどおり断る。`/hd0` にだけマウントされていれば、ERASE を受けた**後**に `sys_umount_checked("/hd0")`
-  で外し、`dev_mount_count(0)` が 0 でなければ消さずに断る (マウント中のまま消さない)。
-- **表示**: 断る理由と今までの案内に続けて LBA 0/1 の要約 — LBA 0 の先頭 4 バイトと 55AA の有無、LBA 1 の
-  項目の数、使っている各項目の mid・sid・名前 (表示できない字は `.`)・開始と終了のシリンダ (C/H/S も生のまま)・
-  BIOS 幾何で読んだ LBA の範囲 (読めなければ `not a valid range`)。写真で何が入っていたか分かるようにする。
-- **打鍵**: `Type ERASE:` に 1 行。`ERASE` (大文字 5 文字、完全一致) + Enter (CR か LF) だけが通る。空行・
-  小文字・前後の空白・`y`・BS などの制御文字を含む行・ESC・15 文字を超える行は `Not erased. Nothing was
-  written.` で今までどおり断る (1 セクタも書かない)。
-- **消す**: LBA 0 → LBA 1 を 0 の 512 B で書き、それぞれ読み戻して全部 0 を確かめる。以後は空のディスクとして
-  今までの手順 (大きさ・容量の検査 → 確認画面 → `y/N` → format → 区画表 → …) に進む。`y/N` は別に取る。
-  確認画面に `The old partition table was erased (ERASE)` を出す。
-- **消した後に止まったとき**: `INCOMPLETE:` と「hd0's partition table was ERASED (LBA 0 and 1 are zero). Run the
-  installer again: it installs onto hd0 as an empty disk.」を出す — `y/N` で断った (install は終了コード 1)、
-  大きさ・容量の検査で断った (`INCOMPLETE: refused after the erase: …`)、format が失敗した、の各場合。
+  START (-42) を返したときだけ (`InstTarget.erase_needed`、理由は `erase_code`)。空のディスク・再作成では
+  聞かない。幾何・ATA の範囲・計画の検査は今までのものをそのまま先に通す (16/63、総数 16514063 なら開始 2016)。
+- **検査の表示**: `hd0 cannot be used as it is: <理由> (code N)` に続けて、他の OS の区画 (FOREIGN・MULTI・55AA)
+  なら「hd0 holds another system's partitions or boot code … the only way onto this disk is to ERASE its whole
+  partition table (asked after the confirmation below)」、中途半端な OS32 の項目 (開始違い・壊れ) なら今までの
+  ホスト側の手当て (`make nhd-init`)。その後に `Current contents of hd0:` の要約 — LBA 0 の先頭 4 バイトと
+  55AA の有無、LBA 1 の項目の数、使っている各項目の mid・sid・名前 (表示できない字は `.`)・開始と終了のシリンダ
+  (C/H/S も生のまま)・BIOS 幾何で読んだ LBA の範囲 (読めなければ `not a valid range`)。写真で何が入っていたか
+  分かるようにする。最後に「Nothing is erased unless you answer y at the confirmation below and then type ERASE」。
+- **マウントの検査**: ルートが hd0、または `/hd0` 以外にマウントされていれば、確認画面より前に今までどおり
+  断る。`/hd0` にだけマウントされていれば確認画面に `will be unmounted first` と出し、`ERASE` を受けた**後**に
+  `sys_umount_checked("/hd0")` で外し、`dev_mount_count(0)` が 0 でなければ消さずに断る。`ERASE` の入力を待つ
+  間に新しくマウントされた・`/hd0` の相手が替わった場合もここで分かり、1 セクタも書かない。
+- **確認画面**: `Target: hd0 …, empty disk: create the OS32 area` の後に「hd0 holds another system's partitions
+  or a table OS32 cannot use (<理由>, code N). After y, type ERASE to erase the partition table (LBA 0 and 1)
+  and install onto hd0 as an empty disk. EVERYTHING ON hd0 WILL BE LOST. Anything but ERASE writes nothing.」。
+- **打鍵**: `y` の後に `Erase hd0's partition table? Type ERASE:` に 1 行。`ERASE` (大文字 5 文字、完全一致) +
+  Enter (CR・LF・CRLF) だけが通る。空行・小文字・前後の空白・`y`・BS や **NUL** などの制御文字を含む行・ESC・
+  15 文字を超える行は `Not erased. Nothing was written.` で終える (1 セクタも書かない)。
+- **鍵の読み方 (Codex P1・P2)**: `kbd_trygetchar` / `serial_trygetchar` は「入力なし」を -1、受けた NUL を 0 で
+  返す。最初の実装は 0 を読み捨てていたので、シリアルから `ERA<NUL>SE<CR>` が届くと消えた。共通の
+  `inst_hdd_getkey` は 0 以上をすべて入力として渡し、NUL を含む行は不一致にする。CR の直後の LF は 1 つの
+  行末の一部として捨てる (もう届いていれば行読みが、後から届けば次の読みが) ので、CRLF の Enter が次の
+  問いに持ち越されない。cdinst の `[0-3]` と `y/N`、install の `y/N` も同じ読み手を使う。
+- **消す**: `ERASE` の後、マウントを外して LBA 0 → LBA 1 を 0 の 512 B で書き、それぞれ読み戻して全部 0 を
+  確かめる (`LBA 0 and 1 of hd0 erased and verified (all zero)`)。以後は空のディスクとして format → 区画表 → …。
+- **消した後に止まったとき**: format が失敗すると `INCOMPLETE: ext2_format_at failed` と「hd0's partition table
+  was ERASED (LBA 0 and 1 are zero). Run the installer again: it installs onto hd0 as an empty disk.」を出す。
   区画表を書いた後の失敗 (マウント・展開・sync) は今までどおり「再起動して入れ直せば OS32 の区域を作り直す」
   だけを出す (次の実行は再作成モードになるので「空のディスク」とは言わない)。消す書き込みか読み戻しが
-  失敗したら `INCOMPLETE: erasing LBA 0 and 1 of hd0 failed` と「もう一度実行して ERASE を打つ」を出す。
-- **順序の注意 (判断)**: 指示どおり消去は検査の途中 (hd0 の検査の中) で行うので、その後の大きさ・容量の
-  検査で断ると、消した状態で止まる (上の INCOMPLETE の案内が出る)。install は FD の列挙 (`measure_need`) を
-  hd0 の検査より前に移し、消した後に断る所を減らした。
-- **中途半端な OS32 の項目** (開始違い・壊れ) と区画表の読み戻しの違いの案内は「次の実行で ERASE を打つ」を
-  先に出し、ホスト側の手当て (`make nhd-init`) も残す。
-- 試験: `tools/tests/test_hdd_stage2.py` の cdinst `erase` / `erase_fail` / `erase_mount` と install の同名 3 本
-  (FOREIGN・MULTI・55AA・BROKEN・START × 8/17・16/63 × ERASE でない 12 通りの入力で 1 セクタも書かない、
-  ERASE で LBA 0/1 が 0 になって最後まで通る、消した後の失敗の案内、マウント中は消さない)。変異は同じ
-  `--mutate` に追加。
+  失敗したら `INCOMPLETE: erasing LBA 0 and 1 of hd0 failed` と「もう一度実行して y と ERASE を打つ」を出す。
+  `y/N` で断る・大きさや容量で断るのは消す**前**なので、`Nothing was written` のまま。
+- **中途半端な OS32 の項目** (開始違い・壊れ) と区画表の読み戻しの違いの案内は「次の実行で y の後に ERASE を
+  打つ」を先に出し、ホスト側の手当て (`make nhd-init`) も残す。
+- 試験: `tools/tests/test_hdd_stage2.py` の cdinst `erase` / `erase_fail` / `erase_mount` / `keys` と install の
+  同名 3 本。贋の鍵は**長さ付きのバイト列** (NUL も 1 バイト)、尽きたら -1、kbd と serial を交互に、鍵の間に
+  「入力なし」を挟み、鍵を渡す贋物の側で write・format・umount が 0 回であることを見る (消すのが打鍵より
+  前なら贋物が落ちる)。FOREIGN・MULTI・55AA・BROKEN・START × 8/17・16/63 × ERASE でない 17 通り (NUL 入り
+  5 通りを含む) で 1 セクタも書かず、CR・LF・CRLF の 3 通りで通り、`N`・大きさ・容量は消す前に止まり、
+  ERASE の入力中にマウントされる・`/hd0` の相手が替わると消さず、読み戻しは先頭側と 511 バイト目の両方、
+  LBA ごとの write / read の失敗で後続の書き込みが止まる。変異は同じ `--mutate` (117 本)。
 
 ### 段 3 — CD インストール → HDD 起動
 
@@ -260,7 +277,7 @@
 - **N1 ブート情報域の置き場** (段 0-1 を置換): **0x7E00〜0x7EFF (256B)**。根拠: 実モードのスタックは 0x7C00 から下へ、ローダは 0x8000〜、`loader_hdd` の受け渡しは 0x7F00〜0x7F0F、圧縮イメージは 0x10000〜0x8EFFF (`boot_defs.h:45-49`)、PM の ESP は 0x9FFFC、カーネル本体は 0x100000。フォントキャッシュ (0x1000〜) は `kernel_main` のフォント初期化で上書きするので、**`kernel_main` の最初 (フォント・ヒープより前) で写す**。実装者はローダ 2 本のバッファ・スタックとの非重複を `.map` / ソースで確かめて報告する。`include/memmap.h` に定義し `tools/gen_memmap.py` の表へ。
 - **N2 HDD 起動の生成経路** (段 0-1 に追加): **FD ローダと HDD ローダ (`loader_hdd.asm` の実モード部) の両方**が、起動のたびに情報域を**まず無効 (magic=0) で初期化**してから AH=84h を呼び、成功時だけ valid を立てる。残留した前回の値を受け入れる経路は無い。HDD ローダは、IPL から受けた heads/SPT と AH=84h の値が食い違えば画面に出して**止まる** (IPL に焼いた値の陳腐化の検出)。
 - **N3 NHD の移行** (段 1-4 を置換): `tools/nhd_deploy.py` に**移行の 1 操作** (`migrate-pt`) を足す — NP21/W 停止中 ([D1]) に、旧配置の区画表を読み、**同じ開始 LBA・長さ**を標準配置で書き直し、第二段ローダ (LBA 2〜) とカーネルを**同時に**配備する。`make deploy-kernel` だけでは移行しない旨を 08_build.md に書く。H2 は `migrate-pt` → 起動 → マウント → 既存ファイルの md5。
-- **N4 モードの分離** (段 1-7 / 段 2-10 を置換): `hdprep` = **空のディスク専用** (区画項目が 1 つでもあれば断る)。インストーラ = **再作成モード**: 区画表の項目が**ちょうど 1 つ**で、それが OS32 が作ったもの (sys_id = ext2 用の値かつ名前 `OS32`、開始 = 期待値) のときだけ、承認後に作り直す。それ以外 (未知の区画、2 つ以上) は断る。**例外 (2026-09-25、ユーザー指示)**: 断る表のときだけ要約を出し、`ERASE` の打鍵を受けたら LBA 0/1 を 0 にして空のディスクとして入れる (段 2 の追補「明示の消去 `ERASE`」)。既定は断るまま。
+- **N4 モードの分離** (段 1-7 / 段 2-10 を置換): `hdprep` = **空のディスク専用** (区画項目が 1 つでもあれば断る)。インストーラ = **再作成モード**: 区画表の項目が**ちょうど 1 つ**で、それが OS32 が作ったもの (sys_id = ext2 用の値かつ名前 `OS32`、開始 = 期待値) のときだけ、承認後に作り直す。それ以外 (未知の区画、2 つ以上) は断る。**例外 (2026-09-25、ユーザー指示)**: 断る表のときだけ要約を出し、全検査と `y` の後に `ERASE` の打鍵を受けたら LBA 0/1 を 0 にして空のディスクとして入れる (段 2 の追補「明示の消去 `ERASE`」)。既定は断るまま。
 - **R3-1 (ユーザー決裁 B)**: 下の N5 の手順の順序を「全検査 → `ext2_format_at` → **区画表を書く → 読み戻し比較 → 通常マウントで確認**」に改める。確認失敗は「未完了」と表示して止める (空のディスクが相手なので失うデータは無い)。
 - **N5 format の新しい入口**: KAPI を**追記** `ext2_format_at(drive, start_lba, length)` (既存 `ext2_format` は変えない、[ABI2])。区画表を読まずに与えられた範囲だけに書き、範囲がディスク総数を超えれば断る。hdprep / インストーラは「全検査 → `ext2_format_at` → マウント確認 → **区画表を最後に**書く → 読み戻し比較」。KAPI 版はキーボード修正の v62 の次 (v63)。
 - **N6 使用中の検査**: KAPI を**追記** `dev_mount_count(drive)` (その物理デバイスがどの prefix でマウントされているか・root かを数える) と `sys_umount_checked(prefix)` (sync の失敗を含めて int を返す。既存 `sys_umount` の void は変えない)。hdprep / インストーラは hd0 のマウントが 1 つでもあれば umount_checked し、失敗・root なら断る。

@@ -19,6 +19,7 @@
 /*    シリンダ境界から 256MiB まで。空のディスクか OS32 の項目 1 つ (再作成) */
 /*    だけを扱う。**全検査** (パッケージの必須の中身・ローダ ≤ 8192 B・      */
 /*    vmkernel.lz4 ≤ 508KiB・展開先の容量・hd0 の幾何とモードとマウント) → */
+/*    確認画面と y/N → (表が使えなければ ERASE の打鍵 → LBA 0/1 の消去) →   */
 /*    ext2_format_at → 区画表 → 読み戻し → マウント → ローダ / IPL → 展開 →  */
 /*    sync の順。どこかで失敗すれば「完了」とは言わない。                    */
 /* ======================================================================== */
@@ -73,15 +74,10 @@ static void println(u8 attr, const char *s)
     api->kprintf(attr, "%s\n", s);
 }
 
+/* 鍵は inst_hdd_getkey (0 以上はすべて入力、CR の直後の LF は捨てる) */
 static int getkey(void)
 {
-    int ch;
-    for (;;) {
-        ch = api->kbd_trygetchar();
-        if (ch > 0) return ch;
-        ch = api->serial_trygetchar();
-        if (ch > 0) return ch;
-    }
+    return inst_hdd_getkey(api);
 }
 
 static int check_cd(void)
@@ -721,13 +717,18 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     print(COL_YELLOW, "Continue? [y/N]: ");
     {
         int k = getkey();
-        api->kprintf(COL_NORMAL, "%c\n", k);
+        /* 表示できる字だけ映す (NUL や制御文字は答え = N として扱うが映さない) */
+        api->kprintf(COL_NORMAL, "%c\n", (k >= 0x20 && k <= 0x7E) ? k : ' ');
         if (k != 'y' && k != 'Y') {
-            /* ERASE で消した後なら INCOMPLETE と入れ直しの案内 */
-            (void)inst_hdd_stopped(api, &tgt, "Installation cancelled.");
+            println(COL_NORMAL, "Installation cancelled. Nothing was written.");
             boot_img_free(&boot);
             return;
         }
+    }
+    /* 表が使えないディスクは y の後に ERASE の打鍵 (受けなければ何も書かない) */
+    if (inst_hdd_ask_erase(api, &tgt) != 0) {
+        boot_img_free(&boot);
+        return;
     }
 
     /* === インストール実行 (R3-1) === */
@@ -735,7 +736,8 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     println(COL_GREEN, "=== Installing OS32 ===");
 
     /* hd0 のマウントを外す (起動時の自動マウントの ctx は旧 FS の
-     * スーパーブロック / GDT を持ったまま)。外れなければ何も書かない */
+     * スーパーブロック / GDT を持ったまま)。外れなければ何も書かない。
+     * ERASE を受けていればここで LBA 0/1 を消す (最初の書き込み) */
     if (inst_hdd_release(api, &tgt) != 0) {
         boot_img_free(&boot);
         return;

@@ -108,3 +108,47 @@ wrap がそれを呼ぶこと、`exec/exec.c` の 4 本の `*_user` がトラン
 (ERROR 0、SURVIVED 0、NOT_APPLIED 0)、対照 5/5 SURVIVED**。初回は 3 本が数えられなかった (置き換え元が
 2 か所にあった 1 本、組めなかった 2 本) — 文脈を足して書き直した。長すぎる行を切り詰めても `ERASE` にはならない
 ので「長すぎる行を許す」変異は区別できず、表に入れていない。
+
+## 7. ERASE の実装レビュー往復 1 (2026-09-25、Codex Request changes → PM 決定で順序を変更)
+
+指摘: [P1] `ih_getkey` が 0 を読み捨てていた (実物のドライバは「入力なし」= -1、受けた NUL = 0) のでシリアルの
+`ERA<NUL>SE<CR>` で消えた。贋の鍵が NUL 終端の文字列で「入力なし」も 0 だったので見えなかった。[P2] CRLF の
+Enter は CR で行を閉じた後の LF が次の `y/N` に届いて取り消しになった。順序: 消すのが y/N より前だったので、
+大きさ・容量の不足が分かっているのに区画表だけを失えた。
+
+直し: 共通の `inst_hdd_getkey` (0 以上はすべて入力、CR の直後の LF は捨てる、覗いた別の字は戻す) を cdinst の
+`[0-3]`・`y/N` と install の `y/N` と 1 行読みが使う。順序は全検査 → 確認と `y/N` → `ERASE` の打鍵
+(`inst_hdd_ask_erase`) → マウントを外す → 消す (`inst_hdd_release` の中) → format。表が使えないディスクは
+`erase_needed` を立てて空のディスクとみなし、確認画面に「After y, type ERASE」を出す。`inst_hdd_stopped` は
+不要になり削除 (確認の前に止まるのは必ず「何も書いていない」)。
+
+贋物: 鍵は**長さ付きのバイト列** (`KEYS(lit)`、NUL も 1 バイト)、尽きたら -1 (100000 回で落とす)、`keys_serial`
+で serial から、`keys_gap` で鍵の間に「入力なし」、`keys_hook` で特定の鍵を渡す直前にマウントを変える。鍵を渡す
+たびに write・format・umount が 0 回であることを見る (どの鍵も書く前に読まれる)。読み戻しの違いは位置を選べる
+(`inj_readback_off`: 先頭側と 511 = 末尾)、LBA ごとの write / read の失敗 (`inj_write_fail_lba` /
+`inj_read_fail_lba`、読み戻しだけなら `inj_read_fail_after_write`)、`/hd0` に別のデバイス (`hd0_other_dev`)。
+
+足したケース: cdinst `keys` (`inst_hdd_getkey` / `ih_read_line` を直に: CRLF・LF LF・NUL・後から届く LF・serial・
+覗いた字の戻し・NUL 入りの行・ESC の後の字)。`erase`: ERASE でない 17 通り (NUL 入り 5 通りを含む) × kbd / serial
+× 鍵の間の「入力なし」、通る行末 3 通り (CR・LF・CRLF、CRLF の LF も読み切る)、表示の順序 (要約 → 確認 → ERASE の
+問い → 消去 → format)。`erase_fail`: `N`・IPL 513 B・容量不足は消す前 (確認も ERASE も無い)、format の失敗の後は
+空のディスクとして入れ直せる、消す書き込み / 読み戻し (先頭側と 511 バイト目) の失敗。`erase_mount`: ERASE の
+入力中に別の場所 / `/hd0` にマウントされる、`/hd0` の相手が hd1 になる / 外れる → 1 セクタも書かない。
+`incomplete` (cdinst / install): LBA 1・2・5・17・0 の write の失敗と LBA 1・5・0 の read の失敗で後続の書き込みが
+止まる (順序の記録で見る)、読み戻しの 511 バイト目だけが違う (区画表 / ローダ / IPL)。
+
+変異は 98 → **117 本**: 削除 2 (無くなったコード)、書き換え 6 (順序の変更)、追加 21 — P1 (0 を読み捨てる、行の中の
+NUL を読み捨てる、serial を読まない)、P2 (LF を捨てない、届いている LF を読まない、覗いた字を捨てる)、順序 (検査の
+中で消す、マウントの検査より前に消す、ERASE を受けても消さない、打鍵なしで消す、確認画面に出さない)、比較の長さを
+511 に縮める (2 か所)、write の失敗の後も書き続ける (ローダ / IPL / 区画表)、呼び手 (ERASE でなくても先へ進む・
+聞かずに消す・N でも書く・旧の鍵読みに戻す) — 結果は下の「変異の結果」。
+
+初回の `--mutate` は「serial からの鍵を読まない」で**止まった** (27 分): 台本を serial から出す試験で、変異体は kbd
+だけを回し、贋物の「尽きた後 100000 回で落とす」は台本を出す側にしか無く、`run_cases` にも上限が無かった。
+贋物は台本を出さない側の -1 も数えて落とし (`keys_none`)、`run_cases` は 1 ケース 120 秒 (`CASE_TIMEOUT`、mutate は
+`TimeoutExpired` を RED と数える) にした。
+同じ回で SURVIVED が 3 本: 「前の実行の消したを持ち越す」(完了した実行の後に消して format が失敗する順が無くなって
+いた → 持ち越しの 2 通りを足した)、「元の断りのモードのまま」(`empty disk` が案内の文にも含まれていた → `Target:` の
+行の全文で見る)、「cdinst の y/N が旧の鍵読み」(確認への NUL を読み捨てるかどうか → `1<NUL>y` で取り消しになる試験を
+足した)。install の y/N の同じ変異は `confirm_install` が y/n/Enter/ESC 以外を読み飛ばすので区別できず、表から外した。
+

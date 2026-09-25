@@ -42,7 +42,7 @@ MINI = ROOT / "tools/tests/ext2_mini_host.c"
 
 PURE_CASES = ["classify817", "classify1663", "paths", "bootfiles", "blocks", "space", "iplpt"]
 CDI_CASES = ["ok817", "ok1663", "modes", "preflight", "incomplete", "paths", "final",
-             "erase", "erase_fail", "erase_mount"]
+             "erase", "erase_fail", "erase_mount", "keys"]
 INS_CASES = ["nokernel", "precheck", "boot_fail", "sync_fail", "geom817", "geom1663",
              "modes", "preflight", "incomplete", "rerun", "erase", "erase_fail", "erase_mount"]
 MAX_IMAGE = 508 * 1024
@@ -51,6 +51,9 @@ MINI_FILES = [("small", 1000, 1000), ("exact", MAX_IMAGE, MAX_IMAGE),
               ("over1", MAX_IMAGE + 1, -2), ("over", 600 * 1024, -2)]
 # 空きを実物の format_at と突き合わせる大きさ (test_hdd_stage1.py の像と同じ)
 ROOM_SIZES = [16652, 20160, 36000, 62496]
+# 1 ケースの上限 (秒)。鍵を読まなくなる変異は贋物が 100000 回で落とすが、二重の守り
+# (mutate は TimeoutExpired を RED と数える)
+CASE_TIMEOUT = 120
 
 SHARED = ["userland/system/inst_disk.c", "drivers/pc98pt.c",
           "userland/shell/hdprep_plan.c", "fs/ext2_layout.c"]
@@ -149,7 +152,7 @@ def run_cases(exes, img, quiet=False):
         failed += len(got) != 2 or (int(got[0]), int(got[1])) != want
     for key, cases in (("pure", PURE_CASES), ("cdi", CDI_CASES), ("ins", INS_CASES)):
         for c in cases:
-            r = run([str(exes[key]), c], capture_output=True, text=True)
+            r = run([str(exes[key]), c], capture_output=True, text=True, timeout=CASE_TIMEOUT)
             if not quiet:
                 print(f"EXIT {key}:{c}={r.returncode}", flush=True)
                 if r.returncode != 0:
@@ -372,9 +375,9 @@ MUTATIONS = [
      "マウント中の hd0 を外さない"),
     ("userland/system/inst_hdd.c",
      "    if (api->dev_mount_count(INST_DRIVE) != 0) {\n        ih_refuse(api, HDPREP_E_STILL_MOUNTED);\n"
-     "        return HDPREP_E_STILL_MOUNTED;\n    }\n    return 0;",
+     "        return HDPREP_E_STILL_MOUNTED;\n    }\n    t->mounts = 0;",
      "    if (0) {\n        ih_refuse(api, HDPREP_E_STILL_MOUNTED);\n"
-     "        return HDPREP_E_STILL_MOUNTED;\n    }\n    return 0;",
+     "        return HDPREP_E_STILL_MOUNTED;\n    }\n    t->mounts = 0;",
      "外した後にマウントが残っていても書く"),
     ("userland/system/inst_hdd.c",
      "    root_hd0 = (rootdev && ih_streq(rootdev, INST_DEV)) ? 1 : 0;",
@@ -489,7 +492,8 @@ MUTATIONS = [
     ("userland/system/inst_hdd.c",
      "        if (rc == INST_E_FOREIGN || rc == INST_E_MULTI || rc == HDPREP_E_MBR_SIG)",
      "        if (0)", "R2 Fable 他の OS の区画にも「表を消せ」と案内する"),
-    # ---- ERASE (N4 の例外、2026-09-25) ----
+    # ---- ERASE (N4 の例外、2026-09-25。順序は Codex レビュー後の PM 決定:
+    #      全検査 → 確認と y/N → ERASE の打鍵 → 消去 → format) ----
     ("userland/system/inst_hdd.c",
      "    if (ih_read_line(api, line, INST_LINE_MAX) != 0 || !ih_streq(line, INST_ERASE_WORD)) {",
      "    if (ih_read_line(api, line, INST_LINE_MAX) != 0 && 0) {", "ERASE でない行でも消す"),
@@ -504,15 +508,51 @@ MUTATIONS = [
      "        if (ch == 0x1B) { break; }", "ESC を Enter と同じに扱う"),
     ("userland/system/inst_hdd.c", "        if (ch == '\\r' || ch == '\\n') break;",
      "        if (ch == '\\r') break;", "LF で行を終えない"),
+    # P1 (Codex): NUL を「入力なし」と読み捨てると ERA<NUL>SE<CR> で消える
     ("userland/system/inst_hdd.c",
-     "        mr = ih_check_mounts(api, t);\n        if (mr < 0) return mr;",
-     "        mr = 0;\n        (void)mr;", "消す道でマウントの検査を飛ばす (ルートの hd0 を消す)"),
-    ("userland/system/inst_hdd.c", "        rc = ih_umount_hd0(api);\n        if (rc != 0) return rc;\n        t->umount_hd0 = 0;",
-     "        rc = 0;\n        (void)rc;", "/hd0 の hd0 を外さずに消す"),
+     "    ch = api->kbd_trygetchar();\n    if (ch < 0) ch = api->serial_trygetchar();\n    return ch;",
+     "    ch = api->kbd_trygetchar();\n    if (ch <= 0) ch = api->serial_trygetchar();\n"
+     "    if (ch == 0) ch = -1;\n    return ch;",
+     "P1 NUL を「入力なし」として読み捨てる (ERA<NUL>SE で消す)"),
+    ("userland/system/inst_hdd.c", "        if (ch < 0x20 || ch > 0x7E) { bad = 1; continue; }",
+     "        if (ch == 0) continue;\n        if (ch < 0x20 || ch > 0x7E) { bad = 1; continue; }",
+     "P1 行の中の NUL を読み捨てる"),
+    ("userland/system/inst_hdd.c", "    if (ch < 0) ch = api->serial_trygetchar();\n    return ch;",
+     "    return ch;", "serial からの鍵を読まない"),
+    # P2 (Codex): CRLF は 1 つの行末
+    ("userland/system/inst_hdd.c",
+     "    if (ch == '\\n' && ih_last_cr) { ih_last_cr = 0; return -1; }",
+     "    if (0) { ih_last_cr = 0; return -1; }", "P2 CR の直後の LF を捨てない (次の問いに持ち越す)"),
+    ("userland/system/inst_hdd.c",
+     "        ch = ih_poll_key(api);           /* 届いている LF なら捨てる */\n"
+     "        if (ch >= 0) ih_pushed = ch;     /* 別の字なら戻す */\n", "",
+     "P2 CR の後に届いている LF を同じ行末として読まない"),
+    ("userland/system/inst_hdd.c", "        if (ch >= 0) ih_pushed = ch;     /* 別の字なら戻す */",
+     "        (void)ch;", "CR の後に覗いた別の字を捨てる"),
+    # 順序: 消すのは全検査・y・ERASE・マウントの検査の後
+    ("userland/system/inst_hdd.c",
+     "        t->erase_needed = 1;\n        t->erase_code = rc;\n        t->mode = INST_MODE_EMPTY;\n    }",
+     "        t->erase_code = rc;\n        t->mode = INST_MODE_EMPTY;\n"
+     "        if (ih_check_mounts(api, t) < 0) return rc;\n"
+     "        if (t->umount_hd0) { (void)ih_umount_hd0(api); t->umount_hd0 = 0; }\n"
+     "        if (ih_erase(api, t) != 0) return rc;\n    }",
+     "検査の中で消す (y/N と ERASE の前、旧順序)"),
+    ("userland/system/inst_hdd.c",
+     "    if (t->umount_hd0) {\n        rc = ih_umount_hd0(api);\n        if (rc != 0) return rc;\n        t->umount_hd0 = 0;\n    }",
+     "    if (t->erase_needed && ih_erase(api, t) != 0) return -1;\n    t->erase_needed = 0;\n"
+     "    if (t->umount_hd0) {\n        rc = ih_umount_hd0(api);\n        if (rc != 0) return rc;\n        t->umount_hd0 = 0;\n    }",
+     "マウントの検査より前に消す"),
+    ("userland/system/inst_hdd.c",
+     "        rc = ih_umount_hd0(api);\n        if (rc != 0) return rc;\n        t->umount_hd0 = 0;",
+     "        rc = 0;\n        (void)rc;", "/hd0 の hd0 を外さずに消す・書く"),
     ("userland/system/inst_hdd.c",
      "    if (api->dev_mount_count(INST_DRIVE) != 0) {\n        ih_refuse(api, HDPREP_E_STILL_MOUNTED);\n"
      "        return HDPREP_E_STILL_MOUNTED;\n    }\n    t->mounts = 0;",
-     "    t->mounts = 0;", "外したのにマウントが残っていても消す"),
+     "    t->mounts = 0;", "外したのにマウントが残っていても消す・書く"),
+    ("userland/system/inst_hdd.c", "    if (t->erase_needed) return ih_erase(api, t);\n    return 0;",
+     "    return 0;", "ERASE を受けても消さない"),
+    ("userland/system/inst_hdd.c", "    return ih_check_mounts(api, t);\n}",
+     "    t->erase_needed = 1;\n    return ih_check_mounts(api, t);\n}", "空のディスク・作り直しでも ERASE を聞く"),
     ("userland/system/inst_hdd.c",
      "    rc = ih_write_verify(api, 0, ih_sect);\n    if (rc == 0) rc = ih_write_verify(api, PC98PT_LBA, ih_sect);",
      "    rc = api->ide_write_sector(INST_DRIVE, 0, ih_sect);\n"
@@ -525,21 +565,15 @@ MUTATIONS = [
      "LBA 1 (区画表) を消さない"),
     ("userland/system/inst_hdd.c", "    for (i = 0; i < IH_SECT; i++) ih_sect[i] = 0;", "    (void)i;",
      "0 で埋めずに前のセクタの中身を書く"),
+    ("userland/system/inst_hdd.c", "    ih_erased = 1;\n    t->erased = 1;\n", "    t->erased = 1;\n",
+     "消したことを記録しない (format の失敗で「空のディスク」と案内しない)"),
     ("userland/system/inst_hdd.c", "    return code == INST_E_FOREIGN || code == INST_E_MULTI",
-     "    return code == INST_E_MULTI", "FOREIGN (実機の -40) で ERASE を聞かない"),
+     "    return code == INST_E_MULTI", "FOREIGN (実機の -40) で ERASE を聞かない (断る)"),
     ("userland/system/inst_hdd.c", "           code == INST_E_BROKEN || code == INST_E_START;",
      "           code == INST_E_START;", "壊れた項目で ERASE を聞かない"),
     ("userland/system/inst_hdd.c", "code == HDPREP_E_MBR_SIG ||\n", "\n", "55AA だけのディスクで ERASE を聞かない"),
-    ("userland/system/inst_hdd.c", "    return ih_check_mounts(api, t);\n}",
-     "    rc = ih_check_mounts(api, t);\n    return rc ? rc : ih_offer_erase(api, t, 0);\n}",
-     "空のディスク・作り直しでも ERASE を聞く"),
     ("userland/system/inst_hdd.c", "    ih_erased = 0;\n    ih_pt_written = 0;\n", "",
      "前の実行の「消した」を持ち越す"),
-    ("userland/system/inst_hdd.c", "    if (ih_erased) {\n        api->kprintf(ATTR_RED, \"INCOMPLETE: refused after",
-     "    if (0) {\n        api->kprintf(ATTR_RED, \"INCOMPLETE: refused after",
-     "消した後の断りを Nothing was written と出す"),
-    ("userland/system/inst_hdd.c", "    if (!t || !t->erased) {", "    if (!t || !t->erased || 1) {",
-     "消した後の取り消しを Nothing was written と出す"),
     ("userland/system/inst_hdd.c", "    if (ih_erased && !ih_pt_written) ih_erased_hint(api);",
      "    if (ih_erased) ih_erased_hint(api);", "区画表を書いた後も「空のディスク」と案内する"),
     ("userland/system/inst_hdd.c", "    if (ih_erased && !ih_pt_written) ih_erased_hint(api);", "",
@@ -550,17 +584,56 @@ MUTATIONS = [
      "                     (u32)e.start_cyl, (u32)e.start_cyl,\n", "要約の終了シリンダが開始"),
     ("userland/system/inst_hdd.c", "            name[k] = (c >= 0x20 && c <= 0x7E) ? (char)c : '.';",
      "            name[k] = (c >= 0x20 && c <= 0x7E) ? '.' : '.';", "要約に区画の名前を出さない"),
-    ("userland/system/inst_hdd.c", "    ih_show_disk(api, t);\n", "", "ERASE の前に LBA 0/1 の要約を出さない"),
-    ("userland/system/inst_hdd.c", "    t->mode = INST_MODE_EMPTY;\n", "",
-     "消した後も元の断りのモードのまま (確認画面が空のディスクでない)"),
-    ("userland/system/inst_hdd.c", "    if (t->erased)\n        api->kprintf(ATTR_YELLOW", "    if (0)\n        api->kprintf(ATTR_YELLOW",
-     "確認画面に消したことを出さない"),
-    ("userland/system/cdinst.c", "            (void)inst_hdd_stopped(api, &tgt, \"Installation cancelled.\");",
+    ("userland/system/inst_hdd.c", "        ih_show_disk(api, t);\n", "", "確認の前に LBA 0/1 の要約を出さない"),
+    ("userland/system/inst_hdd.c", "        t->mode = INST_MODE_EMPTY;\n", "",
+     "消す予定でも元の断りのモードのまま (確認画面が空のディスクでない)"),
+    ("userland/system/inst_hdd.c",
+     "    if (t->erase_needed) {\n        api->kprintf(ATTR_RED,\n                     \"  hd0 holds another",
+     "    if (0) {\n        api->kprintf(ATTR_RED,\n                     \"  hd0 holds another",
+     "確認画面に「y の後に ERASE」を出さない"),
+    ("userland/system/inst_hdd.c", "    if (!t->erase_needed) return 0;\n", "    return 0;\n",
+     "ERASE を聞かずに消す (打鍵なしで消える)"),
+    # 読み戻しの比較の長さ (Codex: 末尾の 511 バイト目)
+    ("userland/system/inst_hdd.c", "    return ih_memeq(buf, ih_back, IH_SECT) ? 0 : -1;",
+     "    return ih_memeq(buf, ih_back, IH_SECT - 1) ? 0 : -1;",
+     "読み戻しの比較を 511 バイトに縮める (ローダ / IPL / 消去)"),
+    ("userland/system/inst_hdd.c", "    if (rc != 0 || !ih_memeq(ih_sect, ih_back, IH_SECT)) {",
+     "    if (rc != 0 || !ih_memeq(ih_sect, ih_back, IH_SECT - 1)) {",
+     "区画表の読み戻しの比較を 511 バイトに縮める"),
+    # LBA ごとの write / read の失敗で後続の書き込みが止まる (Codex)
+    ("userland/system/inst_hdd.c",
+     "            inst_hdd_incomplete(api, \"loader write/readback failed\", rc);\n            return rc < 0 ? rc : -1;",
+     "            inst_hdd_incomplete(api, \"loader write/readback failed\", rc);\n            rc = 0;",
+     "ローダの書き込みの失敗の後も書き続ける"),
+    ("userland/system/inst_hdd.c",
+     "        inst_hdd_incomplete(api, \"IPL write/readback failed\", rc);\n        return rc < 0 ? rc : -1;",
+     "        inst_hdd_incomplete(api, \"IPL write/readback failed\", rc);\n        (void)0;",
+     "IPL の書き込みの失敗の後も展開する"),
+    ("userland/system/inst_hdd.c",
+     "        ih_host_hint(api);\n        return rc < 0 ? rc : -1;\n    }\n    api->kprintf(ATTR_GREEN, \"%s\", \"  Partition table written and verified.\\n\");",
+     "        ih_host_hint(api);\n        (void)0;\n    }\n    api->kprintf(ATTR_GREEN, \"%s\", \"  Partition table written and verified.\\n\");",
+     "区画表の書き込みの失敗の後もマウントしに行く"),
+    # 呼び手 (cdinst / install)
+    ("userland/system/cdinst.c", "    if (inst_hdd_ask_erase(api, &tgt) != 0) {\n        boot_img_free(&boot);\n        return;\n    }",
+     "    (void)inst_hdd_ask_erase(api, &tgt);", "cdinst が ERASE でない入力でも先へ進む (消す)"),
+    ("userland/system/cdinst.c", "    if (inst_hdd_ask_erase(api, &tgt) != 0) {", "    if (0) {",
+     "cdinst が ERASE を聞かずに消す"),
+    ("userland/system/cdinst.c",
+     "            println(COL_NORMAL, \"Installation cancelled. Nothing was written.\");\n            boot_img_free(&boot);\n            return;",
      "            println(COL_NORMAL, \"Installation cancelled. Nothing was written.\");",
-     "cdinst が消した後の取り消しを Nothing was written と出す"),
-    ("userland/system/install.c", "        if (!inst_hdd_stopped(api, &tgt, \"Installation aborted.\")) rc = 0;",
-     "        (void)inst_hdd_stopped(api, &tgt, \"Installation aborted.\");\n        rc = 0;",
-     "install が消した後の取り消しを成功 (0) で返す"),
+     "cdinst が N でも書く"),
+    ("userland/system/install.c", "    if (inst_hdd_ask_erase(api, &tgt) != 0) goto end;",
+     "    (void)inst_hdd_ask_erase(api, &tgt);", "install が ERASE でない入力でも先へ進む (消す)"),
+    ("userland/system/install.c", "    if (inst_hdd_ask_erase(api, &tgt) != 0) goto end;\n", "",
+     "install が ERASE を聞かずに消す"),
+    ("userland/system/install.c",
+     "        api->kprintf(ATTR_WHITE, \"%s\", \"Installation aborted. Nothing was written.\\n\");\n        rc = 0;\n        goto end;",
+     "        api->kprintf(ATTR_WHITE, \"%s\", \"Installation aborted. Nothing was written.\\n\");\n        rc = 0;",
+     "install が N でも書く"),
+    ("userland/system/cdinst.c", "    return inst_hdd_getkey(api);",
+     "    int ch;\n    for (;;) {\n        ch = api->kbd_trygetchar();\n        if (ch > 0) return ch;\n"
+     "        ch = api->serial_trygetchar();\n        if (ch > 0) return ch;\n    }",
+     "cdinst の y/N が旧の鍵読み (serial の CRLF・NUL を共通部と別に扱う)"),
     ("boot/ext2_mini.c", "    if (file_size > max_size) return EXT2M_ERR_TOO_BIG;",
      "    if (file_size > max_size) file_size = max_size;", "上限で切り詰める (旧動作)"),
     ("boot/ext2_mini.c", "    if (file_size > max_size) return EXT2M_ERR_TOO_BIG;\n", "",
