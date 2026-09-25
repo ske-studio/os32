@@ -17,6 +17,7 @@
 #include "io.h"
 #include "pc98.h"
 #include "kprintf.h"
+#include "cpu_calibrate.h"   /* cpu_delay_us / CPU_DELAY_US_MAX (INC_KERNEL で通す。build/kernel.mk) */
 
 /* === 内部状態 === */
 static int cdrom_present = 0;
@@ -47,10 +48,6 @@ static u32 s_diag_lba = 0;
 static u32 s_diag_n = 0;
 /* 読みの失敗の行を出した数 (ATAPI_DIAG_MAX で止める) */
 static u32 s_diag_lines = 0;
-
-/* 校正済みの µs 待ち (kernel/cpu_calibrate.c)。atapi_init は cpu_calibrate の後。
- * drivers/ はカーネルヘッダを見ない作法なので extern で引く (serial.c と同じ) */
-extern void cpu_delay_us(u32 us);
 
 /* ======================================================================== */
 /*  内部ヘルパー                                                             */
@@ -149,13 +146,13 @@ static void atapi_clear_cdb(u8 *cdb)
 }
 
 /* us だけ待つ。cpu_delay_us は 1 回で CPU_DELAY_US_MAX (100ms) までしか待たず、
- * それより長い指定を黙って丸めるので、ATAPI_DELAY_CHUNK_US 以下の塊に分けて呼ぶ。
- * tick_count で待たないのは、PIT の割り込みが来ている (IF=1) ことを前提に
- * できないから — cpu_delay_us は割り込み禁止区間でも待てる */
+ * それより長い指定を黙って丸めるので、CPU_DELAY_US_MAX 以下の塊に分けて呼ぶ。
+ * atapi_init は cpu_calibrate の後に走る。tick_count で待たないのは、PIT の
+ * 割り込みが来ている (IF=1) ことを前提にできないから — cpu_delay_us は割り込み禁止区間でも待てる */
 static void atapi_delay_us(u32 us)
 {
     while (us > 0) {
-        u32 d = (us > ATAPI_DELAY_CHUNK_US) ? ATAPI_DELAY_CHUNK_US : us;
+        u32 d = (us > CPU_DELAY_US_MAX) ? CPU_DELAY_US_MAX : us;
         cpu_delay_us(d);
         us -= d;
     }

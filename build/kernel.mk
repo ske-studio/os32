@@ -84,6 +84,11 @@ drivers/loop_dev.o: drivers/loop_dev.c
 drivers/ne2000.o: drivers/ne2000.c
 	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
 
+# ATAPI: atapi.c は cpu_calibrate.h (cpu_delay_us / CPU_DELAY_US_MAX) を参照するため
+# INC_KERNEL (ne2000.c と同じ)
+drivers/atapi.o: drivers/atapi.c
+	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
 drivers/lgy98.o: drivers/lgy98.c .FORCE
 	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
 
