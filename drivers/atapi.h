@@ -49,12 +49,28 @@
 #define ATAPI_SENSE_MIN               14     /* byte 13 (ASCQ) まで要る */
 
 /* READ CAPACITY の出し直し: UNIT ATTENTION は REQUEST SENSE で消して、
- * NOT READY (3Ah 以外) は ATAPI_READY_WAIT_US 待って、この回数まで */
-#define ATAPI_READY_RETRIES     16
+ * NOT READY (3Ah 以外) は ATAPI_READY_WAIT_US 待って、この回数まで。
+ * 待ちの合計は最大 20 × 250ms = 5 秒 — トレイを閉じた直後の becoming ready
+ * (2〜5 秒) を待ちきる長さ。待ちは atapi_delay_us が ATAPI_DELAY_CHUNK_US
+ * (cpu_delay_us の上限 100ms) 以下の塊に分けて回す */
+#define ATAPI_READY_RETRIES     20
 #define ATAPI_READY_WAIT_US     250000UL
+
+/* READ(10) が UNIT ATTENTION で落ちたときの出し直しの回数 (1 回目に加えて)。
+ * リセットと媒体交換など、UA を複数積む装置がある */
+#define ATAPI_UA_RETRIES        3
+
+/* cpu_delay_us を 1 回に呼ぶ長さの上限 (µs)。kernel/cpu_calibrate.h の
+ * CPU_DELAY_US_MAX (100ms、それより長い指定は丸められる) 以下であること —
+ * drivers/ はカーネルヘッダを見ないので値を写し、ホスト試験 (cd_read_host.c) が
+ * 両者を比べる */
+#define ATAPI_DELAY_CHUNK_US    100000UL
 
 /* SRST を立てておく長さ (ALT_STATUS の空読みの回数)。規定は 5µs 以上 */
 #define ATAPI_SRST_HOLD_LOOP    50000
+/* SRST を解いてからステータスを読むまで置く時間 (µs)。規定は 2ms 以上 —
+ * それより前は BSY がまだ立っていないことがあり、準備済みに見える */
+#define ATAPI_SRST_SETTLE_US    2000UL
 
 /* ======== ATAPI / PACKET コマンド ======== */
 #define ATAPI_CMD_PACKET         0xA0   /* PACKETコマンド (CDB送出) */

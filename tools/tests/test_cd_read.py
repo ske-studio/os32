@@ -44,7 +44,8 @@ READ_CASES = ["stream_4k", "stream_odd", "stream_32k", "read_file", "multi_fallb
               "idle_rule", "no_window", "stat_swap", "list_swap",
               "np2_read", "np2_async", "np2_empty", "cap_nodata", "np2_slave",
               "np2_slave_strict", "cap_len", "np2_sel_lag", "np2_absent", "np2_sel_busy",
-              "np2_stuck", "np2_ua_init", "np2_becoming_ready", "np2_no_medium"]
+              "np2_stuck", "np2_ua_init", "np2_becoming_ready", "np2_no_medium",
+              "np2_ready_total", "np2_srst", "ua_multi"]
 # N = 32 の版で回すもの (1 回 64KB)
 WIDE_CASES = ["stream_4k", "stream_32k", "read_file", "multi_drq", "multi_fallback",
               "np2_read", "np2_async", "np2_sel_lag", "np2_stuck"]
@@ -354,7 +355,7 @@ MUTATIONS = [
      "            s_stats.ready_retries++;\n            continue;",
      "UNIT ATTENTION を REQUEST SENSE で消さずに出し直す"),
     ("drivers/atapi.c",
-     r"            s_stats\.ready_retries\+\+;\n            cpu_delay_us\(ATAPI_READY_WAIT_US\);\n            ret = ATAPI_ERR_NO_MEDIA;\n            continue;",
+     r"            s_stats\.ready_retries\+\+;\n            atapi_delay_us\(ATAPI_READY_WAIT_US\);\n            ret = ATAPI_ERR_NO_MEDIA;\n            continue;",
      "            return ATAPI_ERR_NO_MEDIA;",
      "NOT READY (準備中) を待たずに媒体なしと確定する"),
     ("drivers/atapi.c",
@@ -377,6 +378,27 @@ MUTATIONS = [
      r"    u8 st = \(u8\)inp\(IDE_ALT_STATUS\);\n    s_diag_st = st;\n    return st;",
      "    u8 st = (u8)inp(IDE_ALT_STATUS);\n    return st;",
      "待ちで読んだステータスを記録しない (期限切れの st が前の値になる)"),
+    # --- 代行レビュー (Fable 5.1) 2 回目の P2 / P3
+    ("drivers/atapi.c",
+     r"            atapi_delay_us\(ATAPI_READY_WAIT_US\);",
+     "            cpu_delay_us(ATAPI_READY_WAIT_US);",
+     "準備中の待ちを 250ms 1 回で頼む (cpu_delay_us が 100ms に丸めて合計 1.6 秒。レビュー 2 の P2)"),
+    ("drivers/atapi.h",
+     r"#define ATAPI_READY_RETRIES     20",
+     "#define ATAPI_READY_RETRIES     16",
+     "準備中の出し直しを 16 回 (4 秒) で諦める (4.5 秒準備中のスレーブを取り逃がす)"),
+    ("drivers/atapi.c",
+     r"    atapi_delay_us\(ATAPI_SRST_SETTLE_US\);\n",
+     "",
+     "SRST を解いた直後に 2ms 置かずステータスを読む (レビュー 2 の P3)"),
+    ("drivers/atapi.c",
+     r"    if \(atapi_status\(\) == ATAPI_ST_FLOAT\) return;\n    \(void\)atapi_wait_bsy\(\);\n",
+     "",
+     "SRST の後にマスターの BSY=0 を待たずに DRV_HEAD を書く (レビュー 2 の P3)"),
+    ("drivers/atapi.c",
+     r"attempt <= ATAPI_UA_RETRIES;",
+     "attempt < 2;",
+     "READ(10) の UNIT ATTENTION を 1 回しか出し直さない (レビュー 2 の P3)"),
     # 対照: 何も変えない。SURVIVED でなければ試験が不安定 (偽の RED)。
     ("fs/iso9660.c", r"(#include \"iso9660\.h\")", r"\1", "対照 (何も変えない)"),
 ]

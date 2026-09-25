@@ -24,6 +24,7 @@
 #include "dev.h"
 #include "kmalloc.h"
 #include "lib/kstring.h"
+#include "cpu_calibrate.h"
 
 /* ---- 境界の贋物 (kstring / kmalloc / tick) ---- */
 volatile u32 tick_count;
@@ -41,9 +42,17 @@ char *kstrncpy(char *dst, const char *src, u32 n)
 }
 void *kmemcpy(void *dst, const void *src, u32 n) { return memcpy(dst, src, (size_t)n); }
 void *kmalloc(u32 size) { return g_kmalloc_fail ? (void *)0 : malloc((size_t)size); }
-/* 校正済みの µs 待ちの贋物: 待った合計を数えるだけ (NOT READY の出し直しの間) */
+/* 校正済みの µs 待ちの贋物: 待った合計を数えるだけ (NOT READY の出し直しの間、
+ * SRST の後)。実物 (kernel/cpu_calibrate.c) どおり 1 回 CPU_DELAY_US_MAX (100ms) で
+ * 丸める — 丸めを知らずに 250ms を 1 回で頼む書き方はここで待ちが足りなくなる */
 static unsigned long g_delay_us;
-void cpu_delay_us(u32 us) { g_delay_us += us; }
+static unsigned long g_delay_calls;
+void cpu_delay_us(u32 us)
+{
+    if (us > CPU_DELAY_US_MAX) us = CPU_DELAY_US_MAX;
+    g_delay_us += us;
+    g_delay_calls++;
+}
 void *kzalloc(u32 size) { return calloc(1, (size_t)size); }
 void kfree(void *p) { free(p); }
 
@@ -64,6 +73,9 @@ void kprintf(u8 attr, const char *fmt, ...)
 /* ---- 実物 ---- */
 #include "../../drivers/atapi.c"
 #include "../../fs/iso9660.c"
+
+/* atapi.h が写した塊の上限は、実物の cpu_delay_us の上限を超えない */
+typedef char atapi_delay_chunk_fits[(ATAPI_DELAY_CHUNK_US <= CPU_DELAY_US_MAX) ? 1 : -1];
 
 #define CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #x); exit(1); \
@@ -226,7 +238,7 @@ static struct {
     int fail_multi;    /* count > 1 の READ(10) を MEDIUM ERROR で断る */
     long fail_lba;     /* この LBA を含む READ(10) を断る (-1 = なし) */
     int short_multi;   /* count > 1 の READ(10) で 1 セクタ少なく渡す */
-    int ua_next;       /* 次のコマンドで UNIT ATTENTION を返し、媒体を B へ */
+    int ua_next;       /* 次のこの数のコマンドで UNIT ATTENTION を返し、媒体を B へ */
     int stale;         /* 境目の後の古い状態の回数 */
     int cap_nodata;    /* READ CAPACITY がデータ無しで終わる */
     u32 cap_len;       /* READ CAPACITY の応答の長さ (0 = 8)。7 / 9 は規定外の装置 */
@@ -282,8 +294,8 @@ static void model_exec(void)
 {
     u8 op = M.cdb[0];
     M.err = 0;
-    if (M.ua_next) {
-        M.ua_next = 0;
+    if (M.ua_next > 0) {
+        M.ua_next--;
         M.m = &g_media_b;
         model_error(ATAPI_SK_UNIT_ATTENTION);
         if (op == SCSI_CMD_READ_10) M.n_read10++;
@@ -481,8 +493,17 @@ static struct {
     u32 n_cmd_while_bsy;    /* BSY の装置へ DEVICE RESET 以外のコマンドを書いた */
     u32 n_reg_while_bsy;    /* BSY の装置へ Features / Byte Count を書いた */
     u32 n_packet_stale_cy;  /* 選び直した後 Byte Count を書かずに PACKET を出した */
+    u32 n_srst_early;       /* SRST を解いて 2ms 経たないうちにステータスを読んだ / DRV_HEAD を書いた */
     u32 n_devreset, n_srst;
+    /* SRST を解いた時点の g_delay_us (srst_settling のあいだ 2ms を数える) */
+    int srst_settling;
+    unsigned long srst_release_us;
 } N;
+
+/* 実機寄り (strict): SRST を解いた後、装置はこの回数だけ BSY を見せる */
+#define NP2_SRST_BUSY_READS  40
+/* SRST を解いてからステータスを読むまでに置く時間 (ATA の規定、µs) */
+#define NP2_SRST_SETTLE_US   2000ul
 
 static struct { int strict; int sel_lag; unsigned absent_status; } g_np2cfg = { 0, 0, 0xFF };
 static int g_np2cfg_no_init;   /* 1 = setup_np2_layout が atapi_init を呼ばない (装置を設定してから呼ぶ) */
@@ -630,10 +651,22 @@ static void np2_a0(Np2Drv *D)
     D->sk = 0x0B; D->error = 0x04; np2_senderror(D);   /* sendabort */
 }
 
+/* strict: SRST を解いて 2ms 経つ前にバスへ触ったか (過ぎたら数えるのをやめる) */
+static void np2_check_srst_settle(void)
+{
+    if (!N.srst_settling) return;
+    if (g_delay_us - N.srst_release_us >= NP2_SRST_SETTLE_US) { N.srst_settling = 0; return; }
+    N.n_srst_early++;
+}
+
 static unsigned int np2_inp(unsigned int port)
 {
     Np2Drv *D;
     if (N.bank != 1) return 0xFF;
+    if (port == IDE_STATUS || port == IDE_ALT_STATUS) {
+        /* SRST を立てているあいだの空読み (保持の待ち) は数えない */
+        if (!(N.ctrl & IDE_SRST)) np2_check_srst_settle();
+    }
     D = np2_cur();
     if (!D) return N.absent_status;    /* 居ない装置: 浮いたバスの値 (どのポートも) */
     switch (port) {
@@ -663,6 +696,7 @@ static void np2_outp(unsigned int port, unsigned int v)
         /* ideio_o64c: 書く前に非同期の読みの完了を待つ (asyncwait)。実機 (strict)
          * では BSY の装置は書き込みを受けないので、選択は変わらない */
         int newsel = (int)((v >> 4) & 1);
+        np2_check_srst_settle();
         D = np2_cur();
         if (D && np2_busy(D)) {
             if (N.strict) { N.n_sel_while_bsy++; return; }
@@ -671,7 +705,8 @@ static void np2_outp(unsigned int port, unsigned int v)
         if (newsel != N.drivesel) {
             N.drivesel = newsel;
             if (N.d[newsel].present) {
-                N.d[newsel].busy_left = N.sel_lag;   /* 選ばれた直後の整定 */
+                /* 選ばれた直後の整定 (SRST の後の BSY が残っていればそちら) */
+                if (N.d[newsel].busy_left < N.sel_lag) N.d[newsel].busy_left = N.sel_lag;
                 N.d[newsel].cy_written = 0;
                 if (N.d[newsel].stuck_on_select) {
                     N.d[newsel].stuck_on_select = 0;
@@ -696,10 +731,15 @@ static void np2_outp(unsigned int port, unsigned int v)
                     D->status = NP2_STAT_DRDY | NP2_STAT_DSC | NP2_STAT_CHK;
                     D->error = 0x01;
                     if (D->ua_on_reset) D->ua = 1;
+                    /* 実機寄り: リセットの処理のあいだ BSY (NP21/W はすぐ終わる) */
+                    if (N.strict) D->busy_left = NP2_SRST_BUSY_READS;
                 }
             }
             if (v & IDE_SRST) N.n_srst++;
-            else N.drivesel = 0;                 /* リセット後はマスター */
+            else {
+                N.drivesel = 0;                  /* リセット後はマスター */
+                if (N.strict) { N.srst_settling = 1; N.srst_release_us = g_delay_us; }
+            }
         }
         return;
     }
@@ -871,10 +911,12 @@ static void setup_np2(void) { setup_np2_layout(0); }
 /* 規定違反が無かったか (strict の試験の後に見る) */
 static void np2_check_protocol(void)
 {
-    if (N.n_sel_while_bsy || N.n_cmd_while_bsy || N.n_reg_while_bsy || N.n_packet_stale_cy) {
-        fprintf(stderr, "protocol: sel_bsy=%lu cmd_bsy=%lu reg_bsy=%lu stale_cy=%lu\n",
+    if (N.n_sel_while_bsy || N.n_cmd_while_bsy || N.n_reg_while_bsy || N.n_packet_stale_cy
+        || N.n_srst_early) {
+        fprintf(stderr, "protocol: sel_bsy=%lu cmd_bsy=%lu reg_bsy=%lu stale_cy=%lu srst_early=%lu\n",
                 (unsigned long)N.n_sel_while_bsy, (unsigned long)N.n_cmd_while_bsy,
-                (unsigned long)N.n_reg_while_bsy, (unsigned long)N.n_packet_stale_cy);
+                (unsigned long)N.n_reg_while_bsy, (unsigned long)N.n_packet_stale_cy,
+                (unsigned long)N.n_srst_early);
         CHECK(0);
     }
 }
@@ -1774,6 +1816,104 @@ static void t_np2_no_medium(void)
     CHECK(g_delay_us == 0);
 }
 
+/* 準備中の待ちは実際に 4〜5 秒 (Fable レビューの P2)。cpu_delay_us は 1 回 100ms で
+ * 丸めるので、250ms を 1 回で頼むと 16 × 100ms ≒ 1.6 秒しか待たず、トレイを閉じた
+ * 直後 (becoming ready 2〜5 秒) のスレーブを待ちきれずに空のマスターへ固定していた。
+ * (1) スレーブが 18 回 (4.5 秒) 準備中 → 待ちきってスレーブを選ぶ
+ * (2) スレーブがずっと準備中 → 待ちの合計が 4〜5 秒で諦め、マスターに戻る */
+static void t_np2_ready_total(void)
+{
+    AtapiStats st;
+    u8 buf[SEC];
+    g_np2cfg.strict = 1;
+    g_np2cfg.sel_lag = 0;
+    g_np2cfg_no_init = 1;
+    setup_np2_layout(1);
+    g_np2cfg_no_init = 0;
+    N.d[1].ready_after = 18;
+    CHECK(atapi_init() == 1);
+    if (atapi_drive_index() != 1) {
+        fprintf(stderr, "drive %d, waited %lu us\n", atapi_drive_index(), g_delay_us);
+        CHECK(0);
+    }
+    CHECK(g_delay_us == 18ul * 250000ul);
+    CHECK(g_delay_calls > 18ul);             /* 100ms 以下の塊に分けている */
+    atapi_get_stats(&st);
+    CHECK(st.ready_retries == 18);
+    CHECK(atapi_read_sectors(16, 1, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 16u * SEC, SEC) == 0);
+    np2_check_protocol();
+
+    g_np2cfg_no_init = 1;
+    setup_np2_layout(1);
+    g_np2cfg_no_init = 0;
+    N.d[1].ready_after = 1000000;
+    g_delay_calls = 0;
+    CHECK(atapi_init() == 1);
+    CHECK(atapi_drive_index() == 0);
+    if (g_delay_us < 4000000ul || g_delay_us > 5000000ul) {
+        fprintf(stderr, "waited %lu us (want 4..5 s)\n", g_delay_us);
+        CHECK(0);
+    }
+    np2_check_protocol();
+}
+
+/* SRST の順序 (Fable レビューの P3): 解いてから 2ms 置き、マスターの BSY=0 を待って
+ * から DRV_HEAD → 400ns → BSY=0。strict の模型は SRST を解いた後しばらく BSY を
+ * 見せ、2ms 前のステータスの読みと BSY 中の DRV_HEAD を規定違反と数える。
+ * 使う装置は選ばれた瞬間に固まり DEVICE RESET も受けない (SRST まで行く) ×
+ * 構成 (1) マスターは空・スレーブに媒体 (2) マスター無し・スレーブに媒体
+ * (3) マスターに媒体・スレーブは空 */
+static void t_np2_srst(void)
+{
+    static const int layouts[3] = { 1, 2, 3 };
+    int k;
+    for (k = 0; k < 3; k++) {
+        u8 buf[SEC];
+        AtapiStats st0, st;
+        int drv = (layouts[k] == 3) ? 0 : 1;
+        g_np2cfg.strict = 1;
+        g_np2cfg.sel_lag = 2;
+        setup_np2_layout(layouts[k]);
+        CHECK(atapi_drive_index() == drv);
+        /* バスは使わない方を選んでいる (白箱)。居なければ浮いたバス */
+        s_cursel = drv ? 0x00 : ATAPI_DRV_SLAVE;
+        N.drivesel = drv ? 0 : 1;
+        N.d[drv].stuck_on_select = 1; N.d[drv].ignore_devreset = 1;
+        N.d[0].ua_on_reset = N.d[1].ua_on_reset = 1;
+        atapi_get_stats(&st0);
+        g_delay_us = 0;
+        CHECK(atapi_read_sectors(20, 1, buf) == ATAPI_OK);
+        CHECK(memcmp(buf, g_media_a.img + 20u * SEC, SEC) == 0);
+        atapi_get_stats(&st);
+        CHECK(st.soft_resets - st0.soft_resets == 1);
+        CHECK(g_delay_us >= 2000ul);
+        CHECK(N.drivesel == drv && !N.d[drv].stuck);
+        np2_check_protocol();
+    }
+}
+
+/* READ(10) の UNIT ATTENTION は 3 回まで出し直す (Fable レビューの P3、UA を
+ * 複数積む装置)。3 回続けば 4 回目で読める、4 回続けば落ちる */
+static void t_ua_multi(void)
+{
+    u8 buf[SEC];
+    u32 gen0, n0;
+    setup();
+    gen0 = atapi_media_gen();
+    n0 = M.n_read10;
+    M.ua_next = 3;
+    CHECK(atapi_read_sectors(16, 1, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_b.img + 16u * SEC, SEC) == 0);
+    CHECK(atapi_media_gen() == gen0 + 3u);
+    CHECK(M.n_read10 - n0 == 4);
+    M.ua_next = 4;
+    n0 = M.n_read10;
+    CHECK(atapi_read_sectors(16, 1, buf) == ATAPI_ERR_IO);
+    CHECK(M.n_read10 - n0 == 4);
+    CHECK(M.ua_next == 0);
+}
+
 int main(int argc, char **argv)
 {
     const char *cs = (argc > 1) ? argv[1] : "";
@@ -1813,6 +1953,9 @@ int main(int argc, char **argv)
     else if (!strcmp(cs, "np2_ua_init"))     t_np2_ua_init();
     else if (!strcmp(cs, "np2_becoming_ready")) t_np2_becoming_ready();
     else if (!strcmp(cs, "np2_no_medium"))   t_np2_no_medium();
+    else if (!strcmp(cs, "np2_ready_total")) t_np2_ready_total();
+    else if (!strcmp(cs, "np2_srst"))        t_np2_srst();
+    else if (!strcmp(cs, "ua_multi"))        t_ua_multi();
     else { fprintf(stderr, "unknown case '%s'\n", cs); return 2; }
     return 0;
 }

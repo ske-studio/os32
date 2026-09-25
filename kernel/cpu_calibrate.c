@@ -125,8 +125,8 @@ void cpu_delay_us(u32 us)
 
     if (s_loops_per_tick == 0) return;
 
-    if (us > 100000UL) {
-        us = 100000UL;
+    if (us > CPU_DELAY_US_MAX) {
+        us = CPU_DELAY_US_MAX;
     }
 
     /* (lpt/100) * us / 100 でオーバーフロー回避しつつ精度確保 */

@@ -32,7 +32,7 @@
   (以前から複数 DRQ のループはあった)。**各 DRQ のブロックの後に ALT_STATUS の空読みで 400ns** 置く
   — 置かないと前のブロックの DRQ=1 を読んで次のブロックと取り違える
 - エラーのときエラーレジスタの bit7-4 (センスキー) を覚える。UNIT ATTENTION (6) / NOT READY (2) で
-  **媒体の世代** (`atapi_media_gen`) を進め、UNIT ATTENTION のコマンドは 1 回だけ出し直す
+  **媒体の世代** (`atapi_media_gen`) を進め、UNIT ATTENTION の READ(10) は `ATAPI_UA_RETRIES` (3) 回まで出し直す
   (入れ替え直後の mount の PVD 読みが落ちないように)
 - 相性で困ったら `ATAPI_READ_MAX_SECTORS` を 1 にすれば旧来の読み方 (`#ifndef` なので -D でも変えられる)
 
@@ -105,7 +105,10 @@
 | `np2_sel_busy` | (白箱) バスが別の居る装置を BSY のまま選んでいる: 待ってから選ぶ / 固まったままなら DEVICE RESET (その装置だけ、UA が立つ) / DEVICE RESET を受けなければ SRST / 使う装置が選ばれた瞬間に固まり DEVICE RESET も受けない: SRST の後に使う装置を選び直してから PACKET |
 | `np2_stuck` | 使っている装置が LBA 17 を渡した後に固まる: 複数セクタが期限切れ → 1 セクタずつ (DEVICE RESET で戻す) → 17 で失敗、行は `lba=17 n=1 ret=-1 st=d0 ... got=2048 req=16+4`、その後 16〜17 は読める |
 | `np2_ua_init` | 空のマスター + 媒体のあるスレーブ、両方が UNIT ATTENTION (報告で消える / REQUEST SENSE でだけ消える): スレーブを選ぶ |
-| `np2_becoming_ready` | スレーブが 3 回 NOT READY / 04h: 3 回待って (cpu_delay_us × 3) スレーブを選ぶ |
+| `np2_becoming_ready` | スレーブが 3 回 NOT READY / 04h: 3 回待って (250ms × 3 = 750ms) スレーブを選ぶ |
+| `np2_ready_total` | スレーブが 18 回 (4.5 秒) 準備中: 待ちきってスレーブを選ぶ (待ちは 100ms 以下の塊)。ずっと準備中: 待ちの合計 4〜5 秒で諦めてマスター |
+| `np2_srst` | 使う装置が選ばれた瞬間に固まり DEVICE RESET も受けない × 3 構成 (空のマスター / マスター無し / スレーブが空): SRST → 2ms → マスターの BSY=0 → 選び直し、規定違反 0 |
+| `ua_multi` | READ(10) の UNIT ATTENTION が 3 回続いても読める (世代 +3、READ(10) 4 回)、4 回続けば落ちる |
 | `np2_no_medium` | マスターが NOT READY / 3Ah: READ CAPACITY 1 回で確定 (待たない)、スレーブを選ぶ。公開の `atapi_read_capacity` も `ATAPI_ERR_NO_MEDIA` を 1 回で |
 | `replay` | pkg.c の読み方 (28 回、559KB) を再生: **READ(10) 19 回** (274 セクタ ÷ 16 = 17.2 + 根 + 端)、パスの解決 1 回 |
 
@@ -175,7 +178,8 @@ SURVIVED でなければ試験が不安定。変異の一覧と結果は `test_c
   選んだ後の待ちが期限切れでも同じ回復を 1 回だけ試す
 - **P2** UNIT ATTENTION (6) を媒体なしと扱っていた。→ `atapi_capacity_ready`: UA は REQUEST SENSE で消して
   出し直す、NOT READY (2) は REQUEST SENSE の ASC が **3Ah (媒体なし) のときだけ確定**、それ以外 (04h 準備中など)
-  は `cpu_delay_us(250ms)` 置いて出し直す。`ATAPI_READY_RETRIES` (16) まで。公開の `atapi_read_capacity` も同じ経路
+  は 250ms 置いて出し直す。`ATAPI_READY_RETRIES` (当時 16) まで。公開の `atapi_read_capacity` も同じ経路。
+  (当時は `cpu_delay_us(250ms)` を 1 回で頼んでいて、実物は 100ms に丸めるので実際は 16 × 100ms ≒ 1.6 秒だった — §3-5)
 - **P2** `got` が `total_read += 2` (ワード) 由来で、Byte Count=7 の応答を 8 と数えていた。→ ポートから読むワード数
   `(xfer+1)/2` と有効バイト数 `xfer_size` を分け、`total_read = end`
 - **P3** 診断の行の lba / n が呼び手の範囲で、st / err / got は最後の 1 セクタの試行のものだった。→ `atapi_read10` が
@@ -196,7 +200,29 @@ SURVIVED でなければ試験が不安定。変異の一覧と結果は `test_c
 - 白箱の `np2_sel_busy` はバスの選択 (`s_cursel`) を試験が直接動かす — 「別の居る装置が BSY のまま選ばれている」は
   今の atapi.c の経路では作れない (装置を替えるのは atapi_init だけ) が、`atapi_select_device` の規則そのものを見る
 - `atapi_read10` の UA の出し直しは REQUEST SENSE を挟まない (報告で UA が消える装置を前提。SPC の既定)。
-  REQUEST SENSE でだけ消える装置では読みの UA の出し直しが 1 回では足りない — 未対応 (容量確認だけ直した)
+  REQUEST SENSE でだけ消える装置では読みの UA は出し直しでは消えない — 未対応 (容量確認だけ直した)
+
+## 3-5. 代行レビュー (Fable 5.1) 2 回目の P2 / P3 × 3
+
+- **P2** `ATAPI_READY_WAIT_US` (250ms) を `cpu_delay_us` に 1 回で渡していたが、`cpu_delay_us` は 1 回
+  100ms で丸める (`kernel/cpu_calibrate.c`)。実際の待ちは 16 × 100ms ≒ **1.6 秒** (文書は 4 秒) で、トレイを閉じた
+  直後 (becoming ready 2〜5 秒) のスレーブを待ちきれず空のマスターに固定していた (選び直す経路は無い)。
+  → `atapi_delay_us` が `ATAPI_DELAY_CHUNK_US` (100ms。`kernel/cpu_calibrate.h` に出した `CPU_DELAY_US_MAX` を超えないことをホスト試験がコンパイル時に比べる) 以下の塊に分けて回す。
+  `ATAPI_READY_RETRIES` を 20 にして**待ちの合計は最大 20 × 250ms = 5.0 秒**。
+  **tick_count で待たない理由**: tick は PIT の割り込み (IF=1) が前提で、呼ばれる文脈 (起動時の `atapi_init`、
+  KAPI 経由の読み) で割り込みが開いていると決められない。`cpu_delay_us` は割り込み禁止でも待て、`atapi_init` は
+  `cpu_calibrate` の後 (`kernel/kernel.c`)
+- ホスト試験の贋物 `cpu_delay_us` を実物どおり `CPU_DELAY_US_MAX` で丸める形にした (以前は `g_delay_us += us`
+  で丸めず、1 回 250ms の呼び方を見抜けなかった)
+- **P3** SRST を解いた直後、BSY の解除を待たずに DRV_HEAD を書いていた。→ `atapi_srst`: 解いて 2ms
+  (`ATAPI_SRST_SETTLE_US`) 置き、マスターの BSY=0 を待つ (マスターが居ない・浮いたバスなら待たない)。
+  選び直し (DRV_HEAD → 400ns → BSY=0) は呼び手 (`atapi_recover`)。strict の模型は SRST を解いた後
+  `NP2_SRST_BUSY_READS` 回 BSY を見せ、2ms 前のステータスの読み / DRV_HEAD を規定違反 (`srst_early`) と数える
+- **P3** READ(10) の UNIT ATTENTION の出し直しを 1 回から `ATAPI_UA_RETRIES` (3) 回に
+- **P3** SRST は同じバンク (セカンダリ) の ATA HDD (`ide.c` の drive 2 / 3) も戻す、と atapi.c と §5 に書いた
+- 変異 57〜61 (250ms 1 回で頼む、16 回で諦める、SRST の後 2ms 置かない、SRST の後マスターの BSY を待たない、
+  UA を 1 回しか出し直さない) は全部 RED。全 61 本 RED / 0 SURVIVED (対照は SURVIVED)
+- ATAPI の待ち上限 (ループ回数) を tick の秒単位にする件は別票
 
 ## 4. 未検証
 
@@ -205,7 +231,7 @@ SURVIVED でなければ試験が不安定。変異の一覧と結果は `test_c
 - 実機の CD ドライブが 16 セクタの READ(10) と 0x8000 の byte count limit を受けるか。困ったら
   `ATAPI_READ_MAX_SECTORS` を下げる
 - 実機のドライブが READ(10) で UNIT ATTENTION を返すか (返さなければ 2 秒規則だけが効く)
-- DEVICE RESET (08h) / SRST の回復と、NOT READY / 04h の待ち (250ms × 16) は実機でしか踏まない
+- DEVICE RESET (08h) / SRST の回復と、NOT READY / 04h の待ち (250ms × 20 = 最大 5 秒) は実機でしか踏まない
   (NP21/W は固まらず、READ CAPACITY で UA / NOT READY を返さない)。`atapi_get_stats` の
   `dev_resets` / `soft_resets` / `ready_retries` で踏んだかが分かる
 - HDD (ext2) への書き込みの速さは見ていない。CD 側が速くなった後は、そちらが律速になりうる

@@ -205,9 +205,9 @@ IDEセカンダリバンクに接続されたATAPI CD-ROMデバイスをPIOモ�
 | `atapi_init()` | CD-ROM検出 (セカンダリバンクのATAPIシグネチャ確認) |
 | `atapi_present()` | CD-ROMドライブ存在チェック |
 | `atapi_test_unit_ready()` | メディア挿入確認 |
-| `atapi_read_capacity(cap)` | メディア容量取得 (AtapiCapacity構造体)。UNIT ATTENTION は REQUEST SENSE で消して出し直す、NOT READY は ASC 3Ah (媒体なし) だけ `ATAPI_ERR_NO_MEDIA` で確定し、他は 250ms 置いて `ATAPI_READY_RETRIES` (16) まで出し直す |
+| `atapi_read_capacity(cap)` | メディア容量取得 (AtapiCapacity構造体)。UNIT ATTENTION は REQUEST SENSE で消して出し直す、NOT READY は ASC 3Ah (媒体なし) だけ `ATAPI_ERR_NO_MEDIA` で確定し、他は 250ms 置いて `ATAPI_READY_RETRIES` (20) まで出し直す (待ちの合計は最大 5 秒 — トレイを閉じた直後の準備中 2〜5 秒を待ちきる。`cpu_delay_us` は 1 回 100ms (`CPU_DELAY_US_MAX`) で丸めるので、`atapi_delay_us` が 100ms 以下の塊に分けて回す) |
 | `atapi_read_sectors(lba, count, buf)` | セクタ読み出し (2048B/セクタ, LBA指定)。連続する count セクタを `ATAPI_READ_MAX_SECTORS` (既定 16 = 32KB) ずつの READ(10) で読む。複数セクタが失敗したらその範囲を 1 セクタずつ読み直し、1 セクタでも落ちればそこで失敗 |
-| `atapi_media_gen()` | 媒体の世代。エラーレジスタのセンスキーが UNIT ATTENTION (6) / NOT READY (2) のたびに進む。UNIT ATTENTION のコマンドは 1 回だけ出し直す |
+| `atapi_media_gen()` | 媒体の世代。エラーレジスタのセンスキーが UNIT ATTENTION (6) / NOT READY (2) のたびに進む。READ(10) の UNIT ATTENTION は `ATAPI_UA_RETRIES` (3) 回まで出し直す (UA を複数積む装置がある) |
 | `atapi_get_stats(out)` | READ(10) の数・セクタ数・1 セクタずつへ落ちた数・DEVICE RESET / SRST の数・容量確認の出し直しの数 |
 
 - **PIO の受け取り**: byte count limit (Cylinder Low/High) には `min(バッファ, ATAPI_PIO_BCL_MAX = 0xF800)` を書き、
@@ -220,7 +220,9 @@ IDEセカンダリバンクに接続されたATAPI CD-ROMデバイスをPIOモ�
   なら終わるのを待つ (0xFF や、居ない装置の値は待たない) → DRV_HEAD → 400ns → 選んだ装置の BSY/DRQ クリア待ち →
   Features / Byte Count → PACKET。`atapi_select_bank(1)` はバンクを切り替えるだけで DRV_HEAD は書かない。
   待ちが期限切れなら **DEVICE RESET (08h、その装置だけ。BSY でも受ける)** → それでも戻らなければ **SRST** (バンクで選んだ
-  バスの 2 台。プライマリの HDD には届かない — UNDOCUMENTED io_ide 074Ch、NP21/W `ideio_o74c`)。どちらの後も装置は
+  バスの 2 台。プライマリの HDD には届かない — UNDOCUMENTED io_ide 074Ch、NP21/W `ideio_o74c`。**同じバンク (セカンダリ) の
+  ATA HDD (`ide.c` の drive 2 / 3) も戻す**)。SRST は解いてから 2ms 置き (`ATAPI_SRST_SETTLE_US`)、マスターの BSY=0 を待ってから
+  (マスターが居なければ待たない) 使う装置を選び直す (DRV_HEAD → 400ns → BSY=0)。どちらの後も装置は
   UNIT ATTENTION を立てるので、次のコマンドの出し直しは呼び手が行う。
   2026-09-26 まではマスターしか見ず、NP21/W で ide2 が空の CD のまま ide3 (セカンダリのスレーブ) に ISO を付けると
   `cd0: block 1 sects` (NP21/W は空のドライブの容量を 0 と答える) になり、1 セクタも読めなかった

@@ -23,10 +23,17 @@ u32 cpu_loops_per_tick(void);
 extern u32 cpu_calib_rounds;
 extern u32 cpu_calib_ticks;
 
+/* cpu_delay_us が 1 回で待てる上限 (µs)。これより長い指定は**黙ってこの値に
+ * 丸める** — 長く待ちたい呼び手はこれ以下の塊に分けて呼ぶ (drivers/atapi.c の
+ * atapi_delay_us。drivers/ はこのヘッダを見ないので atapi.h の
+ * ATAPI_DELAY_CHUNK_US に値を写し、ホスト試験が両者を比べる) */
+#define CPU_DELAY_US_MAX  100000UL
+
 /* CPU速度適応型マイクロ秒ディレイ
  * キャリブレーション結果を基に、指定マイクロ秒だけ NOP ループで待つ。
  * 割り込み禁止区間でも使用可能 (PIT に依存しない)。
- * 精度: ±10% 程度 (キャリブレーション誤差 + パイプライン変動) */
+ * 精度: ±10% 程度 (キャリブレーション誤差 + パイプライン変動)。
+ * us は CPU_DELAY_US_MAX で丸める */
 void cpu_delay_us(u32 us);
 
 #endif /* CPU_CALIBRATE_H */

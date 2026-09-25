@@ -48,7 +48,8 @@ static u32 s_diag_n = 0;
 /* 読みの失敗の行を出した数 (ATAPI_DIAG_MAX で止める) */
 static u32 s_diag_lines = 0;
 
-/* 校正済みの µs 待ち (kernel/cpu_calibrate.c)。atapi_init は cpu_calibrate の後 */
+/* 校正済みの µs 待ち (kernel/cpu_calibrate.c)。atapi_init は cpu_calibrate の後。
+ * drivers/ はカーネルヘッダを見ない作法なので extern で引く (serial.c と同じ) */
 extern void cpu_delay_us(u32 us);
 
 /* ======================================================================== */
@@ -147,6 +148,19 @@ static void atapi_clear_cdb(u8 *cdb)
     for (i = 0; i < 12; i++) cdb[i] = 0;
 }
 
+/* us だけ待つ。cpu_delay_us は 1 回で CPU_DELAY_US_MAX (100ms) までしか待たず、
+ * それより長い指定を黙って丸めるので、ATAPI_DELAY_CHUNK_US 以下の塊に分けて呼ぶ。
+ * tick_count で待たないのは、PIT の割り込みが来ている (IF=1) ことを前提に
+ * できないから — cpu_delay_us は割り込み禁止区間でも待てる */
+static void atapi_delay_us(u32 us)
+{
+    while (us > 0) {
+        u32 d = (us > ATAPI_DELAY_CHUNK_US) ? ATAPI_DELAY_CHUNK_US : us;
+        cpu_delay_us(d);
+        us -= d;
+    }
+}
+
 /* sel (DRV_HEAD の値) の装置はシグネチャが出た装置か */
 static int atapi_sel_present(u8 sel)
 {
@@ -157,7 +171,12 @@ static int atapi_sel_present(u8 sel)
 
 /* SRST: セカンダリのバスの 2 台ともリセットする (バンクで選んだバスだけ。
  * プライマリの HDD には届かない — UNDOCUMENTED io_ide 074Ch、NP21/W ideio_o74c)。
- * リセット後はマスターが選ばれる */
+ * 同じバンク (セカンダリ) に ATA の HDD (drivers/ide.c の drive 2 / 3) が
+ * つながっていれば、それも戻す。
+ * リセット後はマスターが選ばれる。順序は ATA の規定どおり:
+ *   SRST を立てる → 5µs 以上 → 解く → 2ms 以上置く → マスターの BSY=0 を待つ。
+ * 使う装置の選び直し (DRV_HEAD → 400ns → BSY=0) は呼び手が行う。
+ * マスターが居ない (シグネチャが出なかった、または浮いたバス) なら待たない */
 static void atapi_srst(void)
 {
     int i;
@@ -166,6 +185,10 @@ static void atapi_srst(void)
     outp(IDE_DEV_CTRL, IDE_NIEN);
     s_cursel = 0x00;
     s_stats.soft_resets++;
+    atapi_delay_us(ATAPI_SRST_SETTLE_US);
+    if (s_present_mask != 0 && !atapi_sel_present(0x00)) return;
+    if (atapi_status() == ATAPI_ST_FLOAT) return;
+    (void)atapi_wait_bsy();
 }
 
 /* 選ばれている装置のコマンドが期限までに終わらなかった (BSY / DRQ のまま)。
@@ -463,7 +486,7 @@ static int atapi_capacity_ready(AtapiCapacity *cap)
                 return ATAPI_ERR_NO_MEDIA;
             }
             s_stats.ready_retries++;
-            cpu_delay_us(ATAPI_READY_WAIT_US);
+            atapi_delay_us(ATAPI_READY_WAIT_US);
             ret = ATAPI_ERR_NO_MEDIA;
             continue;
         }
@@ -583,13 +606,14 @@ int atapi_read_capacity(AtapiCapacity *cap)
 
 /* READ(10) を 1 回出す (n セクタ、バンクは呼び手が選んでおく)。
  * デバイスが渡したバイト数がちょうど n セクタでなければ失敗。
- * UNIT ATTENTION なら媒体の世代を進めて 1 回だけ出し直す。 */
+ * UNIT ATTENTION なら媒体の世代を進めて ATAPI_UA_RETRIES 回まで出し直す
+ * (UA を複数積む装置がある — リセットの後に媒体交換、など)。 */
 static int atapi_read10(u32 lba, u32 n, u8 *dst)
 {
     int attempt;
     int ret = ATAPI_ERR_IO;
 
-    for (attempt = 0; attempt < 2; attempt++) {
+    for (attempt = 0; attempt <= ATAPI_UA_RETRIES; attempt++) {
         u8 cdb[12];
         u32 got = 0;
 
