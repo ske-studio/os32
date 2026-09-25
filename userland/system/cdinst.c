@@ -736,8 +736,9 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     println(COL_GREEN, "=== Installing OS32 ===");
 
     /* hd0 のマウントを外す (起動時の自動マウントの ctx は旧 FS の
-     * スーパーブロック / GDT を持ったまま)。外れなければ何も書かない。
-     * ERASE を受けていればここで LBA 0/1 を消す (最初の書き込み) */
+     * スーパーブロック / GDT を持ったまま)。外れなければ消去も format もしない
+     * (umount 自身の sync は書き出し得る)。ERASE を受けていればここで LBA 0/1 を
+     * 消す (インストーラ自身の最初の書き込み) */
     if (inst_hdd_release(api, &tgt) != 0) {
         boot_img_free(&boot);
         return;

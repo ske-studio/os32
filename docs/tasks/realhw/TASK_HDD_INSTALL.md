@@ -222,7 +222,11 @@
 **順序 (Codex レビュー往復 1 の後の PM 決定)**: 全検査 → 確認画面と `y/N` → `ERASE` の打鍵 → 消去 → format → …。
 最初の実装は hd0 の検査の途中で消していたので、媒体の大きさや容量の不足が分かっているのに区画表だけを失う
 事態があり得た。今は表が使えないディスクでも**消した後の空のディスクとみなして**大きさ・容量・マウントの
-検査と確認画面まで進み、`y` の後に `ERASE` を求め、そこで初めて消す。`ERASE` 以外なら 1 セクタも書かない。
+検査と確認画面まで進み、`y` の後に `ERASE` を求め、そこで初めて消す。`ERASE` 以外なら 1 セクタも書かない
+(umount の前に終える)。保証の範囲 (Codex 往復 2): **`y` と `ERASE` の行を受ける前は何も書かない**、
+**umount とマウント数の検査が通る前は消去も format も始めない**。umount (`fs/vfs.c` `vfs_umount`) は外す前に
+`ops->sync()` を呼び、ext2 の dirty なメタデータ (`fs/ext2_super.c` のスーパーブロック・グループ記述子) を
+書き出し得るので、消去が hd0 への最初の書き込みとは言い切れない — インストーラ**自身の**最初の書き込み。
 
 - **いつ聞くか**: `inst_classify` が FOREIGN (-40)・MULTI (-41)・`HDPREP_E_MBR_SIG`・BROKEN (-43)・
   START (-42) を返したときだけ (`InstTarget.erase_needed`、理由は `erase_code`)。空のディスク・再作成では
@@ -237,13 +241,24 @@
 - **マウントの検査**: ルートが hd0、または `/hd0` 以外にマウントされていれば、確認画面より前に今までどおり
   断る。`/hd0` にだけマウントされていれば確認画面に `will be unmounted first` と出し、`ERASE` を受けた**後**に
   `sys_umount_checked("/hd0")` で外し、`dev_mount_count(0)` が 0 でなければ消さずに断る。`ERASE` の入力を待つ
-  間に新しくマウントされた・`/hd0` の相手が替わった場合もここで分かり、1 セクタも書かない。
+  間に新しくマウントされた・`/hd0` の相手が替わった場合もここで分かる。断りの表示は umount を呼んだかで分ける:
+  umount の前 (`/hd0 no longer holds hd0`、外す予定の無いマウントが増えた) は `Nothing was written`、umount の
+  後 (`umount /hd0 failed`、外したのに `still mounted`) は `Nothing was erased or formatted. (Unmounting may
+  have flushed hd0's file system data, as any umount does.)` (Codex 往復 2 の P2: 失敗した umount も sync の
+  途中で書いた可能性がある)。通常のインストール (ERASE でない) の umount の断りも同じ表示。
 - **確認画面**: `Target: hd0 …, empty disk: create the OS32 area` の後に「hd0 holds another system's partitions
   or a table OS32 cannot use (<理由>, code N). After y, type ERASE to erase the partition table (LBA 0 and 1)
   and install onto hd0 as an empty disk. EVERYTHING ON hd0 WILL BE LOST. Anything but ERASE writes nothing.」。
 - **打鍵**: `y` の後に `Erase hd0's partition table? Type ERASE:` に 1 行。`ERASE` (大文字 5 文字、完全一致) +
   Enter (CR・LF・CRLF) だけが通る。空行・小文字・前後の空白・`y`・BS や **NUL** などの制御文字を含む行・ESC・
   15 文字を超える行は `Not erased. Nothing was written.` で終える (1 セクタも書かない)。
+- **`y` の行末 (Codex 往復 2 の P2)**: `y/N` は 1 字で決まるので、端末が `y` と一緒に送る CR / LF / CRLF や
+  人が `y` の後に押した Enter が残り、それを ERASE の空行と読むと「`y` + Enter → `ERASE` + Enter」が必ず
+  取り消しになっていた (シリアルの行送信)。規則: **`y` の後の最初の行末 1 つは `y` の行末として映さずに読み
+  捨てる** (`ih_read_line` の `skip_eol`、最初の 1 字だけ)。「もう届いている分を読み捨て、後から届く分は
+  ERASE の行の先頭の空行として 1 回だけ無視する」のと結果が同じで、到着の時刻に左右されない一つの規則に
+  した。行末以外 (字・NUL・ESC) が先なら何も捨てない (NUL は入力のまま)。2 つめの行末は空行 = 取り消し
+  (`y` の後に Enter を押していない人は Enter を 2 回押して取り消す: 安全側)。
 - **鍵の読み方 (Codex P1・P2)**: `kbd_trygetchar` / `serial_trygetchar` は「入力なし」を -1、受けた NUL を 0 で
   返す。最初の実装は 0 を読み捨てていたので、シリアルから `ERA<NUL>SE<CR>` が届くと消えた。共通の
   `inst_hdd_getkey` は 0 以上をすべて入力として渡し、NUL を含む行は不一致にする。CR の直後の LF は 1 つの
@@ -265,7 +280,11 @@
   前なら贋物が落ちる)。FOREIGN・MULTI・55AA・BROKEN・START × 8/17・16/63 × ERASE でない 17 通り (NUL 入り
   5 通りを含む) で 1 セクタも書かず、CR・LF・CRLF の 3 通りで通り、`N`・大きさ・容量は消す前に止まり、
   ERASE の入力中にマウントされる・`/hd0` の相手が替わると消さず、読み戻しは先頭側と 511 バイト目の両方、
-  LBA ごとの write / read の失敗で後続の書き込みが止まる。変異は同じ `--mutate` (117 本)。
+  LBA ごとの write / read の失敗で後続の書き込みが止まる。`y` の行末: `y\r\n`・`y\r`・`y\n`・`y` の後の
+  ERASE + CR・LF・CRLF で消去まで進み、`y` の行末の後に Enter だけ (7 通り) は取り消し — kbd / serial ×
+  鍵の間の「入力なし」0〜2 (もう届いている / 後から届く)。umount の贋物は `inj_umount_sync` で「外す前の
+  sync が書く」を数え、umount の後の断りが `Nothing was written` と言わないこと、umount の前の断りは
+  言うことを見る。変異は同じ `--mutate` (124 本)。
 
 ### 段 3 — CD インストール → HDD 起動
 

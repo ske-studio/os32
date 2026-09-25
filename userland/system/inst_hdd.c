@@ -43,7 +43,7 @@ static void ih_erased_hint(KernelAPI *api)
                  "  installer again: it installs onto hd0 as an empty disk.\n");
 }
 
-/* 書く前に断る (消す前なので必ず「何も書いていない」) */
+/* 書く前に断る (umount も呼んでいないので「何も書いていない」と言える) */
 static void ih_refuse(KernelAPI *api, int code)
 {
     api->kprintf(ATTR_RED, "Refused: %s (code %d). Nothing was written.\n",
@@ -134,7 +134,19 @@ static int ih_check_mounts(KernelAPI *api, InstTarget *t)
     return 0;
 }
 
-/* /hd0 の hd0 を外す (N6)。外れなければ負 (まだ何も書いていない) */
+/* umount を呼んだ後に断る: 消去も format も始めていないが、「何も書いていない」
+ * とは言えない。umount (fs/vfs.c vfs_umount) は外す前に ops->sync() を呼び、
+ * ext2 の dirty なメタデータ (スーパーブロック・グループ記述子) を書き出し得る
+ * (失敗した umount でも、書き出しの途中で失敗した可能性がある) */
+static void ih_refused_after_umount(KernelAPI *api)
+{
+    api->kprintf(ATTR_RED, "%s",
+                 "  Nothing was erased or formatted. (Unmounting may have flushed\n"
+                 "  hd0's file system data, as any umount does.)\n");
+}
+
+/* /hd0 の hd0 を外す (N6)。外れなければ負 (消去・format はまだ始めていない。
+ * umount を呼ぶ前に断ったときだけ「何も書いていない」) */
 static int ih_umount_hd0(KernelAPI *api)
 {
     const char *dev = api->sys_is_mounted(INST_MOUNT) ? api->vfs_devname(INST_MOUNT) : 0;
@@ -147,8 +159,8 @@ static int ih_umount_hd0(KernelAPI *api)
     }
     rc = api->sys_umount_checked(INST_MOUNT);
     if (rc < 0) {
-        api->kprintf(ATTR_RED,
-                     "Refused: umount /hd0 failed (rc=%d). Nothing was written.\n", rc);
+        api->kprintf(ATTR_RED, "Refused: umount /hd0 failed (rc=%d).\n", rc);
+        ih_refused_after_umount(api);
         return rc;
     }
     return 0;
@@ -194,13 +206,19 @@ int inst_hdd_getkey(KernelAPI *api)
  * それ以外 (NUL・BS・ESC などの制御文字) や長すぎる行は「一致しない行」にする。
  * ESC はその場で打ち切る。CR の後にもう届いている LF は同じ行末として捨てる
  * (後から届く LF は ih_poll_key が捨てる)。
+ * skip_eol = 1: 最初の 1 字が行末 (CR / LF / CRLF) なら、それは前の問いの答えの
+ * 行末として映さずに 1 回だけ読み捨てる (inst_hdd_ask_erase の注釈)。
  * 戻り値: 0 = buf に行 / -1 = 一致しない行 */
-static int ih_read_line(KernelAPI *api, char *buf, int max)
+static int ih_read_line(KernelAPI *api, char *buf, int max, int skip_eol)
 {
     int n = 0, bad = 0, ch;
 
     for (;;) {
         ch = inst_hdd_getkey(api);
+        if (skip_eol) {
+            skip_eol = 0;                /* 最初の 1 字だけ */
+            if (ch == '\r' || ch == '\n') continue;   /* CRLF の LF は ih_poll_key が捨てる */
+        }
         if (ch == '\r' || ch == '\n') break;
         if (ch == 0x1B) { bad = 1; break; }
         if (ch < 0x20 || ch > 0x7E) { bad = 1; continue; }
@@ -276,7 +294,17 @@ int inst_hdd_ask_erase(KernelAPI *api, const InstTarget *t)
                  "  systems. Type ERASE (capital letters) and press Enter to erase it.\n"
                  "  Anything else leaves hd0 as it is.\n");
     api->kprintf(ATTR_YELLOW, "%s", "Erase hd0's partition table? Type ERASE: ");
-    if (ih_read_line(api, line, INST_LINE_MAX) != 0 || !ih_streq(line, INST_ERASE_WORD)) {
+    /* y/N は 1 字で決まるので、y の後に打った Enter (端末が y と一緒に送る
+     * CR / LF / CRLF) がまだ残っている。それを ERASE の空行と読むと、
+     * 「y + Enter → ERASE + Enter」が必ず取り消しになる (シリアル端末の行送信)。
+     * 規則: y の後の最初の行末 1 つは y の行末とみなして読み捨てる。もう届いて
+     * いても (y\r\n を一度に受けた)、後から届いても (人が y の後で Enter を押した)
+     * 同じ扱い — 「届いている分だけ読み捨て、後から届いた分は ERASE の行の先頭の
+     * 空行として 1 回だけ無視する」のと結果は同じで、到着の時刻に左右されない。
+     * 行末以外 (E・NUL・ESC など) が先に来れば何も捨てない (NUL は入力のまま)。
+     * 2 つめの行末は ERASE の行の空行 = 取り消し (Enter だけで取り消すには、
+     * y の後に Enter を押していなければ 2 回押すことになる: 安全側) */
+    if (ih_read_line(api, line, INST_LINE_MAX, 1) != 0 || !ih_streq(line, INST_ERASE_WORD)) {
         api->kprintf(ATTR_WHITE, "%s", "Not erased. Nothing was written.\n");
         return t->erase_code;
     }
@@ -427,22 +455,31 @@ void inst_hdd_describe(KernelAPI *api, const InstTarget *t)
 
 int inst_hdd_release(KernelAPI *api, InstTarget *t)
 {
-    int rc;
+    int rc, unmounted = 0;
 
-    /* ---- 使用中の検査 (N6): 書く前の最後の検査。失敗なら何も書かない。
-     * ERASE の打鍵を待つ間にマウントが増えた・/hd0 の相手が替わったのも
-     * ここで分かる ---- */
+    /* ---- 使用中の検査 (N6): 消去・format の前の最後の検査。失敗なら消さず
+     * format もしない (umount を呼ぶ前なら何も書いていない。呼んだ後は umount の
+     * sync が書き出し得る: ih_refused_after_umount)。ERASE の打鍵を待つ間に
+     * マウントが増えた・/hd0 の相手が替わったのもここで分かる ---- */
     if (t->umount_hd0) {
         rc = ih_umount_hd0(api);
         if (rc != 0) return rc;
         t->umount_hd0 = 0;
+        unmounted = 1;
     }
     if (api->dev_mount_count(INST_DRIVE) != 0) {
-        ih_refuse(api, HDPREP_E_STILL_MOUNTED);
+        if (unmounted) {
+            api->kprintf(ATTR_RED, "Refused: %s (code %d).\n",
+                         inst_reason(HDPREP_E_STILL_MOUNTED), HDPREP_E_STILL_MOUNTED);
+            ih_refused_after_umount(api);
+        } else {
+            ih_refuse(api, HDPREP_E_STILL_MOUNTED);
+        }
         return HDPREP_E_STILL_MOUNTED;
     }
     t->mounts = 0;
-    /* ---- 消す (N4 の例外): 全検査・y・ERASE の後、最初の書き込み ---- */
+    /* ---- 消す (N4 の例外): 全検査・y・ERASE・マウントの検査の後。インストーラ
+     * 自身の最初の書き込み (その前に書き得るのは umount の sync だけ) ---- */
     if (t->erase_needed) return ih_erase(api, t);
     return 0;
 }

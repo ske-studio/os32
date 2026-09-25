@@ -374,11 +374,9 @@ MUTATIONS = [
     ("userland/system/inst_hdd.c", "    rc = api->sys_umount_checked(INST_MOUNT);", "    rc = 0;",
      "マウント中の hd0 を外さない"),
     ("userland/system/inst_hdd.c",
-     "    if (api->dev_mount_count(INST_DRIVE) != 0) {\n        ih_refuse(api, HDPREP_E_STILL_MOUNTED);\n"
-     "        return HDPREP_E_STILL_MOUNTED;\n    }\n    t->mounts = 0;",
-     "    if (0) {\n        ih_refuse(api, HDPREP_E_STILL_MOUNTED);\n"
-     "        return HDPREP_E_STILL_MOUNTED;\n    }\n    t->mounts = 0;",
-     "外した後にマウントが残っていても書く"),
+     "    if (api->dev_mount_count(INST_DRIVE) != 0) {\n        if (unmounted) {",
+     "    if (api->dev_mount_count(INST_DRIVE) > 1) {\n        if (unmounted) {",
+     "外した後にマウントが 1 つ残っていても書く"),
     ("userland/system/inst_hdd.c",
      "    root_hd0 = (rootdev && ih_streq(rootdev, INST_DEV)) ? 1 : 0;",
      "    root_hd0 = (rootdev && 0) ? 1 : 0;",
@@ -495,8 +493,8 @@ MUTATIONS = [
     # ---- ERASE (N4 の例外、2026-09-25。順序は Codex レビュー後の PM 決定:
     #      全検査 → 確認と y/N → ERASE の打鍵 → 消去 → format) ----
     ("userland/system/inst_hdd.c",
-     "    if (ih_read_line(api, line, INST_LINE_MAX) != 0 || !ih_streq(line, INST_ERASE_WORD)) {",
-     "    if (ih_read_line(api, line, INST_LINE_MAX) != 0 && 0) {", "ERASE でない行でも消す"),
+     "    if (ih_read_line(api, line, INST_LINE_MAX, 1) != 0 || !ih_streq(line, INST_ERASE_WORD)) {",
+     "    if (ih_read_line(api, line, INST_LINE_MAX, 1) != 0 && 0) {", "ERASE でない行でも消す"),
     ("userland/system/inst_hdd.c", "!ih_streq(line, INST_ERASE_WORD)) {",
      "!(ih_streq(line, INST_ERASE_WORD) || ih_streq(line, \"erase\"))) {", "小文字の erase でも消す"),
     ("userland/system/inst_hdd.c", "        if (ch < 0x20 || ch > 0x7E) { bad = 1; continue; }",
@@ -538,17 +536,16 @@ MUTATIONS = [
      "        if (ih_erase(api, t) != 0) return rc;\n    }",
      "検査の中で消す (y/N と ERASE の前、旧順序)"),
     ("userland/system/inst_hdd.c",
-     "    if (t->umount_hd0) {\n        rc = ih_umount_hd0(api);\n        if (rc != 0) return rc;\n        t->umount_hd0 = 0;\n    }",
+     "    if (t->umount_hd0) {\n        rc = ih_umount_hd0(api);\n        if (rc != 0) return rc;\n        t->umount_hd0 = 0;\n        unmounted = 1;\n    }",
      "    if (t->erase_needed && ih_erase(api, t) != 0) return -1;\n    t->erase_needed = 0;\n"
-     "    if (t->umount_hd0) {\n        rc = ih_umount_hd0(api);\n        if (rc != 0) return rc;\n        t->umount_hd0 = 0;\n    }",
+     "    if (t->umount_hd0) {\n        rc = ih_umount_hd0(api);\n        if (rc != 0) return rc;\n        t->umount_hd0 = 0;\n        unmounted = 1;\n    }",
      "マウントの検査より前に消す"),
     ("userland/system/inst_hdd.c",
      "        rc = ih_umount_hd0(api);\n        if (rc != 0) return rc;\n        t->umount_hd0 = 0;",
      "        rc = 0;\n        (void)rc;", "/hd0 の hd0 を外さずに消す・書く"),
     ("userland/system/inst_hdd.c",
-     "    if (api->dev_mount_count(INST_DRIVE) != 0) {\n        ih_refuse(api, HDPREP_E_STILL_MOUNTED);\n"
-     "        return HDPREP_E_STILL_MOUNTED;\n    }\n    t->mounts = 0;",
-     "    t->mounts = 0;", "外したのにマウントが残っていても消す・書く"),
+     "    if (api->dev_mount_count(INST_DRIVE) != 0) {\n        if (unmounted) {",
+     "    if (0) {\n        if (unmounted) {", "外したのにマウントが残っていても消す・書く"),
     ("userland/system/inst_hdd.c", "    if (t->erase_needed) return ih_erase(api, t);\n    return 0;",
      "    return 0;", "ERASE を受けても消さない"),
     ("userland/system/inst_hdd.c", "    return ih_check_mounts(api, t);\n}",
@@ -634,6 +631,38 @@ MUTATIONS = [
      "    int ch;\n    for (;;) {\n        ch = api->kbd_trygetchar();\n        if (ch > 0) return ch;\n"
      "        ch = api->serial_trygetchar();\n        if (ch > 0) return ch;\n    }",
      "cdinst の y/N が旧の鍵読み (serial の CRLF・NUL を共通部と別に扱う)"),
+    # y の後の行末と ERASE の行 (Codex 2 回目 P2-1)
+    ("userland/system/inst_hdd.c", "    if (ih_read_line(api, line, INST_LINE_MAX, 1) != 0",
+     "    if (ih_read_line(api, line, INST_LINE_MAX, 0) != 0",
+     "y の行末を読み捨てない (y + Enter → ERASE + Enter が取り消しになる)"),
+    ("userland/system/inst_hdd.c", "            skip_eol = 0;                /* 最初の 1 字だけ */\n", "",
+     "行末を何度でも読み捨てる (Enter だけで取り消せない)"),
+    ("userland/system/inst_hdd.c", "            if (ch == '\\r' || ch == '\\n') continue;   /* CRLF",
+     "            if (ch == '\\r' || ch == '\\n' || ch == 0) continue;   /* CRLF",
+     "y の後の NUL も読み捨てる (NUL は入力の規則を壊す)"),
+    ("userland/system/inst_hdd.c", "            skip_eol = 0;                /* 最初の 1 字だけ */\n"
+     "            if (ch == '\\r' || ch == '\\n') continue;",
+     "            skip_eol = 0;                /* 最初の 1 字だけ */\n"
+     "            if (ch == '\\r' || ch == '\\n') { api->kprintf(ATTR_WHITE, \"%s\", \"\\n\"); continue; }",
+     "読み捨てた行末を映す (y の後に余計な改行)"),
+    # umount の後の断りの表示 (Codex 2 回目 P2-2)
+    ("userland/system/inst_hdd.c",
+     "                 \"  Nothing was erased or formatted. (Unmounting may have flushed\\n\"\n"
+     "                 \"  hd0's file system data, as any umount does.)\\n\");",
+     "                 \"  Nothing was written.\\n\");",
+     "umount の後の断りでも Nothing was written と言う"),
+    ("userland/system/inst_hdd.c",
+     "        api->kprintf(ATTR_RED, \"Refused: umount /hd0 failed (rc=%d).\\n\", rc);\n"
+     "        ih_refused_after_umount(api);",
+     "        api->kprintf(ATTR_RED,\n"
+     "                     \"Refused: umount /hd0 failed (rc=%d). Nothing was written.\\n\", rc);",
+     "umount の失敗で Nothing was written と言う (旧)"),
+    ("userland/system/inst_hdd.c", "        if (unmounted) {\n            api->kprintf(ATTR_RED, \"Refused: %s",
+     "        if (unmounted && 0) {\n            api->kprintf(ATTR_RED, \"Refused: %s",
+     "umount の後もマウントが残る断りで Nothing was written と言う"),
+    ("userland/system/inst_hdd.c", "        if (unmounted) {\n            api->kprintf(ATTR_RED, \"Refused: %s",
+     "        if (unmounted || 1) {\n            api->kprintf(ATTR_RED, \"Refused: %s",
+     "umount を呼ぶ前の断りでも「sync はあり得る」と言う (何も書いていないのに)"),
     ("boot/ext2_mini.c", "    if (file_size > max_size) return EXT2M_ERR_TOO_BIG;",
      "    if (file_size > max_size) file_size = max_size;", "上限で切り詰める (旧動作)"),
     ("boot/ext2_mini.c", "    if (file_size > max_size) return EXT2M_ERR_TOO_BIG;\n", "",

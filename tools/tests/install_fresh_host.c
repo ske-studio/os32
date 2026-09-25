@@ -175,6 +175,10 @@ static const char *inj_ls_size_name;  /* 列挙がこの名前に名乗らせる
 static u32  inj_ls_size;
 static int  inj_umount_fail;
 static int  inj_mount_stays;          /* umount しても hd0 のマウントが残る */
+/* 実物の umount (fs/vfs.c vfs_umount) は外す前に ops->sync() を呼び、ext2 の dirty な
+ * メタデータを書き出し得る (成否に関わらず)。inj_umount_sync = 1 でそれを再現し、
+ * umount_syncs に数える (インストーラの ide_write_sector = rec_wr_n とは別) */
+static int  inj_umount_sync, umount_syncs;
 static int  inj_root_hd0;             /* ルート (/) が hd0 */
 static int  hd0_mounts;               /* dev_mount_count(0) */
 static int  hd0_at_hd0;               /* /hd0 にマウントされている */
@@ -238,6 +242,7 @@ static void rec_reset(void)
     inj_ls_size = 0;
     inj_umount_fail = 0;
     inj_mount_stays = 0;
+    inj_umount_sync = umount_syncs = 0;
     inj_root_hd0 = 0;
     hd0_mounts = 0;
     hd0_at_hd0 = 0;
@@ -461,6 +466,7 @@ static void fake_sys_umount(const char *pre) { (void)pre; CHECK(!"use sys_umount
 static int fake_sys_umount_checked(const char *pre)
 {
     ev_add("U");
+    if (inj_umount_sync && !strcmp(pre, "/hd0") && hd0_at_hd0) umount_syncs++;
     if (inj_umount_fail) return -5;
     if (!strcmp(pre, "/hd0") && hd0_at_hd0) {
         hd0_at_hd0 = 0;
@@ -1414,18 +1420,28 @@ static void case_preflight(void)
     setup();
     hd0_mounts = 1; hd0_at_hd0 = 1;
     inj_umount_fail = 1;
+    inj_umount_sync = 1;                            /* 失敗する前に sync が書いた */
     CHECK(run() == 1);
     CHECK(rec_wr_n == 0 && fmt_calls == 0);
     CHECK_STR("umount /hd0 failed");
+    CHECK(umount_syncs == 1);                       /* umount の sync は書いた */
+    CHECK_STR("Nothing was erased or formatted");
+    CHECK_STR("Unmounting may have flushed");
+    CHECK_NOSTR("Nothing was written");
     CHECK_NOSTR("INCOMPLETE");
 
-    /* umount したのにまだ残っている */
+    /* umount したのにまだ残っている (umount の後の断り: sync はあり得る) */
     setup();
     hd0_mounts = 1; hd0_at_hd0 = 1;
     inj_mount_stays = 1;
+    inj_umount_sync = 1;
     CHECK(run() == 1);
     CHECK(rec_wr_n == 0 && fmt_calls == 0);
     CHECK_STR("still mounted");
+    CHECK(umount_syncs == 1);                       /* umount の sync は書いた */
+    CHECK_STR("Nothing was erased or formatted");
+    CHECK_STR("Unmounting may have flushed");
+    CHECK_NOSTR("Nothing was written");
 
     /* 承認しなければ umount もしない */
     setup();
@@ -1779,7 +1795,8 @@ static void case_erase(void)
                 memcpy(keep, disk, sizeof(keep));
                 keys_serial = i & 1;
                 keys_gap = i % 3;
-                keys_line("y", &not_erase[i]);
+                /* y の行末を付ける (y の後の最初の行末は y のものとして読み捨てる) */
+                keys_line(((i >> 1) & 1) ? "y\n" : "y\r\n", &not_erase[i]);
                 CHECK(run() == 1);
                 CHECK_NOTHING_WRITTEN();
                 CHECK(memcmp(keep, disk, sizeof(keep)) == 0);
@@ -1811,6 +1828,57 @@ static void case_erase(void)
                 CHECK(keys_pos == keys_len);
                 if (g) check_disk(PLAN1663_START, PLAN1663_LEN, 16, 63, 16514063);
                 else   check_disk(PLAN817_START, PLAN817_LEN, 8, 17, 409600);
+            }
+        }
+    }
+
+    /* y の後の行末 (Codex 2 回目 P2): 端末が y と一緒に送る CR / LF / CRLF、または
+     * 後から押した Enter は y の行末として 1 回だけ読み捨てる。ERASE + 行末で消去まで
+     * 進む (kbd / serial、鍵の間の「入力なし」0〜2 = もう届いている / 後から届く) */
+    {
+        static const char *const yeol[] = { "y\r\n", "y\r", "y\n", "y" };
+        /* y の行末の後に Enter だけ = ERASE の空行 → 取り消し */
+        static const KeyStr ycancel[] = {
+            KS("y\r\n\r"), KS("y\r\r"), KS("y\n\r"), KS("y\n\n"),
+            KS("y\r\n\n"), KS("y\r\n\r\n"), KS("y\r\r\n")
+        };
+        int ser, gap, y, e;
+        for (ser = 0; ser < 2; ser++) {
+            for (gap = 0; gap < 3; gap++) {
+                for (y = 0; y < 4; y++) {
+                    for (e = 0; e < ERASE_OK; e++) {
+                        setup();
+                        bad_disk(BAD_FOREIGN);
+                        keys_serial = ser;
+                        keys_gap = gap;
+                        keys_line(yeol[y], &erase_ok[e]);
+                        CHECK(run() == 0);
+                        CHECK_STR("Type ERASE:");
+                        CHECK_STR("erased and verified (all zero)");
+                        CHECK_STR("Installation complete");
+                        CHECK_NOSTR("Not erased");
+                        CHECK(keys_pos == keys_len || (gap > 0 && keys_pos == keys_len - 1 &&
+                                                       keybuf[keys_len - 1] == '\n'));
+                    }
+                }
+                for (y = 0; y < (int)(sizeof(ycancel) / sizeof(ycancel[0])); y++) {
+                    setup();
+                    bad_disk(BAD_FOREIGN);
+                    memcpy(keep, disk, sizeof(keep));
+                    keys_serial = ser;
+                    keys_gap = gap;
+                    keys_line("", &ycancel[y]);
+                    CHECK(run() == 1);
+                    CHECK_NOTHING_WRITTEN();
+                    CHECK(memcmp(keep, disk, sizeof(keep)) == 0);
+                    CHECK_STR("Not erased. Nothing was written.");
+                    CHECK_NOSTR("erased and verified");
+                    CHECK_NOSTR("[1/3]");
+                    /* 2 つめの行末で止まり、それ以上は聞かない (末尾の CRLF の LF は、
+                     * 後から届くなら読まれずに残る) */
+                    CHECK(keys_pos == keys_len || (gap > 0 && keys_pos == keys_len - 1 &&
+                                                   keybuf[keys_len - 1] == '\n'));
+                }
             }
         }
     }
@@ -2024,22 +2092,32 @@ static void case_erase_mount(void)
     hd0_mounts = 1; hd0_at_hd0 = 1;
     memcpy(keep, disk, sizeof(keep));
     inj_umount_fail = 1;
+    inj_umount_sync = 1;
     KEYS("yERASE\r");
     CHECK(run() == 1);
     CHECK(rec_wr_n == 0 && fmt_calls == 0);
     CHECK(memcmp(keep, disk, sizeof(keep)) == 0);
     CHECK_STR("Type ERASE:");
     CHECK_STR("umount /hd0 failed");
+    CHECK(umount_syncs == 1);                       /* umount の sync は書いた */
+    CHECK_STR("Nothing was erased or formatted");
+    CHECK_STR("Unmounting may have flushed");
+    CHECK_NOSTR("Nothing was written");
     CHECK_NOSTR("INCOMPLETE");
     CHECK_NOSTR("erased and verified");
     setup();
     bad_disk(BAD_MULTI);
     hd0_mounts = 1; hd0_at_hd0 = 1;
     inj_mount_stays = 1;
+    inj_umount_sync = 1;
     KEYS("yERASE\r");
     CHECK(run() == 1);
     CHECK(rec_wr_n == 0 && fmt_calls == 0);
     CHECK_STR("still mounted");
+    CHECK(umount_syncs == 1);                       /* umount の sync は書いた */
+    CHECK_STR("Nothing was erased or formatted");
+    CHECK_STR("Unmounting may have flushed");
+    CHECK_NOSTR("Nothing was written");
     CHECK_NOSTR("INCOMPLETE");
     CHECK_NOSTR("erased and verified");
 
@@ -2087,6 +2165,7 @@ static void case_erase_mount(void)
     CHECK_NOTHING_WRITTEN();
     CHECK(memcmp(keep, disk, sizeof(keep)) == 0);
     CHECK_STR("/hd0 no longer holds hd0");
+    CHECK_NOSTR("Nothing was erased or formatted");   /* umount の前: 何も書いていない */
     CHECK_NOSTR("erased and verified");
     setup();
     bad_disk(BAD_FOREIGN);
@@ -2098,6 +2177,7 @@ static void case_erase_mount(void)
     CHECK_NOTHING_WRITTEN();
     CHECK(memcmp(keep, disk, sizeof(keep)) == 0);
     CHECK_STR("/hd0 no longer holds hd0");
+    CHECK_NOSTR("Nothing was erased or formatted");   /* umount の前: 何も書いていない */
 }
 
 int main(int argc, char **argv)
