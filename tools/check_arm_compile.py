@@ -92,12 +92,13 @@ DEPFLAGS_DROP = ["-MMD", "-MP"]
 KERNEL_EXTRA_FLAGS = ["-O2", "-D__KERNEL_BUILD__"]
 
 # --- ファイル -> インクルード変数の対応 (build/kernel.mk のルールを写したもの) ---
-# drivers/ の 4 本だけは kernel.mk が個別ルールで INC_KERNEL を渡している
+# drivers/ の 5 本だけは kernel.mk が個別ルールで INC_KERNEL を渡している
 # (idt.h / vfs.h / cpu_calibrate.h を見るため)。
 DRIVERS_INC_KERNEL = [
     "drivers/mouse.c",
     "drivers/loop_dev.c",
     "drivers/ne2000.c",
+    "drivers/atapi.c",
     "drivers/lgy98.c",
 ]
 

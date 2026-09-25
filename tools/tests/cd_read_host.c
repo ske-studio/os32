@@ -74,9 +74,6 @@ void kprintf(u8 attr, const char *fmt, ...)
 #include "../../drivers/atapi.c"
 #include "../../fs/iso9660.c"
 
-/* atapi.h が写した塊の上限は、実物の cpu_delay_us の上限を超えない */
-typedef char atapi_delay_chunk_fits[(ATAPI_DELAY_CHUNK_US <= CPU_DELAY_US_MAX) ? 1 : -1];
-
 #define CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #x); exit(1); \
 } } while (0)

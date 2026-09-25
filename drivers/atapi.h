@@ -50,21 +50,16 @@
 
 /* READ CAPACITY の出し直し: UNIT ATTENTION は REQUEST SENSE で消して、
  * NOT READY (3Ah 以外) は ATAPI_READY_WAIT_US 待って、この回数まで。
- * 待ちの合計は最大 20 × 250ms = 5 秒 — トレイを閉じた直後の becoming ready
- * (2〜5 秒) を待ちきる長さ。待ちは atapi_delay_us が ATAPI_DELAY_CHUNK_US
- * (cpu_delay_us の上限 100ms) 以下の塊に分けて回す */
+ * 待ちの合計は 1 装置あたり最大 20 × 250ms = 5 秒 — トレイを閉じた直後の
+ * becoming ready (2〜5 秒) を待ちきる長さ。atapi_init は装置ごとに待つので、
+ * 装置が 2 台なら最大 10 秒。待ちは atapi_delay_us が CPU_DELAY_US_MAX
+ * (kernel/cpu_calibrate.h、cpu_delay_us の上限 100ms) 以下の塊に分けて回す */
 #define ATAPI_READY_RETRIES     20
 #define ATAPI_READY_WAIT_US     250000UL
 
 /* READ(10) が UNIT ATTENTION で落ちたときの出し直しの回数 (1 回目に加えて)。
  * リセットと媒体交換など、UA を複数積む装置がある */
 #define ATAPI_UA_RETRIES        3
-
-/* cpu_delay_us を 1 回に呼ぶ長さの上限 (µs)。kernel/cpu_calibrate.h の
- * CPU_DELAY_US_MAX (100ms、それより長い指定は丸められる) 以下であること —
- * drivers/ はカーネルヘッダを見ないので値を写し、ホスト試験 (cd_read_host.c) が
- * 両者を比べる */
-#define ATAPI_DELAY_CHUNK_US    100000UL
 
 /* SRST を立てておく長さ (ALT_STATUS の空読みの回数)。規定は 5µs 以上 */
 #define ATAPI_SRST_HOLD_LOOP    50000
@@ -140,7 +135,7 @@ int atapi_read_capacity(AtapiCapacity *cap);
  * 連続する count セクタを ATAPI_READ_MAX_SECTORS ずつの READ(10) で読む。
  * 複数セクタの READ(10) が失敗したら、その範囲だけ 1 セクタずつ読み直す。
  * UNIT ATTENTION (媒体の交換の後の最初のコマンド) を受けたら媒体の世代を
- * 進めて同じコマンドを 1 回だけ出し直す。 */
+ * 進めて同じコマンドを ATAPI_UA_RETRIES (3) 回まで出し直す。 */
 int atapi_read_sectors(u32 lba, u32 count, void *buf);
 
 /* 媒体の世代。UNIT ATTENTION / NOT READY を見るたびに進む。上の層 (iso9660)

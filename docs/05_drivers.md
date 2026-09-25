@@ -205,7 +205,7 @@ IDEセカンダリバンクに接続されたATAPI CD-ROMデバイスをPIOモ�
 | `atapi_init()` | CD-ROM検出 (セカンダリバンクのATAPIシグネチャ確認) |
 | `atapi_present()` | CD-ROMドライブ存在チェック |
 | `atapi_test_unit_ready()` | メディア挿入確認 |
-| `atapi_read_capacity(cap)` | メディア容量取得 (AtapiCapacity構造体)。UNIT ATTENTION は REQUEST SENSE で消して出し直す、NOT READY は ASC 3Ah (媒体なし) だけ `ATAPI_ERR_NO_MEDIA` で確定し、他は 250ms 置いて `ATAPI_READY_RETRIES` (20) まで出し直す (待ちの合計は最大 5 秒 — トレイを閉じた直後の準備中 2〜5 秒を待ちきる。`cpu_delay_us` は 1 回 100ms (`CPU_DELAY_US_MAX`) で丸めるので、`atapi_delay_us` が 100ms 以下の塊に分けて回す) |
+| `atapi_read_capacity(cap)` | メディア容量取得 (AtapiCapacity構造体)。UNIT ATTENTION は REQUEST SENSE で消して出し直す、NOT READY は ASC 3Ah (媒体なし) だけ `ATAPI_ERR_NO_MEDIA` で確定し、他は 250ms 置いて `ATAPI_READY_RETRIES` (20) まで出し直す (待ちの合計は 1 装置あたり最大 5 秒 — トレイを閉じた直後の準備中 2〜5 秒を待ちきる。装置が 2 台なら `atapi_init` で最大 10 秒。`cpu_delay_us` は 1 回 100ms (`CPU_DELAY_US_MAX`) で丸めるので、`atapi_delay_us` が 100ms 以下の塊に分けて回す) |
 | `atapi_read_sectors(lba, count, buf)` | セクタ読み出し (2048B/セクタ, LBA指定)。連続する count セクタを `ATAPI_READ_MAX_SECTORS` (既定 16 = 32KB) ずつの READ(10) で読む。複数セクタが失敗したらその範囲を 1 セクタずつ読み直し、1 セクタでも落ちればそこで失敗 |
 | `atapi_media_gen()` | 媒体の世代。エラーレジスタのセンスキーが UNIT ATTENTION (6) / NOT READY (2) のたびに進む。READ(10) の UNIT ATTENTION は `ATAPI_UA_RETRIES` (3) 回まで出し直す (UA を複数積む装置がある) |
 | `atapi_get_stats(out)` | READ(10) の数・セクタ数・1 セクタずつへ落ちた数・DEVICE RESET / SRST の数・容量確認の出し直しの数 |
