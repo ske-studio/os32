@@ -388,15 +388,22 @@ static void case_plan(void)
 #define FK_MAX   8
 #define FK_ERR_IO (-7)
 
-typedef struct { char path[40]; int isdir; char data[64]; u32 len; int used; } FkNode;
+/* 名前 (エントリ) と実体 (inode) を分けて持つ — ext2 の rename は新名を載せて
+ * から旧名を消すので、途中で落ちると 2 つの名前が同じ inode を指す。その
+ * 状態を作って「次の起動」を回すため。 */
+typedef struct { char path[40]; int ino; int used; } FkEnt;
+typedef struct { char data[64]; u32 len; int isdir; int used; } FkIno;
 
-static FkNode fk[FK_MAX];
-static char  fk_log[512];
-static int   fk_fat;          /* 1 = FAT: rename は宛先があると EXIST、write はバイト数 */
+static FkEnt  fk[FK_MAX];
+static FkIno  fki[FK_MAX];
+static char   fk_log[512];
+static int    fk_fat;             /* 1 = FAT: rename は宛先があると EXIST、write はバイト数 */
 static const char *fk_fail_op;    /* この名前の操作で fk_fail_rc を返す */
 static const char *fk_fail_path;  /* (任意) このパスのときだけ */
-static int   fk_fail_rc;
-static int   fk_short;        /* FAT: write が 1 バイト少なく返す (ディスク満杯) */
+static int    fk_fail_rc;
+static int    fk_short;           /* FAT: write が 1 バイト少なく返す (ディスク満杯) */
+static int    fk_rename_n;        /* rename を呼んだ回数 */
+static int    fk_rename_after_link; /* ext2: この回の rename が新名を載せた後 (旧名を消す前) に落ちる */
 
 #define P_LOG  "/var/log/boot.log"
 #define P_NEW  "/var/log/boot.new"
@@ -406,34 +413,67 @@ static int   fk_short;        /* FAT: write が 1 バイト少なく返す (デ�
 static void fk_reset(int fat)
 {
     memset(fk, 0, sizeof(fk));
+    memset(fki, 0, sizeof(fki));
     fk_log[0] = '\0';
     fk_fat = fat;
     fk_fail_op = 0;
     fk_fail_path = 0;
     fk_fail_rc = 0;
     fk_short = 0;
+    fk_rename_n = 0;
+    fk_rename_after_link = 0;
 }
 
-static FkNode *fk_find(const char *p)
+static FkEnt *fk_find(const char *p)
 {
     int i;
     for (i = 0; i < FK_MAX; i++) if (fk[i].used && strcmp(fk[i].path, p) == 0) return &fk[i];
     return 0;
 }
 
-static FkNode *fk_add(const char *p, int isdir, const char *data)
+static int fk_new_ino(int isdir, const char *data)
+{
+    int i;
+    for (i = 0; i < FK_MAX; i++) {
+        if (!fki[i].used) {
+            fki[i].used = 1;
+            fki[i].isdir = isdir;
+            fki[i].data[0] = '\0';
+            fki[i].len = 0;
+            if (data) { strcpy(fki[i].data, data); fki[i].len = (u32)strlen(data); }
+            return i;
+        }
+    }
+    return -1;
+}
+
+static FkEnt *fk_link(const char *p, int ino)
 {
     int i;
     for (i = 0; i < FK_MAX; i++) {
         if (!fk[i].used) {
             fk[i].used = 1;
             strcpy(fk[i].path, p);
-            fk[i].isdir = isdir;
-            if (data) { strcpy(fk[i].data, data); fk[i].len = (u32)strlen(data); }
+            fk[i].ino = ino;
             return &fk[i];
         }
     }
     return 0;
+}
+
+static FkEnt *fk_add(const char *p, int isdir, const char *data)
+{
+    return fk_link(p, fk_new_ino(isdir, data));
+}
+
+/* 名前を消す。他に名前が無ければ inode も解放 (ext2_unlink は links_count が
+ * 0 になったときだけ inode を返す) */
+static void fk_unlink(FkEnt *e)
+{
+    int i, ino = e->ino;
+    e->used = 0;
+    for (i = 0; i < FK_MAX; i++) if (fk[i].used && fk[i].ino == ino) return;
+    fki[ino].used = 0;
 }
 
 /* 既定の /var /var/log と、指定の中身のファイル */
@@ -465,38 +505,49 @@ static int fk_mkdir(const char *p)
 
 static int fk_rm(const char *p)
 {
-    FkNode *n;
+    FkEnt *n;
     if (fk_logop("rm", p)) return fk_fail_rc;
     n = fk_find(p);
     if (!n) return OS32_ERR_NOTFOUND;
-    n->used = 0;
+    fk_unlink(n);
     return 0;
 }
 
 static int fk_rename(const char *a, const char *b)
 {
-    FkNode *n, *d;
+    FkEnt *n, *d;
+    fk_rename_n++;
     if (fk_logop("rename", a)) return fk_fail_rc;
     n = fk_find(a);
     if (!n) return OS32_ERR_NOTFOUND;
     d = fk_find(b);
-    if (d) {
-        if (fk_fat) return OS32_ERR_EXIST;   /* FatFs f_rename は置き換えない */
-        d->used = 0;                          /* ext2_rename は宛先を消して置く */
+    if (fk_fat) {
+        if (d) return OS32_ERR_EXIST;         /* FatFs f_rename は置き換えない */
+        strcpy(n->path, b);
+        return 0;
     }
-    strcpy(n->path, b);
+    /* ext2_rename (fs/ext2_dir.c): 宛先があれば置き換え、無ければ新名を
+     * 載せてから旧名を消す。fk_rename_after_link の回は新名を載せた後で
+     * 落ち、2 つの名前が同じ inode を指したまま残る。 */
+    if (d) fk_unlink(d);
+    fk_link(b, n->ino);
+    if (fk_rename_after_link == fk_rename_n) return FK_ERR_IO;
+    n->used = 0;
     return 0;
 }
 
-/* 実物と同じ約束: 開いた時点で切り詰め (FA_CREATE_ALWAYS / ext2 の上書き)、
- * 失敗はその後に起きる — 「切り詰めた後の失敗」で中身は空になる。
- * 戻りは ext2 が 0、FAT が書いたバイト数 (fk_short なら 1 少ない = 満杯)。 */
+/* 実物と同じ約束: 名前があればその inode を切り詰めて書く (ext2 の上書き /
+ * FA_CREATE_ALWAYS)、無ければ新しい inode。失敗は切り詰めた後に起きる —
+ * 「切り詰めた後の失敗」で中身は空になる。戻りは ext2 が 0、FAT が書いた
+ * バイト数 (fk_short なら 1 少ない = 満杯)。 */
 static int fk_write(const char *p, const void *data, u32 size)
 {
-    FkNode *n;
+    FkEnt *e;
+    FkIno *n;
     int fail = fk_logop("write", p);
-    n = fk_find(p);
-    if (!n) n = fk_add(p, 0, 0);
+    e = fk_find(p);
+    if (!e) e = fk_add(p, 0, 0);
+    n = &fki[e->ino];
     n->data[0] = '\0';
     n->len = 0;
     if (fail) return fk_fail_rc;
@@ -518,11 +569,17 @@ static const BootlogFsOps fk_ops = { fk_mkdir, fk_rm, fk_rename, fk_write, fk_sy
 
 static int fk_has(const char *p, const char *content)
 {
-    FkNode *n = fk_find(p);
-    return n && strcmp(n->data, content) == 0;
+    FkEnt *e = fk_find(p);
+    return e && strcmp(fki[e->ino].data, content) == 0;
 }
 
 static int fk_absent(const char *p) { return fk_find(p) == 0; }
+
+static int fk_same_ino(const char *a, const char *b)
+{
+    FkEnt *x = fk_find(a), *y = fk_find(b);
+    return x && y && x->ino == y->ino;
+}
 
 static void case_save(void)
 {
@@ -532,9 +589,9 @@ static void case_save(void)
     fk_reset(0);
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
     CHECK(st == BOOTLOG_ST_OK && rc == 0, "8a 初回は全段通る (EXIST / NOTFOUND は成功)");
-    CHECK(strcmp(fk_log, "mkdir:/var;mkdir:/var/log;write:" P_NEW ";rm:" P_OLD ";"
+    CHECK(strcmp(fk_log, "mkdir:/var;mkdir:/var/log;rm:" P_NEW ";write:" P_NEW ";"
                          "rename:" P_LOG ";rename:" P_NEW ";sync;") == 0,
-          "8b 順序: mkdir → mkdir → write boot.new → rm .1 → boot.log→.1 → boot.new→boot.log → sync");
+          "8b 順序: mkdir → mkdir → rm boot.new → write boot.new → boot.log→.1 → boot.new→boot.log → sync");
     CHECK(fk_has(P_LOG, "NEW") && fk_absent(P_NEW), "8c boot.log に今回の中身、boot.new は残らない");
 
     /* b. 前々回と前回がある ext2 */
@@ -543,12 +600,15 @@ static void case_save(void)
     CHECK(st == BOOTLOG_ST_OK, "8d 2 回目以降も通る");
     CHECK(fk_has(P_LOG, "NEW") && fk_has(P_OLD, "PREV") && fk_absent(P_NEW),
           "8e 前回分は .1 へ、前々回は消える");
+    CHECK(strstr(fk_log, "rm:" P_OLD) == 0, "8e-2 ext2 の rename は宛先を置き換えるので .1 は消さない");
 
     /* c. FAT: rename は宛先があると断るので、先に消していないと回らない */
     fk_setup(1, "PREV", "OLDER", 0);
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_FAT, "NEW", 3, &rc);
     CHECK(st == BOOTLOG_ST_OK && fk_has(P_OLD8, "PREV") && fk_has(P_LOG, "NEW") &&
           fk_absent(P_NEW), "8f FAT は bootlog.1 へ回して書く (write はバイト数で成功)");
+    CHECK(strstr(fk_log, "rename:" P_LOG ";rm:" P_OLD8 ";rename:" P_LOG ";") != 0,
+          "8f-2 FAT は rename が EXIST で断るので .1 を消してもう一度");
 
     /* d. /var が作れない → 書かずに止める */
     fk_reset(0);
@@ -569,24 +629,40 @@ static void case_save(void)
     CHECK(strstr(fk_log, "write:" P_NEW ";rm:" P_NEW ";") != 0 && fk_absent(P_NEW),
           "8k 途中で切れた boot.new は消す (成否は問わない)");
 
-    /* f. 前回分を消せない → 止める。boot.log は残り、今回分は boot.new */
-    fk_setup(0, "PREV", "OLDER", 0);
-    fk_fail_op = "rm"; fk_fail_path = P_OLD; fk_fail_rc = FK_ERR_IO;
+    /* e-2. 残っていた boot.new を消せない → 書かずに止める (既存 inode に書かない) */
+    fk_setup(0, "PREV", "OLDER", "STALE");
+    fk_fail_op = "rm"; fk_fail_path = P_NEW; fk_fail_rc = FK_ERR_IO;
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
-    CHECK(st == BOOTLOG_ST_RM_OLD && rc == FK_ERR_IO, "8l rm の失敗は RM_OLD");
-    CHECK(strstr(fk_log, "rename") == 0 && strstr(fk_log, "sync") == 0,
-          "8m rm が落ちたら付け替えない");
-    CHECK(fk_has(P_LOG, "PREV") && fk_has(P_OLD, "OLDER") && fk_has(P_NEW, "NEW"),
+    CHECK(st == BOOTLOG_ST_RM_NEW && rc == FK_ERR_IO && strstr(fk_log, "write") == 0,
+          "8k-2 残っていた boot.new を消せなければ RM_NEW で止め、書かない");
+    CHECK(fk_has(P_LOG, "PREV") && fk_has(P_OLD, "OLDER") && fk_has(P_NEW, "STALE"),
+          "8k-3 何も動かない");
+
+    /* f. FAT で前回分を消せない → 止める。boot.log は残り、今回分は boot.new */
+    fk_setup(1, "PREV", "OLDER", 0);
+    fk_fail_op = "rm"; fk_fail_path = P_OLD8; fk_fail_rc = FK_ERR_IO;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_FAT, "NEW", 3, &rc);
+    CHECK(st == BOOTLOG_ST_RM_OLD && rc == FK_ERR_IO, "8l rm .1 の失敗は RM_OLD");
+    CHECK(strstr(fk_log, "rename:" P_NEW) == 0 && strstr(fk_log, "sync") == 0,
+          "8m rm が落ちたら公開しない");
+    CHECK(fk_has(P_LOG, "PREV") && fk_has(P_OLD8, "OLDER") && fk_has(P_NEW, "NEW"),
           "8n boot.log を上書きせず、今回分は boot.new に残す");
+
+    /* f-2. FAT で 2 度目の rename が落ちる */
+    fk_setup(1, "PREV", "OLDER", 0);
+    fk_fail_op = "rename"; fk_fail_path = P_LOG; fk_fail_rc = FK_ERR_IO;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_FAT, "NEW", 3, &rc);
+    CHECK(st == BOOTLOG_ST_ROTATE && rc == FK_ERR_IO && fk_has(P_LOG, "PREV") && fk_has(P_NEW, "NEW"),
+          "8n-2 FAT の付け替えの失敗も ROTATE、boot.log は残る");
 
     /* g. 付け替え (boot.log → .1) が落ちる → boot.log を残す */
     fk_setup(0, "PREV", "OLDER", 0);
     fk_fail_op = "rename"; fk_fail_path = P_LOG; fk_fail_rc = FK_ERR_IO;
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
     CHECK(st == BOOTLOG_ST_ROTATE && rc == FK_ERR_IO, "8o boot.log → .1 の失敗は ROTATE");
-    CHECK(fk_has(P_LOG, "PREV") && fk_has(P_NEW, "NEW") && fk_absent(P_OLD) &&
+    CHECK(fk_has(P_LOG, "PREV") && fk_has(P_NEW, "NEW") && fk_has(P_OLD, "OLDER") &&
           strstr(fk_log, "rename:" P_NEW) == 0 && strstr(fk_log, "sync") == 0,
-          "8p boot.log は残り、今回分は boot.new、公開も sync もしない");
+          "8p boot.log も .1 も残り、今回分は boot.new、公開も sync もしない");
 
     /* h. 公開 (boot.new → boot.log) が落ちる → 前回分は .1、今回分は boot.new */
     fk_setup(0, "PREV", "OLDER", 0);
@@ -595,6 +671,17 @@ static void case_save(void)
     CHECK(st == BOOTLOG_ST_PUBLISH && rc == FK_ERR_IO, "8q boot.new → boot.log の失敗は PUBLISH");
     CHECK(fk_has(P_OLD, "PREV") && fk_has(P_NEW, "NEW") && fk_absent(P_LOG) &&
           strstr(fk_log, "sync") == 0, "8r どのログも失わない (前回分は .1、今回分は boot.new)");
+
+    /* h-2. boot.log が無い (前回の公開が落ちた) → .1 には触らず今回分を公開 */
+    fk_setup(0, 0, "ONLY", "LEFT");
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "NEW") && fk_has(P_OLD, "ONLY") && fk_absent(P_NEW),
+          "8r-2 boot.log が無ければ唯一の旧世代 .1 を残して今回分を公開する");
+    CHECK(strstr(fk_log, "rm:" P_OLD) == 0, "8r-3 そのとき .1 は消さない");
+    fk_setup(1, 0, "ONLY", 0);
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_FAT, "NEW", 3, &rc);
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "NEW") && fk_has(P_OLD8, "ONLY") &&
+          strstr(fk_log, "rm:" P_OLD8) == 0, "8r-4 FAT でも同じ");
 
     /* i. FAT で書いた量が足りない (満杯) */
     fk_setup(1, "PREV", 0, 0);
@@ -614,7 +701,8 @@ static void case_save(void)
     fk_setup(0, "PREV", 0, "STALE");
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "NEW", 3, &rc);
     CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "NEW") && fk_has(P_OLD, "PREV") &&
-          fk_absent(P_NEW), "8v 残っていた boot.new は今回分で上書きされ、公開後に残らない");
+          fk_absent(P_NEW), "8v 残っていた boot.new は先に消され、公開後に残らない");
+    CHECK(strstr(fk_log, "rm:" P_NEW ";write:" P_NEW ";") != 0, "8v-2 消すのは書く前");
     fk_setup(1, "PREV", 0, "STALE");
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_FAT, "NEW", 3, &rc);
     CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "NEW") && fk_absent(P_NEW),
@@ -628,6 +716,7 @@ static void case_save(void)
     /* m. 段の名前 */
     CHECK(strcmp(bootlog_stage_name(BOOTLOG_ST_ROTATE), "rotate") == 0 &&
           strcmp(bootlog_stage_name(BOOTLOG_ST_PUBLISH), "publish") == 0 &&
+          strcmp(bootlog_stage_name(BOOTLOG_ST_RM_NEW), "rm /var/log/boot.new") == 0 &&
           strcmp(bootlog_stage_name(BOOTLOG_ST_WRITE), "write /var/log/boot.new") == 0 &&
           strcmp(bootlog_stage_name(BOOTLOG_ST_MKDIR_LOG), "mkdir /var/log") == 0 &&
           strcmp(bootlog_stage_name(99), "?") == 0, "8y 段の名前");
@@ -667,12 +756,12 @@ static void case_reboots(void)
     CHECK(st == BOOTLOG_ST_WRITE && fk_has(P_LOG, "B1") && fk_absent(P_OLD) && fk_absent(P_NEW),
           "10b 起動 2 (write 失敗): 唯一の旧ログ B1 はそのまま");
 
-    /* 起動 3: .1 が消せない → B1 は残り、B3 は boot.new */
+    /* 起動 3: 付け替え (boot.log → .1) が落ちる → B1 は残り、B3 は boot.new */
     fk_log[0] = '\0';
-    fk_fail_op = "rm"; fk_fail_path = P_OLD; fk_fail_rc = FK_ERR_IO;
+    fk_fail_op = "rename"; fk_fail_path = P_LOG; fk_fail_rc = FK_ERR_IO;
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B3", 2, &rc);
-    CHECK(st == BOOTLOG_ST_RM_OLD && fk_has(P_LOG, "B1") && fk_has(P_NEW, "B3"),
-          "10c 起動 3 (rm 失敗): B1 は残り、B3 は boot.new");
+    CHECK(st == BOOTLOG_ST_ROTATE && fk_has(P_LOG, "B1") && fk_has(P_NEW, "B3") && fk_absent(P_OLD),
+          "10c 起動 3 (付け替え失敗): B1 は残り、B3 は boot.new");
 
     /* 起動 4: 公開が落ちる → B1 は .1 へ、B4 は boot.new (B3 は上書きされた) */
     fk_log[0] = '\0';
@@ -681,16 +770,14 @@ static void case_reboots(void)
     CHECK(st == BOOTLOG_ST_PUBLISH && fk_has(P_OLD, "B1") && fk_has(P_NEW, "B4") && fk_absent(P_LOG),
           "10d 起動 4 (公開失敗): B1 は .1、B4 は boot.new、boot.log は無い");
 
-    /* 起動 5: .1 だけが残っている状態から正常に保存 → B5 が boot.log。
-     * .1 (B1) は今回分が boot.new に**書けてから**消えるので、書けなかった
-     * ときに (起動 2 のように) 唯一のログを先に失うことはない */
+    /* 起動 5: .1 だけが残っている状態から正常に保存 → B5 が boot.log、
+     * boot.log が無かったので唯一の旧世代 B1 (.1) はそのまま */
     fk_log[0] = '\0';
     fk_fail_op = 0; fk_fail_path = 0;
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B5", 2, &rc);
-    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B5") && fk_absent(P_OLD) && fk_absent(P_NEW),
-          "10e 起動 5 (正常): B5 が boot.log、B1 (.1) は入れ替わって消える");
-    CHECK(strstr(fk_log, "write:" P_NEW ";rm:" P_OLD ";") != 0,
-          "10f .1 を消すのは今回分を書けた後");
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B5") && fk_has(P_OLD, "B1") && fk_absent(P_NEW),
+          "10e 起動 5 (正常): B5 が boot.log、B1 (.1) は残る");
+    CHECK(strstr(fk_log, "rm:" P_OLD) == 0, "10f boot.log が無かったので .1 には触らない");
 
     /* 起動 6: .1 だけの状態で write が落ちる → .1 は残る */
     fk_setup(0, 0, "ONLY", 0);
@@ -702,9 +789,54 @@ static void case_reboots(void)
     /* 起動 7: 正常 → 2 世代 */
     fk_fail_op = 0;
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B7", 2, &rc);
-    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B7") && fk_absent(P_OLD), "10h 続く正常な起動で boot.log");
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B7") && fk_has(P_OLD, "ONLY"), "10h 続く正常な起動で boot.log、.1 は残る");
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B8", 2, &rc);
-    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B8") && fk_has(P_OLD, "B7"), "10i さらに 1 回で 2 世代");
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B8") && fk_has(P_OLD, "B7"), "10i さらに 1 回で 2 世代 (ONLY は入れ替わる)");
+}
+
+/* ------------------------------------------------------------------------ */
+/*  11. ext2 の rename が新名を載せた後で落ちる (2 つの名前が同じ inode)      */
+/* ------------------------------------------------------------------------ */
+static void case_hardlink(void)
+{
+    int st, rc;
+
+    /* 起動 A: 公開 (boot.new → boot.log、この手順で 2 回目の rename) が旧名の
+     * 削除で落ちる。fs/ext2_dir.c の順序 (links +1 → 新名を載せる → 旧名を
+     * 消す) では boot.log と boot.new が同じ inode を指したまま残る */
+    fk_setup(0, "PREV", 0, 0);
+    fk_rename_after_link = 2;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "A", 1, &rc);
+    CHECK(st == BOOTLOG_ST_PUBLISH && rc == FK_ERR_IO, "11a 公開が旧名の削除で落ちる");
+    CHECK(fk_same_ino(P_LOG, P_NEW) && fk_has(P_LOG, "A") && fk_has(P_OLD, "PREV"),
+          "11b boot.log と boot.new が同じ inode (中身は A)、.1 は PREV");
+
+    /* 起動 B: そのまま保存。boot.new を先に消す (名前だけ消え、inode は
+     * boot.log が持つ) → 新しい inode に書く → boot.log (A) を .1 へ → 公開 */
+    fk_log[0] = '\0';
+    fk_rename_n = 0;
+    fk_rename_after_link = 0;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B", 1, &rc);
+    CHECK(st == BOOTLOG_ST_OK, "11c 次の起動は通る");
+    CHECK(fk_has(P_OLD, "A") && fk_has(P_LOG, "B") && fk_absent(P_NEW),
+          "11d 前回の A は .1 に無傷で残り (共有 inode を切り詰めない)、B が boot.log");
+    CHECK(strstr(fk_log, "rm:" P_NEW ";write:" P_NEW ";") != 0, "11e boot.new は書く前に消す");
+    CHECK(!fk_same_ino(P_LOG, P_OLD), "11f boot.log と .1 は別の inode");
+
+    /* 起動 A': boot.log → .1 (1 回目の rename) が旧名の削除で落ちる →
+     * boot.log と .1 が同じ inode。次の起動: boot.log は在るので rename が
+     * 置き換え (宛先を消して載せる) → 同じ inode の名前が 1 つ減るだけ */
+    fk_setup(0, "PREV", "OLDER", 0);
+    fk_rename_after_link = 1;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "A", 1, &rc);
+    CHECK(st == BOOTLOG_ST_ROTATE && fk_same_ino(P_LOG, P_OLD) && fk_has(P_NEW, "A"),
+          "11g 付け替えが旧名の削除で落ちると boot.log と .1 が同じ inode、今回分は boot.new");
+    fk_log[0] = '\0';
+    fk_rename_n = 0;
+    fk_rename_after_link = 0;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B", 1, &rc);
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B") && fk_has(P_OLD, "PREV") && fk_absent(P_NEW),
+          "11h 次の起動で B が boot.log、PREV が .1 (どれも切り詰めていない)");
 }
 
 /* /var/log だけが作れない (1 本目の mkdir は通し、2 本目で落とす) */
@@ -753,6 +885,7 @@ int main(int argc, char **argv)
         { "save_mkdir",   case_save_mkdir_log },
         { "write_rc",     case_write_rc },
         { "reboots",      case_reboots },
+        { "hardlink",     case_hardlink },
     };
     unsigned i;
     int ran = 0;

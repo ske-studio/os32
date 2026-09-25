@@ -40,11 +40,12 @@
 #define BOOTLOG_ST_OK         0
 #define BOOTLOG_ST_MKDIR_VAR  1
 #define BOOTLOG_ST_MKDIR_LOG  2
-#define BOOTLOG_ST_WRITE      3     /* boot.new に書く (write + close) */
-#define BOOTLOG_ST_RM_OLD     4     /* .1 を消す */
-#define BOOTLOG_ST_ROTATE     5     /* boot.log → .1 */
-#define BOOTLOG_ST_PUBLISH    6     /* boot.new → boot.log */
-#define BOOTLOG_ST_SYNC       7
+#define BOOTLOG_ST_RM_NEW     3     /* 残っていた boot.new を消す */
+#define BOOTLOG_ST_WRITE      4     /* boot.new に書く (write + close) */
+#define BOOTLOG_ST_RM_OLD     5     /* .1 を消す (FAT で宛先が塞がっていたとき) */
+#define BOOTLOG_ST_ROTATE     6     /* boot.log → .1 */
+#define BOOTLOG_ST_PUBLISH    7     /* boot.new → boot.log */
+#define BOOTLOG_ST_SYNC       8
 
 /* 本物は vfs_mkdir / vfs_rm / vfs_rename / vfs_write / vfs_sync をそのまま
  * 差す (kernel/bootlog_save.c)。戻り値の約束は vfs_* と同じ:
@@ -100,15 +101,21 @@ int bootlog_write_ok(int kind, int rc, u32 len);
 
 /* 書き出しの手順 (既存のログを失わない順):
  *   1. /var, /var/log を作る (EXIST は成功)。作れなければそこで止める
- *   2. data を **boot.new** (一時ファイル、FAT でも 8.3) に書く。書けなければ
+ *   2. 残っている boot.new を消す (NOTFOUND は成功)。消せなければ止める —
+ *      既存の inode に書かない (ext2 の rename は新名を載せてから旧名を消す
+ *      ので、公開が途中で落ちると boot.new と boot.log が同じ inode を指す。
+ *      そこへ書くと boot.log まで切り詰める)
+ *   3. data を **boot.new** (一時ファイル、FAT でも 8.3) に書く。書けなければ
  *      boot.new を消して (成否は問わない) 止める — boot.log と .1 は無傷
- *   3. 前回分 (.1) を消す (NOTFOUND は成功)。落ちたら止める
- *   4. boot.log → .1 (NOTFOUND = 初回は成功)。落ちたら止める
+ *   4. boot.log → .1。NOTFOUND = boot.log が無い (前回の保存が途中で止まった)
+ *      ときは **.1 に触らない** (唯一の旧世代を残す)。EXIST (FatFs は宛先が
+ *      あると断る) なら .1 を消してもう一度。落ちたら止める
  *   5. boot.new → boot.log。落ちたら止める (前回分は .1、今回分は boot.new)
  *   6. sync
- * 3〜5 で止まったときは boot.log を上書きせず、今回分は boot.new に残す。
- * 残った boot.new は次の起動の 2 で上書きされる (誰も読まない。残っている
- * = その起動の保存が世代の更新の途中で止まった、中身は完全な 1 本)。
+ * 4〜5 で止まったときは boot.log を上書きせず、今回分は boot.new に残す。
+ * 残った boot.new は次の起動の 2 で消される (誰も読まない)。残存は「その
+ * 起動の保存が途中で止まった」印だが、3 の後始末も落ちうるので**残存だけでは
+ * 完全な 1 本とは限らない**。
  * 戻りは失敗した段 (BOOTLOG_ST_*)、*fail_rc にその戻り値。 */
 int bootlog_save_with(const BootlogFsOps *ops, int kind,
                       const char *data, u32 len, int *fail_rc);

@@ -539,8 +539,8 @@ static int bl_sync(void) { return fatfs_vfs_sync(&test_ctx); }
 static const BootlogFsOps bl_ops = { bl_mkdir, bl_rm, bl_rename, bl_write, bl_sync };
 
 /* ケース 14: 起動ログの保存で、実物の FAT の close が落ちる。手順は WRITE で
- * 止まり (rc は IO)、世代を動かさない (rename は 0 回)。消すのは途中で
- * 切れた boot.new だけ (unlink 1 回、その名前)。 */
+ * 止まり (rc は IO)、世代を動かさない (rename は 0 回)。unlink は書く前の
+ * boot.new と、途中で切れた boot.new の後始末の 2 回 (どちらもその名前)。 */
 static int case_bootlog_close_fail_keeps_logs(void)
 {
     int st, rc = 0;
@@ -552,10 +552,11 @@ static int case_bootlog_close_fail_keeps_logs(void)
     CHECK(rc == VFS_ERR_IO);
     CHECK(stub_close_calls == 1);
     CHECK(stub_rename_calls == 0);
-    CHECK(stub_unlink_calls == 1);
+    CHECK(stub_unlink_calls == 2);
     CHECK(strcmp(stub_last_path, "0:/var/log/boot.new") == 0);
 
-    /* 対照: close が通れば全段通る — unlink は .1、rename は 2 回 */
+    /* 対照: close が通れば全段通る — unlink は書く前の boot.new だけ (贋物の
+     * f_rename は宛先の有無を見ないので .1 は消さない)、rename は 2 回 */
     reset();
     st = bootlog_save_with(&bl_ops, BOOTLOG_FS_FAT, "LOG\n", 4, &rc);
     CHECK(st == BOOTLOG_ST_OK);

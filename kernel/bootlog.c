@@ -222,6 +222,7 @@ const char *bootlog_stage_name(int stage)
     case BOOTLOG_ST_OK:        return "ok";
     case BOOTLOG_ST_MKDIR_VAR: return "mkdir " SYS_BOOTLOG_VAR_DIR;
     case BOOTLOG_ST_MKDIR_LOG: return "mkdir " SYS_BOOTLOG_DIR;
+    case BOOTLOG_ST_RM_NEW:    return "rm " SYS_BOOTLOG_NEW;
     case BOOTLOG_ST_WRITE:     return "write " SYS_BOOTLOG_NEW;
     case BOOTLOG_ST_RM_OLD:    return "rm old";
     case BOOTLOG_ST_ROTATE:    return "rotate";
@@ -264,11 +265,21 @@ int bootlog_save_with(const BootlogFsOps *ops, int kind,
         return BOOTLOG_ST_MKDIR_LOG;
     }
 
-    /* 2. 今回のログを**まず一時ファイル**へ。既存の boot.log / 前回分には
-     *    まだ触らない — ここで落ちても失うものは無い。残っていた boot.new
-     *    (前回の起動が世代の更新の途中で止まった) はここで上書きされる。
-     *    書けなかった (途中で切れた) 一時ファイルは消しておく (成否は問わ
-     *    ない): 残る boot.new は「完全な 1 本」だけにする。 */
+    /* 2. 残っている boot.new を**消す** (無ければ成功)。書き込みで既存の
+     *    inode を再利用しない — ext2 の rename は新名を載せてから旧名を消す
+     *    (fs/ext2_dir.c) ので、前回の公開が旧名の削除で落ちていると boot.new
+     *    と boot.log が同じ inode を指している。そこへ write すると boot.log
+     *    まで切り詰める。消せなければ (NOTFOUND 以外) ここで止める */
+    rc = ops->rm(SYS_BOOTLOG_NEW);
+    if (rc != 0 && rc != OS32_ERR_NOTFOUND) {
+        if (fail_rc) *fail_rc = rc;
+        return BOOTLOG_ST_RM_NEW;
+    }
+
+    /* 3. 今回のログを**まず一時ファイル**へ。既存の boot.log / 前回分には
+     *    まだ触らない — ここで落ちても失うものは無い。書けなかった (途中で
+     *    切れた) 一時ファイルは消しておく (成否は問わない。消せなければ
+     *    不完全な boot.new が残るので、残存だけでは完了を保証しない) */
     rc = ops->write(SYS_BOOTLOG_NEW, data, len);
     if (!bootlog_write_ok(kind, rc, len)) {
         if (fail_rc) *fail_rc = rc;
@@ -276,16 +287,21 @@ int bootlog_save_with(const BootlogFsOps *ops, int kind,
         return BOOTLOG_ST_WRITE;
     }
 
-    /* 3. 前回分を消す。FatFs の rename は宛先があると断るので先に消す。
-     *    消せなければ世代を動かさない (boot.log は残り、今回分は boot.new) */
-    rc = ops->rm(old);
-    if (rc != 0 && rc != OS32_ERR_NOTFOUND) {
-        if (fail_rc) *fail_rc = rc;
-        return BOOTLOG_ST_RM_OLD;
-    }
-
-    /* 4. 今の boot.log を前回分へ (無ければ初回)。落ちたら boot.log を残す */
+    /* 4. 今の boot.log を前回分へ。rename が boot.log の有無を教える:
+     *      NOTFOUND = boot.log が無い (前回の保存が途中で止まった)。**.1 を
+     *                 消さない** — 唯一の旧世代を残す
+     *      EXIST    = FatFs (f_rename は宛先があると断る)。.1 を消してもう一度
+     *      0        = 付け替えた (ext2 の rename は宛先を置き換える)
+     *    落ちたら boot.log を残して止める */
     rc = ops->rename(SYS_BOOTLOG_FILE, old);
+    if (rc == OS32_ERR_EXIST) {
+        rc = ops->rm(old);
+        if (rc != 0 && rc != OS32_ERR_NOTFOUND) {
+            if (fail_rc) *fail_rc = rc;
+            return BOOTLOG_ST_RM_OLD;
+        }
+        rc = ops->rename(SYS_BOOTLOG_FILE, old);
+    }
     if (rc != 0 && rc != OS32_ERR_NOTFOUND) {
         if (fail_rc) *fail_rc = rc;
         return BOOTLOG_ST_ROTATE;

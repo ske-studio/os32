@@ -71,10 +71,11 @@ rshell が立つ前の kprintf はシリアルにも出ない。カーネルは�
   `# end  kept N bytes  dropped M bytes`。`dropped` が 0 でなければ後ろが切れている。
 - 書き出しに失敗しても起動は続き、画面に `[bootlog] <段> failed rc=…` が 1 行だけ出る
   (その行とシェル起動後の出力はファイルに入らない)。ルートが HostDrv / iso9660 なら書かない。
-- 今回分はまず `/var/log/boot.new` に書き、書けたと確かめてから `.1` を消す → `boot.log` → `.1` →
-  `boot.new` → `boot.log` と回す。途中で落ちてもそこで止め、**既存の `boot.log` は上書きしない**
-  (今回分は `boot.new` に残る)。`boot.new` が残っていたら、その起動の保存が世代の更新の途中で止まった印
-  (次の起動で上書きされる)。
+- 今回分はまず `/var/log/boot.new` に書き (残っていたものは先に消す)、書けたと確かめてから
+  `boot.log` → `.1` → `boot.new` → `boot.log` と回す。`boot.log` が無ければ `.1` には触らない
+  (唯一の旧世代を残す)。途中で落ちてもそこで止め、**既存の `boot.log` は上書きしない** (今回分は
+  `boot.new` に残る)。`boot.new` が残っていたら、その起動の保存が途中で止まった印 (次の起動で消される)。
+  書けなかった後の後始末も落ちうるので、残存だけでは中身が完全とは限らない。
 - **いつの起動のログか**はヘッダの Commit / Image CRC を `ver` と突き合わせて決める。
   実装: `kernel/bootlog.c`、記録: `tools/tests/bootlog_tdd.md`。
 

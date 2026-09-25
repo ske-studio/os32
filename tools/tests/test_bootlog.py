@@ -28,7 +28,7 @@ HARNESS = ROOT / "tools/tests/bootlog_host.c"
 SRC = ROOT / "kernel/bootlog.c"
 
 CASES = ["collect", "overflow", "utf8_latch", "stop", "header", "compose",
-         "plan", "lock", "save", "save_mkdir", "write_rc", "reboots"]
+         "plan", "lock", "save", "save_mkdir", "write_rc", "reboots", "hardlink"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl=", "-DBOOTLOG_NO_IRQ_LOCK"]
@@ -99,18 +99,30 @@ MUTATIONS = [
      "FAT の書いた量の不足を成功と読む"),
     (r"        \(void\)ops->rm\(SYS_BOOTLOG_NEW\);\n", "",
      "途中で切れた boot.new を残す"),
-    (r"    rc = ops->rm\(old\);\n", "    rc = 0;\n",
-     "前回分を消さずに付け替える (FAT の rename が EXIST で落ちる)"),
-    (r"        return BOOTLOG_ST_RM_OLD;\n", "        (void)0;\n",
+    (r"    rc = ops->rm\(SYS_BOOTLOG_NEW\);\n    if \(rc != 0 && rc != OS32_ERR_NOTFOUND\) \{",
+     "    rc = OS32_ERR_NOTFOUND;\n    if (rc != 0 && rc != OS32_ERR_NOTFOUND) {",
+     "残っていた boot.new を消さずに書く (rename が途中で落ちた後の共有 inode を切り詰める)"),
+    (r"        return BOOTLOG_ST_RM_NEW;\n", "        (void)0;\n",
+     "残っていた boot.new を消せなくても書く"),
+    (r"    if \(rc == OS32_ERR_EXIST\) \{\n        rc = ops->rm\(old\);",
+     "    if (rc == OS32_ERR_EXIST || rc == OS32_ERR_NOTFOUND) {\n        rc = ops->rm(old);",
+     "boot.log が無いときも .1 を消す (唯一の旧世代を失う)"),
+    (r"    if \(rc == OS32_ERR_EXIST\) \{\n        rc = ops->rm\(old\);",
+     "    if (0) {\n        rc = ops->rm(old);",
+     "FAT で宛先が塞がっていても .1 を消さない (rename が EXIST で落ちる)"),
+    (r"            return BOOTLOG_ST_RM_OLD;\n", "            (void)0;\n",
      "前回分を消せなくても付け替える"),
+    (r"        rc = ops->rename\(SYS_BOOTLOG_FILE, old\);\n    \}",
+     "        rc = 0;\n    }",
+     ".1 を消した後にもう一度付け替えない (boot.log が残ったまま公開が EXIST で落ちる)"),
     (r"        return BOOTLOG_ST_ROTATE;\n", "        (void)0;\n",
      "boot.log → .1 に失敗しても公開する (boot.log を上書きする)"),
     (r"        return BOOTLOG_ST_PUBLISH;\n", "        (void)0;\n",
      "公開に失敗しても sync して成功にする"),
     (r"    rc = ops->sync\(\);\n", "    rc = 0;\n",
      "sync しない (電源断で消える)"),
-    (r"    rc = ops->rename\(SYS_BOOTLOG_FILE, old\);",
-     "    rc = ops->rename(old, SYS_BOOTLOG_FILE);",
+    (r"    rc = ops->rename\(SYS_BOOTLOG_FILE, old\);\n    if \(rc == OS32_ERR_EXIST\)",
+     "    rc = ops->rename(old, SYS_BOOTLOG_FILE);\n    if (rc == OS32_ERR_EXIST)",
      "付け替えの向きが逆"),
 ]
 
