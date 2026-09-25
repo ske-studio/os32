@@ -124,6 +124,9 @@ MUTATIONS = [
     (r"    rc = ops->rename\(SYS_BOOTLOG_FILE, old\);\n    if \(rc == OS32_ERR_EXIST\)",
      "    rc = ops->rename(old, SYS_BOOTLOG_FILE);\n    if (rc == OS32_ERR_EXIST)",
      "付け替えの向きが逆"),
+    (r"    rc = ops->rename\(SYS_BOOTLOG_NEW, SYS_BOOTLOG_FILE\);",
+     "    (void)ops->rm(SYS_BOOTLOG_FILE);\n    rc = ops->rename(SYS_BOOTLOG_NEW, SYS_BOOTLOG_FILE);",
+     "公開の前に boot.log を消す (付け替えが no-op だった共有 inode の状態で公開が落ちると boot.log を失う)"),
 ]
 
 
@@ -216,13 +219,18 @@ def check_write_contract():
     bad = 0
     ext2 = fn_body((ROOT / "fs/ext2_vfs.c").read_text(encoding="utf-8"), "ext2_vfs_write")
     fat = fn_body((ROOT / "fs/fatfs_vfs.c").read_text(encoding="utf-8"), "fatfs_vfs_write")
-    print("CONTRACT ext2_vfs_write / fatfs_vfs_write", flush=True)
+    print("CONTRACT ext2_vfs_write / fatfs_vfs_write / ext2_rename の同一 inode", flush=True)
     if "return ext2_to_vfs_err(ext2_write(" not in ext2 or \
        "return ext2_to_vfs_err(ext2_create(" not in ext2 or re.search(r"return \(int\)", ext2):
         print("  FAIL ext2 の write_file は成功で VFS_OK (0) を返す形", flush=True)
         bad += 1
     if "return (int)bw;" not in fat:
         print("  FAIL FAT の write_file は書いたバイト数を返す形", flush=True)
+        bad += 1
+    d = (ROOT / "fs/ext2_dir.c").read_text(encoding="utf-8")
+    if not re.search(r"if \(dst_ino == ino\) \{.*?return EXT2_OK;\s*/\*[^*]*ハードリンク同士", d, re.S):
+        print("  FAIL ext2 の rename は元と宛先が同じ inode なら何もせず成功 (偽 FS はこれを写す)",
+              flush=True)
         bad += 1
     if "fr_close = f_close(&fil);" not in fat or \
        "if (fr_close != FR_OK) return ff_to_vfs(fr_close);" not in fat:

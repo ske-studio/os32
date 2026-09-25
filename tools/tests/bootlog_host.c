@@ -526,9 +526,12 @@ static int fk_rename(const char *a, const char *b)
         strcpy(n->path, b);
         return 0;
     }
-    /* ext2_rename (fs/ext2_dir.c): 宛先があれば置き換え、無ければ新名を
-     * 載せてから旧名を消す。fk_rename_after_link の回は新名を載せた後で
-     * 落ち、2 つの名前が同じ inode を指したまま残る。 */
+    /* ext2_rename (fs/ext2_dir.c): 元と宛先が同じ inode (ファイルの
+     * ハードリンク同士) なら何もせず成功し、両名が残る (POSIX どおり)。
+     * 別の inode の宛先があれば置き換え (旧 inode はリンク数が減るだけ)、
+     * 無ければ新名を載せてから旧名を消す。fk_rename_after_link の回は新名を
+     * 載せた後で落ち、2 つの名前が同じ inode を指したまま残る。 */
+    if (d && d->ino == n->ino) return 0;
     if (d) fk_unlink(d);
     fk_link(b, n->ino);
     if (fk_rename_after_link == fk_rename_n) return FK_ERR_IO;
@@ -824,8 +827,10 @@ static void case_hardlink(void)
     CHECK(!fk_same_ino(P_LOG, P_OLD), "11f boot.log と .1 は別の inode");
 
     /* 起動 A': boot.log → .1 (1 回目の rename) が旧名の削除で落ちる →
-     * boot.log と .1 が同じ inode。次の起動: boot.log は在るので rename が
-     * 置き換え (宛先を消して載せる) → 同じ inode の名前が 1 つ減るだけ */
+     * boot.log と .1 が同じ inode。次の起動: boot.log → .1 は同じ inode
+     * 同士なので何もせず成功 (両名が残る、fs/ext2_dir.c)。続く公開
+     * (boot.new → boot.log) が既存の boot.log を置き換える — 旧 inode は
+     * リンク数が 1 減るだけで、.1 の名前で PREV が残る */
     fk_setup(0, "PREV", "OLDER", 0);
     fk_rename_after_link = 1;
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "A", 1, &rc);
@@ -837,6 +842,43 @@ static void case_hardlink(void)
     st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B", 1, &rc);
     CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "B") && fk_has(P_OLD, "PREV") && fk_absent(P_NEW),
           "11h 次の起動で B が boot.log、PREV が .1 (どれも切り詰めていない)");
+    CHECK(strstr(fk_log, "rename:" P_LOG ";rename:" P_NEW ";sync;") != 0 &&
+          strstr(fk_log, "rm:" P_OLD) == 0 && !fk_same_ino(P_LOG, P_OLD),
+          "11h-2 付け替えは no-op の成功、.1 は消さず、公開の置き換えで別の inode になる");
+
+    /* 偽 FS そのものの約束: 同じ inode 同士の rename は何もせず成功 */
+    fk_setup(0, "PREV", 0, 0);
+    fk_link(P_OLD, fk_find(P_LOG)->ino);
+    CHECK(fk_rename(P_LOG, P_OLD) == 0 && fk_same_ino(P_LOG, P_OLD) && fk_has(P_LOG, "PREV"),
+          "11i 同じ inode 同士の rename は両名を残して成功 (ext2_dir.c の no-op)");
+
+    /* boot.log と .1 が同じ inode (PREV)、boot.new (A) も残っている状態から、
+     * 公開 (boot.new → boot.log) が落ちる */
+    fk_setup(0, "PREV", 0, "A");
+    fk_link(P_OLD, fk_find(P_LOG)->ino);
+    fk_fail_op = "rename"; fk_fail_path = P_NEW; fk_fail_rc = FK_ERR_IO;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B", 1, &rc);
+    CHECK(st == BOOTLOG_ST_PUBLISH && rc == FK_ERR_IO, "11j 共有 inode の状態で公開が落ちると PUBLISH");
+    CHECK(fk_has(P_LOG, "PREV") && fk_has(P_OLD, "PREV") && fk_same_ino(P_LOG, P_OLD) &&
+          fk_has(P_NEW, "B") && strstr(fk_log, "sync") == 0,
+          "11k 公開が落ちても boot.log と .1 は同じ inode の PREV のまま残り、今回分 B は boot.new");
+    CHECK(strstr(fk_log, "rm:" P_OLD) == 0 && strstr(fk_log, "rm:" P_LOG) == 0,
+          "11l そのとき boot.log も .1 も消していない");
+
+    /* 続く起動は正常: B は boot.new ごと消え (8v と同じ)、C が boot.log、PREV が .1 */
+    fk_log[0] = '\0';
+    fk_fail_op = 0; fk_fail_path = 0;
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "C", 1, &rc);
+    CHECK(st == BOOTLOG_ST_OK && fk_has(P_LOG, "C") && fk_has(P_OLD, "PREV") && fk_absent(P_NEW) &&
+          !fk_same_ino(P_LOG, P_OLD), "11m 次の正常な起動で C が boot.log、PREV が .1 (別の inode)");
+
+    /* 同じ状態から公開まで通る */
+    fk_setup(0, "PREV", 0, "A");
+    fk_link(P_OLD, fk_find(P_LOG)->ino);
+    st = bootlog_save_with(&fk_ops, BOOTLOG_FS_EXT2, "B", 1, &rc);
+    CHECK(st == BOOTLOG_ST_OK && rc == 0 && fk_has(P_LOG, "B") && fk_has(P_OLD, "PREV") &&
+          fk_absent(P_NEW) && !fk_same_ino(P_LOG, P_OLD),
+          "11n 共有 inode の状態から公開が通れば B が boot.log、PREV が .1 (別の inode)");
 }
 
 /* /var/log だけが作れない (1 本目の mkdir は通し、2 本目で落とす) */
