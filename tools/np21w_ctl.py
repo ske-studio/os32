@@ -50,7 +50,8 @@ fdd --insert は `/api/fdd` の 200 の後、`/api/instance` の fdd[].path に�
 
 cd は動いている NP21/W の IDE の CD-ROM に ISO を出し入れする (`/api/cd`、api_version 3 以上、
 ini は変えない)。ISO は NP21W_DIR 直下の名前、Windows のローカルの絶対パス (`C:\\…`)、
-`/mnt/<x>/…` の WSL パスのどれか (UNC は受けない)。--drive (IDE スロット 1〜4、ini の IDEnTYPE / CDn_FILE の n) を省くと
+`/mnt/<x>/…` の WSL パスのどれか (UNC は受けない)。ISO はローカルの固定ディスクに置く
+(ネットワークドライブの割り当ては NP21/W が 400、ジャンクションは検出しない)。--drive (IDE スロット 1〜4、ini の IDEnTYPE / CDn_FILE の n) を省くと
 NP21/W がいまの CD-ROM 種別の最初のスロットを選ぶ。受理の後、`/api/instance` の ide[] にその媒体が
 現れるまで --ready-wait 秒 (既定 15) 待つ。別の CD が入っていたときは NP21/W が古い媒体を出し、
 新しい媒体を 6 秒 (エミュレーション時間) 後に入れる (`changing`)。
@@ -107,6 +108,8 @@ OLD_FORK = ('NP21/W のフォークが古い (/api/instance が無い)。'
 OLD_FORK_CD = ('NP21/W のフォークが古い (/api/cd が無い、api_version 3 未満)。'
                'np21w-src で make build → NP21/W を止めて make deploy が要る')
 CD_API_VERSION = 3                # NP21/W aidebug_app.h AIDEBUG_APP_API_VERSION (/api/cd)
+# /api/cd の HTTP の待ち。サーバーは最悪 21 秒 (UI の受け取り 5 + 実行待ち 6 + 適用中 10) 待って答える
+CD_POST_TIMEOUT = 25
 
 WIN_SYS = '/mnt/c/Windows/System32'
 TASKKILL = WIN_SYS + '/taskkill.exe'
@@ -1114,10 +1117,20 @@ class Ctl(object):
         if int(inst.get('api_version') or 0) < CD_API_VERSION:
             raise CtlError(OLD_FORK_CD)
         headers = self.token_headers(inst)
-        st, js = self.api('POST', '/api/cd', urllib.parse.urlencode(params), timeout=15,
-                          headers=headers)
+        st, js = self.api('POST', '/api/cd', urllib.parse.urlencode(params),
+                          timeout=CD_POST_TIMEOUT, headers=headers)
         if st == 404 and (js or {}).get('error') == 'unknown endpoint':
             raise CtlError(OLD_FORK_CD)
+        if st == 503 and 'being applied' in (js or {}).get('error', ''):
+            # 適用は始まった (COMMIT の後) が 10 秒で終わらなかった。結果は ide[] で見る
+            slot = drive or next((e.get('slot') for e in inst.get('ide') or []
+                                  if e.get('type') == 'cdrom'), None)
+            self.say('/api/cd: 適用中のまま応答が返った (HTTP 503 being applied) — '
+                     '/api/instance で結果を確かめる')
+            if slot is None:
+                raise CtlError('/api/cd: 適用中のまま応答が返り、どのスロットか分からない '
+                               '(--drive で指定する)')
+            return self.cd_confirm(slot, params.get('path', ''), ready_wait)
         if st != 200 or not js:
             raise CtlError('/api/cd が失敗した (HTTP %s): %s'
                            % (st, (js or {}).get('error', '応答なし')))

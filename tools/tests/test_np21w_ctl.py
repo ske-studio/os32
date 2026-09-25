@@ -234,6 +234,9 @@ class FakeHttp(object):
             return 409, ('{"ok":false,"error":"emulation is paused in the trap '
                          '(breakpoint/step/fault); POST /api/resume first"}')
         if self.cd_status is not None:
+            if self.cd_status[1].startswith('cd request is being applied'):
+                # COMMIT の後に 10 秒で終わらなかった: 操作自体は後で反映される
+                self.cd_status_apply(body)
             return self.cd_status[0], json.dumps({'ok': False, 'error': self.cd_status[1]})
         q = parse_qs(body or '', keep_blank_values=True)
         if 'drive' in q:
@@ -271,6 +274,12 @@ class FakeHttp(object):
             self.ide[slot] = {'type': 'cdrom', 'path': '', 'changing': False, 'next': ''}
             js['state'] = 'empty'
         return 200, json.dumps(js)
+
+    def cd_status_apply(self, body):
+        q = parse_qs(body or '', keep_blank_values=True)
+        slot = int(q['drive'][0]) if 'drive' in q else 3
+        path = q['path'][0] if q['action'][0] == 'insert' else ''
+        self.ide[slot] = {'type': 'cdrom', 'path': path, 'changing': False, 'next': ''}
 
     def request(self, method, path, body=None, timeout=10, headers=None):
         self.calls.append((method, path, body, timeout, dict(headers or {})))
@@ -1251,6 +1260,27 @@ class Cd(Base):
         self.assertIn('ide3 (cdrom) changing (反映は待たない)', self.out.getvalue())
         self.assertEqual(self.fc.now, 0)
 
+    def test_post_timeout_covers_server_worst_case(self):
+        # サーバーは最悪 21 秒 (5 + 6 + 10) 待って答える。それより短く切らない
+        c = self.make(ops=self.ops0)
+        self.assertEqual(self.run_main(c, ['cd', 'os32_install.iso']), 0, self.err.getvalue())
+        self.assertGreaterEqual(self.cd_calls()[0][3], 25)
+
+    def test_being_applied_503_checks_instance(self):
+        # 適用中のまま 503: 失敗と決めつけず /api/instance で結果を見る (drive 省略 = CD の最初)
+        c = self.make(ops=self.ops0, cd_status=(503, 'cd request is being applied but did '
+                                                'not finish in time; see GET /api/instance ide[]'))
+        self.assertEqual(self.run_main(c, ['cd', 'os32_install.iso']), 0, self.err.getvalue())
+        out = self.out.getvalue()
+        self.assertIn('being applied', out)
+        self.assertIn('ide3 (cdrom) ready ' + ISO, out)
+
+    def test_other_503_is_failure(self):
+        c = self.make(ops=self.ops0, cd_status=(503, 'cd request withdrawn: the UI thread did '
+                                                'not get to it in time (nothing was changed)'))
+        self.assertEqual(self.run_main(c, ['cd', 'os32_install.iso']), 1)
+        self.assertIn('nothing was changed', self.err.getvalue())
+
     def test_eject(self):
         c = self.make(ops=self.ops0)
         self.http.ide[3]['path'] = ISO
@@ -1499,8 +1529,8 @@ MUTATIONS = [
      "            wsl = None\n",
      "/api/instance の token_file を使わない"),
     # ---- 2026-09-26 cd (/api/cd) ----
-    ("        st, js = self.api('POST', '/api/cd', urllib.parse.urlencode(params), timeout=15,\n                          headers=headers)",
-     "        st, js = self.api('POST', '/api/cd', urllib.parse.urlencode(params), timeout=15)",
+    ("        st, js = self.api('POST', '/api/cd', urllib.parse.urlencode(params),\n                          timeout=CD_POST_TIMEOUT, headers=headers)",
+     "        st, js = self.api('POST', '/api/cd', urllib.parse.urlencode(params),\n                          timeout=CD_POST_TIMEOUT)",
      "cd にトークンを付けない"),
     ("        if drive is not None:\n            params['drive'] = str(drive)",
      "        params['drive'] = str(drive)",
@@ -1526,6 +1556,12 @@ MUTATIONS = [
     ("    if last.get('_trap'):\n        return 'ブレーク",
      "    if False:\n        return 'ブレーク",
      "media_fresh:false をブレーク中でも「UI スレッドが答えない」と言う (Codex 1 回目 P3)"),
+    ("CD_POST_TIMEOUT = 25\n",
+     "CD_POST_TIMEOUT = 15\n",
+     "/api/cd をサーバーの最悪 21 秒より短く切る (Fable 2 回目 P3-2)"),
+    ("        if st == 503 and 'being applied' in (js or {}).get('error', ''):",
+     "        if False:",
+     "適用中の 503 を失敗と決めつけ、結果を見に行かない (Fable 2 回目 P3-2)"),
     ("                elif s.get('type') == 'cdrom':",
      "                elif False:",
      "status に空の CD ドライブを出さない"),
