@@ -132,7 +132,8 @@ class FakeHttp(object):
                  api_up_after=0, tvram=None, fdd_status=200, token=TOKEN,
                  token_file=None, fdd_delay=2, fdd_accepts=True, paused=None,
                  quit_status=200, quit_error='', latency=0.0, quit_policy=None,
-                 api_version=3, cd_status=None, cd_delay=2, cd_accepts=True):
+                 api_version=3, cd_status=None, cd_delay=2, cd_accepts=True,
+                 trap_after_cd=False):
         self.ops = ops
         self.mode = mode
         self.inst_pid = inst_pid
@@ -169,6 +170,9 @@ class FakeHttp(object):
                     4: {'type': 'none', 'path': ''}}
         self.cd_changed_at = {}
         self.stale_after_cd = None      # /api/cd の後、何回目の instance まで古い快照か
+        # trap_after_cd: 受理の後にブレークで止まる。実サーバーは快照を取り直せず
+        # media_fresh:false (古い快照)、trap_pause は要求の時点の値で true (api_version 3)
+        self.trap_after_cd = trap_after_cd
         self.cd_snapshot = None
         self.cd_posted_at = None
         self.base = 'http://127.0.0.1:8025'
@@ -225,6 +229,10 @@ class FakeHttp(object):
             return 404, '{"ok":false,"error":"unknown endpoint"}'
         if not self._authorized(headers):
             return 401, '{"ok":false,"error":"need the aidebug token"}'
+        if self.paused == 'trap':
+            # aidapp_cd: ブレーク中は受理しない
+            return 409, ('{"ok":false,"error":"emulation is paused in the trap '
+                         '(breakpoint/step/fault); POST /api/resume first"}')
         if self.cd_status is not None:
             return self.cd_status[0], json.dumps({'ok': False, 'error': self.cd_status[1]})
         q = parse_qs(body or '', keep_blank_values=True)
@@ -243,6 +251,8 @@ class FakeHttp(object):
         n = len([c for c in self.calls if c[1] == '/api/instance'])
         self.cd_snapshot = self._ide_json()
         self.cd_posted_at = n
+        if self.trap_after_cd:
+            self.stale_after_cd = 10 ** 6
         js = {'ok': True, 'drive': slot, 'action': q['action'][0], 'ini': 'unchanged'}
         if q['action'][0] == 'insert':
             want = q['path'][0]
@@ -300,6 +310,8 @@ class FakeHttp(object):
                 if n - self.cd_posted_at <= self.stale_after_cd:
                     js['ide'] = self.cd_snapshot
                     js['media_fresh'] = False
+                if self.trap_after_cd:
+                    js['trap_pause'] = True
             if self.token_file is not None:
                 js['token_file'] = self.token_file
                 if not self.token_file:
@@ -1127,13 +1139,25 @@ class Cd(Base):
         self.assertIn('ide3 (cdrom) insert %s 受理 (ready)' % ISO, out)
         self.assertIn('ide3 (cdrom) ready ' + ISO, out)
 
-    def test_insert_with_drive_and_unc_path(self):
-        unc = '\\\\srv\\share\\a.iso'
+    def test_insert_with_drive_and_local_windows_path(self):
+        win = 'D:\\iso\\a.iso'
+        local = os.path.join(self.dir, 'os32_install.iso')
         c = self.make(ops=self.ops0)
-        self.assertEqual(self.run_main(c, ['cd', unc, '--drive', '3']), 0, self.err.getvalue())
+        with mock.patch.object(ctl, 'to_wsl_path',
+                               side_effect=lambda p: local if p == win else None):
+            self.assertEqual(self.run_main(c, ['cd', win, '--drive', '3']), 0,
+                             self.err.getvalue())
         self.assertEqual(parse_qs(self.cd_calls()[0][2]),
-                         {'drive': ['3'], 'action': ['insert'], 'path': [unc]})
-        self.assertIn('ide3 (cdrom) ready ' + unc, self.out.getvalue())
+                         {'drive': ['3'], 'action': ['insert'], 'path': [win]})
+        self.assertIn('ide3 (cdrom) ready ' + win, self.out.getvalue())
+
+    def test_unc_is_refused_before_calling(self):
+        # NP21/W は UNC を 400 で断る (HTTP スレッドの同期 I/O で止まらないため)。ctl も先に断る
+        for unc in ('\\\\srv\\share\\a.iso', '//srv/share/a.iso'):
+            c = self.make(ops=self.ops0)
+            self.assertEqual(self.run_main(c, ['cd', unc]), 2, unc)
+            self.assertIn('UNC', self.err.getvalue())
+            self.assertEqual(self.cd_calls(), [])
 
     def test_image_spec_resolution(self):
         c = self.make(ops=self.ops0)
@@ -1141,8 +1165,8 @@ class Cd(Base):
                          (ISO, os.path.join(self.dir, 'os32_install.iso')))
         self.assertEqual(c.cd_image('/mnt/d/iso/a.iso'), ('D:\\iso\\a.iso', '/mnt/d/iso/a.iso'))
         self.assertEqual(c.cd_image('C:/x/a.iso'), ('C:\\x\\a.iso', '/mnt/c/x/a.iso'))
-        self.assertEqual(c.cd_image('\\\\srv\\a.iso'), ('\\\\srv\\a.iso', None))
-        for bad in ('/home/me/a.iso', 'rel\\a.iso', 'a b.iso', '../a.iso', 'x:a.iso'):
+        for bad in ('/home/me/a.iso', 'rel\\a.iso', 'a b.iso', '../a.iso', 'x:a.iso',
+                    '\\\\srv\\a.iso'):
             with self.assertRaises(ctl.CtlError) as cm:
                 c.cd_image(bad)
             self.assertEqual(cm.exception.code, 2, bad)
@@ -1162,13 +1186,41 @@ class Cd(Base):
         self.assertIn('ide3 (cdrom) ready ' + WIN + '\\other.iso', out)
         self.assertGreater(self.fc.now, 0)
 
-    def test_swap_stuck_while_paused_fails_with_reason(self):
+    def test_trapped_before_post_is_409(self):
+        # 実サーバーはブレーク中の POST を 409 で断る (受理しない)
         c = self.make(ops=self.ops0, paused='trap')
+        self.assertEqual(self.run_main(c, ['cd', 'other.iso']), 1)
+        err = self.err.getvalue()
+        self.assertIn('409', err)
+        self.assertIn('/api/resume', err)
+        self.assertEqual(self.fc.now, 0)
+
+    def test_trapped_after_accept_says_break_not_ui(self):
+        # 受理の後にブレーク: 快照を取り直せず media_fresh:false のまま。
+        # 「UI スレッドが答えない」ではなくブレークと言う
+        c = self.make(ops=self.ops0, trap_after_cd=True)
+        self.http.ide[3]['path'] = ISO
+        self.assertEqual(self.run_main(c, ['cd', 'other.iso']), 1)
+        err = self.err.getvalue()
+        self.assertIn('media_fresh:false', err)
+        self.assertIn('ブレーク', err)
+        self.assertNotIn('UI スレッドが答えない', err)
+        self.assertGreaterEqual(self.fc.now, 15)
+
+    def test_stale_without_pause_says_ui(self):
+        c = self.make(ops=self.ops0)
+        self.http.stale_after_cd = 10 ** 6
+        self.assertEqual(self.run_main(c, ['cd', 'other.iso']), 1)
+        self.assertIn('UI スレッドが答えない', self.err.getvalue())
+
+    def test_swap_stuck_while_user_paused_fails_with_reason(self):
+        # 利用者の一時停止では快照は取れる (fresh) がエミュレーション時間が進まない
+        c = self.make(ops=self.ops0, paused='user')
         self.http.ide[3]['path'] = ISO
         self.assertEqual(self.run_main(c, ['cd', 'other.iso']), 1)
         err = self.err.getvalue()
         self.assertIn('changing', err)
-        self.assertIn('ブレーク', err)
+        self.assertIn('一時停止', err)
         self.assertGreaterEqual(self.fc.now, 15)
 
     def test_swap_not_opened_fails(self):
@@ -1453,7 +1505,7 @@ MUTATIONS = [
     ("        if drive is not None:\n            params['drive'] = str(drive)",
      "        params['drive'] = str(drive)",
      "--drive を省いても drive を送る (NP21/W に CD-ROM の最初のスロットを選ばせない)"),
-    ("            if wsl is not None and not os.path.isfile(wsl):",
+    ("            if not os.path.isfile(wsl):",
      "            if False:",
      "ISO の有無を確かめずに送る"),
     ("            win = to_win_path(image)\n            if win == image:",
@@ -1468,6 +1520,12 @@ MUTATIONS = [
     ("        if last.get('changing'):\n            why =",
      "        if False:\n            why =",
      "cd: 差し替え待ち (changing) と開けない失敗を区別しない"),
+    ("        if win.startswith('\\\\\\\\'):\n            raise CtlError('UNC",
+     "        if False:\n            raise CtlError('UNC",
+     "cd: UNC の ISO を NP21/W へ送る (Codex 1 回目 P2)"),
+    ("    if last.get('_trap'):\n        return 'ブレーク",
+     "    if False:\n        return 'ブレーク",
+     "media_fresh:false をブレーク中でも「UI スレッドが答えない」と言う (Codex 1 回目 P3)"),
     ("                elif s.get('type') == 'cdrom':",
      "                elif False:",
      "status に空の CD ドライブを出さない"),

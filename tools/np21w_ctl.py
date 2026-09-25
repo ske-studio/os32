@@ -49,8 +49,8 @@ fdd --insert は `/api/fdd` の 200 の後、`/api/instance` の fdd[].path に�
 一時停止・背景で停止。空 = NP21/W が受け付けなかった)。
 
 cd は動いている NP21/W の IDE の CD-ROM に ISO を出し入れする (`/api/cd`、api_version 3 以上、
-ini は変えない)。ISO は NP21W_DIR 直下の名前、Windows の絶対パス (`C:\\…`)、`/mnt/<x>/…` の
-WSL パスのどれか。--drive (IDE スロット 1〜4、ini の IDEnTYPE / CDn_FILE の n) を省くと
+ini は変えない)。ISO は NP21W_DIR 直下の名前、Windows のローカルの絶対パス (`C:\\…`)、
+`/mnt/<x>/…` の WSL パスのどれか (UNC は受けない)。--drive (IDE スロット 1〜4、ini の IDEnTYPE / CDn_FILE の n) を省くと
 NP21/W がいまの CD-ROM 種別の最初のスロットを選ぶ。受理の後、`/api/instance` の ide[] にその媒体が
 現れるまで --ready-wait 秒 (既定 15) 待つ。別の CD が入っていたときは NP21/W が古い媒体を出し、
 新しい媒体を 6 秒 (エミュレーション時間) 後に入れる (`changing`)。
@@ -522,6 +522,15 @@ class Http(object):
 # ---------------------------------------------------------------------------
 # 本体
 # ---------------------------------------------------------------------------
+def stale_why(last):
+    """media_fresh:false の理由。/api/instance の trap_pause / user_pause は api_version 3
+    から要求の時点の値 (快照の中ではない) なので、ブレーク中と UI の無応答を分けられる。
+    ブレーク中は NP21/W が快照を取り直せない (エミュレーションスレッドが止まりに来ない)。"""
+    if last.get('_trap'):
+        return 'ブレークで止まっていて NP21/W が媒体の情報を取り直せない (/api/resume)'
+    return 'UI スレッドが答えない'
+
+
 def format_dialog(js):
     """/api/dialog の JSON を 1 段落に。"""
     parts = []
@@ -1044,8 +1053,8 @@ class Ctl(object):
             raise CtlError('fdd%d: /api/instance が %g 秒答えない' % (drive, ready_wait))
         if not last.get('_fresh'):
             raise CtlError('fdd%d: 受理されたが %g 秒のあいだ媒体の情報が更新されず '
-                           '(media_fresh:false — UI スレッドが答えない)、反映を確かめられなかった'
-                           % (drive, ready_wait))
+                           '(media_fresh:false — %s)、反映を確かめられなかった'
+                           % (drive, ready_wait, stale_why(last)))
         if want_path and last.get('pending'):
             why = ('ブレークで止まっている (/api/resume)' if last.get('_trap') else
                    '一時停止中 (/api/resume)' if last.get('_user') else
@@ -1058,8 +1067,10 @@ class Ctl(object):
 
     # -- CD --------------------------------------------------------------------
     def cd_image(self, image):
-        """ISO の指定を (Windows パス, WSL パス | None) に。名前は NP21W_DIR 直下、
-        `/mnt/<x>/…` は Windows のドライブへ、`C:\\…` / `\\\\server\\…` はそのまま。"""
+        """ISO の指定を (Windows パス, WSL パス) に。名前は NP21W_DIR 直下、
+        `/mnt/<x>/…` は Windows のドライブへ、`C:\\…` はそのまま。UNC (`\\\\server\\…`) は
+        受けない — NP21/W は存在の確認を HTTP スレッドで同期にするので、応答しない共有先で
+        aidebug 全体が止まる (np21w-src 02-architecture §18)。ISO はローカルに置く。"""
         if '/' not in image and '\\' not in image and ':' not in image:
             check_name(image, 'ISO')
             return self.paths.win_of(image), self.paths.wsl_of(image)
@@ -1070,6 +1081,8 @@ class Ctl(object):
                                % image, 2)
             return win, image
         win = win_sep(image)
+        if win.startswith('\\\\'):
+            raise CtlError('UNC (\\\\server\\…) の ISO は受けない — ローカルに置く: %s' % image, 2)
         if not is_win_abs(win):
             raise CtlError('ISO は NP21W_DIR 直下の名前か絶対パスで渡す: %r' % image, 2)
         return win, to_wsl_path(win)
@@ -1086,7 +1099,7 @@ class Ctl(object):
             params['drive'] = str(drive)
         if image:
             win, wsl = self.cd_image(image)
-            if wsl is not None and not os.path.isfile(wsl):
+            if not os.path.isfile(wsl):
                 raise CtlError('イメージが無い: %s' % wsl, 2)
             params.update({'action': 'insert', 'path': win})
         else:
@@ -1160,8 +1173,8 @@ class Ctl(object):
             raise CtlError('ide%d: /api/instance が %g 秒答えない' % (slot, ready_wait))
         if not last.get('_fresh'):
             raise CtlError('ide%d: 受理されたが %g 秒のあいだ媒体の情報が更新されず '
-                           '(media_fresh:false — UI スレッドが答えない)、反映を確かめられなかった'
-                           % (slot, ready_wait))
+                           '(media_fresh:false — %s)、反映を確かめられなかった'
+                           % (slot, ready_wait, stale_why(last)))
         if last.get('changing'):
             why = ('ブレークで止まっている (/api/resume)' if last.get('_trap') else
                    '一時停止中 (/api/resume)' if last.get('_user') else
@@ -1267,7 +1280,7 @@ def build_parser():
                    help='/api/instance に反映されるまで待つ秒数 (既定 5、0 = 待たない)')
     p = sub.add_parser('cd', help='CD の出し入れ (/api/cd、ini は変えない)')
     p.add_argument('image', nargs='?',
-                   help='ISO: NP21W_DIR 直下の名前、C:\\… の絶対パス、/mnt/<x>/… のどれか')
+                   help='ISO: NP21W_DIR 直下の名前、C:\\… のローカルの絶対パス、/mnt/<x>/… のどれか (UNC 不可)')
     p.add_argument('--eject', action='store_true')
     p.add_argument('--drive', type=int, default=None,
                    help='IDE スロット 1〜4 (既定: CD-ROM 種別の最初のスロット)')

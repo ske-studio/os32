@@ -725,10 +725,12 @@ python3 tools/np21w_ctl.py status [--ini <name>]         # プロセス・aidebu
   ctl は `/api/instance` の `fdd[].path` に現れるまで待って `ready` と言う。`pending` のまま
   なら理由 (ブレーク中 / 一時停止 / 背景で停止) を出して失敗する。
 - `cd` は ini の `CD3_FILE` が空で毎回空のドライブで起動する (ini の `IDE3TYPE=2` はドライブを作るだけ)
-  ことへの対処で、ini は書き換えない ([D2])。ISO は NP21W_DIR 直下の名前・`C:\…`・`/mnt/<x>/…` のどれか。
+  ことへの対処で、ini は書き換えない ([D2])。ISO は NP21W_DIR 直下の名前・ローカルの `C:\…`・`/mnt/<x>/…` のどれか (UNC は NP21/W の HTTP スレッドを
+  止めうるので受けない)。
   空のドライブへはすぐ入り、別の CD が入っていれば NP21/W が古い媒体を出して 6 秒 (エミュレーション時間)
   後に入れる (`changing`)。ctl は `/api/instance` の `ide[]` に現れるまで待ち (`--ready-wait 15`)、
-  `changing` のままなら理由を出して失敗する。NP21/W 側は api_version 3 (2026-09-26〜) が要る — 古ければ
+  `changing` のままなら理由を出して失敗する。媒体の情報が更新されない (`media_fresh:false`) ときは
+  `trap_pause` で「ブレーク中」と「UI スレッドが答えない」を分けて言う。ブレーク中の `/api/cd` は 409。NP21/W 側は api_version 3 (2026-09-26〜) が要る — 古ければ
   「make deploy が要る」と出す。`status` は空の CD ドライブも `ide3 (cdrom): empty` と出す。
   CD の中身は `np2cfg.idecd` に残るので、別の操作で設定が汚れた状態で `save=1` 終了すると ini に
   残りうる (`stop` は `save=0`)。仕様は `np21w-src/docs/03-api-reference.md` の「POST /api/cd」。
