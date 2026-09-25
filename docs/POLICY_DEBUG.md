@@ -708,13 +708,14 @@ python3 tools/np21w_ctl.py start --ini np21x64w.ini      # プロセス 0 → �
 python3 tools/np21w_ctl.py start --ini np21w-trial-cdinst.ini --fd os32_boot.d88 --wait-ready
 python3 tools/np21w_ctl.py wait-ready                    # /api/tvram に "Waiting for commands" (既定 180 秒)
 python3 tools/np21w_ctl.py fdd --drive 1 --insert os32_boot.d88   # FD の出し入れ (--eject)。ini は変えない。/api/instance に反映されるまで待つ (--ready-wait 5)
+python3 tools/np21w_ctl.py cd os32_install.iso           # 動いている NP21/W の CD-ROM に ISO を入れる (/api/cd、ini は変えない)。--drive N (IDE スロット、既定は CD-ROM の最初)、cd --eject で取り出し
 python3 tools/np21w_ctl.py status [--ini <name>]         # プロセス・aidebug (instance)・ダイアログ・媒体の free/locked/missing
 ```
 
-- **トークン**: `/api/quit` と `/api/fdd` は NP21/W が起動時に exe の隣へ書く `np21w_aidebug_<port>.token`
+- **トークン**: `/api/quit`・`/api/fdd`・`/api/cd` は NP21/W が起動時に exe の隣へ書く `np21w_aidebug_<port>.token`
   (利用者だけが読める ACL) の中身を `X-Aidebug-Token` で要求する。ctl は `NP21W_AIDEBUG_TOKEN_FILE`
   (WSL パス) → `/api/instance` の `token_file` → `NP21W_DIR/np21w_aidebug_8025.token` の順で読む。
-  中身は出力しない ([D3])。読めなければ `stop` は exe 一致の強制終了に落ち、`fdd` は失敗する。
+  中身は出力しない ([D3])。読めなければ `stop` は exe 一致の強制終了に落ち、`fdd` / `cd` は失敗する。
   `/api/state/save` (ホストにファイルを書く) も同じトークンが要り、`tools/np21w_mcp` の `emu_state_save`
   は `np21w_client.token_headers()` で付ける。読み取り系の口 (`/api/status` `/api/cmd` `/api/key` など)
   はトークン不要のまま。Origin ヘッダを付ける要求は 403 (ブラウザ経由を閉じる) — curl / urllib は
@@ -723,6 +724,14 @@ python3 tools/np21w_ctl.py status [--ini <name>]         # プロセス・aidebu
 - `fdd --insert` の 200 は「受理」で、FD は 0.4 秒のエミュレーション時間の後に入る (`DISK_DELAY`)。
   ctl は `/api/instance` の `fdd[].path` に現れるまで待って `ready` と言う。`pending` のまま
   なら理由 (ブレーク中 / 一時停止 / 背景で停止) を出して失敗する。
+- `cd` は ini の `CD3_FILE` が空で毎回空のドライブで起動する (ini の `IDE3TYPE=2` はドライブを作るだけ)
+  ことへの対処で、ini は書き換えない ([D2])。ISO は NP21W_DIR 直下の名前・`C:\…`・`/mnt/<x>/…` のどれか。
+  空のドライブへはすぐ入り、別の CD が入っていれば NP21/W が古い媒体を出して 6 秒 (エミュレーション時間)
+  後に入れる (`changing`)。ctl は `/api/instance` の `ide[]` に現れるまで待ち (`--ready-wait 15`)、
+  `changing` のままなら理由を出して失敗する。NP21/W 側は api_version 3 (2026-09-26〜) が要る — 古ければ
+  「make deploy が要る」と出す。`status` は空の CD ドライブも `ide3 (cdrom): empty` と出す。
+  CD の中身は `np2cfg.idecd` に残るので、別の操作で設定が汚れた状態で `save=1` 終了すると ini に
+  残りうる (`stop` は `save=0`)。仕様は `np21w-src/docs/03-api-reference.md` の「POST /api/cd」。
 - `--api-timeout 0` は HTTP を 1 回も呼ばない (`/api/dialog` も)。HTTP の待ちには残り時間を渡し、
   期限を過ぎてから届いた応答は成功に数えない。
 
