@@ -959,6 +959,7 @@ u32 save_crc32(const void *data, u32 len)
  * (build/programs.mk の PCI_DECODE_USER_OBJ)。 */
 #include "../../userland/shell/cmd_pci.c"
 #include "../../drivers/pci_decode.c"
+#include "../../userland/shell/pci_verbose.c"   /* lspci -v の行づくり */
 /* cmd_hdprep.c (hdprep、票 TASK_HDD_INSTALL 段 1) も同じ理由 — main.c が
  * shell_cmd_hdprep_init() を呼ぶ。判定の純粋部と区画表の共有部も実ビルドと同じ 1 本
  * (build/programs.mk の PC98PT_USER_OBJ)。 */
