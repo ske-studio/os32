@@ -109,6 +109,15 @@ MUTATIONS = [
     ("cross_mount",
      "            if (mdev && mdev[0]) {\n                g_excluded++;",
      "            if (mdev && mdev[0] && 0) {\n                g_excluded++;"),
+    # 変異: 既定の sys 除外をマウント判定より先に見る版 (Codex 3 回目 P3 の否定側)。
+    # /sys が別マウントでも理由が default_sys_exclusion に隠れて行が出ない
+    ("sys_exclusion_hides_mount",
+     "        {\n            const char *mdev = api->vfs_devname(dst_path);",
+     "        if (depth == 0 && g_root_sync && str_cmp(fl.names[i], \"sys\") == 0) {\n"
+     "            g_excluded++;\n"
+     "            continue;\n"
+     "        }\n"
+     "        {\n            const char *mdev = api->vfs_devname(dst_path);"),
     # 変異: 宛先のマウントを遡らずルートだけ見る版 (/fd0 のサブマウントを見逃す)
     ("fd_dest_root_only",
      "        dev = api->vfs_devname(buf);\n        if (dev && dev[0]) break;",

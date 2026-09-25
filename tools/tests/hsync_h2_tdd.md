@@ -276,3 +276,10 @@ MINIMAL (= 起動 FD) に hsync を入れたので、FD 起動で引数なしの
   通常どおり
 - 変異 `cross_mount` (判定を無効にする) は RED
 
+### /sys が別マウントのときも other_mount を出す (Codex 3 回目 P3)
+
+マウント判定を既定の sys 除外より前へ移した。以前は /sys が別マウントだと
+default_sys_exclusion (-v でしか出ない) で黙って飛ばされていた (書き込みは防げていた)。
+`case_dst_fd` に「/sys = hd1 + 全体同期 → `/sys reason=other_mount` の行、/sys/k.bin 不変」
+を足し、変異 `sys_exclusion_hides_mount` (sys 除外を先に見る) が RED。
+
