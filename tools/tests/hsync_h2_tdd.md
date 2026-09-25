@@ -264,3 +264,15 @@ MINIMAL (= 起動 FD) に hsync を入れたので、FD 起動で引数なしの
 - 変異 `fd_dest_not_refused` (判定を常に 0) と `fd_dest_root_only` (遡らずルートだけ見る) は RED
 - 他の hsync ハーネス (h1 / h3 / h4) の贋 KAPI には、ルート hd0 を返す `vfs_devname` を足した
 
+### マウントをまたがない (Codex 2026-09-25 2 回目 P2)
+
+開始点の判定だけでは、/ = hd0・/fd0 = fd0 で同期元に `/host/fd0/x` があると、全体同期が
+`/fd0/x` を mkdir して FD に書けた。`sync_directory` の各項目で、宛先の子が別のマウントの根
+(`vfs_devname` が名前を返す) なら入らずに `other_mount` で除外する (-v 無しでも 1 行、
+`excluded` に数える、失敗にしない)。
+
+- `case_dst_fd` の続き: 上の配置で全体同期は rc=0、`other_mount` の行が出て、/fd0 の下に
+  ノードができず /fd0 以下への mkdir は 0 回。hd0 側 (/bin/a.bin の更新、/newdir の作成) は
+  通常どおり
+- 変異 `cross_mount` (判定を無効にする) は RED
+

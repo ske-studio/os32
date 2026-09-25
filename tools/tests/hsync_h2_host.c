@@ -274,6 +274,7 @@ static const char *fk_root_dev = "hd0";
 static const char *fk_sub_prefix = 0;
 static const char *fk_sub_dev = 0;
 static int fk_mkdir_calls;
+static int fk_mkdir_fd0_calls;   /* /fd0 とその下への mkdir */
 
 static const char *fk_vfs_devname(const char *prefix)
 {
@@ -293,6 +294,8 @@ static int fk_vfs_sync(void)
 static int fk_sys_mkdir(const char *path)
 {
     fk_mkdir_calls++;
+    if (strncmp(path, "/fd0", 4) == 0 && (path[4] == '\0' || path[4] == '/'))
+        fk_mkdir_fd0_calls++;
     if (fs_find(path) >= 0) return OS32_ERR_EXIST;
     if (fk_rofs) return OS32_ERR_ROFS;
     fs_add_dir(path);
@@ -1704,6 +1707,27 @@ static void case_dst_fd(void)
           node_of("/fd0/x") < 0, "HDD 起動の hsync fd0/x (FD のサブマウント) は断る");
     check(run1("bin") == 0 && !log_has("dest_on_fd"),
           "HDD 起動の hsync bin は通る (FD 判定は宛先のマウントだけを見る)");
+
+    /* 全体同期: / は hd0、/fd0 は fd0、同期元に /host/fd0/x と
+     * /host/fd0/f.bin。開始点は HDD なので通るが、/fd0 の下へは入らない
+     * (Codex 2026-09-25 2 回目 P2)。hd0 側 (/bin/a.bin) は通常どおり同期する */
+    {
+        u8 *blob = make_blob(500, 9);
+        int before = fs_find("/fd0");
+        fs_add_file("/host/fd0/f.bin", blob, 500);
+        free(blob);
+        check(before >= 0, "準備: /fd0 がある");
+        fk_mkdir_fd0_calls = 0;
+        check(run0() == 0, "HDD 起動の全体同期: 成功 (マウントをまたがないのは失敗でない)");
+        check(log_has("other_mount") && log_has("/fd0"),
+              "/fd0 を reason=other_mount で除外したと 1 行出す");
+        check(node_of("/fd0/x") < 0 && node_of("/fd0/f.bin") < 0,
+              "/fd0 (FD) の下に mkdir も書き込みもしない");
+        check(fk_mkdir_fd0_calls == 0, "/fd0 とその下へ mkdir を 1 回も呼ばない");
+        check(node_size(DST_PATH) == 3000 && !dst_unchanged() &&
+              node_of("/newdir") >= 0,
+              "hd0 側は通常どおり同期された (/bin/a.bin の更新、/newdir の作成)");
+    }
 
     fk_sub_prefix = 0;
     fk_sub_dev = 0;

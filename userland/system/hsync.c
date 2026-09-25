@@ -160,6 +160,7 @@
 #define HR_BAD_NAME     "bad_name"          /* 名前に '\' が混じっている */
 #define HR_PATH_REJECT  "path_rejected"     /* 正規化できず判定もできない */
 #define HR_DST_ON_FD    "dest_on_fd"        /* 同期先がフロッピーのマウント */
+#define HR_OTHER_MOUNT  "other_mount"       /* 宛先が別のマウントの根 (またがない) */
 
 /* フロッピーのデバイス名の先頭 (drivers/dev.c の "fd0" / "fd1"、kernel.c の
  * FD 起動のルート root_dev = "fd0")。同期先のマウントがこれなら断る */
@@ -2221,6 +2222,26 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
                 api->kprintf(ATTR_YELLOW, "  EXCLUDE %s reason=%s\n",
                              dst_path, HR_DEFAULT_SYS);
             continue;
+        }
+
+        /* ---- マウントをまたがない (rsync -x と同じ、Codex 2026-09-25 P2) ----
+         * 宛先の子がマウント点 (vfs_devname が完全一致で名前を返す = 別の
+         * マウントの根) なら、その下へは入らない — 掃除も mkdir もコピーもしない。
+         * 開始点の判定 (dst_on_floppy) だけでは、/ = hd0 のとき同期元の
+         * /host/fd0/x が /fd0 (FD の自動マウント) へ mkdir されて書かれた。
+         * FD に限らず全部のマウント (/host、/cd0、/hd1 …) に当てる。
+         * 失敗ではなく除外として数え、-v が無くても 1 行出す (配備元にその名前が
+         * あるのに黙って入らないと、なぜ入らないかの手がかりが無いので)。
+         * 開始点そのもの (`hsync sys` で /sys が別マウントの場合) は明示の指定
+         * なので対象にしない — 見るのは子だけ。 */
+        {
+            const char *mdev = api->vfs_devname(dst_path);
+            if (mdev && mdev[0]) {
+                g_excluded++;
+                api->kprintf(ATTR_YELLOW, "  EXCLUDE %s reason=%s (dev %s)\n",
+                             dst_path, HR_OTHER_MOUNT, mdev);
+                continue;
+            }
         }
 
         /* ---- 保護判定 (同じく内容を開く前) ----

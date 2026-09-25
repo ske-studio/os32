@@ -105,6 +105,10 @@ MUTATIONS = [
     ("fd_dest_not_refused",
      "    return dev[0] == HS_FD_DEV_PREFIX0 && dev[1] == HS_FD_DEV_PREFIX1;",
      "    return 0;"),
+    # 変異: 再帰でマウントをまたぐ版 (Codex 2026-09-25 2 回目 P2 の否定側)
+    ("cross_mount",
+     "            if (mdev && mdev[0]) {\n                g_excluded++;",
+     "            if (mdev && mdev[0] && 0) {\n                g_excluded++;"),
     # 変異: 宛先のマウントを遡らずルートだけ見る版 (/fd0 のサブマウントを見逃す)
     ("fd_dest_root_only",
      "        dev = api->vfs_devname(buf);\n        if (dev && dev[0]) break;",
