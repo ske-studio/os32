@@ -45,6 +45,9 @@
 /* ======== ASC (REQUEST SENSE の byte 12) ======== */
 #define ATAPI_ASC_BECOMING_READY      0x04   /* NOT READY: 準備中 (回転の立ち上がり等) */
 #define ATAPI_ASC_MEDIUM_NOT_PRESENT  0x3A   /* NOT READY: 媒体が無い (これだけが確定) */
+/* ASC 04h の ASCQ 02h = initializing command required (START UNIT が要る)。
+ * 待っても変わらないので START STOP UNIT (開始) を 1 回出して出し直す */
+#define ATAPI_ASCQ_INIT_CMD_REQUIRED  0x02
 #define ATAPI_SENSE_LEN               18     /* REQUEST SENSE で受け取る長さ */
 #define ATAPI_SENSE_MIN               14     /* byte 13 (ASCQ) まで要る */
 
@@ -60,6 +63,30 @@
 /* READ(10) が UNIT ATTENTION で落ちたときの出し直しの回数 (1 回目に加えて)。
  * リセットと媒体交換など、UA を複数積む装置がある */
 #define ATAPI_UA_RETRIES        3
+
+/* ======== 待ちの上限 (秒単位、2026-09-26 TASK_ATAPI_TIMEOUT) ========
+ * BSY / DRQ の待ちは ALT_STATUS を 1 回読むごとに cpu_delay_us(ATAPI_POLL_US) を
+ * 挟み、挟んだ時間の合計で上限を数える (atapi_wait_clear)。以前は
+ * IDE_TIMEOUT_LOOP (100 万回の inp、Ra266 で 0.5〜1 秒) で、実機のスピンアップ
+ * (READ(10) で 2〜4 秒 BSY) に足りず、健全な装置を DEVICE RESET で捨てていた。
+ * tick_count で数えないのは、呼ばれる文脈 (起動時の atapi_init、KAPI 経由の読み)
+ * で PIT の割り込みが来ていると決められないから (atapi_delay_us と同じ理由)。
+ * cpu_delay_us の誤差は ±10% 程度 — 上限はどれも規定・実測より 2 倍以上の余裕で決める。
+ * 読み間の inp の時間は数えないので、実際の待ちは上限より少し長い (長い側へ外れる) */
+#define ATAPI_POLL_US           100UL
+/* 通常の PACKET の上限 (コマンドの BSY / DRQ、装置の選択、DEVICE RESET の後)。
+ * スピンアップの 2〜4 秒 (票 §0) の 2 倍 + 余裕。cpu_delay_us が -10% に外れても 9 秒。
+ * これを越えて BSY のままの装置だけを「固まった」と見る: コマンドの待ちが
+ * 期限切れになっても DEVICE RESET はせず、次のコマンドの装置選択でさらに
+ * この時間待っても BSY / DRQ のときに初めて DEVICE RESET する (atapi_select_device) */
+#define ATAPI_CMD_TIMEOUT_US    10000000UL
+/* atapi_init の間の上限 (シグネチャの確認と、2 台のときの容量確認)。スピンアップの
+ * 上限 4 秒は待ちきり、起動の最悪時間 (装置が応答しない) を抑える。電源投入・
+ * リセットの直後の長い BSY は SRST の待ち (ATAPI_SRST_TIMEOUT_US) が受け持つ。
+ * init で期限切れになった遅い装置も、以後のコマンドは ATAPI_CMD_TIMEOUT_US で待つ */
+#define ATAPI_INIT_TIMEOUT_US   5000000UL
+/* SRST の後にマスターの BSY=0 を待つ上限。ATA の規定の最大 (31 秒) */
+#define ATAPI_SRST_TIMEOUT_US   31000000UL
 
 /* SRST を立てておく長さ (ALT_STATUS の空読みの回数)。規定は 5µs 以上 */
 #define ATAPI_SRST_HOLD_LOOP    50000
@@ -85,6 +112,8 @@
 #define SCSI_CMD_TEST_UNIT_READY  0x00
 #define SCSI_CMD_REQUEST_SENSE    0x03
 #define SCSI_CMD_INQUIRY          0x12
+#define SCSI_CMD_START_STOP_UNIT  0x1B   /* byte 4 bit0 = Start、byte 1 bit0 = IMMED (使わない) */
+#define SCSI_SSU_START            0x01
 #define SCSI_CMD_READ_CAPACITY    0x25
 #define SCSI_CMD_READ_10          0x28
 
@@ -154,6 +183,7 @@ typedef struct {
     u32 dev_resets;       /* コマンドが終わらない装置へ出した DEVICE RESET の数 */
     u32 soft_resets;      /* DEVICE RESET でも戻らず SRST した数 */
     u32 ready_retries;    /* READ CAPACITY を UNIT ATTENTION / NOT READY で出し直した数 */
+    u32 start_units;      /* NOT READY / 04h/02h に START STOP UNIT (開始) を出した数 */
 } AtapiStats;
 
 void atapi_get_stats(AtapiStats *out);
