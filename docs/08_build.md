@@ -190,14 +190,14 @@ KernelAPI の構造体を変えたときは `make clean` → `make all` が必�
 #### 検査の 3 段 (`check-fast` / `check-changed` / `check`、2026-09-26)
 
 どれも `make all` の後に回す (成果物を読む検査がある)。列 (`build/sdk.mk` の
-`CHECK_PAR_TARGETS` / `CHECK_MUT_TARGETS`) と recipe は共通で、違うのは**変異
+`CHECK_PAR_TARGETS`、2026-09-26 から 1 本) と recipe は共通で、違うのは**変異
 (否定側 — 実装を壊して試験が RED になるか) を回すかどうか**だけ。
 
 | ターゲット | 回すもの | いつ | 実測 (16 コア) |
 |---|---|---|---|
-| `make check-fast` | 全部の検査を**変異なし**で 1 段の並列 | 作業中に何度でも | **約 40 秒** |
+| `make check-fast` | 全部の検査を**変異なし**で 1 段の並列 | 作業中に何度でも | **約 33 秒** |
 | `make check-changed` | 変更したファイルに関係する検査だけ変異込み、残りは変異なし | コミットの前 | docs だけ **0.7 秒**、`drivers/serial.c` **137 秒**、変更なし **48 秒** |
-| `make check` | 全部を**変異込み** (1 段目 並列 → 2 段目 `-j1`) | 取り込み (merge) の前に 1 回 | **約 9 分 (529 秒)** |
+| `make check` | 全部を**変異込み** (1 段の並列。変異は写しの木に当てる) | 取り込み (merge) の前に 1 回 | **約 2 分 (129 秒)** |
 
 - **変異の切り替え**: recipe は `--mutate` / `--mutants` の代わりに `$(MUT)` / `$(MUTS)` と書く。
   `MUTATE=1` (既定) で付く、`MUTATE=0` で付かない、`MUTATE=sel` なら `MUTATE_TARGETS` に
@@ -214,19 +214,31 @@ KernelAPI の構造体を変えたときは `make clean` → `make all` が必�
     (ツリー全体の glob に当たっただけで安全側が消えるのを防ぐ)
   - 変更が全部 `docs_only:` (`**/*.md` など) → 当たった検査 + **文書を読む検査 (`docs_always:` —
     constraints / kapi-version / manifests / packages / tests-inventory / docs-links / docs-orphans / memmap) を常に**
+  - `notest:` (どのホスト試験の入力でもない場所 — `userland/cmds/**`・`gfx/*.c`・`docs/manpages/*.1`、
+    試験が読むものは `except:`) の変更は変異の選び方に何も足さない。それだけで、どの検査の glob にも
+    当たらなければ全部を変異なし (= `check-fast`)。走査型の `**` glob など検査の glob に当たれば
+    その検査は変異込み (glob が勝つ)
   - それ以外 → 当たった検査は変異込み、残りは変異なし
 - **対応表の漏れは `make check-map` が見る** (両方の列に入っている): 列と表の検査名の過不足、
   どのファイルにも当たらない古い glob、各検査の recipe から辿れる試験スクリプトが開く /
   `#include` する / `#[path]` で取り込むソースがその検査の glob に入っていること。C は場所を問わず
-  `#include "..."` を多段に辿る (実装の `.c` が取り込む `.inc` も入力)。`"/"` の無い裸の名前も
+  `#include "..."` を多段に辿る (実装の `.c` が取り込む `.inc` も入力)。見つける先は取り込む側の場所・
+  ROOT・**その検査の `-I` の探索先** (recipe の `-I…` と、試験スクリプトの `"-I…"` / `.h` を持つ
+  ディレクトリ名の文字列 — `include/types.h` などのヘッダもこれで表に載る)。拾えた入力が `notest:` に
+  当たると「notest なのに入力になっている」で落ちる (notest の番人)。`"/"` の無い裸の名前も
   `.md` `.yaml` `.json` `.tsv` なら候補にする (`README.md` / `CLAUDE.md` を読む検査器)。
   辿り方は静的なので、ツリーを舐める検査器 (`check-arch-asm` など) は glob を手で広く書いてある。
   表が欠けても `sel` の場合は**試験そのものは変異なしで必ず回る** — 落とすのは否定側だけ。
   docs だけの変更では当たらない検査は回らないので、文書を読む検査は `docs_always:` に入れておく。
-  選び方そのものの試験は `make check-check-select-host` (`tools/tests/test_check_select.py`、変異 8 本)。
+  選び方そのものの試験は `make check-check-select-host` (`tools/tests/test_check_select.py`、変異 13 本)。
 - 新しい検査を列に足したら `python3 tools/check_select.py --suggest <検査名>` の出力を
   下書きにして対応表へ足す (`make check-map` が足りないと言う)。
-- `tools/check_tree_unchanged.py` の番人 ([POLICY_DEBUG §4-40](POLICY_DEBUG.md)) は 3 通りとも各段の後で回る。
+- `tools/check_tree_unchanged.py` の番人 ([POLICY_DEBUG §4-40](POLICY_DEBUG.md)) は 3 通りとも段の前後で回る。
+- **変異試験は実物のソースを書き換えない** (2026-09-26〜)。変異は `tools/tests/mutpar.py` の
+  `mutant_tree` / `build_in_tree` / `run_script_in_tree` で一時ディレクトリの写しの木 (変異を当てるファイルと
+  gcc -MM の依存は実体、残りは symlink) に当て、変異なしの写しが GREEN であること (`CONTROL`) を
+  先に確かめる。新しい変異試験もこの作りにする — 実物を書き換える試験は列に足さない
+  (票 [TASK_CHECK_MUT_PARALLEL](tasks/tools/TASK_CHECK_MUT_PARALLEL.md) §5)。
 
 <a id="kapi-v63-移行"></a>
 #### KAPI v63 への移行 (データ欄の固定配置、票 [TASK_KAPI_DATA_FIELDS](tasks/memory/TASK_KAPI_DATA_FIELDS.md))

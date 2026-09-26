@@ -195,10 +195,10 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 - GUI アプリが窓も出さずに消えて **`fault_kill_count` だけ増える** (例外 0 件) → WM (gshell) はアプリの syscall の中で
   走るので、KAPI の検査を `ring3_in_syscall` だけで「アプリ由来」と決めると **gshell 自身のポインタを弾いてアプリを kill** する。
   門は `ring3_guard_active(ring3_in_syscall, ring3_wm_depth)` で判定する。→ §4-61
-- ビルドは既定で `-j$(nproc)`。検査は 3 段: `check-fast` (変異なし **約 40 秒**) / `check-changed` (変えた所だけ変異、`tools/check_map.yaml`) / `check` (全変異 **約 4 分 (252 秒、2026-09-26)**、取り込み前)。
-  各段の後に `tools/check_tree_unchanged.py` がソースの残留を見る。 → §4-41
-- `make check` を途中で止めると**変異試験が当てた変更がソースに残る**。打ち切ったら
-  コミット前に必ず `git status` を見る (`git add -A` が壊れたコードを拾う)。全 55 本で 15 分以上。 → §4-40
+- ビルドは既定で `-j$(nproc)`。検査は 3 段: `check-fast` (変異なし **約 33 秒**) / `check-changed` (変えた所だけ変異、`tools/check_map.yaml`) / `check` (全変異 **約 2 分 (129 秒、2026-09-26)**、取り込み前)。
+  段の前後に `tools/check_tree_unchanged.py` がソースの残留を見る。 → §4-41
+- 変異試験は**実物のソースを書き換えない** (2026-09-26〜、`tools/tests/mutpar.py` の写しの木で全部並列)。
+  新しい変異試験もこの作りにする — 実物を書き換える作りは打ち切りで変異が残る。 → §4-40
 - Device windows: decide from the physical map (`pgalloc_range_has_ram`), never from the RAM ceiling (`sys_get_mem_kb`). → §4-34
 - VFS errors are `OS32_ERR_*`, translated at the FS boundary; `vfs_open` refuses directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
 - ext2 はメタデータの I/O エラーを 1 回踏むと**そのマウントの間は書き込みを全部断る** (`OS32_ERR_ROFS` = -15)。読み取りは通り、再起動で警告付きで戻る。書き込みが全部 -15 になったらホストの `e2fsck` へ。 → §4-35

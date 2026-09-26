@@ -675,7 +675,7 @@ check-h4-manifest-host:
 # mkos32x.py / mkshlib.py のヘッダ v3 (値 = ELF の .os32_kapi_layout、刻印が
 # 無ければ失敗、min_api_ver >= 63)、crt の kapi 改名で作り直し忘れの .o が
 # リンクで落ちること。--mutate は判定・拒否を崩した版で落ちることを見る
-# (ソースを書き換えるので check-mut)。i386-elf の道具を使う。
+# (変異は一時ディレクトリの写しの木に当てるので並列で回せる)。i386-elf の道具を使う。
 check-kapi-layout-host:
 	python3 -B tools/tests/test_kapi_layout.py $(MUT)
 
@@ -851,8 +851,8 @@ check-result-conv-host:
 #                     エミュレータにも時計にも触らない純関数に切ってあるので、
 #                     贋物の入力だけで全部踏める。**そこが壊れていたらゲストで
 #                     回しても意味がない**ので、これは `check` の列に入れる
-#                     (実物の tools/guest_tests.py を書き換えて戻す変異試験を
-#                     持つので check-mut 側 = 逐次)。
+#                     (変異は tools/guest_tests.py の写しの木に当てる —
+#                     tools/tests/mutpar.py、並列で回せる)。
 #                     --mutate の否定側: 食い違い (0 なのに FAIL) の見逃し /
 #                     見張りが発火しない / 固まった試験を名指ししない /
 #                     /host が無いのに合格にする / 落ちた試験 (139) で後続を
@@ -940,16 +940,15 @@ check-tests-inventory:
 check-packages-host:
 	python3 -B tools/tests/test_packages.py
 
-# check は 2 段。**遅さの正体は逐次ではなく、変異試験が同じソースを奪い合う
-# ことだった** (2026-09-17)。変異試験は実物のソースを書き換えて戻す作りなので、
-# 同時に走ると互いのファイルを壊し合い、しかも壊れ方が再現しない
-# (docs/POLICY_DEBUG.md §4-40)。
+# check は 1 段 (2026-09-26 から)。変異試験は**一時ディレクトリの写しの木**に
+# 変異を当てる (tools/tests/mutpar.py の overlay / mutant_tree、票
+# docs/tasks/tools/TASK_CHECK_MUT_PARALLEL.md §5) ので、全部を並列に回せる。
+# 以前は実物のソースを書き換えて戻す試験が 14 本あり、2 段目 check-mut を
+# 逐次 (-j1) で回していた (docs/POLICY_DEBUG.md §4-40・§4-41)。
 #
-#   1 段目 check-par  写しの上で変異する / 書き換えない試験 → **並列**
-#   2 段目 check-mut  実物のソースを書き換える変異試験     → **逐次 (-j1)**
-#
-# 各段の後で tools/check_tree_unchanged.py が「試験がソースを書き換えたまま
-# 戻していないか」を見る。1 段目で引っかかれば、その試験を 2 段目へ移すこと。
+# 段の前後で tools/check_tree_unchanged.py が「試験がソースを書き換えたまま
+# 戻していないか」を見る (番人)。引っかかったら、その試験を写しの作りに直す
+# — **実物を書き換える試験を列に足さない**。
 #
 # 検査は 3 通りの回し方がある (2026-09-26、docs/08_build.md §8-4)。列と recipe は
 # 共通で、違うのは**変異 (否定側) を回すかどうか**だけ:
@@ -973,18 +972,13 @@ check:
 	@python3 tools/check_tree_unchanged.py --save par
 	@$(MAKE) check-par MUTATE=1
 	@python3 tools/check_tree_unchanged.py --verify par
-	@python3 tools/check_tree_unchanged.py --save mut
-	@$(MAKE) -j1 check-mut MUTATE=1
-	@python3 tools/check_tree_unchanged.py --verify mut
 
-# 変異なしなら check-mut の試験もソースを書き換えないので、全部を 1 段で並べる。
 check-fast:
 	@python3 tools/check_tree_unchanged.py --save fast
-	@$(MAKE) $(CHECK_PAR_TARGETS) $(CHECK_MUT_TARGETS) MUTATE=0
+	@$(MAKE) $(CHECK_PAR_TARGETS) MUTATE=0
 	@python3 tools/check_tree_unchanged.py --verify fast
 
-# 1 段目: 並列 (選ばれた check-par の検査だけ変異込み)、
-# 2 段目: 選ばれた check-mut の検査を変異込みで逐次。
+# 並列 1 段 (選ばれた検査だけ変異込み、残りは変異なし)。
 # FILES="<パス>..." を渡すと git を見ずにその一覧を変更とみなす (選び方の試し。
 # `FILES=` と空で渡せば「変更なし」)。
 BASE ?=
@@ -996,9 +990,6 @@ check-changed:
 	  python3 tools/check_tree_unchanged.py --save chg1 && \
 	  { [ -z "$$CC_STAGE1" ] || $(MAKE) $$CC_STAGE1 MUTATE=sel MUTATE_TARGETS="$$CC_MUT1"; } && \
 	  python3 tools/check_tree_unchanged.py --verify chg1 && \
-	  python3 tools/check_tree_unchanged.py --save chg2 && \
-	  { [ -z "$$CC_STAGE2" ] || $(MAKE) -j1 $$CC_STAGE2 MUTATE=1; } && \
-	  python3 tools/check_tree_unchanged.py --verify chg2 && \
 	  echo "*** $$CC_SUMMARY ***"
 
 # 対応表 tools/check_map.yaml の検査 (列との過不足・古い glob・入力の漏れ)。
@@ -1046,15 +1037,13 @@ CHECK_PAR_TARGETS := check-bootinfo-host check-hdd-stage1-host \
     check-net-link-host check-host-lib-host check-lan-bridge-host \
     check-pci-decode-host check-irq-math-host check-time-math-host \
     check-fdc-track-host check-cd-read-host check-map \
-    check-check-select-host
-check-par: $(CHECK_PAR_TARGETS)
-
-CHECK_MUT_TARGETS := check-kapi-layout-host check-edit-doc-host \
+    check-check-select-host \
+    check-kapi-layout-host check-edit-doc-host \
     check-fstat-redir-host check-kstring-c-host check-kstr-bench-host \
     check-sh-status-host check-hsync-h3-host check-hsync-h2-host \
     check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host \
     check-cat-linenum-host check-result-conv-host check-guest-host
-check-mut: $(CHECK_MUT_TARGETS)
+check-par: $(CHECK_PAR_TARGETS)
 
 # エディタ GUI 版の本文と libos32gui の桁・折り返し (票 TASK_EDIT_GUI 受入 E8 / E10)。
 # 実物の userland/rust/edit_gui/src/doc.rs と
@@ -1072,4 +1061,4 @@ check-edit-doc-host:
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: check-fast check-changed check-map check-check-select-host check-par check-mut check-packages-host check-kapi-layout-host check-bootinfo-host check-hdd-stage1-host check-hdd-stage2-host check-vmkernel-lz4-host check-vk32-crc-host check-build-id-host check-kbd-status-host check-kbd-dlog-host check-pcm-cs4231-host check-kapi-out check-dma8237-host check-dma-pool-host check-pci-bind-host check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-np21w-ctl-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-serial-portc-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-serialfs-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-bootlog-host check-kbd-inject-host check-launch-host check-ring3-str-host check-ring3-guard-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host check-irq-math-host check-time-math-host check-fdc-track-host check-cd-read-host
+.PHONY: check-fast check-changed check-map check-check-select-host check-par check-packages-host check-kapi-layout-host check-bootinfo-host check-hdd-stage1-host check-hdd-stage2-host check-vmkernel-lz4-host check-vk32-crc-host check-build-id-host check-kbd-status-host check-kbd-dlog-host check-pcm-cs4231-host check-kapi-out check-dma8237-host check-dma-pool-host check-pci-bind-host check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-np21w-ctl-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-serial-portc-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-serialfs-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-bootlog-host check-kbd-inject-host check-launch-host check-ring3-str-host check-ring3-guard-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host check-irq-math-host check-time-math-host check-fdc-track-host check-cd-read-host

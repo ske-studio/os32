@@ -77,7 +77,7 @@ make check-tests-inventory                      # 表が古くないか検査す
 
 ## 2. `make check` の列 (98 ターゲット)
 
-`build/sdk.mk` の `CHECK_PAR_TARGETS` / `CHECK_MUT_TARGETS` (`check-par` / `check-mut` の依存) が
+`build/sdk.mk` の `CHECK_PAR_TARGETS` (`check-par` の依存) が
 正典。この表はその列をそのまま展開したもの。コマンド列は `make check` (変異込み) の形。
 
 | # | ターゲット | コマンド | 対象ソース | 記録 (RED→GREEN) | 票 | CI |
@@ -175,7 +175,7 @@ make check-tests-inventory                      # 表が古くないか検査す
 | 91 | `check-hsync-h3-host` | `python3 -B tools/tests/test_hsync_h3.py --target --mutate` | `fs/vfs.c`<br>`fs/hostdrv_stat_rules.inc`<br>`userland/system/hsync.c` | [`tools/tests/h3_tdd.md`](../tools/tests/h3_tdd.md) | [`docs/tasks/shell/TASK_H3.md`](tasks/shell/TASK_H3.md) | × |
 | 92 | `check-hsync-h2-host` | `python3 -B tools/tests/test_hsync_h2.py --target --mutate` | `userland/system/hsync.c` | [`tools/tests/hsync_h2_tdd.md`](../tools/tests/hsync_h2_tdd.md) | [`docs/tasks/shell/TASK_H2.md`](tasks/shell/TASK_H2.md) | × |
 | 93 | `check-h4-manifest-host` | `python3 -B tools/tests/test_h4_manifest.py --target --mutate`<br>`python3 -B tools/tests/test_hostdrv_manifest.py --mutate` | `userland/system/hsync.c`<br>`tools/hostdrv_deploy.py` | [`tools/tests/h4_manifest_tdd.md`](../tools/tests/h4_manifest_tdd.md) | [`docs/tasks/shell/TASK_H4.md`](tasks/shell/TASK_H4.md) | × |
-| 94 | `check-vfs-excl-host` | `python3 -B tools/tests/test_vfs_excl.py --target --mutate` | `fs/vfs_fd.c`<br>`fs/vfs.c` | [`tools/tests/vfs_excl_tdd.md`](../tools/tests/vfs_excl_tdd.md) | [`docs/tasks/shell/TASK_H2.md`](tasks/shell/TASK_H2.md) | × |
+| 94 | `check-vfs-excl-host` | `python3 -B tools/tests/test_vfs_excl.py --target --mutate` | `fs/vfs.c`<br>`fs/vfs_fd.c` | [`tools/tests/vfs_excl_tdd.md`](../tools/tests/vfs_excl_tdd.md) | [`docs/tasks/shell/TASK_H2.md`](tasks/shell/TASK_H2.md) | × |
 | 95 | `check-fs-kind-callers-host` | `python3 -B tools/tests/test_fs_kind_callers.py --target --mutate` | `userland/shell/cmd_fs_shared.c`<br>`userland/shell/cmd_file.c` | [`tools/tests/fs_kind_callers_tdd.md`](../tools/tests/fs_kind_callers_tdd.md) | [`docs/tasks/shell/TASK_FS_TYPE.md`](tasks/shell/TASK_FS_TYPE.md) | × |
 | 96 | `check-cat-linenum-host` | `python3 -B tools/tests/test_cat_linenum.py --target --mutate` | `userland/shell/cmd_fs_shared.c`<br>`userland/shell/cmd_file.c` | [`tools/tests/cat_linenum_tdd.md`](../tools/tests/cat_linenum_tdd.md) | — | × |
 | 97 | `check-result-conv-host` | `python3 -B tools/tests/test_result_conv.py --target --mutate` | `userland/tests/stat_t.c`<br>`userland/tests/restest.c`<br>`userland/tests/test2.c`<br>`userland/tests/klibc_test.c`<br>`userland/tests/font_load_test.c`<br>`userland/rust/alloc_demo/src/lib.rs` | [`tools/tests/result_conv_tdd.md`](../tools/tests/result_conv_tdd.md) | [`docs/tasks/test/TASK_TEST_RESULT.md`](tasks/test/TASK_TEST_RESULT.md) | × |

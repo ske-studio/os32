@@ -25,11 +25,15 @@ fs/ext2_vfs.c が -Werror で通ることの確認 ([C1] C89/GNU89)。
 
 make・エミュレータ・実配備には一切触れない。
 """
+import os
 import pathlib
 import re
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mutpar                                                   # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -150,33 +154,40 @@ MUTATIONS = [
 ]
 
 
-def run_mutations(tmp):
-    target = ROOT / "fs/vfs_fd.c"
-    bad = 0
-    for name, old, new in MUTATIONS:
-        original = target.read_text(encoding="utf-8")
-        if old not in original:
-            print("MUTATE %-22s SKIP (目印が見つからない)" % name, flush=True)
-            bad += 1
-            continue
+MUT_TARGET = "fs/vfs_fd.c"
+
+
+def host_cmd(exe, src="tools/tests/vfs_excl_host.c"):
+    return ["gcc", *HOST_FLAGS, *HOST_INC, str(ROOT / src), "-o", str(exe)]
+
+
+def one_mutation(item):
+    """変異 1 本を一時ディレクトリの写しで組んで回す。(印字, 見逃し) を返す。"""
+    name, old, new = item
+    original = (ROOT / MUT_TARGET).read_text(encoding="utf-8")
+    if old not in original:
+        return "MUTATE %-22s SKIP (目印が見つからない)" % name, 1
+    with tempfile.TemporaryDirectory(prefix="os32-vfs-excl-mut-") as td:
+        exe = pathlib.Path(td) / ("mut-" + name)
         try:
-            target.write_text(original.replace(old, new, 1), encoding="utf-8")
-            try:
-                exe = build_host(tmp, "mut-" + name)
-            except subprocess.CalledProcessError:
-                print("MUTATE %-22s RED (コンパイルが通らない)" % name, flush=True)
-                continue
-            rc = subprocess.run([str(exe)], cwd=ROOT, timeout=120,
-                                capture_output=True).returncode
-            if rc == 0:
-                print("MUTATE %-22s **GREEN のまま = 試験が規則を見ていない**"
-                      % name, flush=True)
-                bad += 1
-            else:
-                print("MUTATE %-22s RED (期待どおり落ちた)" % name, flush=True)
-        finally:
-            target.write_text(original, encoding="utf-8")
-    return bad
+            tree = mutpar.build_in_tree(
+                ROOT, td, {MUT_TARGET: original.replace(old, new, 1)},
+                [host_cmd(exe)])
+        except subprocess.CalledProcessError:
+            return "MUTATE %-22s RED (コンパイルが通らない)" % name, 0
+        head = "HOST GNU89 -Werror COMPILE PASS (real fs/vfs.c + fs/vfs_fd.c)\n"
+        rc = subprocess.run([str(exe)], cwd=str(tree), timeout=120,
+                            capture_output=True).returncode
+    if rc == 0:
+        return (head + "MUTATE %-22s **GREEN のまま = 試験が規則を見ていない**"
+                % name, 1)
+    return head + "MUTATE %-22s RED (期待どおり落ちた)" % name, 0
+
+
+def run_mutations(tmp):
+    """否定側。変異は一時ディレクトリの写しにだけ当てる (mutpar で並列、
+    実物のソースは読むだけ — check-par で回せる)。"""
+    return mutpar.run_with_control(one_mutation, MUTATIONS, ("control", "", ""))
 
 
 if __name__ == "__main__":

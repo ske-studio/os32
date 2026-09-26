@@ -28,10 +28,14 @@ Make・エミュレータは使わない。
 なので、それぞれをわざと壊した版を作って**試験が落ちること**を見る。
 GREEN のまま通ってしまう変異があれば、その規則を試験が見ていないということ。
 """
+import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mutpar                                                   # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BASE = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
@@ -305,41 +309,55 @@ MUTATIONS = [
 ]
 
 
+def host_cmd(shim, exe, extra):
+    return ["gcc", *BASE, *extra, "-O0", *shim, *INCLUDES,
+            "-nostdlib", "-static", "-no-pie", str(HOST_SRC), "-o", str(exe)]
+
+
+def one_mutation(item):
+    """変異 1 本を一時ディレクトリの写しで 2 通り組んで回す (実物は読むだけ)。
+    (印字, 見逃し) を返す。"""
+    name, rel, old, new = item
+    original = (ROOT / rel).read_text(encoding="utf-8")
+    if original.count(old) != 1 and old:
+        return ("MUTATE %-24s SKIP (目印が %d か所)"
+                % (name, original.count(old)), 1)
+    with tempfile.TemporaryDirectory(prefix="os32-sh-status-mut-") as td:
+        td = pathlib.Path(td)
+        shim = write_shims(td)
+        edits = {rel: original.replace(old, new, 1)}
+        tree = mutpar.mutant_tree(
+            ROOT, td / "tree", edits,
+            gcc_cmds=[host_cmd(shim, td / "dep", extra)
+                      for _, extra in VARIANTS])
+        red = False
+        compiled = False
+        for vname, extra in VARIANTS:
+            exe = td / ("mut-%s-%s" % (name, vname))
+            try:
+                subprocess.run(mutpar.rebase(host_cmd(shim, exe, extra),
+                                             ROOT, tree),
+                               cwd=str(tree), check=True)
+            except subprocess.CalledProcessError:
+                red = True
+                continue
+            compiled = True
+            rc = subprocess.run([str(exe)], cwd=str(tree), timeout=60,
+                                capture_output=True).returncode
+            if rc != 0:
+                red = True
+    if red:
+        return ("MUTATE %-24s RED (期待どおり落ちた%s)"
+                % (name, "" if compiled else " — コンパイル不能"), 0)
+    return ("MUTATE %-24s **GREEN のまま = 試験が規則を見ていない**" % name,
+            1)
+
+
 def run_mutations(tmp, shim):
-    bad = 0
-    for name, rel, old, new in MUTATIONS:
-        target = ROOT / rel
-        original = target.read_text(encoding="utf-8")
-        if original.count(old) != 1:
-            print("MUTATE %-24s SKIP (目印が %d か所)"
-                  % (name, original.count(old)), flush=True)
-            bad += 1
-            continue
-        try:
-            target.write_text(original.replace(old, new, 1), encoding="utf-8")
-            red = False
-            compiled = False
-            for vname, extra in VARIANTS:
-                try:
-                    exe = build_host(tmp, shim, "mut-%s-%s" % (name, vname), extra)
-                except subprocess.CalledProcessError:
-                    red = True
-                    continue
-                compiled = True
-                rc = subprocess.run([str(exe)], cwd=ROOT, timeout=60,
-                                    capture_output=True).returncode
-                if rc != 0:
-                    red = True
-            if red:
-                print("MUTATE %-24s RED (期待どおり落ちた%s)"
-                      % (name, "" if compiled else " — コンパイル不能"), flush=True)
-            else:
-                print("MUTATE %-24s **GREEN のまま = 試験が規則を見ていない**"
-                      % name, flush=True)
-                bad += 1
-        finally:
-            target.write_text(original, encoding="utf-8")
-    return bad
+    """否定側。変異は一時ディレクトリの写しにだけ当てる (mutpar で並列、
+    check-par で回せる)。tmp / shim は使わない (変異ごとに写しの中で作る)。"""
+    return mutpar.run_with_control(
+        one_mutation, MUTATIONS, ("control", "userland/shell/main.c", "", ""))
 
 
 if __name__ == "__main__":

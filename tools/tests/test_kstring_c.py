@@ -28,11 +28,15 @@ kstrncpy の埋め。kernel/kselftest.c の test_str の既存ケースも両版
 
 make・エミュレータ・実配備・libc には一切触れない。
 """
+import os
 import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mutpar                                                   # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -210,33 +214,38 @@ MUTATIONS = [
 ]
 
 
-def run_mutations(tmp):
+def one_mutation(item):
+    """変異 1 本: C 版の写し (一時ディレクトリの木) を壊して組んで回す。
+    実物の lib/kstring_c.c は読むだけ。(印字, 見逃し) を返す。"""
+    name, old, new = item
     original = C_SRC.read_text(encoding="utf-8")
-    bad = 0
-    for name, old, new in MUTATIONS:
-        if old not in original:
-            print("MUTATE %-22s SKIP (目印が見つからない)" % name, flush=True)
-            bad += 1
-            continue
+    if old not in original:
+        return "MUTATE %-22s SKIP (目印が見つからない)" % name, 1
+    rel = str(C_SRC.relative_to(ROOT))
+    with tempfile.TemporaryDirectory(prefix="os32-kstring-c-mut-") as td:
+        td = pathlib.Path(td)
+        dep_cmd = ["gcc", *COMMON_FLAGS, *X86_FLAGS, "-O2", *INCLUDES,
+                   "-c", str(C_SRC), "-o", str(td / "dep.o")]
+        tree = mutpar.mutant_tree(ROOT, td / "tree",
+                                  {rel: original.replace(old, new, 1)},
+                                  gcc_cmds=[dep_cmd])
         try:
-            C_SRC.write_text(original.replace(old, new, 1), encoding="utf-8")
-            try:
-                exe, _, _ = build_exe(tmp, C_SRC, "mut-" + name)
-            except subprocess.CalledProcessError:
-                print("MUTATE %-22s RED (コンパイルが通らない)" % name,
-                      flush=True)
-                continue
-            rc = subprocess.run([str(exe)], cwd=ROOT, timeout=300,
-                                capture_output=True).returncode
-            if rc == 0:
-                print("MUTATE %-22s **GREEN のまま = 試験が契約を見ていない**"
-                      % name, flush=True)
-                bad += 1
-            else:
-                print("MUTATE %-22s RED (期待どおり落ちた)" % name, flush=True)
-        finally:
-            C_SRC.write_text(original, encoding="utf-8")
-    return bad
+            exe, _, _ = build_exe(td, tree / rel, "mut-" + name)
+        except subprocess.CalledProcessError:
+            return "MUTATE %-22s RED (コンパイルが通らない)" % name, 0
+        rc = subprocess.run([str(exe)], cwd=str(tree), timeout=300,
+                            capture_output=True).returncode
+    if rc == 0:
+        return ("MUTATE %-22s **GREEN のまま = 試験が契約を見ていない**"
+                % name, 1)
+    return "MUTATE %-22s RED (期待どおり落ちた)" % name, 0
+
+
+def run_mutations(tmp):
+    """否定側。変異は一時ディレクトリの写しにだけ当てる (mutpar で並列、
+    check-par で回せる)。"""
+    return mutpar.run_with_control(one_mutation, MUTATIONS,
+                                   ("control", "", ""))
 
 
 if __name__ == "__main__":

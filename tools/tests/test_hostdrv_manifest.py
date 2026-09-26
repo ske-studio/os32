@@ -26,9 +26,11 @@ import zlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tools/tests"))
 
 import hostdrv_deploy as hd          # noqa: E402
 import deploy_protect as protect     # noqa: E402
+import mutpar                        # noqa: E402
 
 failures = 0
 checks = 0
@@ -441,29 +443,31 @@ def case_kapi(tmp):
         check(not b.man().is_file(), "K4 名札を書かない")
 
 
+MUT_TARGET = "tools/hostdrv_deploy.py"
+SELF = "tools/tests/test_hostdrv_manifest.py"
+
+
+def one_mutation(item):
+    """変異 1 本: 写しの木の hostdrv_deploy.py を壊し、写しの中のこの試験を
+    流し直す (実物は読むだけ)。(印字, 見逃し) を返す。"""
+    name, old, new = item
+    original = (ROOT / MUT_TARGET).read_text(encoding="utf-8")
+    if old not in original:
+        return "MUTATE %-24s SKIP (目印が見つからない)" % name, 1
+    with tempfile.TemporaryDirectory(prefix="os32-hostdrv-man-mut-") as td:
+        rc = mutpar.run_script_in_tree(
+            ROOT, td, {MUT_TARGET: original.replace(old, new, 1)}, SELF,
+            capture_output=True, timeout=300).returncode
+    if rc == 0:
+        return ("MUTATE %-24s **GREEN のまま = 試験が規則を見ていない**"
+                % name, 1)
+    return "MUTATE %-24s RED (期待どおり落ちた)" % name, 0
+
+
 def run_mutations():
-    target = ROOT / "tools/hostdrv_deploy.py"
-    bad = 0
-    for name, old, new in MUTATIONS:
-        original = target.read_text(encoding="utf-8")
-        if old not in original:
-            print("MUTATE %-24s SKIP (目印が見つからない)" % name, flush=True)
-            bad += 1
-            continue
-        try:
-            target.write_text(original.replace(old, new, 1), encoding="utf-8")
-            rc = subprocess.run(
-                [sys.executable, "-B", str(pathlib.Path(__file__).resolve())],
-                cwd=str(ROOT), capture_output=True, timeout=300).returncode
-            if rc == 0:
-                print("MUTATE %-24s **GREEN のまま = 試験が規則を見ていない**"
-                      % name, flush=True)
-                bad += 1
-            else:
-                print("MUTATE %-24s RED (期待どおり落ちた)" % name, flush=True)
-        finally:
-            target.write_text(original, encoding="utf-8")
-    return bad
+    """否定側。変異は一時ディレクトリの写しにだけ当てる (mutpar で並列、
+    check-par で回せる)。"""
+    return mutpar.run_with_control(one_mutation, MUTATIONS, ("control", "", ""))
 
 
 if __name__ == "__main__":

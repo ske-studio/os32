@@ -34,6 +34,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mutpar                                                   # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 HOST_FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
@@ -59,7 +62,7 @@ TARGET_FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding",
                 "-I" + str(CROSS_DIR / "i386-elf/include")]
 
 
-# 否定側。cmd_file.c を一時的に書き換えて、この試験が RED になることを見る。
+# 否定側。cmd_file.c の写し (一時ディレクトリの木) を書き換えて、この試験が RED になることを見る。
 MKDIR_BLOCK = r"""    rc = g_api->sys_mkdir(dst);
     if (rc != 0 && !(rc == OS32_ERR_EXIST && fs_path_kind(dst) == FS_KIND_DIR)) {
         g_api->kprintf(ATTR_RED, "cp -r: cannot create directory '%s': %s\n",
@@ -98,44 +101,41 @@ MUTATIONS = [
 ]
 
 
-def build_host(tmp, name):
-    exe = tmp / name
-    subprocess.run(["gcc", *HOST_FLAGS, *HOST_INC,
-                    str(ROOT / "tools/tests/fs_kind_callers_host.c"),
-                    "-o", str(exe)], cwd=ROOT, check=True)
-    return exe
+MUT_TARGET = "userland/shell/cmd_file.c"
+
+
+def host_cmd(exe):
+    return ["gcc", *HOST_FLAGS, *HOST_INC,
+            str(ROOT / "tools/tests/fs_kind_callers_host.c"), "-o", str(exe)]
+
+
+def one_mutation(item):
+    """変異 1 本を一時ディレクトリの写しで組んで回す。(印字, 見逃し) を返す。"""
+    name, old, new = item
+    original = (ROOT / MUT_TARGET).read_text(encoding="utf-8")
+    if old not in original:
+        return "MUTATE %-24s SKIP (目印が見つからない)" % name, 1
+    with tempfile.TemporaryDirectory(prefix="os32-fs-kind-callers-mut-") as td:
+        exe = pathlib.Path(td) / ("mut-" + name)
+        try:
+            tree = mutpar.build_in_tree(
+                ROOT, td, {MUT_TARGET: original.replace(old, new, 1)},
+                [host_cmd(exe)])
+        except subprocess.CalledProcessError:
+            return "MUTATE %-24s RED (コンパイルが通らない)" % name, 0
+        out = subprocess.run([str(exe)], cwd=str(tree), timeout=120,
+                             capture_output=True)
+    if out.returncode == 0:
+        return ("MUTATE %-24s **GREEN のまま = 試験が規則を見ていない**"
+                % name, 1)
+    fails = out.stdout.decode("utf-8", "replace").count("FAIL ")
+    return "MUTATE %-24s RED (期待どおりに落ちた: FAIL %d 件)" % (name, fails), 0
 
 
 def run_mutations(tmp):
-    target = ROOT / "userland/shell/cmd_file.c"
-    bad = 0
-    for name, old, new in MUTATIONS:
-        original = target.read_text(encoding="utf-8")
-        if old not in original:
-            print("MUTATE %-24s SKIP (\u76ee\u5370\u304c\u898b\u3064\u304b\u3089\u306a\u3044)" % name, flush=True)
-            bad += 1
-            continue
-        try:
-            target.write_text(original.replace(old, new, 1), encoding="utf-8")
-            try:
-                exe = build_host(tmp, "mut-" + name)
-            except subprocess.CalledProcessError:
-                print("MUTATE %-24s RED (\u30b3\u30f3\u30d1\u30a4\u30eb\u304c\u901a\u3089\u306a\u3044)" % name,
-                      flush=True)
-                continue
-            out = subprocess.run([str(exe)], cwd=ROOT, timeout=120,
-                                 capture_output=True)
-            if out.returncode == 0:
-                print("MUTATE %-24s **GREEN \u306e\u307e\u307e = \u8a66\u9a13\u304c\u898f\u5247\u3092\u898b\u3066\u3044\u306a\u3044**"
-                      % name, flush=True)
-                bad += 1
-            else:
-                fails = out.stdout.decode("utf-8", "replace").count("FAIL ")
-                print("MUTATE %-24s RED (\u671f\u5f85\u3069\u304a\u308a\u306b\u843d\u3061\u305f: FAIL %d \u4ef6)"
-                      % (name, fails), flush=True)
-        finally:
-            target.write_text(original, encoding="utf-8")
-    return bad
+    """否定側。変異は一時ディレクトリの写しにだけ当てる (mutpar で並列、
+    実物のソースは読むだけ — check-par で回せる)。"""
+    return mutpar.run_with_control(one_mutation, MUTATIONS, ("control", "", ""))
 
 
 if __name__ == "__main__":
