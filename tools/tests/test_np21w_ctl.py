@@ -129,7 +129,7 @@ class FakeHttp(object):
 
     def __init__(self, ops, mode='new', inst_pid=None, inst_exe=EXE,
                  quit_stops=True, dialog=None, instance_dialog=False,
-                 api_up_after=0, tvram=None, fdd_status=200, token=TOKEN,
+                 api_up_after=0, tvram=None, fdd_status=200, fdd_error='x', token=TOKEN,
                  token_file=None, fdd_delay=2, fdd_accepts=True, paused=None,
                  quit_status=200, quit_error='', latency=0.0, quit_policy=None,
                  api_version=3, cd_status=None, cd_delay=2, cd_accepts=True,
@@ -144,6 +144,7 @@ class FakeHttp(object):
         self.api_up_after = api_up_after
         self.tvram = tvram
         self.fdd_status = fdd_status
+        self.fdd_error = fdd_error      # fdd_status != 200 のときの error
         self.token = token              # 正しいトークン (None = 検査しない)
         self.token_file = token_file    # /api/instance の token_file ('' = 書けていない)
         self.fdd_delay = fdd_delay      # insert 後、何回目の instance で path が立つか
@@ -350,8 +351,9 @@ class FakeHttp(object):
                 return 404, '{"ok":false,"error":"unknown endpoint"}'
             if not self._authorized(headers):
                 return 401, '{"ok":false,"error":"need the aidebug token"}'
-            if self.fdd_status != 200:
-                return self.fdd_status, '{"ok":false,"error":"x"}'
+            applying = self.fdd_error.startswith('fdd request is being applied')
+            if self.fdd_status != 200 and not applying:
+                return self.fdd_status, json.dumps({'ok': False, 'error': self.fdd_error})
             q = parse_qs(body or '')
             d = int(q['drive'][0])
             n = len([c for c in self.calls if c[1] == '/api/instance'])
@@ -363,6 +365,9 @@ class FakeHttp(object):
             else:
                 self.fdd[d] = {'path': '', 'cfg': '', 'pending': False}
                 self.fdd_inserted_at.pop(d, None)
+            if applying:
+                # COMMIT の後に 10 秒で終わらなかった: 操作自体は後で反映される
+                return self.fdd_status, json.dumps({'ok': False, 'error': self.fdd_error})
             return 200, '{"ok":true}'
         return 404, '{"ok":false,"error":"unknown endpoint"}'
 
@@ -1022,6 +1027,55 @@ class Fdd(Base):
         self.assertEqual(call[4], {'X-Aidebug-Token': TOKEN})
         self.assertIn('fdd1 empty', self.out.getvalue())
 
+    def test_post_timeout_covers_server_worst_case(self):
+        # /api/fdd も /api/cd と同じ状態機械で、最悪 21 秒 (5 + 6 + 10) 待って答える
+        c = self.make(ops=self.ops0)
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--eject']), 0,
+                         self.err.getvalue())
+        call = [x for x in self.http.calls if x[1] == '/api/fdd'][0]
+        self.assertGreaterEqual(call[3], 25)
+
+    def test_being_applied_503_checks_instance(self):
+        # 適用中のまま 503: 失敗と決めつけず /api/instance の fdd[] で結果を見る
+        c = self.make(ops=self.ops0, fdd_status=503,
+                      fdd_error='fdd request is being applied but did not finish in '
+                                'time; see GET /api/instance fdd[]')
+        rc = self.run_main(c, ['fdd', '--drive', '2', '--insert', 'other.d88'])
+        self.assertEqual(rc, 0, self.err.getvalue())
+        out = self.out.getvalue()
+        self.assertIn('being applied', out)
+        self.assertIn('fdd2 ready %s' % (WIN + '\\other.d88'), out)
+
+    def test_being_applied_503_eject_checks_instance(self):
+        c = self.make(ops=self.ops0, fdd_status=503,
+                      fdd_error='fdd request is being applied but did not finish in '
+                                'time; see GET /api/instance fdd[]')
+        self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--eject']), 0,
+                         self.err.getvalue())
+        self.assertIn('fdd1 empty', self.out.getvalue())
+
+    def test_being_applied_503_not_reflected_fails(self):
+        # 適用中の 503 の後、反映が見えなければ失敗 (成功と決めつけない)
+        c = self.make(ops=self.ops0, fdd_status=503, fdd_accepts=False,
+                      fdd_error='fdd request is being applied but did not finish in '
+                                'time; see GET /api/instance fdd[]')
+        rc = self.run_main(c, ['fdd', '--drive', '1', '--insert', 'other.d88'])
+        self.assertEqual(rc, 1)
+        self.assertIn('開けなかった', self.err.getvalue())
+
+    def test_other_503_is_failure(self):
+        for err in ('fdd request withdrawn: the UI thread did not get to it in time '
+                    '(nothing was changed)',
+                    'emulation thread did not pause or the UI section was busy (2s); '
+                    'nothing was changed',
+                    'UI thread did not respond (5s); nothing was changed'):
+            self.out, self.err = io.StringIO(), io.StringIO()
+            c = self.make(ops=self.ops0, fdd_status=503, fdd_error=err)
+            self.assertEqual(self.run_main(c, ['fdd', '--drive', '1', '--eject']), 1, err)
+            self.assertIn('nothing was changed', self.err.getvalue())
+            self.assertIn('503', self.err.getvalue())
+            self.assertEqual([x for x in self.http.calls if x[1] == '/api/instance'][1:], [])
+
     def test_missing_token_file_fails_before_calling_fdd(self):
         os.remove(os.path.join(self.dir, TOKEN_NAME))
         c = self.make(ops=self.ops0)
@@ -1507,8 +1561,8 @@ MUTATIONS = [
     ("            st, js = self.api('POST', '/api/quit', body, timeout=10, headers=headers)",
      "            st, js = self.api('POST', '/api/quit', body, timeout=10)",
      "quit にトークンを付けない (7/12)"),
-    ("        st, js = self.api('POST', '/api/fdd', urllib.parse.urlencode(params), timeout=15,\n                          headers=headers)",
-     "        st, js = self.api('POST', '/api/fdd', urllib.parse.urlencode(params), timeout=15)",
+    ("        st, js = self.api('POST', '/api/fdd', urllib.parse.urlencode(params),\n                          timeout=FDD_POST_TIMEOUT, headers=headers)",
+     "        st, js = self.api('POST', '/api/fdd', urllib.parse.urlencode(params),\n                          timeout=FDD_POST_TIMEOUT)",
      "fdd にトークンを付けない (7/12)"),
     ("            return win_norm(f.get('path') or '') == win_norm(want_path)",
      "            return True",
@@ -1559,9 +1613,19 @@ MUTATIONS = [
     ("CD_POST_TIMEOUT = 25\n",
      "CD_POST_TIMEOUT = 15\n",
      "/api/cd をサーバーの最悪 21 秒より短く切る (Fable 2 回目 P3-2)"),
-    ("        if st == 503 and 'being applied' in (js or {}).get('error', ''):",
-     "        if False:",
+    ("        if st == 503 and 'being applied' in (js or {}).get('error', ''):\n            # 適用は始まった (COMMIT の後) が 10 秒で終わらなかった。結果は ide[] で見る",
+     "        if False:\n            # 適用は始まった (COMMIT の後) が 10 秒で終わらなかった。結果は ide[] で見る",
      "適用中の 503 を失敗と決めつけ、結果を見に行かない (Fable 2 回目 P3-2)"),
+    # ---- 2026-09-26 fdd を cd と同じ状態機械に (代行レビュー P3-3) ----
+    ("FDD_POST_TIMEOUT = 25\n",
+     "FDD_POST_TIMEOUT = 15\n",
+     "/api/fdd をサーバーの最悪 21 秒より短く切る (P3-3)"),
+    ("        if st == 503 and 'being applied' in (js or {}).get('error', ''):\n            # 適用は始まった (COMMIT の後) が 10 秒で終わらなかった。結果は fdd[] で見る。",
+     "        if False:\n            # 適用は始まった (COMMIT の後) が 10 秒で終わらなかった。結果は fdd[] で見る。",
+     "fdd: 適用中の 503 を失敗と決めつけ、結果を見に行かない (P3-3)"),
+    ("        if st == 503 and 'being applied' in (js or {}).get('error', ''):\n            # 適用は始まった (COMMIT の後) が 10 秒で終わらなかった。結果は fdd[] で見る。",
+     "        if st == 503:\n            # 適用は始まった (COMMIT の後) が 10 秒で終わらなかった。結果は fdd[] で見る。",
+     "fdd: 何も変えていない 503 まで結果を見に行く (P3-3)"),
     ("                elif s.get('type') == 'cdrom':",
      "                elif False:",
      "status に空の CD ドライブを出さない"),
