@@ -17,14 +17,18 @@
 --select の規則 (安全側に倒す):
   * 変更 = `git diff --name-only <base>...HEAD` + 未コミット (staged / unstaged)
     + 追跡外 (gitignore を除く)。`ignore:` に当たるものは数えない。
+  * 基点の既定は feat/gui との merge-base。それが HEAD (= feat/gui の上でコミット
+    した後) なら HEAD~1
   * 変更が無い                     → 全部を変異なし (= check-fast)
   * `full:` に当たる変更がある     → 全部を変異込み (= check)
   * どの検査の glob にも `docs_only:` にも当たらない変更がある
                                    → 全部を変異込み (= check)。表の漏れで
-                                     否定側を落とさないため
-  * 変更が全部 `docs_only:` に当たる → 当たった検査だけを回す (他は回さない)
+                                     否定側を落とさないため。`broad:` の検査の
+                                     `**` glob はこの判定に数えない
+  * 変更が全部 `docs_only:` に当たる → 当たった検査 + `docs_always:` だけを回す
   * それ以外                       → 当たった検査は変異込み、残りは変異なし
-  出力は sh の代入 (CC_MODE / CC_STAGE1 / CC_MUT1 / CC_STAGE2)。説明は stderr。
+  出力は sh の代入 (CC_MODE / CC_STAGE1 / CC_MUT1 / CC_STAGE2 / CC_SUMMARY)。説明は stderr。
+  試験は tools/tests/test_check_select.py (make check-check-select-host)。
 
 --lint が見るもの (make check-map、check-fast / check の列に入っている):
   (a) build/sdk.mk の CHECK_PAR_TARGETS / CHECK_MUT_TARGETS と対応表の検査名が
@@ -115,6 +119,8 @@ def load_map():
     m.setdefault("full", [])
     m.setdefault("docs_only", [])
     m.setdefault("checks", {})
+    m.setdefault("broad", [])
+    m.setdefault("docs_always", [])
     return m
 
 
@@ -166,6 +172,13 @@ PY_IMPORT = re.compile(r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w., ]+))",
 TOML_PATH = re.compile(r'path\s*=\s*"([^"]+)"')
 
 SCAN_ROOTS = ("tools/", "userland/gshell/host/")   # ここの下は中身まで辿る
+# C の実装は場所を問わず #include "..." を多段に辿る。実装の .c が取り込む
+# .inc (コードの断片、hsync.c → hsync_protect.inc など) を表から落とさないため
+# (代行レビュー P2-1、2026-09-26)。
+C_EXTS = (".c", ".h", ".inc")
+# "/" を含まない裸のファイル名でも、この拡張子なら ROOT 相対の候補にする
+# (check_kapi_version.py の README.md、check_manifests.py の CLAUDE.md — P2-2)。
+BARE_EXTS = (".md", ".yaml", ".yml", ".json", ".tsv")
 
 
 def norm(p):
@@ -195,7 +208,7 @@ class Extractor:
             return
         self.seen.add(rel)
         if rel.startswith(SCAN_ROOTS) or rel.endswith("/Cargo.toml") \
-                or "/host_tests/" in rel:
+                or "/host_tests/" in rel or rel.endswith(C_EXTS):
             self.scan(rel)
 
     def add_dir(self, rel):
@@ -222,11 +235,16 @@ class Extractor:
         d = os.path.dirname(rel)
         if rel.endswith(".py"):
             self.scan_py(text, d)
-        elif rel.endswith((".c", ".h")):
+        elif rel.endswith(C_EXTS):
+            # "..." はまず取り込む側の場所から、次に ROOT から探す (C の規則と
+            # 同じ順)。-I で探す <...> / 別ディレクトリのヘッダは追わない。
+            # 循環は add() の seen で止まる。
             for inc in C_INC.findall(text):
-                r = self.resolve(inc, d)
-                if r and r[0] == "f":
-                    self.add(r[1])
+                for base in (d, ""):
+                    rel2 = norm(os.path.join(base, inc))
+                    if is_tracked_file(rel2):
+                        self.add(rel2)
+                        break
         elif rel.endswith(".rs"):
             for p in RS_PATH.findall(text):
                 self.add(os.path.join(d, p))
@@ -249,7 +267,9 @@ class Extractor:
             parts = re.findall(r"""['"]([^'"]+)['"]""", m.group(0))
             cands.add("/".join(parts))
         for _, s in PY_STR.findall(text):
-            if "/" in s and " " not in s:
+            if " " in s:
+                continue
+            if "/" in s or s.endswith(BARE_EXTS):
                 cands.add(s)
         for c in cands:
             c = c.strip()
@@ -312,6 +332,10 @@ def lint():
         errs.append("対応表に無い検査: %s (tools/check_map.yaml の checks: に足す)" % t)
     for t in sorted(mapped - listed):
         errs.append("列に無い検査が対応表にある: %s" % t)
+    for key in ("broad", "docs_always"):
+        for t in m[key]:
+            if t not in listed:
+                errs.append("%s: に列に無い検査がある: %s" % (key, t))
     dup = set(par) & set(mut)
     for t in sorted(dup):
         errs.append("CHECK_PAR_TARGETS と CHECK_MUT_TARGETS の両方にある: %s" % t)
@@ -344,73 +368,110 @@ def lint():
 
 # ---------------------------------------------------------------- --select
 def changed_files(base):
-    files = set(git("diff", "--name-only", "--no-renames", "%s...HEAD" % base))
-    files |= set(git("diff", "--name-only", "--no-renames", "HEAD"))
-    files |= set(git("ls-files", "--others", "--exclude-standard"))
-    return sorted(files)
+    """(コミット済みの変更, 未コミット + 追跡外) を返す。改名は旧名も数える。"""
+    committed = set(git("diff", "--name-only", "--no-renames", "%s...HEAD" % base))
+    work = set(git("diff", "--name-only", "--no-renames", "HEAD"))
+    work |= set(git("ls-files", "--others", "--exclude-standard"))
+    return sorted(committed), sorted(work - committed)
 
 
 def default_base():
+    """(基点, 説明)。既定は feat/gui との merge-base。
+
+    feat/gui の上でコミットした後は merge-base == HEAD になり、コミット済みの
+    変更が 1 件も見えず「変更なし = check-fast」に退化する。そのときは HEAD~1
+    (直前のコミット) を基点にする (代行レビュー P2-3)。
+    """
+    head = git("rev-parse", "HEAD")[0]
     for ref in ("feat/gui", "origin/feat/gui", "main"):
         p = subprocess.run(["git", "-C", ROOT, "merge-base", ref, "HEAD"],
                            capture_output=True, text=True)
+        mb = p.stdout.strip()
+        if p.returncode != 0 or not mb:
+            continue
+        if mb != head:
+            return mb, "%s との merge-base" % ref
+        p = subprocess.run(["git", "-C", ROOT, "rev-parse", "--verify", "-q",
+                            "HEAD~1"], capture_output=True, text=True)
         if p.returncode == 0 and p.stdout.strip():
-            return p.stdout.strip()
-    return "HEAD"
+            return (p.stdout.strip(),
+                    "HEAD~1 (%s との merge-base が HEAD — %s の上でコミット済み)"
+                    % (ref, ref))
+        return head, "HEAD (%s の上、親コミットが無い)" % ref
+    return head, "HEAD (feat/gui / main が見つからない)"
 
 
-def select(base, files=None):
+def plan(files):
+    """変更の一覧から (mode, stage1, mut1, stage2, 説明の行) を決める。git は見ない。"""
     m = load_map()
     _, vars_ = read_makefiles()
     par, mut = check_lists(vars_)
     ign = compile_globs(m["ignore"])
     full = compile_globs(m["full"])
     docs = compile_globs(m["docs_only"])
+    broad = set(m["broad"])
     checks = {t: compile_globs(g) for t, g in m["checks"].items()}
-    if files is None:
-        files = changed_files(base)
+    # 走査型の検査 (broad:) の `**` を含む glob は「表に載っている」の判定に数えない
+    # — ツリーを丸ごと舐める検査に当たっただけで安全側が発火しなくなるのを防ぐ
+    # (代行レビュー P2-1 の保険)。変異込みで回す検査を選ぶ方には数える。
+    cover = {t: [(g, r) for g, r in cg if not (t in broad and "**" in g)]
+             for t, cg in checks.items()}
     changed = [f for f in files if not matches(f, ign)]
 
     hit, unmatched, full_hits = set(), [], []
     for f in changed:
-        ts = {t for t, cg in checks.items() if matches(f, cg)}
-        hit |= ts
+        hit |= {t for t, cg in checks.items() if matches(f, cg)}
         if matches(f, full):
             full_hits.append(f)
-        elif not ts and not matches(f, docs):
+        elif not matches(f, docs) and \
+                not any(matches(f, cg) for cg in cover.values()):
             unmatched.append(f)
 
-    say = sys.stderr.write
-    say("check-changed: 基点 %s、変更 %d 件\n" % (base[:12], len(changed)))
+    lines = []
     if not changed:
         mode, s1, m1, s2 = "fast", par + mut, [], []
-        say("  変更なし → 全部を変異なしで回す (= check-fast)\n")
+        lines.append("変更なし → 全部を変異なしで回す (= check-fast)")
     elif full_hits or unmatched:
-        mode, s1, m1, s2 = "full", par, par, mut
-        for f in full_hits[:10]:
-            say("  full: に当たる: %s\n" % f)
-        for f in unmatched[:10]:
-            say("  対応表に無い: %s\n" % f)
-        say("  → 安全側: 全部を変異込みで回す (= check)\n")
+        mode, s1, m1, s2 = "full", list(par), list(par), list(mut)
+        lines += ["full: に当たる: %s" % f for f in full_hits[:10]]
+        lines += ["対応表に無い (broad の ** を除く): %s" % f for f in unmatched[:10]]
+        lines.append("→ 安全側: 全部を変異込みで回す (= check)")
     elif all(matches(f, docs) for f in changed):
+        # 文書を読む検査は当たらなくても回す (表の漏れで文書の検査を落とさない)。
+        run = hit | (set(m["docs_always"]) & (set(par) | set(mut)))
         mode = "docs"
-        s1 = [t for t in par + mut if t in hit and t not in mut]
+        s1 = [t for t in par if t in run]
         m1 = list(s1)
-        s2 = [t for t in mut if t in hit]
-        say("  docs だけの変更 → 当たった %d 本だけ回す: %s\n"
-            % (len(hit), " ".join(sorted(hit)) or "(なし)"))
+        s2 = [t for t in mut if t in run]
+        lines.append("docs だけの変更 → %d 本だけ回す (当たった検査 + docs_always:): %s"
+                     % (len(run), " ".join(sorted(run))))
     else:
         mode = "sel"
         s2 = [t for t in mut if t in hit]
         s1 = [t for t in par + mut if t not in s2]
         m1 = [t for t in par if t in hit]
-        say("  変異込み %d 本: %s\n" % (len(hit), " ".join(sorted(hit))))
-        say("  残り %d 本は変異なし\n" % (len(s1) - len(m1)))
+        lines.append("変異込み %d 本: %s" % (len(hit), " ".join(sorted(hit))))
+        lines.append("残り %d 本は変異なし" % (len(s1) - len(m1)))
+    return mode, s1, m1, s2, lines
+
+
+def select(base, files=None, base_note=""):
+    if files is None:
+        committed, work = changed_files(base)
+    else:
+        committed, work = [], list(files)
+    mode, s1, m1, s2, lines = plan(sorted(set(committed) | set(work)))
+    summary = ("check-changed: 基点 %s (%s)、コミット済みの変更 %d 件 + 未コミット %d 件 → %s"
+               % (base[:12], base_note or "指定", len(committed), len(work), mode))
+    for l in lines:
+        sys.stderr.write("  " + l + "\n")
+    sys.stderr.write("*** " + summary + " ***\n")
     q = lambda xs: shlex.quote(" ".join(xs))
     print("CC_MODE=%s" % mode)
     print("CC_STAGE1=%s" % q(s1))
     print("CC_MUT1=%s" % q(m1))
     print("CC_STAGE2=%s" % q(s2))
+    print("CC_SUMMARY=%s" % shlex.quote(summary))
     return 0
 
 
@@ -431,11 +492,13 @@ def main(argv):
         return lint()
     if "--select" in argv:
         base = argv[argv.index("--base") + 1] if "--base" in argv else ""
-        files = None
         if "--files" in argv:                 # 試しに選ばせる (git を見ない)
             files = argv[argv.index("--files") + 1:]
-            return select("(--files)", files)
-        return select(base or default_base(), files)
+            return select("(--files)", files, "git を見ない")
+        if base:
+            return select(base, None, "BASE=%s" % base)
+        b, note = default_base()
+        return select(b, None, note)
     if "--inputs" in argv:
         rules, _ = read_makefiles()
         for f in sorted(extract(rules, argv[argv.index("--inputs") + 1])):

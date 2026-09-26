@@ -3,13 +3,14 @@
 # 読むのは tools/check_select.py。規則はそこの docstring と docs/08_build.md §8-4:
 #   * 変更が checks: の glob に当たった検査 → 変異込み、当たらなかった検査 → 変異なし
 #   * full: に当たる変更、または どの glob にも docs_only: にも当たらない変更
-#     → 全部を変異込み (= make check)。表の漏れで否定側を落とさないための安全側
-#   * 変更が全部 docs_only: に当たる → 当たった検査だけを回す
+#     → 全部を変異込み (= make check)。表の漏れで否定側を落とさないための安全側。
+#     broad: の検査の `**` glob はこの判定に数えない
+#   * 変更が全部 docs_only: に当たる → 当たった検査 + docs_always: だけを回す
 #   * ignore: に当たるものは変更に数えない
 # glob: `**` はディレクトリを跨ぐ、`*` `?` は跨がない。`[ch]` などの文字集合可。
 #
 # **表の漏れは make check-map が見る**: 各検査の recipe から辿れる試験スクリプトが
-# 開く / #include する / #[path] で取り込むソースが、その検査の glob (または full:)
+# 開く / #include する (C は場所を問わず "..." を多段に) / #[path] で取り込むソースが、その検査の glob (または full:)
 # に入っていること。静的に拾えない入力 (os.walk で舐める検査器・rustc に渡す
 # ディレクトリ) は glob を手で広く書く (各検査の先頭の行)。
 # 新しい検査を列 (build/sdk.mk の CHECK_PAR_TARGETS / CHECK_MUT_TARGETS) に足したら
@@ -34,6 +35,31 @@ docs_only:
   - docs/images/**
   - docs/logs/**
 
+# 走査型の検査。ここに名のある検査の `**` を含む glob は「表に載っている」の判定に
+# 数えない (ツリーを丸ごと舐める glob に当たっただけで「表に無い → 全部変異」の
+# 安全側が発火しなくなるのを防ぐ)。変異込みで回す検査を選ぶ方には数える。
+broad:
+  - check-arch-asm
+  - check-privileged
+  - check-le-access
+  - check-docs-links
+  - check-docs-orphans
+  - check-tests-inventory
+  - check-manifests
+  - check-packages-host
+
+# 文書を読む検査。docs だけの変更のときは、glob に当たらなくても必ず回す
+# (表の漏れで文書の検査を落とさない。どれも数秒以内)。
+docs_always:
+  - check-constraints
+  - check-kapi-version
+  - check-manifests
+  - check-packages-host
+  - check-tests-inventory
+  - check-docs-links
+  - check-docs-orphans
+  - check-memmap
+
 checks:
   check-bootinfo-host:
     - boot/bootinfo.inc
@@ -43,6 +69,7 @@ checks:
     - kernel/bootinfo_check.c
     - tools/tests/bootinfo_host.c
     - tools/tests/test_bootinfo.py
+    - drivers/ide_addr.h
   check-hdd-stage1-host:
     - boot/boot_main.c
     - build/core.yaml
@@ -69,6 +96,12 @@ checks:
     - userland/deploy.yaml
     - userland/shell/hdprep_plan.c
     - userland/shell/hdprep_plan.h
+    - boot/boot_defs.h
+    - fs/ext2.h
+    - fs/ext2_ctx.h
+    - fs/ext2_priv.h
+    - fs/vfs.h
+    - sdk/include/os32/os32_kapi_generated.h
   check-hdd-stage2-host:
     - boot/boot_defs.h
     - boot/boot_hdd.asm
@@ -120,6 +153,18 @@ checks:
     - userland/system/inst_hdd.h
     - userland/system/install.c
     - userland/system/install_recover.inc
+    - exec/appslot.h
+    - exec/exec_heap.h
+    - exec/exec_kapi_init.inc
+    - exec/os32x_hdr.h
+    - exec/ring3_str.h
+    - fs/ext2.h
+    - fs/ext2_priv.h
+    - fs/vfs.h
+    - kapi/kapi_db.h
+    - kapi/kapi_host.h
+    - kapi/kapi_profile.h
+    - sdk/include/os32/os32_kapi_generated.h
   check-vmkernel-lz4-host:
     - boot/boot_defs.h
     - boot/loader_fat_new.asm
@@ -138,6 +183,8 @@ checks:
     - tools/mkvmkernel.py
     - tools/tests/test_vk32_crc.py
     - tools/tests/vk32_host.c
+    - include/types.h
+    - lib/crc32_core.inc
   check-build-id-host:
     - include/build_id.h
     - tools/gen_build_id.py
@@ -151,6 +198,8 @@ checks:
     - kernel/v86_kbd.h
     - tools/tests/kbd_status_host.c
     - tools/tests/test_kbd_status.py
+    - drivers/kbd_dlog.h
+    - drivers/serial.h
   check-kbd-dlog-host:
     - drivers/kbd.c
     - drivers/kbd.h
@@ -163,6 +212,7 @@ checks:
     - tools/tests/test_kbd_dlog.py
     - userland/shell/kbd_watch.c
     - userland/shell/kbd_watch.h
+    - drivers/serial.h
   check-pcm-cs4231-host:
     - drivers/pcm_cs4231.c
     - drivers/pcm_cs4231.h
@@ -170,6 +220,7 @@ checks:
     - tools/tests/pcm_cs4231_host.c
     - tools/tests/pcm_hostshim/io.h
     - tools/tests/test_pcm_cs4231.py
+    - drivers/dma8237.h
   check-kprintf-attr-host:
     - lib/kprintf.c
     - lib/kprintf_attr.c
@@ -188,10 +239,14 @@ checks:
     - sdk/rust/os32api/src/kapi_generated.rs
     - tools/check_kapi_version.py
     - userland/rust/libos32gui/src/cfgro.rs
+    - README.md
   check-kapi-out:
     - kapi/kapi_generated.c
     - sdk/gen_kapi.py
     - tools/tests/test_kapi_out.py
+    - kapi/kapi_db.h
+    - kapi/kapi_host.h
+    - kapi/kapi_profile.h
   check-docs-links:
     - docs/**/*.md
     - CLAUDE.md
@@ -211,6 +266,8 @@ checks:
     - docs/TESTS.md
     - tools/gen_tests_inventory.py
   check-manifests:
+    - apps               # サブモジュールの bump (毎回 full にしない)
+    - game
     - userland/**
     - docs/manpages/**
     - assets/**
@@ -219,7 +276,10 @@ checks:
     - build/packages.yaml
     - docs/07_shell.md
     - tools/check_manifests.py
+    - CLAUDE.md
   check-packages-host:
+    - apps               # サブモジュールの bump (毎回 full にしない)
+    - game
     - userland/deploy.yaml
     - docs/manpages/**
     - assets/**
@@ -250,6 +310,33 @@ checks:
     - userland/system/inst_hdd.h
     - userland/system/install.c
     - userland/system/install_recover.inc
+    - fs/fatfs/diskio_os32.h
+    - fs/fatfs/ff.h
+    - fs/fatfs/ffconf.h
+    - fs/vfs.h
+    - fs/vfs_name_rules.inc
+    - kernel/boot_splash.h
+    - kernel/cpu_calibrate.h
+    - kernel/dma_pool.h
+    - kernel/idt.h
+    - kernel/ime.h
+    - kernel/ime_render.h
+    - kernel/irq.h
+    - kernel/irq_math.h
+    - kernel/kmalloc.h
+    - kernel/kselftest.h
+    - kernel/memory_boot.h
+    - kernel/paging.h
+    - kernel/pit_math.h
+    - kernel/shlib.h
+    - kernel/shm.h
+    - kernel/snd_engine.h
+    - kernel/sysclk.h
+    - kernel/sysconfig.h
+    - kernel/tss.h
+    - kernel/v86.h
+    - sdk/include/os32/os32_kapi_generated.h
+    - userland/shell/shell.h
   check-constraints:
     - CLAUDE.md
     - docs/CONSTRAINTS.md
@@ -291,6 +378,8 @@ checks:
     - sdk/include/os32/os32_gui_shared.h
     - sdk/rust/os32api/src/gui/proto.rs
     - tools/check_gui_proto.py
+    - sdk/include/os32/os32_kapi_generated.h
+    - sdk/include/os32/os32_kapi_shared.h
   check-term-model:
     - userland/libos32term/**
   check-term-render:
@@ -344,6 +433,29 @@ checks:
     - tools/tests/test_pgalloc_range.py
     - tools/tests/test_physmem.py
     - tools/tests/test_sbrk_tier.py
+    - exec/exec_heap.h
+    - exec/exec_kapi_init.inc
+    - exec/os32x_hdr.h
+    - exec/ring3_str.h
+    - kernel/boot_font.h
+    - kernel/boot_splash.h
+    - kernel/cpu_calibrate.h
+    - kernel/dma_pool.h
+    - kernel/idt.h
+    - kernel/ime.h
+    - kernel/ime_render.h
+    - kernel/irq.h
+    - kernel/irq_math.h
+    - kernel/kmalloc.h
+    - kernel/kselftest.h
+    - kernel/pit_math.h
+    - kernel/shlib.h
+    - kernel/shm.h
+    - kernel/snd_engine.h
+    - kernel/sysclk.h
+    - kernel/sysconfig.h
+    - kernel/tss.h
+    - kernel/v86.h
   check-memmap-host:
     - boot/boot_defs.h
     - boot/bootinfo.inc
@@ -373,6 +485,10 @@ checks:
     - tools/tests/test_memmap_boot.py
     - tools/tests/test_memmap_gen.py
     - tools/tests/test_owner_reclaim.py
+    - fs/vfs.h
+    - include/types.h
+    - sdk/include/os32/os32_kapi_generated.h
+    - sdk/include/os32/os32_kapi_shared.h
   check-memmap:
     - docs/02_memory.md
     - include/memmap.h
@@ -392,6 +508,11 @@ checks:
     - tools/gen_memmap.py
     - tools/tests/owner_reclaim_host.c
     - tools/tests/test_owner_reclaim.py
+    - fs/vfs.h
+    - include/types.h
+    - kernel/paging.h
+    - sdk/include/os32/os32_kapi_generated.h
+    - sdk/include/os32/os32_kapi_shared.h
   check-boot-splash-host:
     - gfx/backend_pc98.c
     - gfx/gfx_core.c
@@ -399,6 +520,9 @@ checks:
     - kernel/boot_splash.h
     - tools/tests/boot_splash_native_host.c
     - tools/tests/test_boot_splash_native.py
+    - gfx/gfx.h
+    - gfx/gfx_internal.h
+    - gfx/palette.h
   check-tools-host:
     - assets/settings/defaults.tsv
     - build/core.yaml
@@ -442,6 +566,7 @@ checks:
     - userland/rust/filer/host/model_tests.rs
     - userland/rust/filer/src/model.rs
     - userland/rust/libos32gui/src/app.rs
+    - sdk/include/os32/os32_kapi_generated.h
   check-np21w-ctl-host:
     - tools/np21w_ctl.py
     - tools/tests/test_np21w_ctl.py
@@ -458,6 +583,8 @@ checks:
     - fs/vfs_fd.c
     - tools/tests/test_vfs_fd_sqlite.py
     - tools/tests/vfs_fd_sqlite_host.c
+    - fs/fd_redirect.h
+    - fs/vfs.h
   check-fdc-seek-host:
     - drivers/fdc.c
     - drivers/fdc.h
@@ -465,6 +592,7 @@ checks:
     - drivers/fdc_decide.h
     - tools/tests/fdc_seek_host.c
     - tools/tests/test_fdc_seek.py
+    - drivers/dma8237.h
   check-serial-vfast-host:
     - drivers/serial.c
     - drivers/serial.h
@@ -483,6 +611,9 @@ checks:
     - kernel/sys.c
     - tools/tests/serial_portc_host.c
     - tools/tests/test_serial_portc.py
+    - kernel/paging.h
+    - kernel/pgalloc.h
+    - kernel/physmem.h
   check-cpu-calibrate-host:
     - kernel/cpu_calibrate.c
     - kernel/cpu_calibrate.h
@@ -512,12 +643,15 @@ checks:
     - kernel/dma_pool_math.c
     - tools/tests/dma_pool_host.c
     - tools/tests/test_dma_pool.py
+    - drivers/dma8237.h
   check-pci-bind-host:
     - drivers/pci_bind.c
     - drivers/pci_bind.h
     - drivers/pci_bind_match.c
     - tools/tests/pci_bind_host.c
     - tools/tests/test_pci_bind.py
+    - drivers/pci.h
+    - drivers/pci_decode.h
   check-rshell-serial-host:
     - tools/rshell_serial.py
     - tools/serialfs_host.py
@@ -551,6 +685,12 @@ checks:
     - userland/shell/serial_watchdog.c
     - userland/shell/serial_watchdog.h
     - userland/system/hsync_bootold.inc
+    - fs/vfs.h
+    - kernel/paging.h
+    - kernel/pgalloc.h
+    - kernel/physmem.h
+    - lib/crc32_core.inc
+    - sdk/include/os32/os32_kapi_generated.h
   check-vfs-mount-dev-host:
     - drivers/pc98pt.c
     - drivers/pc98pt.h
@@ -578,6 +718,14 @@ checks:
     - tools/tests/test_fatfs_stat.py
     - tools/tests/test_vfs_mount_dev.py
     - tools/tests/vfs_mount_dev_host.c
+    - fs/ext2.h
+    - fs/ext2_ctx.h
+    - fs/ext2_layout.h
+    - fs/ext2_priv.h
+    - fs/fatfs/diskio_os32.h
+    - fs/fatfs/ff.h
+    - fs/fatfs/ffconf.h
+    - fs/vfs_name_rules.inc
   check-sqlite-groups-host:
     - fs/vfs_fd.c
     - lib/sqlite3/os32_sqlite_config.h
@@ -589,6 +737,8 @@ checks:
     - tools/tests/sqlite_groups_host.c
     - tools/tests/test_sqlite_groups.py
     - tools/tests/vfs_fd_sqlite_host.c
+    - fs/fd_redirect.h
+    - fs/vfs.h
   check-con-sink-host:
     - kernel/con_sink.c
     - kernel/console.c
@@ -604,6 +754,35 @@ checks:
     - kernel/kernel.c
     - tools/tests/bootlog_host.c
     - tools/tests/test_bootlog.py
+    - fs/ext2.h
+    - fs/ext2_ctx.h
+    - fs/ext2_priv.h
+    - fs/fatfs/diskio_os32.h
+    - fs/fatfs/ff.h
+    - fs/fatfs/ffconf.h
+    - fs/vfs.h
+    - fs/vfs_name_rules.inc
+    - kernel/boot_font.h
+    - kernel/boot_splash.h
+    - kernel/cpu_calibrate.h
+    - kernel/dma_pool.h
+    - kernel/idt.h
+    - kernel/ime.h
+    - kernel/ime_render.h
+    - kernel/irq.h
+    - kernel/irq_math.h
+    - kernel/kmalloc.h
+    - kernel/kselftest.h
+    - kernel/memory_boot.h
+    - kernel/paging.h
+    - kernel/pit_math.h
+    - kernel/shlib.h
+    - kernel/shm.h
+    - kernel/snd_engine.h
+    - kernel/sysclk.h
+    - kernel/sysconfig.h
+    - kernel/tss.h
+    - kernel/v86.h
   check-kbd-inject-host:
     - kernel/kbd_inject.c
     - tools/tests/kbd_inject_host.c
@@ -612,6 +791,7 @@ checks:
     - exec/launch.c
     - tools/tests/launch_host.c
     - tools/tests/test_launch.py
+    - exec/appslot.h
   check-ring3-str-host:
     - exec/ring3_str.c
     - exec/ring3_str.h
@@ -638,6 +818,7 @@ checks:
     - userland/shell/sh_ls.inc
     - userland/shell/sh_pipe.inc
     - userland/shell/sh_redraw.inc
+    - userland/shell/shell.h
   check-sh-truncation-host:
     - drivers/pc98pt.c
     - drivers/pc98pt.h
@@ -672,6 +853,31 @@ checks:
     - userland/shell/sh_exec.inc
     - userland/shell/sh_launch.inc
     - userland/shell/ui.c
+    - kernel/boot_font.h
+    - kernel/boot_splash.h
+    - kernel/cpu_calibrate.h
+    - kernel/dma_pool.h
+    - kernel/idt.h
+    - kernel/ime.h
+    - kernel/ime_render.h
+    - kernel/irq.h
+    - kernel/irq_math.h
+    - kernel/kmalloc.h
+    - kernel/kselftest.h
+    - kernel/memory_boot.h
+    - kernel/paging.h
+    - kernel/pit_math.h
+    - kernel/shlib.h
+    - kernel/shm.h
+    - kernel/snd_engine.h
+    - kernel/sysclk.h
+    - kernel/sysconfig.h
+    - kernel/tss.h
+    - kernel/v86.h
+    - userland/shell/sh_ls.inc
+    - userland/shell/sh_pipe.inc
+    - userland/shell/sh_redraw.inc
+    - userland/shell/shell.h
   check-multiapp-model-host:
     - exec/appslot.c
     - exec/appslot.h
@@ -687,6 +893,8 @@ checks:
     - tools/tests/test_multiapp_impl.py
     - tools/tests/test_multiapp_model.py
     - tools/tests/test_owner_reclaim.py
+    - fs/vfs.h
+    - kernel/paging.h
   check-settings-protect-host:
     - build/core.yaml
     - sdk/include/os32/os32_kapi_shared.h
@@ -701,6 +909,10 @@ checks:
     - tools/tests/test_hsync_protect.py
     - userland/deploy.yaml
     - userland/system/hsync.c
+    - lib/crc32_core.inc
+    - sdk/include/os32/os32_kapi_generated.h
+    - userland/system/hsync_bootold.inc
+    - userland/system/hsync_protect.inc
   check-hsync-h1-host:
     - fs/hostdrv_stat_rules.inc
     - fs/hostdrvfs.c
@@ -712,12 +924,21 @@ checks:
     - tools/tests/test_hsync_h1.py
     - userland/system/hsync.c
     - userland/system/hsync_protect.inc
+    - fs/hostdrv_list_rules.inc
+    - fs/hostdrvfs_proto.h
+    - fs/vfs_name_rules.inc
+    - lib/crc32_core.inc
+    - userland/system/hsync_bootold.inc
   check-hostdrv-list-host:
     - fs/hostdrv_list_rules.inc
     - fs/hostdrvfs.c
     - fs/hostdrvfs.h
     - tools/tests/hostdrv_list_host.c
     - tools/tests/test_hostdrv_list.py
+    - fs/hostdrv_stat_rules.inc
+    - fs/hostdrvfs_proto.h
+    - fs/vfs.h
+    - fs/vfs_name_rules.inc
   check-fs-kind-host:
     - tools/tests/fs_kind_fake.h
     - tools/tests/fs_kind_host.c
@@ -725,12 +946,14 @@ checks:
     - userland/shell/cmd_file.c
     - userland/shell/cmd_fs_shared.c
     - userland/shell/cmd_fs_shared.h
+    - userland/shell/shell.h
   check-vfs-kind-host:
     - fs/vfs.c
     - fs/vfs.h
     - fs/vfs_fd.c
     - tools/tests/test_vfs_kind.py
     - tools/tests/vfs_kind_host.c
+    - fs/fd_redirect.h
   check-b8-open-host:
     - drivers/pc98pt.c
     - drivers/pc98pt.h
@@ -755,6 +978,14 @@ checks:
     - tools/tests/hostdrv_hostshim/io.h
     - tools/tests/test_b8_hostdrv.py
     - tools/tests/test_b8_open.py
+    - fs/ext2.h
+    - fs/ext2_ctx.h
+    - fs/ext2_layout.h
+    - fs/ext2_priv.h
+    - fs/fd_redirect.h
+    - fs/hostdrv_list_rules.inc
+    - fs/hostdrvfs_proto.h
+    - fs/vfs_name_rules.inc
   check-ext2-empty-name-host:
     - build/core.yaml
     - drivers/pc98pt.c
@@ -774,6 +1005,10 @@ checks:
     - tools/tests/mtar_freestanding/string.h
     - tools/tests/test_ext2_empty_name.py
     - userland/deploy.yaml
+    - fs/ext2.h
+    - fs/ext2_ctx.h
+    - fs/ext2_priv.h
+    - sdk/include/os32/os32_kapi_generated.h
   check-vfs-fd-path-host:
     - build/core.yaml
     - drivers/pc98pt.c
@@ -818,6 +1053,21 @@ checks:
     - userland/shell/hdprep_plan.c
     - userland/shell/hdprep_plan.h
     - userland/system/cdinst.c
+    - fs/ext2.h
+    - fs/ext2_ctx.h
+    - fs/ext2_priv.h
+    - fs/fatfs/diskio.h
+    - fs/fatfs/diskio_os32.h
+    - fs/fd_redirect.h
+    - fs/hostdrv_list_rules.inc
+    - fs/hostdrv_stat_rules.inc
+    - fs/hostdrvfs_proto.h
+    - kernel/ime.h
+    - kernel/ime_render.h
+    - lib/kstring.h
+    - sdk/include/os32/os32_kapi_generated.h
+    - userland/system/inst_disk.h
+    - userland/system/inst_hdd.h
   check-db-v50-host:
     - exec/exec.c
     - exec/exec.h
@@ -837,6 +1087,26 @@ checks:
     - tools/tests/sqlite_groups_backend.h
     - tools/tests/test_kapi_db_v50.py
     - tools/tests/vfs_fd_sqlite_host.c
+    - exec/appslot.h
+    - exec/exec_heap.h
+    - exec/exec_kapi_init.inc
+    - exec/os32x_hdr.h
+    - exec/ring3_str.h
+    - fs/fd_redirect.h
+    - fs/vfs.h
+    - kernel/cpu_calibrate.h
+    - kernel/cpu_calibrate_math.h
+    - kernel/dma_pool.h
+    - kernel/idt.h
+    - kernel/irq.h
+    - kernel/irq_math.h
+    - kernel/kmalloc.h
+    - kernel/ktime.h
+    - kernel/pgalloc.h
+    - kernel/physmem.h
+    - kernel/pit_math.h
+    - kernel/sysclk.h
+    - kernel/time_math.h
   check-db-errstr-host:
     - fs/vfs_fd.c
     - kapi/kapi_db.c
@@ -850,6 +1120,8 @@ checks:
     - tools/tests/sqlite_groups_backend.h
     - tools/tests/test_db_errstr.py
     - tools/tests/vfs_fd_sqlite_host.c
+    - fs/fd_redirect.h
+    - fs/vfs.h
   check-cfg-host:
     - assets/settings/defaults.tsv
     - fs/vfs_fd.c
@@ -876,6 +1148,8 @@ checks:
     - userland/lib/cfg/libos32cfg.c
     - userland/lib/cfg/libos32cfg.h
     - userland/tests/cfg_bench.c
+    - fs/fd_redirect.h
+    - fs/vfs.h
   check-gui-host:
     - userland/rust/libos32gui/host_tests/**
     - sdk/rust/os32api/src/cfg.rs
@@ -898,6 +1172,11 @@ checks:
     - tools/tests/vfs_fd_sqlite_host.c
     - userland/system/install.c
     - userland/system/install_recover.inc
+    - fs/fd_redirect.h
+    - fs/vfs.h
+    - userland/shell/hdprep_plan.h
+    - userland/system/inst_disk.h
+    - userland/system/inst_hdd.h
   check-install-fresh-host:
     - drivers/pc98pt.c
     - drivers/pc98pt.h
@@ -912,6 +1191,7 @@ checks:
     - userland/system/inst_hdd.c
     - userland/system/inst_hdd.h
     - userland/system/install.c
+    - userland/system/install_recover.inc
   check-host-agent:
     - tools/host_agent.py
     - tools/tests/test_host_agent.py
@@ -928,6 +1208,18 @@ checks:
     - net/link.h
     - tools/tests/net_link_host.c
     - tools/tests/test_net_link.py
+    - drivers/ne2000.h
+    - drivers/np2sysp.h
+    - exec/appslot.h
+    - exec/exec_heap.h
+    - exec/exec_kapi_init.inc
+    - exec/os32x_hdr.h
+    - exec/ring3_str.h
+    - kapi/kapi_db.h
+    - kapi/kapi_profile.h
+    - kernel/idt.h
+    - kernel/paging.h
+    - kernel/pit_math.h
   check-host-lib-host:
     - tools/tests/host_cmd_host.c
     - tools/tests/host_lib_host.c
@@ -961,6 +1253,8 @@ checks:
     - kernel/irq_math.h
     - tools/tests/irq_math_host.c
     - tools/tests/test_irq_math.py
+    - kernel/idt.h
+    - kernel/pit_math.h
   check-time-math-host:
     - kernel/ktime.c
     - kernel/ktime.h
@@ -968,6 +1262,8 @@ checks:
     - kernel/time_math.h
     - tools/tests/test_time_math.py
     - tools/tests/time_math_host.c
+    - kernel/idt.h
+    - kernel/pit_math.h
   check-fdc-track-host:
     - drivers/fdc.c
     - drivers/fdc.h
@@ -983,6 +1279,11 @@ checks:
     - tools/tests/fdc_hostshim/io.h
     - tools/tests/fdc_track_host.c
     - tools/tests/test_fdc_track.py
+    - drivers/dma8237.h
+    - fs/fatfs/diskio_os32.h
+    - fs/fatfs/ffconf.h
+    - fs/vfs.h
+    - fs/vfs_name_rules.inc
   check-cd-read-host:
     - drivers/atapi.c
     - drivers/atapi.h
@@ -995,9 +1296,13 @@ checks:
     - tools/tests/test_cd_read.py
     - userland/lib/rt/pkg.c
     - userland/lib/rt/pkg.h
+    - drivers/ide.h
+    - fs/vfs.h
   check-map:
     - tools/check_map.yaml
     - tools/check_select.py
+    - CLAUDE.md
+    - README.md
   check-kapi-layout-host:
     - exec/exec.c
     - exec/exec.h
@@ -1018,6 +1323,12 @@ checks:
     - tools/tests/os32x_layout_host.c
     - tools/tests/test_kapi_layout.py
     - userland/rust/libos32gui/src/shlib.rs
+    - exec/appslot.h
+    - exec/exec_heap.h
+    - exec/ring3_str.h
+    - kapi/kapi_db.h
+    - kapi/kapi_host.h
+    - kapi/kapi_profile.h
   check-edit-doc-host:
     - tools/tests/os32api_host.py
     - tools/tests/test_edit_doc.py
@@ -1037,11 +1348,13 @@ checks:
     - sdk/include/os32/os32_kapi_shared.h
     - tools/tests/fstat_redir_host.c
     - tools/tests/test_fstat_redir.py
+    - sdk/include/os32/os32_kapi_generated.h
   check-kstring-c-host:
     - lib/kstring_asm.asm
     - lib/kstring_c.c
     - tools/tests/kstring_c_host.c
     - tools/tests/test_kstring_c.py
+    - lib/kstring.h
   check-kstr-bench-host:
     - build/app.conf
     - lib/kstring_asm.asm
@@ -1051,6 +1364,8 @@ checks:
     - tools/tests/test_kstr_bench.py
     - userland/deploy.yaml
     - userland/tests/kstr_bench.c
+    - lib/kstring.h
+    - sdk/include/os32/os32_kapi_generated.h
   check-sh-status-host:
     - drivers/pc98pt.c
     - drivers/pc98pt.h
@@ -1082,6 +1397,12 @@ checks:
     - userland/shell/serial_watchdog.h
     - userland/shell/sh_exec.inc
     - userland/shell/ui.c
+    - userland/shell/sh_args.inc
+    - userland/shell/sh_launch.inc
+    - userland/shell/sh_ls.inc
+    - userland/shell/sh_pipe.inc
+    - userland/shell/sh_redraw.inc
+    - userland/shell/shell.h
   check-hsync-h3-host:
     - build/app.conf
     - fs/ext2_vfs.c
@@ -1101,12 +1422,28 @@ checks:
     - tools/tests/test_hsync_h3.py
     - tools/tests/vfs_set_mtime_host.c
     - userland/system/hsync.c
+    - fs/ext2.h
+    - fs/ext2_ctx.h
+    - fs/ext2_priv.h
+    - fs/fatfs/diskio_os32.h
+    - fs/fatfs/ff.h
+    - fs/fatfs/ffconf.h
+    - fs/hostdrv_list_rules.inc
+    - fs/hostdrvfs_proto.h
+    - fs/vfs_name_rules.inc
+    - lib/crc32_core.inc
+    - lib/kstring.h
+    - userland/system/hsync_bootold.inc
+    - userland/system/hsync_protect.inc
   check-hsync-h2-host:
     - build/app.conf
     - docs/manpages/hsync.1
     - tools/tests/hsync_h2_host.c
     - tools/tests/test_hsync_h2.py
     - userland/system/hsync.c
+    - lib/crc32_core.inc
+    - userland/system/hsync_bootold.inc
+    - userland/system/hsync_protect.inc
   check-h4-manifest-host:
     - build/core.yaml
     - docs/manpages/hsync.1
@@ -1118,6 +1455,9 @@ checks:
     - tools/tests/test_hostdrv_manifest.py
     - userland/deploy.yaml
     - userland/system/hsync.c
+    - lib/crc32_core.inc
+    - userland/system/hsync_bootold.inc
+    - userland/system/hsync_protect.inc
   check-vfs-excl-host:
     - fs/ext2_dir.c
     - fs/ext2_file.c
@@ -1130,6 +1470,10 @@ checks:
     - sdk/include/os32/os32_kapi_shared.h
     - tools/tests/test_vfs_excl.py
     - tools/tests/vfs_excl_host.c
+    - fs/ext2.h
+    - fs/ext2_ctx.h
+    - fs/ext2_priv.h
+    - fs/fd_redirect.h
   check-fs-kind-callers-host:
     - tools/tests/fs_kind_callers_host.c
     - tools/tests/fs_kind_fake.h
@@ -1137,12 +1481,14 @@ checks:
     - userland/shell/cmd_file.c
     - userland/shell/cmd_fs_shared.c
     - userland/shell/cmd_fs_shared.h
+    - userland/shell/shell.h
   check-cat-linenum-host:
     - tools/tests/cat_linenum_host.c
     - tools/tests/test_cat_linenum.py
     - userland/shell/cmd_file.c
     - userland/shell/cmd_fs_shared.c
     - userland/shell/cmd_fs_shared.h
+    - userland/shell/shell.h
   check-result-conv-host:
     - tools/tests/result_conv/run_font_load_test.c
     - tools/tests/result_conv/run_klibc_test.c
@@ -1172,3 +1518,12 @@ checks:
     - tools/hostdrv_deploy.py
     - tools/tests/test_guest_tests.py
     - userland/deploy.yaml
+  check-check-select-host:
+    - CLAUDE.md
+    - README.md
+    - docs/08_build.md
+    - tools/check_map.yaml
+    - tools/check_select.py
+    - tools/tests/test_check_select.py
+    - userland/shell/sh_pipe.inc
+    - userland/system/hsync_protect.inc

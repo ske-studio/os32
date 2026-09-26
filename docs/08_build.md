@@ -203,18 +203,27 @@ KernelAPI の構造体を変えたときは `make clean` → `make all` が必�
   `MUTATE=1` (既定) で付く、`MUTATE=0` で付かない、`MUTATE=sel` なら `MUTATE_TARGETS` に
   名前のある検査だけ付く。新しい変異試験を足すときもこの書き方にする。
 - **`check-changed` の選び方** (`tools/check_select.py`、対応表は `tools/check_map.yaml`):
-  変更 = `git diff --name-only $(BASE)...HEAD` + 未コミット + 追跡外。`BASE` の既定は
-  `feat/gui` との merge-base。`FILES="a b"` を渡すと git を見ずにその一覧で選ぶ (試し用)。
+  変更 = `git diff --name-only --no-renames $(BASE)...HEAD` + 未コミット + 追跡外。`BASE` の既定は
+  `feat/gui` との merge-base。**`feat/gui` の上でコミットした後は merge-base == HEAD になるので
+  `HEAD~1` を基点にする** (直前のコミットを見る)。使った基点と「コミット済み N 件 + 未コミット M 件」は
+  最後の行 (`*** check-changed: … ***`) に出る。`FILES="a b"` を渡すと git を見ずにその一覧で選ぶ (試し用)。
   - 変更なし → 全部を変異なし (= `check-fast`)
   - `full:` (`Makefile` `build/*.mk` `sdk/kapi.json`) に当たる変更、または**対応表のどの
-    glob にも当たらない変更** → 全部を変異込み (= `check`)。表の漏れで否定側を落とさないための安全側
-  - 変更が全部 `docs_only:` (`**/*.md` など) → 当たった検査 (文書系) だけ
+    glob にも当たらない変更** → 全部を変異込み (= `check`)。表の漏れで否定側を落とさないための安全側。
+    走査型の検査 (`broad:` — `check-arch-asm` など) の `**` glob はこの判定に**数えない**
+    (ツリー全体の glob に当たっただけで安全側が消えるのを防ぐ)
+  - 変更が全部 `docs_only:` (`**/*.md` など) → 当たった検査 + **文書を読む検査 (`docs_always:` —
+    constraints / kapi-version / manifests / packages / tests-inventory / docs-links / docs-orphans / memmap) を常に**
   - それ以外 → 当たった検査は変異込み、残りは変異なし
 - **対応表の漏れは `make check-map` が見る** (両方の列に入っている): 列と表の検査名の過不足、
   どのファイルにも当たらない古い glob、各検査の recipe から辿れる試験スクリプトが開く /
-  `#include` する / `#[path]` で取り込むソースがその検査の glob に入っていること。
+  `#include` する / `#[path]` で取り込むソースがその検査の glob に入っていること。C は場所を問わず
+  `#include "..."` を多段に辿る (実装の `.c` が取り込む `.inc` も入力)。`"/"` の無い裸の名前も
+  `.md` `.yaml` `.json` `.tsv` なら候補にする (`README.md` / `CLAUDE.md` を読む検査器)。
   辿り方は静的なので、ツリーを舐める検査器 (`check-arch-asm` など) は glob を手で広く書いてある。
-  表が欠けても**試験そのものは変異なしで必ず回る** — 落とすのは否定側だけ。
+  表が欠けても `sel` の場合は**試験そのものは変異なしで必ず回る** — 落とすのは否定側だけ。
+  docs だけの変更では当たらない検査は回らないので、文書を読む検査は `docs_always:` に入れておく。
+  選び方そのものの試験は `make check-check-select-host` (`tools/tests/test_check_select.py`、変異 8 本)。
 - 新しい検査を列に足したら `python3 tools/check_select.py --suggest <検査名>` の出力を
   下書きにして対応表へ足す (`make check-map` が足りないと言う)。
 - `tools/check_tree_unchanged.py` の番人 ([POLICY_DEBUG §4-40](POLICY_DEBUG.md)) は 3 通りとも各段の後で回る。
