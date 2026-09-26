@@ -274,7 +274,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         tvram_print(6, 2, cpubuf, TATTR_WHITE);
     }
 
-    /* キーボード初期化 */
+    /* キーボード初期化。**paging_init より前** に呼ぶ — kbd_init は BIOS ワーク
+     * エリア 0000:053Ah (カナ・CAPS の初期値) を読み、ページング後はページ 0 が
+     * NOT PRESENT になる (include/pc98.h BIOS_WORK_KB_SHIFT、memmap.h)。 */
     tvram_print(48, 1, "KBD...", TATTR_GREEN);
     kbd_init();
     tvram_print(54, 1, "OK", TATTR_WHITE);

@@ -1,6 +1,6 @@
 # 実機 (PC-9821Ra266) の回 — 2026-09-26 発行の手順: 入れ直しと v2.1 の確認
 
-> 発行: PM (Claude Code `claude-opus-5-5`)。使う成果物: **CI の artifact `os32-feat-gui-b8f76e0`** (KAPI **v66**)。手順 10 (`kbdstat -w`) は **5992fd5 以降 (KAPI v67)** の成果物が要る — その回の最新の CI 成果物を使い、ver の Commit を記録する。
+> 発行: PM (Claude Code `claude-opus-5-5`)。使う成果物: **CI の artifact `os32-feat-gui-b8f76e0`** (KAPI **v66**)。手順 10・11 は **カナ・CAPS を方式 B (make で ON・break で OFF) にした成果物 — e2ab7b1 を取り込んだ feat/gui 以降** が要る (古い成果物だと「外してもカナのまま」が方式の判定と混ざる) — その回の最新の CI 成果物を使い、ver の Commit を記録する。
 > ノートの取り方: `cd ~/os32 && git pull && tools/ci_fetch.sh --sha b8f76e0` → `./os32-ci/os32-feat-gui-b8f76e0/`。
 > 前回の手順: [CHECKLIST_2026-09-25.md](CHECKLIST_2026-09-25.md) (HDD インストール、合格)。v2.1 の条件は [ROADMAP](../../ROADMAP.md) §0。
 
@@ -33,11 +33,14 @@
 | 8 | ユーザー | `gfxmode pegc` → リセット → GUI 起動 → ずれた画面で**液晶の自動調整ボタン** | 直るか・変わらないか。液晶の OSD の**水平/垂直周波数と解像度の写真** ([TASK_PEGC480_REALHW](TASK_PEGC480_REALHW.md) 段 0) |
 | 9 | ユーザー | `gfxmode pc98` に戻してリセット | CUI が正しく出る |
 | 10 | ユーザー + ノート | 本体で `kbdstat -w` → カナを押し込む (3 秒保持) → 離す → もう一度押して解除 → CAPS で同じ → ESC | 画面の行を写真 ([TASK_KBD_NAV](../gui/TASK_KBD_NAV.md) §3)。**解除のときに break が来るか**、押している間に make が繰り返すか。NP21/W は「押下で make・解除で break」だった (§3-1) |
+| 11 | ユーザー + ノート | カナを**ロックしたまま**再起動 → 起動行の `[kbd] … lock=` と、`kbdstat -w` の 1 行目の `mods=` | `lock=04` (カナ) なら BIOS が電源投入・再起動時のロックを 053Ah に載せている。`lock=00` なら載せていない (1 回ロックし直せば追いつく) |
 
 ## v2.1 の判定 (手順 1〜7)
 
 - 1・5 で起動が止まらない、2 でビープが鳴らない、3 が `Installation Complete`、6 でセルフテストが全部通る → **v2.1 を feat/gui → main に取り込んでタグを打つ** (PM)。
 - 手順 8・9 (PEGC) は v3 の材料で、v2.1 の判定には入れない。
+
+**手順 10 で解除のときに break が来ず make だけだった場合 (方式 A のキーボード)**: 方式 B ではカナ・CAPS を外せない。CAPS が立ったままだと本体キーボードの入力が大文字になる (シリアルからの操作は影響なし)。PM が drivers/kbd.c の `kbd_lock_apply` を「make で反転・break を無視」に戻す (試験の変異 12 の形)。
 
 ## 止まったとき
 
