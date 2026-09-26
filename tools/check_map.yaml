@@ -1454,6 +1454,7 @@ checks:
     - userland/system/hsync_bootold.inc
     - userland/system/hsync_protect.inc
   check-hsync-h2-host:
+    - fs/ext2.h
     - build/app.conf
     - docs/manpages/hsync.1
     - tools/tests/hsync_h2_host.c
