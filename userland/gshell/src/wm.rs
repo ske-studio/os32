@@ -253,6 +253,13 @@ pub struct Win {
      * **借りている index のビット集合 + 16 色分の色**で持つ。 */
     pub lease_mask: u16,
     pub lease_rgb: [GuiRgb; 16],
+    /* ---- WM が持つ窓の状態 (票 KBD_NAV §1-2 の窓メニュー) ----
+     * 最小化 = `visible` を落としてタスクバーにだけ残す (アプリの表示意図
+     * `GUI_WF_VISIBLE` は触らない)。アプリが show / hide したら解ける。 */
+    pub minimized: bool,
+    /// 最大化中 (作業領域いっぱい)。`restore` が元の外形。
+    pub maximized: bool,
+    pub restore: Rect,
 }
 
 impl Win {
@@ -280,6 +287,9 @@ impl Win {
         tc_visible: false,
         lease_mask: 0,
         lease_rgb: [GuiRgb { r: 0, g: 0, b: 0 }; 16],
+        minimized: false,
+        maximized: false,
+        restore: Rect::EMPTY,
     };
 
     /// 外形矩形 (画面座標)。
@@ -417,6 +427,16 @@ pub struct GuiState {
     pub mouse_x: i32,
     pub mouse_y: i32,
     pub prev_buttons: u8,
+    /// 実マウス (`mouse_poll`) の前回値。マウスキー (票 KBD_NAV §1-3) が
+    /// `mouse_x/y` を動かすので、「実マウスが動いたか」はこちらと比べる
+    /// (動いたら実マウスの値から続ける = 最後に動いた方が勝つ)。
+    pub real_x: i32,
+    pub real_y: i32,
+    /// マウスキーが押している合成ボタン (MOUSE_BTN_*)。実マウスとは別に持ち、
+    /// `prev_buttons` の差分には混ぜない (票 KBD_NAV §1-3)。
+    pub synth_buttons: u8,
+    /// キーボードでの WM 操作 (票 KBD_NAV)。
+    pub kn: crate::kbdnav::KbdNav,
 
     /* WM が所有する画面損傷 (デスクトップ + クローム)。画面座標。 */
     pub screen_dirty: RectSet,
@@ -481,6 +501,10 @@ impl GuiState {
         mouse_x: 320,
         mouse_y: 200,
         prev_buttons: 0,
+        real_x: 320,
+        real_y: 200,
+        synth_buttons: 0,
+        kn: crate::kbdnav::KbdNav::NEW,
         screen_dirty: RectSet::EMPTY,
         last_kbd_dropped: 0,
         cursor: Cursor::EMPTY,
@@ -605,6 +629,21 @@ impl GuiState {
         self.z_add_top(index);
     }
 
+    /// index を最背面へ (GRPH+ESC、票 KBD_NAV §1-2)。
+    pub fn send_to_back(&mut self, index: usize) {
+        if self.z_of(index).is_none() {
+            return;
+        }
+        self.z_remove(index);
+        let mut j = self.z_count;
+        while j > 0 {
+            self.zorder[j] = self.zorder[j - 1];
+            j -= 1;
+        }
+        self.zorder[0] = index;
+        self.z_count += 1;
+    }
+
     /// z (0=背面) 番目のウィンドウ index。
     #[inline]
     pub fn z_at(&self, z: usize) -> usize {
@@ -721,7 +760,7 @@ impl GuiState {
                 self.windows[i].gen = gen;
                 self.dirty_screen(vac);
                 if self.drag_index == i as i32 {
-                    self.drag_index = -1;
+                    drop_drag_frame(self);
                 }
             }
             i += 1;
@@ -743,6 +782,15 @@ impl GuiState {
             s += 1;
         }
     }
+}
+
+/// ドラッグ (マウス / キーボードの移動・サイズ) 中の窓が消えた: 枠を消して
+/// 終わらせる (代行レビュー P3-5: 枠が画面に残っていた)。
+fn drop_drag_frame(st: &mut GuiState) {
+    let f = st.drag_frame;
+    st.drag_index = -1;
+    st.drag_frame = Rect::EMPTY;
+    input::erase_frame(st, f);
 }
 
 /// GUI_WF_VISIBLE ビットを visible フラグへ同期する補助。
@@ -1037,6 +1085,15 @@ pub fn set_focus(st: &mut GuiState, owner: i32, id: u32) -> i32 {
     if st.front_index() == Some(index) {
         return 0;
     }
+    /* WM が最小化した窓へのアプリの set_focus は何もしない (Win98 の SetFocus も
+     * 復元しない)。前へ出すと、不可視の窓が Z の最前面に居るのに打鍵は可視の
+     * 窓へ行き、Focus だけが食い違う (代行レビュー P2-2)。 */
+    if st.windows[index].minimized {
+        return 0;
+    }
+    /* 未確定文字は元の窓へ確定する (票 KBD_NAV §1-6)。ここは X1 なので
+     * 変換 (辞書) は走らせず、次の X3 の頭で元の窓へ流す。 */
+    focus_leaving(st, false);
     let old_id = st.front_id();
     st.bring_to_front(index);
     visible::recompute_and_expose(st);
@@ -1045,6 +1102,146 @@ pub fn set_focus(st: &mut GuiState, owner: i32, id: u32) -> i32 {
     let new_id = st.windows[index].id(index);
     input::emit_focus_change(st, old_id, new_id);
     0
+}
+
+/// フォーカスが別の窓へ移る**直前**に呼ぶ (票 KBD_NAV §1-6)。FEP の未確定文字を
+/// いまのフォーカス窓へ確定する。`x3` = 変換を走らせてよい文脈 (WM の UI)。
+/// X1 (アプリの要求) では予約だけして、次の X3 の頭で同じ窓へ流す。
+pub fn focus_leaving(st: &mut GuiState, x3: bool) {
+    let old = st.front_id();
+    if old == 0 {
+        return;
+    }
+    if x3 {
+        fep::commit_to(st, old);
+    } else {
+        fep::defer_commit(old);
+    }
+}
+
+/// WM 自身がフォーカスを移す共通経路 (X3。マウス・タスクバー・キー操作)。
+/// FEP の確定 → 最前面 → 露出 → `Focus`。既に最前面なら何もしない。
+pub fn activate_index(st: &mut GuiState, index: usize) {
+    if st.windows[index].minimized {
+        restore_minimized(st, index);
+        return;
+    }
+    if st.front_index() == Some(index) {
+        return;
+    }
+    focus_leaving(st, true);
+    let old_front = st.front_id();
+    st.bring_to_front(index);
+    visible::recompute_and_expose(st);
+    let outer = st.windows[index].outer();
+    st.dirty_screen(outer);
+    let new_front = st.windows[index].id(index);
+    input::emit_focus_change(st, old_front, new_front);
+}
+
+/* ================================================================ */
+/*  最小化 / 最大化 / 元のサイズ (票 KBD_NAV §1-2 の窓メニュー、X3)  */
+/* ================================================================ */
+
+/// 最小化: 画面から外してタスクバーにだけ残す。MRU の末尾へ回す。
+pub fn minimize(st: &mut GuiState, index: usize) {
+    let w = st.windows[index];
+    if !w.used || w.minimized || !w.visible {
+        return;
+    }
+    let was_front = st.front_index() == Some(index);
+    if was_front {
+        focus_leaving(st, true);
+    }
+    let old_front = st.front_id();
+    st.windows[index].minimized = true;
+    st.windows[index].visible = false;
+    st.dirty_screen(w.outer());
+    visible::recompute_and_expose(st);
+    crate::kbdnav::mru_to_end(st, w.id(index));
+    let new_front = st.front_id();
+    if new_front != old_front {
+        input::emit_focus_change(st, old_front, new_front);
+    }
+}
+
+/// 最小化を解いて最前面へ出し、フォーカスを移す (`Focus` は 1 回)。
+pub fn restore_minimized(st: &mut GuiState, index: usize) {
+    if !st.windows[index].used || !st.windows[index].minimized {
+        return;
+    }
+    focus_leaving(st, true);
+    let old_front = st.front_id();
+    st.windows[index].minimized = false;
+    st.windows[index].visible = true;
+    damage::set_dirty_full(&mut st.windows[index]);
+    st.bring_to_front(index);
+    visible::recompute_and_expose(st);
+    let outer = st.windows[index].outer();
+    st.dirty_screen(outer);
+    let new_front = st.windows[index].id(index);
+    if new_front != old_front {
+        input::emit_focus_change(st, old_front, new_front);
+    }
+}
+
+/// 外形を WM が決めた矩形へ置き換える (最大化 / 元のサイズ / キーボードの
+/// 移動・サイズ)。旧 ∪ 新を損傷にし、クライアントを全面再描画させて
+/// `Configure` を流す (マウスのドラッグ確定と同じ手順)。
+pub fn set_outer(st: &mut GuiState, index: usize, r: Rect) {
+    let old = st.windows[index].outer();
+    if old == r {
+        return;
+    }
+    st.windows[index].x = r.x;
+    st.windows[index].y = r.y;
+    st.windows[index].w = r.w;
+    st.windows[index].h = r.h;
+    st.dirty_screen(old);
+    st.dirty_screen(r);
+    visible::recompute_and_expose(st);
+    damage::set_dirty_full(&mut st.windows[index]);
+    st.windows[index].configure_pending = true;
+    input::emit_configure(st, index);
+}
+
+/// 最大化: 作業領域いっぱいにする。元の外形は `restore` に控える。
+pub fn maximize(st: &mut GuiState, index: usize) {
+    if st.windows[index].maximized {
+        return;
+    }
+    let old = st.windows[index].outer();
+    st.windows[index].restore = old;
+    st.windows[index].maximized = true;
+    let wa = work_area(st);
+    set_outer(st, index, wa);
+}
+
+/// 元のサイズ: 最大化を解く (最小化なら元に戻す)。
+pub fn restore_size(st: &mut GuiState, index: usize) {
+    if st.windows[index].minimized {
+        restore_minimized(st, index);
+        return;
+    }
+    if !st.windows[index].maximized {
+        return;
+    }
+    st.windows[index].maximized = false;
+    let r = st.windows[index].restore;
+    set_outer(st, index, r);
+}
+
+/// 窓の大きさの下限 (`resize_window` と同じ規則)。
+pub fn min_size(w: &Win) -> (i32, i32) {
+    let mut mw = w.min_w;
+    let mut mh = w.min_h;
+    if mw < 60 {
+        mw = 60;
+    }
+    if mh < TITLEBAR_H + 8 {
+        mh = TITLEBAR_H + 8;
+    }
+    (mw, mh)
 }
 
 /* ================================================================ */
@@ -1118,6 +1315,9 @@ pub fn create_window(st: &mut GuiState, owner: i32, spec: &GuiWinSpec) -> i32 {
     w.visible = wf_visible(w.flags);
     w.configure_pending = true;
     st.windows[index] = w;
+    if w.visible {
+        focus_leaving(st, false); /* X1 (票 KBD_NAV §1-6) */
+    }
     let old_front = st.front_id();
     st.z_add_top(index);
     /* 初回は全面 dirty + 露出計算。 */
@@ -1146,7 +1346,7 @@ pub fn destroy_window(st: &mut GuiState, owner: i32, id: u32) -> i32 {
     st.windows[index] = Win::EMPTY;
     st.windows[index].gen = gen;
     if st.drag_index == index as i32 {
-        st.drag_index = -1;
+        drop_drag_frame(st);
     }
     st.dirty_screen(vac);
     visible::recompute_and_expose(st);
@@ -1159,6 +1359,8 @@ pub fn move_window(st: &mut GuiState, owner: i32, id: u32, x: i32, y: i32) -> i3
         Err(e) => return e,
     };
     let old = st.windows[index].outer();
+    /* アプリが動かしたら最大化ではない (元のサイズの記憶は捨てる)。 */
+    st.windows[index].maximized = false;
     st.windows[index].x = x;
     st.windows[index].y = y;
     st.dirty_screen(old);
@@ -1189,6 +1391,7 @@ pub fn resize_window(st: &mut GuiState, owner: i32, id: u32, w: i32, h: i32) -> 
     if nh < TITLEBAR_H + 8 {
         nh = TITLEBAR_H + 8;
     }
+    st.windows[index].maximized = false;
     st.windows[index].w = nw;
     st.windows[index].h = nh;
     st.dirty_screen(old);
@@ -1205,7 +1408,12 @@ pub fn show_window(st: &mut GuiState, owner: i32, id: u32, show: bool) -> i32 {
         Err(e) => return e,
     };
     let outer = st.windows[index].outer();
+    if show && !st.windows[index].visible {
+        focus_leaving(st, false); /* X1 (票 KBD_NAV §1-6) */
+    }
     let old_front = st.front_id();
+    /* アプリの show / hide は WM の最小化を解く (hide ならタスクバーからも消える)。 */
+    st.windows[index].minimized = false;
     st.windows[index].visible = show;
     if show {
         st.windows[index].flags |= GUI_WF_VISIBLE;

@@ -249,6 +249,16 @@ pub fn fep_script(script: &[i32]) {
 pub fn push_rawkeys(keys: &[i32]) {
     lk(&RAWKEYS).extend_from_slice(keys);
 }
+/// `kbd_get_modifiers()` の答え (**現在値**、SHIFT_*)。gshell は起動時にしか
+/// 読まない (票 KBD_NAV §1-5) — 試験は raw の列と食い違う値を置いて、
+/// 現在値を読む実装を落とす。
+pub static KBD_MODS: AtomicUsize = AtomicUsize::new(0);
+pub fn set_kbd_mods(m: u32) {
+    KBD_MODS.store(m as usize, Ordering::SeqCst);
+}
+unsafe extern "C" fn kbd_mods() -> u32 {
+    KBD_MODS.load(Ordering::SeqCst) as u32
+}
 
 /* ================================================================ */
 /*  K5b-W: アプリ 4 本の同時実行 (KAPI v44) の差し替え                */
@@ -827,6 +837,8 @@ pub fn init() {
     a.sys_time = sys_time;
     a.kbd_dropped_count = zero;
     a.kbd_trygetrawkey = raw_key;
+    a.kbd_get_modifiers = kbd_mods;
+    KBD_MODS.store(0, Ordering::SeqCst);
     a.mouse_poll = mouse;
     a.gfx_init = gfx_init;
     a.gfx_shutdown = nothing;

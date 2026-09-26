@@ -1055,6 +1055,13 @@ fn row_rect(m: &Modal, row: usize) -> Rect {
     )
 }
 
+/// ファイル選択の一覧の行 `row` (画面座標)。試験の観測点 (票 KBD_NAV K1 ④:
+/// マウスキーの + がダブルクリックの判定に入るか)。
+#[allow(dead_code)]
+pub fn file_row_rect(row: usize) -> Rect {
+    row_rect(state(), row)
+}
+
 /// 一覧 + パス行の帯 (損傷を絞る用)。
 fn list_band(m: &Modal) -> Rect {
     Rect::new(

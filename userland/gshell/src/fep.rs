@@ -159,6 +159,9 @@ pub struct Fep {
     toggle_pending: bool,
     commit: [u8; COMMIT_MAX],
     commit_len: usize,
+    /// X1 でフォーカスが移ったとき、未確定文字を確定して届ける窓 (完全な id、
+    /// 0 = 無し)。次の X3 の頭 ([`apply_pending_commit`]) で流す (票 KBD_NAV §1-6)。
+    commit_for: u32,
     /// [`GSHELL_IME_RENDER_GFX`] の番地。K が `ime_set_render` を足したら
     /// これをそのまま渡す。**参照を 1 つ作っておかないと `--gc-sections` で
     /// 関数表ごと落ちる**ので、ここで必ず番地を控える。
@@ -189,6 +192,7 @@ impl Fep {
         toggle_pending: false,
         commit: [0; COMMIT_MAX],
         commit_len: 0,
+        commit_for: 0,
         render_table: 0,
     };
 }
@@ -437,8 +441,8 @@ pub fn flush_text(st: &mut GuiState) {
     if len == 0 {
         return;
     }
-    state().commit_len = 0;
     if modal::is_open() {
+        state().commit_len = 0;
         if modal::is_input() {
             /* `state()` は 'static mut なので、差し込みの前に値を写しておく。 */
             let mut buf = [0u8; COMMIT_MAX];
@@ -451,7 +455,18 @@ pub fn flush_text(st: &mut GuiState) {
         }
         return;
     }
-    let t = match input::focus_target(st) {
+    let t = input::focus_target(st);
+    flush_text_to(st, t);
+}
+
+/// 溜まった確定文字列を `t` の窓へ `Text` で流す (`None` なら捨てる)。
+fn flush_text_to(st: &mut GuiState, t: Option<input::Target>) {
+    let len = state().commit_len;
+    if len == 0 {
+        return;
+    }
+    state().commit_len = 0;
+    let t = match t {
         Some(t) => t,
         /* 宛先無し (窓が無い) は捨てる。 */
         None => return,
@@ -490,6 +505,69 @@ pub fn flush_text(st: &mut GuiState) {
         }
         i += n;
     }
+}
+
+/* ================================================================ */
+/*  フォーカス移動の前の確定 (票 KBD_NAV §1-6)                       */
+/* ================================================================ */
+
+/* KEY_RETURN と ASCII CR (drivers/kbd.h)。確定は「RETURN を 1 打」と同じ。 */
+const SC_RETURN: u8 = 0x1C;
+const CH_CR: u8 = 0x0D;
+/// フォーカス移動の前の確定で RETURN を流す回数の上限 (未確定行は 1 行 =
+/// 高々数十文字、最長一致の区切りの数だけ回れば足りる)。
+const COMMIT_ROUNDS_MAX: usize = 16;
+
+/// 未確定文字 (候補の選択中なら今の候補) を確定して、完全な id `win_id` の窓へ
+/// `Text` で届ける。**X3 でだけ呼ぶ** (カーネル FEP の変換を走らせる)。
+/// FEP がオフ・未確定が無い (RETURN が素通り) なら何もしない。
+/// モーダル中は未確定はダイアログのものなので触らない — X1 の予約
+/// (`commit_for`) は**捨てずに残し**、モーダルが閉じてから流す
+/// (代行レビュー P2-1: 捨てると閉じた後の RETURN で別の窓へ確定した)。
+pub fn commit_to(st: &mut GuiState, win_id: u32) {
+    if !state().on {
+        state().commit_for = 0;
+        return;
+    }
+    if modal::is_open() {
+        return; /* 予約は残す */
+    }
+    state().commit_for = 0;
+    /* 前の打鍵の確定文字が残っていれば、それは今のフォーカス窓のもの。 */
+    flush_text(st);
+    /* RETURN 1 打では確定し切らないことがある: 候補の確定は最長一致で、
+     * 残りのかなを未確定へ戻す (kernel/ime.c の commit_candidate)。素通り
+     * (= 未確定が無い) になるまで上限つきで繰り返す (代行レビュー P3-1)。 */
+    let mut n = 0;
+    while n < COMMIT_ROUNDS_MAX {
+        if feed(st, SC_RETURN, CH_CR, 0) != Fed::Consumed {
+            break;
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return;
+    }
+    let t = input::target_of(st, win_id);
+    flush_text_to(st, t);
+}
+
+/// X1 でフォーカスが移る前に、確定の宛先だけ控える (最初の 1 件を保つ)。
+pub fn defer_commit(win_id: u32) {
+    let f = state();
+    if !f.on || f.commit_for != 0 {
+        return;
+    }
+    f.commit_for = win_id;
+}
+
+/// [`defer_commit`] で控えた確定を X3 の頭で流す。
+pub fn apply_pending_commit(st: &mut GuiState) {
+    let id = state().commit_for;
+    if id == 0 {
+        return;
+    }
+    commit_to(st, id);
 }
 
 /// `ime_is_active()` を写し取り、変化していたらモード表示を作り直す。

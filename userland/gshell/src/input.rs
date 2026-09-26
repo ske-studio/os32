@@ -17,7 +17,7 @@
 //! (`kbd_buf`) にカーネルが積まないので (K2)、打鍵の入口は raw 1 本だけ。
 
 use crate::wm::{GuiState, Rect};
-use crate::{cursor, fep, modal, ring, slot, startmenu, taskbar, visible, wm};
+use crate::{cursor, fep, kbdnav, modal, ring, slot, startmenu, taskbar, visible, wm};
 use os32api::gui::proto::{GuiRect16, GUI_EV_CONFIGURE, GUI_EV_FOCUS};
 
 /// 入力取り込みの実行文脈 (契約 T8)。
@@ -209,6 +209,20 @@ fn release_capture(st: &mut GuiState, mx: i32, my: i32, button: u8) -> bool {
     true
 }
 
+/// 完全な id の窓への配送先 (窓が消えていれば None)。
+pub fn target_of(st: &GuiState, win_id: u32) -> Option<Target> {
+    let index = st.win_by_id(win_id)?;
+    let owner = st.windows[index].owner;
+    let slot = st.slot_of_owner(owner)?;
+    let (cox, coy) = st.windows[index].client_origin();
+    Some(Target {
+        slot,
+        win_id,
+        cox,
+        coy,
+    })
+}
+
 pub fn focus_target(st: &GuiState) -> Option<Target> {
     let index = st.front_index()?;
     let owner = st.windows[index].owner;
@@ -271,6 +285,9 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
     /* X4 で見た SHIFT+SPACE をここで実行する (契約 T8: 辞書を開く重い処理は X3)。 */
     if ctx.wm_ui() {
         fep::apply_pending_toggle(st);
+        /* X1 (アプリの set_focus 等) でフォーカスが移ったときの未確定文字を、
+         * 次の打鍵より先に元の窓へ確定する (票 KBD_NAV §1-6)。 */
+        fep::apply_pending_commit(st);
     }
 
     /* 取りこぼしの差分を dropped に加算 (契約 T3)。 */
@@ -316,7 +333,10 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
          * にも数えられずに消える。空きが無ければ読まずにカーネル側へ残す (契約 T3)。 */
         let defer = ctx == Ctx::Pump
             && (fep::is_on() || fep::toggle_pending() || st.pending_raw_n > 0);
-        if defer && st.pending_raw_n >= st.pending_raw.len() {
+        /* WM のキー (票 KBD_NAV §1-4) かどうかは raw を**取り出した後**でないと
+         * 分からないので、X4 では退避先に空きが無ければ (退避しない種類の
+         * キーであっても) 読まずに止める。 */
+        if ctx == Ctx::Pump && st.pending_raw_n >= st.pending_raw.len() {
             break;
         }
         /* X3 は前の X4 が退避した raw を先に消費する (順序を保つ)。 */
@@ -335,7 +355,10 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         if raw < 0 {
             break;
         }
-        if defer {
+        /* WM のショートカットとマウスキーは状態機械を動かすので X3 でだけ
+         * 実行する (票 KBD_NAV §1-4)。X4 で見つけたら FEP と同じく、この raw と
+         * 以後を全部退避して次の X3 へ回す (順序を保つ)。 */
+        if defer || (ctx == Ctx::Pump && kbdnav::is_wm_raw(st, raw)) {
             /* 空きは取り出す前に確認済み。 */
             st.pending_raw[st.pending_raw_n] = raw;
             st.pending_raw_n += 1;
@@ -344,6 +367,17 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         let scan = (raw & 0x7F) as u8;
         let down = ((raw >> 8) & 1) != 0;
         let mods = ((raw >> 9) & 0x7F) as u32; /* イベント時点の修飾状態 */
+        /* X4 まで来た make は WM のキーではない (上で退避していない)。古い印を
+         * 消して、対になる break を X4 がそのまま配れるようにする。 */
+        if ctx == Ctx::Pump && down {
+            kbdnav::pump_delivered_make(st, scan);
+        }
+
+        /* 修飾キーとして捨てる**前**に: カナ (マウスキーの切り替え) と、GRPH+TAB
+         * 切り替え中の GRPH の離し (票 KBD_NAV §1-2 / §1-5)。 */
+        if ctx.wm_ui() && kbdnav::pre(st, scan, down, mods) {
+            continue;
+        }
 
         /* 修飾キー自体は Key として配送しない (状態は mods で見る)。 */
         if scan >= SC_SHIFT && scan <= SC_CTRL {
@@ -371,6 +405,12 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
                     fep::request_toggle();
                 }
             }
+            continue;
+        }
+
+        /* WM のショートカットとマウスキー (票 KBD_NAV §1-2 / §1-3)。モーダル・
+         * メニュー・FEP・アプリより前。状態ごとの扱いは kbdnav 側の表。 */
+        if ctx.wm_ui() && kbdnav::on_key(st, scan, down, mods) {
             continue;
         }
 
@@ -417,6 +457,12 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         }
 
         let ch = translate(scan, mods);
+
+        /* X1 の set_focus 等で予約した確定を、モーダルが閉じた後の最初の打鍵より
+         * 先に元の窓へ流す (同じ周期でモーダルが閉じた場合、票 KBD_NAV §1-6)。 */
+        if ctx.wm_ui() {
+            fep::apply_pending_commit(st);
+        }
 
         /* 押下は**先に FEP へ通す** (契約 U2a)。FEP が消費したキー (かな入力、
          * 未確定の編集、候補操作、確定、取消) は `Key` として配送しない。 */
@@ -470,11 +516,20 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
     if crate::fullscreen::active() {
         st.mouse_x = mi.x as i32;
         st.mouse_y = mi.y as i32;
+        st.real_x = st.mouse_x;
+        st.real_y = st.mouse_y;
         st.prev_buttons = mi.buttons;
         return;
     }
-    let mx = mi.x as i32;
-    let my = mi.y as i32;
+    /* 位置は**実マウスが動いたときだけ**実マウスの値へ (最後に動いた方が勝つ)。
+     * マウスキー (票 KBD_NAV §1-3) が動かした位置を、止まっている実マウスの
+     * 値で毎周巻き戻さない。 */
+    let rx = mi.x as i32;
+    let ry = mi.y as i32;
+    let real_moved = rx != st.real_x || ry != st.real_y;
+    st.real_x = rx;
+    st.real_y = ry;
+    let (mx, my) = if real_moved { (rx, ry) } else { (st.mouse_x, st.mouse_y) };
     let moved = mx != st.mouse_x || my != st.mouse_y;
     st.mouse_x = mx;
     st.mouse_y = my;
@@ -484,6 +539,8 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
     let up_edge = (btn & MOUSE_BTN_LEFT) == 0 && (st.prev_buttons & MOUSE_BTN_LEFT) != 0;
     let rdown_edge = (btn & MOUSE_BTN_RIGHT) != 0 && (st.prev_buttons & MOUSE_BTN_RIGHT) == 0;
     let rup_edge = (btn & MOUSE_BTN_RIGHT) == 0 && (st.prev_buttons & MOUSE_BTN_RIGHT) != 0;
+    /* アプリへ配る `buttons` は実マウスと合成ボタン (マウスキー) の和。 */
+    let pbtn = btn | st.synth_buttons;
 
     /* ---- モーダル中は宛先をダイアログに限定する (契約 U4) ---- */
     if modal::is_open() {
@@ -493,24 +550,17 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
         /* 状態機械を進めるのは X3 だけ (契約 T8)。X4 (ポンプ) では
          * prev_buttons を**進めない** — 進めると X4 が先に押下を見たとき
          * 次の X3 に down_edge が立たず、ダイアログのボタンが反応しない
-         * (レビュー #4 ④)。X3 が現在値と prev を比べてエッジを拾う。 */
+         * (レビュー #4 ④)。X3 が現在値と prev を比べてエッジを拾う。
+         * エッジの扱いは [`edge_x3`] のモーダル分岐 (マウスキーと共通)。 */
         if ctx.wm_ui() {
             if down_edge {
-                let _ = modal::on_button(st, mx, my);
+                edge_x3(st, mx, my, MOUSE_BTN_LEFT, true);
             }
-            /* 契約 U4 は**新しい入力**の宛先を決める規則で、モーダルが開く前の
-             * 押下と対になる離しは、その押下を受けたアプリのもの。ここで
-             * 捕捉を返さないと、アプリ内で押したまま自分でダイアログを開いた
-             * 場合 (OP_MODAL_OPEN) に離しが永久に届かない: prev_buttons だけ
-             * 進むので up_edge は二度と立たず、ウィジェットは armed のまま、
-             * 捕捉も残って次の無関係な離しが古い相手へ飛ぶ (レビュー #4 [P2])。
-             * 捕捉が無ければ何も配らないので、モーダル中に始まった押下・離しは
-             * 今までどおりダイアログだけのものになる。 */
             if up_edge {
-                release_capture(st, mx, my, MOUSE_BTN_LEFT);
+                edge_x3(st, mx, my, MOUSE_BTN_LEFT, false);
             }
             if rup_edge {
-                release_capture(st, mx, my, MOUSE_BTN_RIGHT);
+                edge_x3(st, mx, my, MOUSE_BTN_RIGHT, false);
             }
             st.prev_buttons = btn;
         }
@@ -518,22 +568,23 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
     }
 
     if ctx.wm_ui() {
-        /* ---- ドラッグ追従 (枠だけ動かす。実体は drop で移す。R2) ---- */
-        if st.drag_index >= 0 {
+        /* ---- ドラッグ追従 (枠だけ動かす。実体は drop で移す。R2) ----
+         * キーボードの移動・サイズ中 (窓メニュー) は枠をキーが持つ。 */
+        if st.drag_index >= 0 && !kbdnav::kmove_busy(st) {
             update_drag(st, mx, my);
         } else if moved {
             /* カーソルの移動は損傷に含めない (別経路で退避・再描画)。 */
             cursor::move_to(st, mx, my);
         }
         if down_edge {
-            wm_button_down(st, mx, my);
+            edge_x3(st, mx, my, MOUSE_BTN_LEFT, true);
         } else if up_edge {
-            wm_button_up(st, mx, my);
+            edge_x3(st, mx, my, MOUSE_BTN_LEFT, false);
         }
         if rdown_edge {
-            wm_right_down(st, mx, my);
+            edge_x3(st, mx, my, MOUSE_BTN_RIGHT, true);
         } else if rup_edge {
-            wm_right_up(st, mx, my);
+            edge_x3(st, mx, my, MOUSE_BTN_RIGHT, false);
         }
         if moved && !down_edge && !up_edge && !rdown_edge && !rup_edge {
             /* 移動: フォーカス窓へ Pointer (畳み込み)。
@@ -543,7 +594,7 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
              * 溜まり、`OP_WAIT` は `ring::pending > 0` で毎回すぐ戻る = アプリは
              * 二度と眠らず PIT の速さで回り続ける (v1.2 G3 実測: 無操作で毎秒
              * 33 周、マウス移動中は毎秒 2000 周)。契約 P と U5 の趣旨に反する。 */
-            forward_pointer(st, mx, my, btn);
+            forward_pointer(st, mx, my, pbtn);
         }
     } else {
         /* ポンプ (X4): 状態機械を進めず、入力の追記とカーソル移動だけ。
@@ -581,10 +632,66 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
         }
         if moved && !down_edge && !up_edge && !rdown_edge && !rup_edge {
             /* X3 と同じ理由で `moved` が要る (上のコメント)。 */
-            forward_pointer(st, mx, my, btn);
+            forward_pointer(st, mx, my, pbtn);
         }
     }
     st.prev_buttons = btn;
+}
+
+/// ボタンのエッジ 1 つを X3 で処理する。**実マウスとマウスキーの共通経路**
+/// (票 KBD_NAV §1-3): モーダル中はダイアログへ (背後の窓へは届かない)、
+/// それ以外は WM の状態機械 (`wm_button_down/up`・`wm_right_down/up`)。
+pub fn edge_x3(st: &mut GuiState, x: i32, y: i32, button: u8, down: bool) {
+    if modal::is_open() {
+        if down {
+            if button == MOUSE_BTN_LEFT {
+                let _ = modal::on_button(st, x, y);
+            }
+        } else {
+            /* 契約 U4 は**新しい入力**の宛先を決める規則で、モーダルが開く前の
+             * 押下と対になる離しは、その押下を受けたアプリのもの。ここで
+             * 捕捉を返さないと、アプリ内で押したまま自分でダイアログを開いた
+             * 場合 (OP_MODAL_OPEN) に離しが永久に届かない (レビュー #4 [P2])。
+             * 捕捉が無ければ何も配らないので、モーダル中に始まった押下・離しは
+             * 今までどおりダイアログだけのものになる。 */
+            release_capture(st, x, y, button);
+        }
+        return;
+    }
+    /* キーボードの移動・サイズ中はマウスで枠を動かさない。前に配った押下の
+     * 離しだけは相手へ返す (押されたままを残さない)。 */
+    if kbdnav::kmove_busy(st) {
+        if !down {
+            release_capture(st, x, y, button);
+        }
+        return;
+    }
+    match (button, down) {
+        (MOUSE_BTN_LEFT, true) => wm_button_down(st, x, y),
+        (MOUSE_BTN_LEFT, false) => wm_button_up(st, x, y),
+        (MOUSE_BTN_RIGHT, true) => wm_right_down(st, x, y),
+        (MOUSE_BTN_RIGHT, false) => wm_right_up(st, x, y),
+        _ => {}
+    }
+}
+
+/// ポインタの移動 1 回を X3 で処理する (マウスキー用、票 KBD_NAV §1-3)。
+/// 実マウスの移動と同じ分岐: モーダル中はカーソルだけ、WM のドラッグ中は
+/// 枠の追従、それ以外はカーソルとフォーカス窓への `Pointer`。
+pub fn move_x3(st: &mut GuiState, x: i32, y: i32) {
+    st.mouse_x = x;
+    st.mouse_y = y;
+    if modal::is_open() || kbdnav::kmove_busy(st) {
+        cursor::move_to(st, x, y);
+        return;
+    }
+    if st.drag_index >= 0 {
+        update_drag(st, x, y);
+    } else {
+        cursor::move_to(st, x, y);
+    }
+    let b = st.prev_buttons | st.synth_buttons;
+    forward_pointer(st, x, y, b);
 }
 
 /// このボタンエッジは WM の状態機械 (X3) が処理すべきものか。
@@ -655,9 +762,13 @@ fn wm_button_down(st: &mut GuiState, mx: i32, my: i32) {
         Some(i) => i,
         None => return,
     };
-    /* 前面化 + フォーカス切替 (Focus イベント)。 */
-    let old_front = st.front_id();
+    /* 前面化 + フォーカス切替 (Focus イベント)。未確定文字は元の窓へ確定
+     * してから移す (票 KBD_NAV §1-6)。 */
     let changed = st.front_index() != Some(idx);
+    if changed {
+        wm::focus_leaving(st, true);
+    }
+    let old_front = st.front_id();
     if changed {
         st.bring_to_front(idx);
         visible::recompute_and_expose(st);
@@ -755,6 +866,7 @@ fn wm_right_down(st: &mut GuiState, mx: i32, my: i32) {
     };
     if st.front_index() != Some(idx) {
         /* 背面窓の上: 前面化 + フォーカスだけ (左と同じ)。 */
+        wm::focus_leaving(st, true);
         let old_front = st.front_id();
         st.bring_to_front(idx);
         visible::recompute_and_expose(st);
@@ -787,8 +899,13 @@ fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
     let ny0 = my - st.drag_dy;
     /* 作業領域 (画面 − タスクバー) へクランプする (契約 D1)。 */
     let (nx, ny) = wm::clamp_to_work_area(st, nx0, ny0, w.w, w.h);
+    redraw_frame(st, Rect::new(nx, ny, w.w, w.h));
+}
+
+/// ドラッグ枠を `new_frame` へ描き替える (マウスのドラッグとキーボードの
+/// 移動・サイズの共通経路)。旧枠を下地で消し、新枠とカーソルを 1 回で present。
+pub fn redraw_frame(st: &mut GuiState, new_frame: Rect) {
     let old_frame = st.drag_frame;
-    let new_frame = Rect::new(nx, ny, w.w, w.h);
     let old_cursor = cursor::rect(st);
     let cursor_moved = st.mouse_x != st.cursor.x || st.mouse_y != st.cursor.y;
     if new_frame == old_frame && !cursor_moved {
@@ -814,6 +931,41 @@ fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
     let cr = cursor::rect(st);
     wm::queue_present(st, cr);
     wm::flush_present();
+}
+
+/// キーボードの移動・サイズを始める: 窓 `idx` の外形に枠を描く
+/// (マウスのタイトルバー押下と同じ描き方)。
+pub fn begin_frame(st: &mut GuiState, idx: usize) {
+    let w = st.windows[idx];
+    st.drag_index = idx as i32;
+    st.drag_dx = 0;
+    st.drag_dy = 0;
+    st.drag_frame = w.outer();
+    cursor::hide(st);
+    crate::chrome::draw_drag_outline(w.x, w.y, w.w, w.h, crate::lease::mono(st));
+    queue_frame_edges(st, w.outer());
+    cursor::show(st);
+    let cr = cursor::rect(st);
+    wm::queue_present(st, cr);
+    wm::flush_present();
+}
+
+/// 枠を消す (キーボードの移動・サイズの終わり)。枠は窓のクライアントにも
+/// 掛かるので、下地に加えて掛かった窓へ露出の `Paint` を返す
+/// (メニューを閉じるときと同じ扱い)。
+pub fn erase_frame(st: &mut GuiState, f: Rect) {
+    if f.is_empty() {
+        return;
+    }
+    st.dirty_screen(f);
+    let mut i = 0;
+    while i < st.windows.len() {
+        if st.windows[i].used && st.windows[i].visible {
+            let (ox, oy) = st.windows[i].client_origin();
+            crate::damage::add_dirty(&mut st.windows[i], f.translate(-ox, -oy));
+        }
+        i += 1;
+    }
 }
 
 /* ---- アプリへの配送 ---- */
@@ -863,6 +1015,8 @@ fn forward_button(st: &mut GuiState, mx: i32, my: i32, button: u8, down: bool) {
 
 /// フォーカスの移動を両者へ `Focus` で知らせる (契約 U2)。
 pub fn emit_focus_change(st: &mut GuiState, old_id: u32, new_id: u32) {
+    /* GRPH+TAB の並び (票 KBD_NAV §1-2 の MRU)。 */
+    kbdnav::mru_touch(st, new_id);
     if old_id != 0 {
         if let Some(oi) = st.win_by_id(old_id) {
             if let Some(slot) = st.slot_of_owner(st.windows[oi].owner) {
