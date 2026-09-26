@@ -89,6 +89,7 @@ def flags_for(mutated):
 
 sys.path.insert(0, str(ROOT / "tools/tests"))
 from test_serial_portc import FAKE_ARCH_IO, FAKE_PLATFORM_IO  # noqa: E402
+import mutpar  # noqa: E402  (tools/tests/mutpar.py)
 
 
 # ============================================================================
@@ -177,11 +178,19 @@ def session_build(tmp, mutated=None, name="session"):
     return exe
 
 
-def run_exe_cases(exe, cases, quiet=False, tag=""):
+# 変異のケースの時間の上限。実物のケースは長いもので 0.5 秒 (rshell_watchdog_junk、
+# 2026-09-26)。上限を消す変異 (C16「静まるのを待つ口に上限が無い」) は止まらず、
+# この上限で RED になる — 60 秒のままだと変異を並列にしても段の wall がこの 1 本で
+# 決まるので、変異だけ 20 秒にする (実物の 40 倍、make -j の負荷の下でも届かない)。
+MUT_CASE_TIMEOUT = 20
+
+
+def run_exe_cases(exe, cases, quiet=False, tag="", first_fail=False, timeout=60):
+    """落ちた数を返す。first_fail なら最初に落ちたところで打ち切る (変異用)。"""
     failed = 0
     for case in cases:
         try:
-            rc = subprocess.run([str(exe), case], cwd=ROOT, timeout=60,
+            rc = subprocess.run([str(exe), case], cwd=ROOT, timeout=timeout,
                                 stdout=subprocess.DEVNULL if quiet else None,
                                 stderr=subprocess.DEVNULL if quiet else None
                                 ).returncode
@@ -190,6 +199,8 @@ def run_exe_cases(exe, cases, quiet=False, tag=""):
         if not quiet:
             print(f"EXIT {tag}{case}={rc}", flush=True)
         failed += rc != 0
+        if failed and first_fail:
+            break
     return failed
 
 
@@ -1163,7 +1174,7 @@ PY_CASES = {
 }
 
 
-def run_py(h, r, names, quiet=False):
+def run_py(h, r, names, quiet=False, first_fail=False):
     global FAILED
     bad = 0
     for name in names:
@@ -1178,6 +1189,8 @@ def run_py(h, r, names, quiet=False):
                 print(f"  FAIL {name}: {f}", flush=True)
             print(f"EXIT py:{name}={rc}", flush=True)
         bad += rc
+        if bad and first_fail:
+            break
     return bad
 
 
@@ -1606,68 +1619,90 @@ PY_MUTATIONS = [
 ]
 
 
+def _mutate_c_one(item):
+    """C の変異 1 本。tmp/mut<i> (自分専用) に写して組み、最初に落ちたケースで打ち切る。
+    並列に呼ばれる。(missed, error, 行) を返す。"""
+    tmp, i, (rel, pattern, repl, why) = item
+    original = (ROOT / rel).read_text(encoding="utf-8")
+    text, n = re.subn(pattern, repl, original, count=1)
+    if n != 1:
+        return 0, 1, f"MUTATION C{i} ERROR (not applicable): {why}"
+    # 変異を当てたファイル → 組むハーネス (ほかのハーネスはこのファイルを含まないか、
+    # 含んでも変異の的ではない — 従来どおりの対応)
+    if rel == "drivers/serial.c":
+        build, cases = gate_build, GATE_CASES
+    elif rel == "fs/serialfs_session.c":
+        build, cases = session_build, SESSION_CASES
+    else:
+        build, cases = c_build, C_CASES
+    name = "mut%d" % i
+    try:
+        exe = build(tmp, {rel: text}, name=name)
+    except subprocess.CalledProcessError:
+        return 0, 1, f"MUTATION C{i} ERROR (compile): {why}"
+    try:
+        hits = run_exe_cases(exe, cases, quiet=True, first_fail=True,
+                             timeout=MUT_CASE_TIMEOUT)
+    finally:
+        shutil.rmtree(pathlib.Path(tmp) / name, ignore_errors=True)
+    if why == IDENTITY:
+        status = "GREEN (control)" if not hits else "**RED (control broken)**"
+        missed = int(bool(hits))
+    else:
+        status = "RED" if hits else "**GREEN (見逃し)**"
+        missed = int(not hits)
+    return missed, 0, f"MUTATION C{i} {status} ({hits} 件): {why}"
+
+
+def _mutate_py_one(item):
+    """Python の変異 1 本。tmp/pymut<i> に写して読み込み直し、最初に落ちたケースで
+    打ち切る。モジュールの差し替え (sys.modules) と FAILED を使うので、別プロセスで
+    呼ばれる (mutpar processes=True)。(missed, error, 行) を返す。"""
+    tmp, i, (rel, pattern, repl, why) = item
+    mdir = pathlib.Path(tmp) / ("pymut%d" % i)
+    mdir.mkdir(parents=True, exist_ok=True)
+    files = {"tools/serialfs_host.py": mdir / "serialfs_host.py",
+             "tools/rshell_serial.py": mdir / "rshell_serial.py"}
+    for src, dst in files.items():
+        shutil.copy(ROOT / src, dst)
+    original = (ROOT / rel).read_text(encoding="utf-8")
+    text, n = re.subn(pattern, repl, original, count=1)
+    if n != 1:
+        return 0, 1, f"MUTATION P{i} ERROR (not applicable): {why}"
+    files[rel].write_text(text, encoding="utf-8")
+    try:
+        h, r = load_pair(files["tools/serialfs_host.py"],
+                         files["tools/rshell_serial.py"])
+    except Exception:  # noqa: BLE001
+        return 0, 1, f"MUTATION P{i} ERROR (import): {why}"
+    hits = run_py(h, r, list(PY_CASES), quiet=True, first_fail=True)
+    if why == IDENTITY:
+        status = "GREEN (control)" if not hits else "**RED (control broken)**"
+        missed = int(bool(hits))
+    else:
+        status = "RED" if hits else "**GREEN (見逃し)**"
+        missed = int(not hits)
+    return missed, 0, f"MUTATION P{i} {status} ({hits} 件): {why}"
+
+
 def mutate(tmp):
+    """C の変異はスレッド、Python の変異は別プロセスで並列に回し (mutpar、
+    OS32_MUT_JOBS)、結果は番号順に出す。どちらも最初に落ちたケースで打ち切る
+    (「件」は打ち切るまでに落ちた数 = 1)。"""
     bad = 0
     errors = 0
-    for i, (rel, pattern, repl, why) in enumerate(
-            C_MUTATIONS + GATE_MUTATIONS + SESSION_MUTATIONS, 1):
-        original = (ROOT / rel).read_text(encoding="utf-8")
-        text, n = re.subn(pattern, repl, original, count=1)
-        if n != 1:
-            print(f"MUTATION C{i} ERROR (not applicable): {why}", flush=True)
-            errors += 1
-            continue
-        if rel == "drivers/serial.c":
-            build, cases = gate_build, GATE_CASES
-        elif rel == "fs/serialfs_session.c":
-            build, cases = session_build, SESSION_CASES
-        else:
-            build, cases = c_build, C_CASES
-        try:
-            exe = build(tmp, {rel: text}, name="mut")
-        except subprocess.CalledProcessError:
-            print(f"MUTATION C{i} ERROR (compile): {why}", flush=True)
-            errors += 1
-            continue
-        hits = run_exe_cases(exe, cases, quiet=True)
-        if why == IDENTITY:
-            status = "GREEN (control)" if not hits else "**RED (control broken)**"
-            bad += bool(hits)
-        else:
-            status = "RED" if hits else "**GREEN (見逃し)**"
-            bad += not hits
-        print(f"MUTATION C{i} {status} ({hits} 件): {why}", flush=True)
-
-    for i, (rel, pattern, repl, why) in enumerate(PY_MUTATIONS, 1):
-        mdir = pathlib.Path(tmp) / ("pymut%d" % i)
-        mdir.mkdir(parents=True, exist_ok=True)
-        files = {"tools/serialfs_host.py": mdir / "serialfs_host.py",
-                 "tools/rshell_serial.py": mdir / "rshell_serial.py"}
-        for src, dst in files.items():
-            shutil.copy(ROOT / src, dst)
-        original = (ROOT / rel).read_text(encoding="utf-8")
-        text, n = re.subn(pattern, repl, original, count=1)
-        if n != 1:
-            print(f"MUTATION P{i} ERROR (not applicable): {why}", flush=True)
-            errors += 1
-            continue
-        files[rel].write_text(text, encoding="utf-8")
-        try:
-            h, r = load_pair(files["tools/serialfs_host.py"],
-                             files["tools/rshell_serial.py"])
-        except Exception:  # noqa: BLE001
-            print(f"MUTATION P{i} ERROR (import): {why}", flush=True)
-            errors += 1
-            continue
-        hits = run_py(h, r, list(PY_CASES), quiet=True)
-        if why == IDENTITY:
-            status = "GREEN (control)" if not hits else "**RED (control broken)**"
-            bad += bool(hits)
-        else:
-            status = "RED" if hits else "**GREEN (見逃し)**"
-            bad += not hits
-        print(f"MUTATION P{i} {status} ({hits} 件): {why}", flush=True)
-    load_pair()                 # 実物へ戻す
+    items = [(tmp, i, m) for i, m in enumerate(
+        C_MUTATIONS + GATE_MUTATIONS + SESSION_MUTATIONS, 1)]
+    for missed, err, line in mutpar.run_ordered(_mutate_c_one, items):
+        print(line, flush=True)
+        bad += missed
+        errors += err
+    items = [(str(tmp), i, m) for i, m in enumerate(PY_MUTATIONS, 1)]
+    for missed, err, line in mutpar.run_ordered(_mutate_py_one, items, processes=True):
+        print(line, flush=True)
+        bad += missed
+        errors += err
+    load_pair()                 # 実物へ戻す (OS32_MUT_JOBS=1 ならこのプロセスで読み込み直している)
     total = (len(C_MUTATIONS) + len(GATE_MUTATIONS) + len(SESSION_MUTATIONS)
              + len(PY_MUTATIONS))
     print(f"MUTATION SUMMARY total={total} errors={errors} missed={bad}",

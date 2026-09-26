@@ -33,6 +33,8 @@ import subprocess
 import sys
 import tempfile
 
+import mutpar  # noqa: E402  (tools/tests/mutpar.py、同じディレクトリ)
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HARNESS = ROOT / "tools/tests/hdd_stage1_host.c"
 PART_HARNESS = ROOT / "tools/tests/ext2_part_host.c"
@@ -231,7 +233,7 @@ def run(cmd, **kw):
 #  C のハーネス                                                             #
 # ======================================================================== #
 
-def build_pure(tmp, root=ROOT):
+def _pure_cmd(tmp, root):
     exe = pathlib.Path(tmp) / "hdd-stage1-host"
     harness = HARNESS
     if root != ROOT:
@@ -241,15 +243,10 @@ def build_pure(tmp, root=ROOT):
     inc = ["-I" + str(root), "-I" + str(root / "include"), "-I" + str(root / "drivers"),
            "-I" + str(root / "fs"), "-I" + str(ROOT / "include"),
            "-I" + str(ROOT / "drivers"), "-I" + str(ROOT / "fs")]
-    r = run(["gcc", *HOST_FLAGS, *inc, str(harness), "-o", str(exe)],
-            capture_output=True, text=True)
-    if r.returncode != 0:
-        sys.stderr.write(r.stderr)
-        return None
-    return exe
+    return ["gcc", *HOST_FLAGS, *inc, str(harness), "-o", str(exe)]
 
 
-def build_part(tmp, root=ROOT):
+def _part_cmd(tmp, root):
     exe = pathlib.Path(tmp) / "ext2-part-host"
     harness = PART_HARNESS
     if root != ROOT:
@@ -259,21 +256,35 @@ def build_part(tmp, root=ROOT):
     inc = ["-I" + str(root)]
     inc += ["-I" + str(root / d) for d in PART_INC_DIRS]
     inc += ["-I" + str(ROOT / d) for d in PART_INC_DIRS]
-    r = run(["gcc", *PART_FLAGS, *inc, str(harness), "-o", str(exe)],
-            capture_output=True, text=True)
+    return ["gcc", *PART_FLAGS, *inc, str(harness), "-o", str(exe)]
+
+
+def _build(cmd):
+    r = run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         sys.stderr.write(r.stderr)
         return None
-    return exe
+    return pathlib.Path(cmd[-1])
 
 
-def run_cases(exe, cases, quiet=False):
+def build_pure(tmp, root=ROOT):
+    return _build(_pure_cmd(tmp, root))
+
+
+def build_part(tmp, root=ROOT):
+    return _build(_part_cmd(tmp, root))
+
+
+def run_cases(exe, cases, quiet=False, first_fail=False):
+    """落ちた数を返す。first_fail なら最初に落ちたところで打ち切る (変異用)。"""
     failed = 0
     for case in cases:
         r = run([str(exe), case], capture_output=quiet, text=True)
         if not quiet:
             print(f"EXIT {case}={r.returncode}", flush=True)
         failed += r.returncode != 0
+        if failed and first_fail:
+            break
     return failed
 
 
@@ -851,76 +862,109 @@ def _controls(mutations):
     return seen
 
 
+# 変異を当てた C のファイル → 組み直して回すハーネス (票 TASK_CHECK_MUT_PARALLEL)。
+# もう一方は実物で組んだもの (main の 1 回目、全部通ったもの) をそのまま使い、ケースも
+# 回さない。表に無いファイル (ヘッダなど) は両方組む。表が gcc -MM の依存より狭ければ
+# mutate_c() が落ちる (mutpar.check_rebuild_table)。
+REBUILD = {
+    "drivers/pc98pt.c": ("pure", "part"),
+    "drivers/ide_addr.c": ("pure",),
+    "fs/ext2_layout.c": ("pure", "part"),
+    "userland/shell/hdprep_plan.c": ("pure",),
+    "fs/ext2_super.c": ("part",),
+    "fs/ext2_fmt.c": ("part",),
+}
+C_HARNESS = {"pure": (_pure_cmd, PURE_CASES), "part": (_part_cmd, PART_CASES)}
+
+
+def _mutate_c_one(item):
+    """C の変異 1 本を自分専用の一時ディレクトリの写しで組んで回す。並列に呼ばれる。"""
+    rel, before, after, why, base = item
+    with tempfile.TemporaryDirectory(prefix="os32-hdd1-mut-") as tmp:
+        troot = pathlib.Path(tmp) / "root"
+        for m in MIRROR:
+            dst = troot / m
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / m, dst)
+        path = troot / rel
+        text = path.read_text(encoding="utf-8")
+        control = before is None
+        if control:
+            text = text + C_IDENTITY_TAIL
+        elif before not in text:
+            return "NOT_APPLIED", why, False
+        else:
+            text = text.replace(before, after, 1)
+        path.write_text(text, encoding="utf-8")
+        # 組み直すハーネスを 1 本ずつ組んでは回し、落ちたらそこで打ち切る (後のハーネスは
+        # 組まない)。組めなければ ERROR。全部通れば SURVIVED。
+        for k in REBUILD.get(rel, tuple(C_HARNESS)):
+            exe = _build(C_HARNESS[k][0](tmp, troot))
+            if exe is None:
+                return "ERROR", why, control
+            if run_cases(exe, C_HARNESS[k][1], quiet=True, first_fail=True):
+                return "RED", why, control
+        return "SURVIVED", why, control
+
+
 def mutate_c(counts):
-    """C の変異。**ビルドが通って**試験が落ちたものだけを RED に数える。
-    ビルドが通らない変異は ERROR (何も確かめていない — Opus M1)。"""
+    """恒等 (対照) → C_MUTATIONS。ビルドが通って試験が落ちたものだけ RED、
+    ビルドが通らない変異は ERROR (何も確かめていない — Opus M1)。
+    並列に回し (mutpar、OS32_MUT_JOBS)、結果は変異の順に出す。"""
+    with tempfile.TemporaryDirectory(prefix="os32-hdd1-deps-") as dtmp:
+        deps = {k: mutpar.gcc_deps(f(dtmp, ROOT), ROOT) for k, (f, _) in C_HARNESS.items()}
+    stale = mutpar.check_rebuild_table(REBUILD, deps, [m[0] for m in C_MUTATIONS])
+    for s in stale:
+        print("REBUILD TABLE STALE: " + s, flush=True)
+        counts["STALE"] = counts.get("STALE", 0) + 1
     plan = [(rel, None, None, "対照 (恒等): " + rel) for rel in _controls(C_MUTATIONS)]
     plan += list(C_MUTATIONS)
-    for rel, before, after, why in plan:
-        with tempfile.TemporaryDirectory(prefix="os32-hdd1-mut-") as tmp:
-            troot = pathlib.Path(tmp) / "root"
-            for m in MIRROR:
-                dst = troot / m
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(ROOT / m, dst)
-            path = troot / rel
-            text = path.read_text(encoding="utf-8")
-            control = before is None
-            if control:
-                text = text + C_IDENTITY_TAIL
-            elif before not in text:
-                _tally(counts, "NOT_APPLIED", why)
-                continue
-            else:
-                text = text.replace(before, after, 1)
-            path.write_text(text, encoding="utf-8")
-            exe = build_pure(tmp, troot)
-            pexe = build_part(tmp, troot)
-            if exe is None or pexe is None:
-                status = "ERROR"
-            else:
-                failed = run_cases(exe, PURE_CASES, quiet=True)
-                failed += run_cases(pexe, PART_CASES, quiet=True)
-                status = "RED" if failed else "SURVIVED"
-            if control:
-                _tally(counts, "CONTROL_OK" if status == "SURVIVED" else "CONTROL_BAD",
-                       why + " → " + status)
-            else:
-                _tally(counts, status, why + (" (ビルドが通らない)" if status == "ERROR" else ""))
+    for status, why, control in mutpar.run_ordered(_mutate_c_one,
+                                                   [(*p, None) for p in plan]):
+        if control:
+            _tally(counts, "CONTROL_OK" if status == "SURVIVED" else "CONTROL_BAD",
+                   why + " → " + status)
+        else:
+            _tally(counts, status, why + (" (ビルドが通らない)" if status == "ERROR" else ""))
+
+
+def _mutate_py_one(item):
+    """Python の変異 1 本。写しの tools/ を別プロセス (--py) で回す。並列に呼ばれる。"""
+    rel, before, after, why, c_exe = item
+    with tempfile.TemporaryDirectory(prefix="os32-hdd1-pymut-") as tmp:
+        tdir = pathlib.Path(tmp) / "tools"
+        tdir.mkdir()
+        for m in PY_MIRROR:
+            shutil.copy2(ROOT / m, tdir / pathlib.Path(m).name)
+        # nhd_deploy.tree_kapi_version は PROJ_DIR/sdk/... を読む (旧配置の門、M2)
+        hdr = pathlib.Path(tmp) / "sdk/include/os32"
+        hdr.mkdir(parents=True)
+        shutil.copy2(ROOT / "sdk/include/os32/os32_kapi_shared.h", hdr)
+        path = tdir / pathlib.Path(rel).name
+        text = path.read_text(encoding="utf-8")
+        control = before is None
+        if control:
+            text = text + PY_IDENTITY_TAIL
+        elif before not in text:
+            return "NOT_APPLIED", why, False
+        else:
+            text = text.replace(before, after, 1)
+        path.write_text(text, encoding="utf-8")
+        rc = run_py(tdir, c_exe, quiet=True)
+        status = "RED" if rc == 1 else ("SURVIVED" if rc == 0 else "ERROR")
+        return status, why, control
 
 
 def mutate_py(c_exe, counts):
-    """Python の変異。試験の失敗 (終了 1) だけを RED、読み込み・例外 (終了 3) は ERROR。"""
     plan = [(rel, None, None, "対照 (恒等): " + rel) for rel in _controls(PY_MUTATIONS)]
     plan += list(PY_MUTATIONS)
-    for rel, before, after, why in plan:
-        with tempfile.TemporaryDirectory(prefix="os32-hdd1-pymut-") as tmp:
-            tdir = pathlib.Path(tmp) / "tools"
-            tdir.mkdir()
-            for m in PY_MIRROR:
-                shutil.copy2(ROOT / m, tdir / pathlib.Path(m).name)
-            # nhd_deploy.tree_kapi_version は PROJ_DIR/sdk/... を読む (旧配置の門、M2)
-            hdr = pathlib.Path(tmp) / "sdk/include/os32"
-            hdr.mkdir(parents=True)
-            shutil.copy2(ROOT / "sdk/include/os32/os32_kapi_shared.h", hdr)
-            path = tdir / pathlib.Path(rel).name
-            text = path.read_text(encoding="utf-8")
-            control = before is None
-            if control:
-                text = text + PY_IDENTITY_TAIL
-            elif before not in text:
-                _tally(counts, "NOT_APPLIED", why)
-                continue
-            else:
-                text = text.replace(before, after, 1)
-            path.write_text(text, encoding="utf-8")
-            rc = run_py(tdir, c_exe, quiet=True)
-            status = "RED" if rc == 1 else ("SURVIVED" if rc == 0 else "ERROR")
-            if control:
-                _tally(counts, "CONTROL_OK" if status == "SURVIVED" else "CONTROL_BAD",
-                       why + " → " + status)
-            else:
-                _tally(counts, status, why)
+    for status, why, control in mutpar.run_ordered(_mutate_py_one,
+                                                   [(*p, c_exe) for p in plan]):
+        if control:
+            _tally(counts, "CONTROL_OK" if status == "SURVIVED" else "CONTROL_BAD",
+                   why + " → " + status)
+        else:
+            _tally(counts, status, why)
 
 
 def main(argv):
@@ -971,7 +1015,7 @@ def main(argv):
                       red, n, counts.get("ERROR", 0), counts.get("SURVIVED", 0),
                       counts.get("NOT_APPLIED", 0), counts.get("CONTROL_OK", 0), nctl),
                   flush=True)
-            if red != n or counts.get("CONTROL_OK", 0) != nctl:
+            if red != n or counts.get("CONTROL_OK", 0) != nctl or counts.get("STALE", 0):
                 failed += 1
     return 1 if failed else 0
 
