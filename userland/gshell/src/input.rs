@@ -367,6 +367,11 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         let scan = (raw & 0x7F) as u8;
         let down = ((raw >> 8) & 1) != 0;
         let mods = ((raw >> 9) & 0x7F) as u32; /* イベント時点の修飾状態 */
+        /* X4 まで来た make は WM のキーではない (上で退避していない)。古い印を
+         * 消して、対になる break を X4 がそのまま配れるようにする。 */
+        if ctx == Ctx::Pump && down {
+            kbdnav::pump_delivered_make(st, scan);
+        }
 
         /* 修飾キーとして捨てる**前**に: カナ (マウスキーの切り替え) と、GRPH+TAB
          * 切り替え中の GRPH の離し (票 KBD_NAV §1-2 / §1-5)。 */
@@ -452,6 +457,12 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         }
 
         let ch = translate(scan, mods);
+
+        /* X1 の set_focus 等で予約した確定を、モーダルが閉じた後の最初の打鍵より
+         * 先に元の窓へ流す (同じ周期でモーダルが閉じた場合、票 KBD_NAV §1-6)。 */
+        if ctx.wm_ui() {
+            fep::apply_pending_commit(st);
+        }
 
         /* 押下は**先に FEP へ通す** (契約 U2a)。FEP が消費したキー (かな入力、
          * 未確定の編集、候補操作、確定、取消) は `Key` として配送しない。 */

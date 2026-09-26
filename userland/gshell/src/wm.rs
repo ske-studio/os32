@@ -760,7 +760,7 @@ impl GuiState {
                 self.windows[i].gen = gen;
                 self.dirty_screen(vac);
                 if self.drag_index == i as i32 {
-                    self.drag_index = -1;
+                    drop_drag_frame(self);
                 }
             }
             i += 1;
@@ -782,6 +782,15 @@ impl GuiState {
             s += 1;
         }
     }
+}
+
+/// ドラッグ (マウス / キーボードの移動・サイズ) 中の窓が消えた: 枠を消して
+/// 終わらせる (代行レビュー P3-5: 枠が画面に残っていた)。
+fn drop_drag_frame(st: &mut GuiState) {
+    let f = st.drag_frame;
+    st.drag_index = -1;
+    st.drag_frame = Rect::EMPTY;
+    input::erase_frame(st, f);
 }
 
 /// GUI_WF_VISIBLE ビットを visible フラグへ同期する補助。
@@ -1076,6 +1085,12 @@ pub fn set_focus(st: &mut GuiState, owner: i32, id: u32) -> i32 {
     if st.front_index() == Some(index) {
         return 0;
     }
+    /* WM が最小化した窓へのアプリの set_focus は何もしない (Win98 の SetFocus も
+     * 復元しない)。前へ出すと、不可視の窓が Z の最前面に居るのに打鍵は可視の
+     * 窓へ行き、Focus だけが食い違う (代行レビュー P2-2)。 */
+    if st.windows[index].minimized {
+        return 0;
+    }
     /* 未確定文字は元の窓へ確定する (票 KBD_NAV §1-6)。ここは X1 なので
      * 変換 (辞書) は走らせず、次の X3 の頭で元の窓へ流す。 */
     focus_leaving(st, false);
@@ -1331,7 +1346,7 @@ pub fn destroy_window(st: &mut GuiState, owner: i32, id: u32) -> i32 {
     st.windows[index] = Win::EMPTY;
     st.windows[index].gen = gen;
     if st.drag_index == index as i32 {
-        st.drag_index = -1;
+        drop_drag_frame(st);
     }
     st.dirty_screen(vac);
     visible::recompute_and_expose(st);
@@ -1344,6 +1359,8 @@ pub fn move_window(st: &mut GuiState, owner: i32, id: u32, x: i32, y: i32) -> i3
         Err(e) => return e,
     };
     let old = st.windows[index].outer();
+    /* アプリが動かしたら最大化ではない (元のサイズの記憶は捨てる)。 */
+    st.windows[index].maximized = false;
     st.windows[index].x = x;
     st.windows[index].y = y;
     st.dirty_screen(old);
@@ -1374,6 +1391,7 @@ pub fn resize_window(st: &mut GuiState, owner: i32, id: u32, w: i32, h: i32) -> 
     if nh < TITLEBAR_H + 8 {
         nh = TITLEBAR_H + 8;
     }
+    st.windows[index].maximized = false;
     st.windows[index].w = nw;
     st.windows[index].h = nh;
     st.dirty_screen(old);

@@ -185,7 +185,7 @@ Alt+TAB の窓一覧の表示 (v2、v1 はタスクバーのボタンで代用)�
 
 新しいモジュール `userland/gshell/src/kbdnav.rs` (ショートカット・切り替え・窓メニューの実行・キーボードの移動/サイズ・マウスキー)。
 入口は `input.rs` の `capture_keyboard` の 2 か所 (`kbdnav::pre` = 修飾キーを捨てる前、`kbdnav::on_key` = SHIFT+SPACE の後・モーダルより前) と、X4 の退避判定 `kbdnav::is_wm_raw`。
-マウスのエッジと移動は `input::edge_x3` / `input::move_x3` に切り出し、実マウスとマウスキーが同じ関数を通る。試験は `userland/gshell/host/kbdnav_tests.rs` (K1 ①〜⑧ + 窓メニュー等、27 本)、変異は `host/integration.py` の `MUTATIONS` (23 本、`make check-gshell-host` が `--mutate` で毎回回す)。
+マウスのエッジと移動は `input::edge_x3` / `input::move_x3` に切り出し、実マウスとマウスキーが同じ関数を通る。試験は `userland/gshell/host/kbdnav_tests.rs` (K1 ①〜⑧ + 窓メニュー等 + 代行レビューの探り、36 本)、変異は `host/integration.py` の `MUTATIONS` (32 本、`make check-gshell-host` が `--mutate` で毎回回す)。
 
 §0 と今のコードの差: 行番号は 2026-09-25 時点でほぼ合っていた (input.rs のモーダル分岐は 377 がコメントの頭で本体は 383、全画面の判定は 470)。**最小化・最大化・元のサイズは WM に無かった** (票 §1-2 の窓メニューと GRPH+TAB の「最小化した窓」が前提にしていた) ので下のとおり足した。
 
@@ -195,13 +195,22 @@ Alt+TAB の窓一覧の表示 (v2、v1 はタスクバーのボタンで代用)�
 |---|---|---|
 | 最小化 | `Win.minimized` を足し、`visible` を落としてタスクバーにだけ残す (`GUI_WF_VISIBLE` = アプリの意図は触らない)。アプリの show / hide で解ける。タスクバーのボタンを押すと元に戻る | 新しい描画の仕組みを足さずに済む。露出と Paint は既存の `visible` の経路 |
 | 最大化 / 元のサイズ | `Win.maximized` と `restore` (元の外形)。最大化 = 作業領域いっぱいへ `wm::set_outer` (旧 ∪ 新を損傷、全面再描画、Configure)。libos32gui は Configure で面を作り直して再レイアウトする | マウスのドラッグ確定と同じ手順 |
-| 窓メニューの使える項目 | Restore = 最大化中、Move / Size / Maximize = `GUI_WF_MOVABLE` かつ最大化でない、Minimize = 常に、Close = `GUI_WF_HAS_CLOSE`。使えない項目は灰色 (`GUI_COLOR_SHADOW`) で描き、選んでも何もしない (メニューも閉じない)。項目名は英語 (Start メニューと同じ) | Win98 と同じ灰色の扱い |
+| 窓メニューの使える項目 | Restore = 最大化中、Move / Size / Maximize = `GUI_WF_MOVABLE` かつ最大化でない、Minimize = 常に、Close = `GUI_WF_HAS_CLOSE`。使えない項目は灰色 (`GUI_COLOR_SHADOW`) で描き、選んでも何もしない (メニューも閉じない)。**初期カーソルは最初の使える項目** (ふつうの窓では Move)。項目名は英語 (Start メニューと同じ) | Win98 と同じ灰色の扱い |
 | Size の操作 | 左上を固定して矢印で右辺・下辺を動かす。下限は `resize_window` と同じ (min_w/min_h、60 × タイトル+8)、上限は作業領域 | Win98 は最初の矢印で動かす辺を選ぶが、v1 は 1 通りに絞った (**Win98 との差**) |
-| 移動・サイズ中 | キーは make も break も全部 WM が取る (始めた RETURN の離しもアプリへ漏らさない)。マウスは枠を動かさず、エッジも無視 (前に配った押下の離しだけは相手へ返す)。窓が消えたら自然に終わる | 表の「移動・サイズ中」の列 |
+| 移動・サイズ中 | キーは make も break も全部 WM が取る (窓メニューの Move / Size を選んだ RETURN の離しも移動中に来るので漏れない。**Minimize / Close などほかの項目の RETURN の離しは Start メニューと同じく今までどおり前面の窓へ行く**)。マウスは枠を動かさず、エッジも無視 (前に配った押下の離しだけは相手へ返す)。窓が消えたら枠を消して終わる (`wm::drop_drag_frame`、マウスのドラッグも同じ) | 表の「移動・サイズ中」の列 |
 | マウスで窓をドラッグ中 | WM のショートカットは「移動・サイズ中」と同じく無視 (消費) | 枠が残ったまま窓が入れ替わるのを避ける |
 | GRPH+f･4 | 閉じるボタンの無い窓 (`GUI_WF_HAS_CLOSE` なし) には Close を送らない | 閉じるボタンと同じ規則 |
 | SHIFT+f･10 (窓なし) | デスクトップのメニューはポインタの位置に出す (作業領域へ寄せる) | 右クリックと同じ |
-| §1-6 の X1 の経路 | アプリの `set_focus` / `create_window` / `show_window` (X1) でフォーカスが移るときは、確定の宛先 (元の窓) だけ控え、**次の X3 の頭** (`capture_keyboard` の先頭、打鍵より先) で確定して元の窓へ流す | 確定は辞書の学習 (SQLite) まで走るので X1 では呼べない (契約 T8)。WM 自身の経路 (マウス・タスクバー・キー) は X3 なのでその場で確定する |
+| §1-6 の X1 の経路 | アプリの `set_focus` / `create_window` / `show_window` (X1) でフォーカスが移るときは、確定の宛先 (元の窓) だけ控え、**次の X3 の頭** (`capture_keyboard` の先頭と、アプリへ配る打鍵の直前) で確定して元の窓へ流す。**モーダル中は予約を残し**、閉じてから流す | 確定は辞書の学習 (SQLite) まで走るので X1 では呼べない (契約 T8)。WM 自身の経路 (マウス・タスクバー・キー) は X3 なのでその場で確定する |
 | WM が消費したキーの break | scan ごとの印 (`consumed`) で、make を WM が取ったキーの break は WM が取る (マウスキーのテンキーに限らず、ショートカットの TAB・ESC・f･4・SPACE も)。新しい make で印は消える | §1-4 の「マウスキーが消費したテンキーの break」を一般化 |
 | 押したまま (0) の左ボタンがある間の 5 / + | 押し直さない (何もしない) | 合成ボタンの状態を壊さない |
 | 実マウスの位置 | `GuiState.real_x/real_y` に実マウスの前回値を持ち、実マウスが動いた周だけ `mouse_x/y` を実マウスの値にする | 止まっている実マウスの値で合成の位置を毎周巻き戻さない (§1-3「最後に動いた方が勝つ」) |
+| 確定の回数 | RETURN を素通り (= 未確定が無い) になるまで流す (上限 16 回) | 候補の確定は最長一致で、残りのかなを未確定へ戻す (kernel/ime.c の commit_candidate) — 1 打では確定し切らない |
+| 最小化した窓へのアプリの `set_focus` | 何もせず 0 を返す (Focus も出さない) | Win98 の SetFocus も復元しない。前へ出すと不可視の窓が Z の最前面に居るのに打鍵は可視の窓へ行き、Focus だけ食い違う |
+| アプリの move / resize と最大化 | アプリが最大化中の窓を動かす・大きさを変えると `maximized` を落とす (Restore は使えなくなる) | 古い矩形へ戻さない |
+| GRPH+TAB の途中でモーダルが開いた | GRPH↑ で切り替えず取り消す | ダイアログの裏で窓が入れ替わらない |
+| X4 で配った make | WM の印 (`consumed`) を消す | break を取りこぼした後に印が残ると、X4 で配った make の break を X3 が握り潰す |
+
+### 代行レビュー (Fable 5.1、1f69b44) の反映 (2026-09-26)
+
+Request changes (P1 なし) の P2×2・P3×6 を直した。各指摘に探りの試験 (`kbdnav_tests.rs` の `review_*`) と変異 (9 本) を足した。ほかに勧められた試験 (GRPH+f･4 で Close が届く、メニュー表示中の CTRL+ESC / GRPH+TAB) も足した。

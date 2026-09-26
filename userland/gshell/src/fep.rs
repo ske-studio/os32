@@ -514,19 +514,38 @@ fn flush_text_to(st: &mut GuiState, t: Option<input::Target>) {
 /* KEY_RETURN と ASCII CR (drivers/kbd.h)。確定は「RETURN を 1 打」と同じ。 */
 const SC_RETURN: u8 = 0x1C;
 const CH_CR: u8 = 0x0D;
+/// フォーカス移動の前の確定で RETURN を流す回数の上限 (未確定行は 1 行 =
+/// 高々数十文字、最長一致の区切りの数だけ回れば足りる)。
+const COMMIT_ROUNDS_MAX: usize = 16;
 
 /// 未確定文字 (候補の選択中なら今の候補) を確定して、完全な id `win_id` の窓へ
 /// `Text` で届ける。**X3 でだけ呼ぶ** (カーネル FEP の変換を走らせる)。
 /// FEP がオフ・未確定が無い (RETURN が素通り) なら何もしない。
-/// モーダル中は未確定はダイアログのものなので触らない。
+/// モーダル中は未確定はダイアログのものなので触らない — X1 の予約
+/// (`commit_for`) は**捨てずに残し**、モーダルが閉じてから流す
+/// (代行レビュー P2-1: 捨てると閉じた後の RETURN で別の窓へ確定した)。
 pub fn commit_to(st: &mut GuiState, win_id: u32) {
-    state().commit_for = 0;
-    if !state().on || modal::is_open() {
+    if !state().on {
+        state().commit_for = 0;
         return;
     }
+    if modal::is_open() {
+        return; /* 予約は残す */
+    }
+    state().commit_for = 0;
     /* 前の打鍵の確定文字が残っていれば、それは今のフォーカス窓のもの。 */
     flush_text(st);
-    if feed(st, SC_RETURN, CH_CR, 0) != Fed::Consumed {
+    /* RETURN 1 打では確定し切らないことがある: 候補の確定は最長一致で、
+     * 残りのかなを未確定へ戻す (kernel/ime.c の commit_candidate)。素通り
+     * (= 未確定が無い) になるまで上限つきで繰り返す (代行レビュー P3-1)。 */
+    let mut n = 0;
+    while n < COMMIT_ROUNDS_MAX {
+        if feed(st, SC_RETURN, CH_CR, 0) != Fed::Consumed {
+            break;
+        }
+        n += 1;
+    }
+    if n == 0 {
         return;
     }
     let t = input::target_of(st, win_id);

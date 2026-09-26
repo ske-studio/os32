@@ -696,11 +696,9 @@ fn winmenu_move_by_arrows_and_return() {
     park_pointer(&mut st, 600, 10);
     run(&mut st, &tap(SC_SPACE, GRPH));
     assert_eq!(startmenu::winmenu_target(), Some(id(&st, 0)), "窓メニューが開かない");
-    /* DOWN で "Move" → RETURN。 */
-    let mut r = Vec::new();
-    r.extend_from_slice(&tap(0x3D, 0));
-    r.extend_from_slice(&tap(0x1C, 0));
-    run(&mut st, &r);
+    /* 初期カーソルは最初の使える項目 = Move (Restore は灰色、代行レビュー P3-4)。 */
+    assert_eq!(startmenu::cursor(), kbdnav::WM_MOVE, "初期カーソルが Move でない");
+    run(&mut st, &tap(0x1C, 0));
     assert!(!startmenu::is_open());
     assert_eq!(st.drag_index, 0, "移動が始まらない");
     let mut r = Vec::new();
@@ -722,10 +720,10 @@ fn winmenu_minimize_then_grph_tab_restores() {
     let shm = mocks::Shm::new();
     let mut st = windows(&shm, &[(20, 20, 200, 120), (300, 20, 200, 120)]);
     park_pointer(&mut st, 600, 10);
-    /* 窓メニュー → Minimize (3 行下)。 */
+    /* 窓メニュー → Minimize (初期カーソル Move から 2 行下)。 */
     let mut r = Vec::new();
     r.extend_from_slice(&tap(SC_SPACE, GRPH));
-    for _ in 0..3 {
+    for _ in 0..2 {
         r.extend_from_slice(&tap(0x3D, 0));
     }
     r.extend_from_slice(&tap(0x1C, 0));
@@ -863,4 +861,194 @@ fn k1_4_plus_is_a_double_click_that_the_file_dialog_accepts() {
     assert!(!modal::is_open(), "+ でダブルクリックにならない (ダイアログが開いたまま)");
     assert!(st.launch_pending, "ダブルクリックで項目が選ばれない");
     assert_eq!(&st.launch_path[..st.launch_path_len], b"/a.bin");
+}
+
+
+/* ================================================================ */
+/*  代行レビュー (Fable 5.1、1f69b44) の指摘の探り                    */
+/* ================================================================ */
+
+/// [P2-1] X1 の予約確定はモーダル中に捨てない。モーダルが閉じた後 (同じ周期の
+/// 次の打鍵より先) に元の窓 A へ流す。捨てると閉じた後の RETURN で B に確定した。
+#[test]
+fn review_p2_1_deferred_commit_survives_a_modal() {
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = fep_two_windows(&shm);
+    let b = id(&st, 0);
+    modal::open_wm_message(&mut st, GUI_MODAL_YES_NO, b"x\0", modal::WM_PURPOSE_NOTIFY);
+    assert_eq!(wm::set_focus(&mut st, 2, b), 0);
+    input::capture(&mut st, input::Ctx::Wait); /* モーダル中の X3: 流さない */
+    assert!(text(&st, 1).is_empty() && text(&st, 0).is_empty());
+    /* ESC でモーダルを閉じ、同じ周期で RETURN。 */
+    let mut r = Vec::new();
+    r.extend_from_slice(&tap(SC_ESC, 0));
+    r.extend_from_slice(&tap(0x1C, 0));
+    run(&mut st, &r);
+    assert!(!modal::is_open());
+    assert_eq!(text(&st, 1), "にほん".as_bytes().to_vec(), "予約した確定が A に届かない");
+    assert!(text(&st, 0).is_empty(), "未確定が B に確定した: {:?}", text(&st, 0));
+    fep_off();
+}
+
+/// [P3-1] RETURN 1 打で確定し切らない (最長一致で残りが未確定へ戻る) 場合も、
+/// 素通りになるまで流して全部を元の窓へ。
+#[test]
+fn review_p3_1_commit_repeats_return_until_nothing_is_left() {
+    mocks::init();
+    fep_off();
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(300, 20, 200, 150), (20, 20, 200, 150)]);
+    park_pointer(&mut st, 600, 300);
+    let mut script = vec![-1, -1];
+    script.extend("にほん".bytes().map(|b| b as i32));
+    script.push(0);
+    script.extend("ご".bytes().map(|b| b as i32));
+    script.push(0);
+    mocks::fep_script(&script);
+    fep::install();
+    let mut r = Vec::new();
+    r.extend_from_slice(&tap(SC_N, 0));
+    r.extend_from_slice(&tap(SC_I, 0));
+    r.extend_from_slice(&[SC_GRPH | DOWN | GRPH, SC_TAB | DOWN | GRPH, SC_TAB | GRPH, SC_GRPH]);
+    run(&mut st, &r);
+    assert_eq!(text(&st, 1), "にほんご".as_bytes().to_vec(), "残りのかなが確定しない");
+    assert!(text(&st, 0).is_empty());
+    fep_off();
+}
+
+/// [P2-2] WM が最小化した窓へのアプリの set_focus は何もしない (Focus も出さない)。
+#[test]
+fn review_p2_2_app_set_focus_on_a_minimized_window_is_a_no_op() {
+    mocks::init();
+    fep_off();
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(20, 20, 200, 120), (300, 20, 200, 120)]);
+    wm::minimize(&mut st, 0);
+    park_pointer(&mut st, 600, 10);
+    let b = id(&st, 0);
+    assert_eq!(wm::set_focus(&mut st, 2, b), 0);
+    assert!(st.windows[0].minimized && st.front_index() == Some(1));
+    assert_eq!(st.zorder[st.z_count - 1], 1, "不可視の窓が Z の最前面へ出た");
+    assert!(focus(&st, 0).is_empty() && focus(&st, 1).is_empty(), "Focus が食い違った");
+    run(&mut st, &tap(SC_A, 0));
+    assert_eq!(keys(&st, 1).len(), 2, "打鍵が前面の窓へ届かない");
+}
+
+/// アプリが最大化中の窓を動かしたら最大化の旗を落とす (Restore が古い矩形へ戻さない)。
+#[test]
+fn review_app_move_clears_maximized() {
+    mocks::init();
+    fep_off();
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(40, 40, 300, 200)]);
+    wm::maximize(&mut st, 0);
+    let w0 = id(&st, 0);
+    assert_eq!(wm::move_window(&mut st, 2, w0, 10, 10), 0);
+    assert!(!st.windows[0].maximized, "move で最大化が解けない");
+    wm::maximize(&mut st, 0);
+    assert_eq!(wm::resize_window(&mut st, 2, w0, 200, 100), 0);
+    assert!(!st.windows[0].maximized, "resize で最大化が解けない");
+}
+
+/// [P3-2] GRPH+TAB の途中でモーダルが開いたら GRPH↑ で切り替えない。
+#[test]
+fn review_p3_2_switch_is_cancelled_when_a_modal_opens() {
+    mocks::init();
+    fep_off();
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(20, 20, 200, 120), (300, 20, 200, 120)]);
+    park_pointer(&mut st, 600, 10);
+    run(&mut st, &[SC_GRPH | DOWN | GRPH, SC_TAB | DOWN | GRPH, SC_TAB | GRPH]);
+    modal::open_wm_message(&mut st, GUI_MODAL_YES_NO, b"x\0", modal::WM_PURPOSE_NOTIFY);
+    run(&mut st, &[SC_GRPH]);
+    assert_eq!(st.front_index(), Some(1), "モーダル中に切り替わった");
+    assert_eq!(kbdnav::switch_selection(&st), None);
+    modal::on_key(&mut st, 0, 0x1B, 0);
+}
+
+/// [P3-3] break を取りこぼして印が残っても、X4 で配った make の break は X4 が配る。
+#[test]
+fn review_p3_3_pump_delivers_the_break_of_a_make_it_delivered() {
+    mocks::init();
+    fep_off();
+    let shm = mocks::Shm::new();
+    let mut st = one_window(&shm);
+    /* X3: カナ中の 5 の make だけ (break を取りこぼした) → 印が残る。カナ解除。 */
+    run(&mut st, &[SC_KANA | DOWN | KANA, NP_5 | DOWN | KANA, SC_KANA | DOWN]);
+    clear_rings(&st);
+    /* X4: 数字の 5 の make と break。 */
+    mocks::push_rawkeys(&tap(NP_5, 0));
+    input::capture(&mut st, input::Ctx::Pump);
+    assert_eq!(
+        keys(&st, 0),
+        vec![(true, NP_5 as u8, b'5', 0), (false, NP_5 as u8, b'5', 0)],
+        "X4 で配った make の break が握り潰された"
+    );
+    input::capture(&mut st, input::Ctx::Wait);
+    assert_eq!(keys(&st, 0).len(), 2);
+}
+
+/// [P3-5] キーボードの移動中に窓が消えたら枠を消す (画面に残さない)。
+#[test]
+fn review_p3_5_frame_is_erased_when_the_window_goes_away() {
+    mocks::init();
+    fep_off();
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(40, 40, 300, 200)]);
+    park_pointer(&mut st, 600, 10);
+    let w0 = id(&st, 0);
+    kbdnav::winmenu_run(&mut st, w0, kbdnav::WM_MOVE);
+    run(&mut st, &tap(0x3C, 0)); /* → 8 */
+    let f = st.drag_frame;
+    assert_eq!(f.x, 48);
+    st.screen_dirty.clear();
+    assert_eq!(wm::destroy_window(&mut st, 2, w0), 0);
+    assert_eq!(st.drag_index, -1);
+    assert!(st.drag_frame.is_empty(), "枠が残った");
+    assert!(
+        st.screen_dirty.as_slice().iter().any(|r| r.intersect(&f) == f),
+        "消えた窓の枠が損傷に積まれていない"
+    );
+    run(&mut st, &tap(0x1C, 0)); /* 移動モードは終わっている */
+}
+
+/// GRPH+f･4 は前面の窓へ Close を送る。
+#[test]
+fn grph_f4_sends_close_to_the_front_window() {
+    mocks::init();
+    fep_off();
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(20, 20, 200, 120), (300, 20, 200, 120)]);
+    park_pointer(&mut st, 600, 10);
+    run(&mut st, &tap(SC_F4, GRPH));
+    let c: Vec<u32> = events(&st, 1)
+        .iter()
+        .filter(|e| e.kind == os32api::gui::proto::GUI_EV_CLOSE)
+        .map(|e| e.window)
+        .collect();
+    assert_eq!(c, vec![id(&st, 1)], "前面の窓へ Close が届かない");
+    assert!(events(&st, 0).iter().all(|e| e.kind != os32api::gui::proto::GUI_EV_CLOSE));
+    assert!(keys(&st, 1).is_empty());
+}
+
+/// メニュー表示中: CTRL+ESC は閉じる、GRPH+TAB は閉じてから切り替える。
+#[test]
+fn menu_open_ctrl_esc_closes_and_grph_tab_closes_then_switches() {
+    mocks::init();
+    fep_off();
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(20, 20, 200, 120), (300, 20, 200, 120)]);
+    park_pointer(&mut st, 600, 10);
+    startmenu::toggle_start(&mut st);
+    assert!(startmenu::is_open());
+    run(&mut st, &tap(SC_ESC, CTRL));
+    assert!(!startmenu::is_open(), "CTRL+ESC で閉じない");
+    startmenu::toggle_start(&mut st);
+    run(&mut st, &[SC_GRPH | DOWN | GRPH, SC_TAB | DOWN | GRPH, SC_TAB | GRPH, SC_GRPH]);
+    assert!(!startmenu::is_open(), "GRPH+TAB でメニューが閉じない");
+    assert_eq!(st.front_index(), Some(0), "閉じた後に切り替わらない");
+    for s in 0..2 {
+        assert!(keys(&st, s).is_empty());
+    }
 }

@@ -251,6 +251,16 @@ pub fn open_winmenu(st: &mut GuiState, win: u32, x: i32, y: i32) {
     }
     set_open(st, KIND_WIN, Rect::new(x, y, WIN_W, h), crate::kbdnav::WM_ITEMS);
     m().win = win;
+    /* 初期カーソルは最初の使える項目 (ふつうの窓では灰色の Restore ではなく
+     * Move、代行レビュー P3-4)。 */
+    let mut i = 0;
+    while i < crate::kbdnav::WM_ITEMS {
+        if crate::kbdnav::winmenu_enabled(st, win, i) {
+            m().cursor = i;
+            break;
+        }
+        i += 1;
+    }
 }
 
 /// Shut Down の確認 (Start の Shut Down と、窓が無いときの GRPH+f･4)。
@@ -753,6 +763,12 @@ fn item_enabled(st: &GuiState, mm: &Menu, idx: usize) -> bool {
         return true;
     }
     crate::kbdnav::winmenu_enabled(st, mm.win, idx)
+}
+
+/// いまのカーソル行 (試験の観測点)。
+#[allow(dead_code)]
+pub fn cursor() -> usize {
+    m().cursor
 }
 
 /// 窓メニューが開いていればその対象 (試験の観測点)。

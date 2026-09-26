@@ -380,6 +380,12 @@ pub fn is_wm_raw(st: &GuiState, raw: i32) -> bool {
 /*  X3: 修飾キーを捨てる前 (票 §1-2 GRPH の break / §1-5 カナ)        */
 /* ================================================================ */
 
+/// X4 がアプリへ配った make の印を消す (代行レビュー P3-3: break を取りこぼした
+/// 後に印が残ると、X4 で配った make の break を X3 が握り潰していた)。
+pub fn pump_delivered_make(st: &mut GuiState, scan: u8) {
+    set_consumed(st, scan, false);
+}
+
 /// 修飾キーとして捨てる**前**に見る。消費したら true (カナの raw)。
 /// GRPH が離れたら (break そのもの、または GRPH の無い raw = 取りこぼし)
 /// 切り替えを確定する — その raw 自体は呼び出し側が続けて処理する。
@@ -438,7 +444,7 @@ pub fn on_key(st: &mut GuiState, scan: u8, down: bool, mods: u32) -> bool {
         return false;
     }
     if st.kn.kmode != KM_NONE && !kmove_active(st) {
-        st.kn.kmode = KM_NONE; /* 窓が消えた */
+        st.kn.kmode = KM_NONE; /* 窓が消えた (枠は wm::drop_drag_frame が消した) */
     }
     let c = make(st, scan, mods);
     if c {
@@ -554,6 +560,11 @@ fn advance_switch(st: &mut GuiState, back: bool) {
 
 /// GRPH を離した: 選んだ窓へ 1 回だけ切り替える (最小化なら元に戻す)。
 fn finish_switch(st: &mut GuiState) {
+    /* 途中でモーダルが開いたら切り替えない (代行レビュー P3-2)。 */
+    if modal::is_open() {
+        cancel_switch(st);
+        return;
+    }
     let id = match switch_selection(st) {
         Some(id) => id,
         None => 0,
