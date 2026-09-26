@@ -46,6 +46,9 @@ gshell のスタックのポインタがアプリの PD で PTE を見られ、�
 | 5 | `gui_owner_exit` のハンドラの中の深さ | 0 | 1、戻って 0。WM 未登録なら印も立てない |
 | 6 | 負の深さ (壊れた状態) | — | ガードを効かせる (安全側) |
 | 7 | ゲスト (kselftest): ディスパッチ中を装ってカーネル帯のローカル変数を門に渡す | 深さ 0: 拒否 / 深さ 1: 拒否 | 深さ 0: 拒否 + `ring3_range_reject_last` = `WR_PDE` か `WR_PTE` / 深さ 1: 素通し / leave で再び拒否 |
+| 8 | (代行レビュー P2) アプリ (ID 2) が登録した fd 1 のバッファが RO になり、WM のハンドラ (深さ 1) が fd 1 へ書く | 素通し (カーネルがアプリ指定の番地へ書く) | 表を歩いて拒否 → kill。書けるページなら書ける。WM が張ったバッファは深さ 1 で素通し |
+| 9 | (同) アプリが RO / 帯外のページを登録 | 登録できる (ラッパの門だけ) | `fd_redirect_to_buffer` も歩いて -1、表は変えない |
+| 10 | (同、ゲスト kselftest `test_fd_redirect_origin_guard`) 由来=アプリの項目 + カーネル帯のバッファ + 深さ 1 | — | `fd_redirect_buf_write_ok` = 0 (数えられる)、由来=WM なら 1、深さ 0 の登録は -1 |
 
 実行結果 (2026-09-26、ホスト):
 
@@ -53,6 +56,7 @@ gshell のスタックのポインタがアプリの PD で PTE を見られ、�
 1 ring3_guard_active の表        6/6 ok
 2 gui_call の前後で深さが対になる   16/16 ok
 3 gui_owner_exit の前後で深さが対になる 7/7 ok
+4 アプリが登録したバッファは WM の中でも表を歩く 18/18 ok
 HOST ILP32 GNU89 EXIT ring3_guard_host=0
 TARGET i386-elf GNU89 -Werror COMPILE PASS
 ```
@@ -64,7 +68,10 @@ MUTATION 1 RED: WM の文脈を見ない (= 直す前の判定)
 MUTATION 2 RED: gui_call が印を立てない
 MUTATION 3 RED: gui_call が印を下ろさない
 MUTATION 4 RED: owner_exit が印を立てない
-MUTATIONS 4/4 RED
+MUTATION 5 RED: アプリが登録したバッファの書きを文脈つきの門に戻す (= 直す前)
+MUTATION 6 RED: 登録の由来を記録しない
+MUTATION 7 RED: 登録時の二重の守りを外す
+MUTATIONS 7/7 RED
 ```
 
 ## この試験が見ていないもの
@@ -73,3 +80,5 @@ MUTATIONS 4/4 RED
 - `ring3_wm_depth` の longjmp 地点の立ち直し (`exec_park*` / `ring3_kill_kind`) — exec/exec.c はホストで組めない。
   ディスパッチャの入口の `ring3_wm_depth = 0` が構造的に守る (深さが残っても次の syscall で 0)。
 - gshell の他の出力付き KAPI (`gfx_screen_info` / `gfx_stats` / `launch_take`) — 同じ門を通るので同じ直しで通る。
+- 登録時の歩きを `_always` から文脈つきの門へ戻す変異は**同値** (登録時に由来がアプリ = 深さ 0 + ディスパッチ中で、
+  そこでは 2 つの門が同じ答えを返す) なので変異に入れていない。

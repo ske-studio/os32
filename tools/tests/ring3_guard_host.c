@@ -20,11 +20,14 @@
  *  gui_call のハンドラ / ポンプ / owner_exit の前後で数え、門の判定は
  *  ring3_guard_active(in_syscall, wm_depth) (exec/ring3_str.c) に寄せる。
  *
- *  ここで実物のまま #include して見るのは 2 つ:
+ *  ここで実物のまま #include して見るのは 3 つ:
  *    (1) exec/ring3_str.c  — 判定表 (in_syscall × wm_depth)
  *    (2) kernel/gui.c      — 入口の配線: ハンドラの**中**では深さが 1 以上、
  *                            戻った後は元どおり。入れ子の gui_call でも同じ。
  *                            owner_exit も同じ印を立てる。
+ *    (3) fs/fd_redirect.c  — 門は「ポインタの由来」で決める (代行レビュー P2):
+ *                            アプリが登録したバッファは WM の中 (深さ 1) でも
+ *                            表を歩いて断る。WM が張ったバッファは素通し。
  *  kernel/gui.c の外部参照 (res_owner_get / appslot_gui_op_* / kbd_set_gui_mode
  *  / ime_set_render / kstrncpy / kmemset / ring3_wm_enter / ring3_wm_leave) は
  *  ここで贋物にする。ring3_wm_enter / leave の贋物は exec/exec.c の実装と
@@ -53,9 +56,8 @@ void *kmemset(void *dst, int c, u32 n)
     return dst;
 }
 
-/* fs/fd_redirect.c の res_owner_get — 試験が値を差し替える。 */
-static int host_owner = 1;
-int res_owner_get(void) { return host_owner; }
+/* res_owner_get / res_owner_set は実物の fs/fd_redirect.c (下で #include)。
+ * 試験は res_owner_set で「いま走っている ID」を差し替える。 */
 
 /* exec/appslot.c の OP_WAIT の控え — 呼ばれた回数だけ見る。 */
 static int host_op_enter, host_op_leave;
@@ -72,9 +74,64 @@ static int host_enter_calls, host_leave_calls;
 void ring3_wm_enter(void) { host_enter_calls++; ring3_wm_depth++; }
 void ring3_wm_leave(void) { host_leave_calls++; if (ring3_wm_depth > 0) ring3_wm_depth--; }
 
+#include "ring3_str.h"   /* ring3_guard_active (実体は下で #include する実物) */
+#include "vfs.h"         /* 下の VFS の贋物の型 */
+
+/* ---- exec/exec.c の門 (fs/fd_redirect.c が引く 5 本) --------------------
+ * 表の歩き (ring3_user_ranges_writable_always) は「app_page の中で、
+ * host_page_rw が立っていれば書ける」だけの贋物。ページ属性が登録の後で
+ * RO に変わる (sys_shm_lock / shlib .text) のは host_page_rw = 0 で装う。
+ * 文脈つきの門と由来の問い合わせは exec/exec.c と同じ式 — 判定は実物の
+ * ring3_guard_active (exec/ring3_str.c)。ring3_in_syscall は host_in_syscall。 */
+static u8  app_page[64];              /* アプリのユーザ帯の 1 ページの代わり */
+static u8  wm_buf[64];                /* シェル帯 (WM のバッファ) の代わり */
+static int host_page_rw = 1;
+static int host_in_syscall = 0;
+static int host_walks, host_kills;
+
+static int in_app_page(u32 p, u32 len)
+{
+    u32 lo = (u32)app_page, hi = (u32)app_page + (u32)sizeof(app_page);
+    if (len == 0) return 1;
+    return p >= lo && p + len <= hi && p + len > p;
+}
+
+int ring3_ptr_ok(u32 p)
+{
+    return p >= (u32)app_page && p < (u32)app_page + (u32)sizeof(app_page);
+}
+
+int ring3_user_ranges_writable_always(u32 pa, u32 la, u32 pb, u32 lb)
+{
+    host_walks++;
+    return host_page_rw && in_app_page(pa, la) && in_app_page(pb, lb);
+}
+
+int ring3_user_ranges_writable(u32 pa, u32 la, u32 pb, u32 lb)
+{
+    if (!ring3_guard_active(host_in_syscall, ring3_wm_depth)) return 1;
+    return ring3_user_ranges_writable_always(pa, la, pb, lb);
+}
+
+int ring3_call_from_user(void)
+{
+    return ring3_guard_active(host_in_syscall, ring3_wm_depth);
+}
+
+/* 実物は戻らない (longjmp)。ホストでは数えて戻る — 呼ばれたかだけを見る。 */
+void ring3_fault_kill(void) { host_kills++; }
+
+/* fs/fd_redirect.c が引く VFS (ファイル型は使わない)。 */
+int vfs_open(const char *path, int mode) { (void)path; (void)mode; return -1; }
+void vfs_close(int fd) { (void)fd; }
+int vfs_seek(int fd, int off, int whence) { (void)fd; (void)off; (void)whence; return 0; }
+int vfs_read_fd(int fd, void *buf, u32 size) { (void)fd; (void)buf; (void)size; return -1; }
+int vfs_write_fd(int fd, const void *buf, u32 size) { (void)fd; (void)buf; (void)size; return -1; }
+
 /* 実物 */
 #include "ring3_str.c"
 #include "gui.c"
+#include "fd_redirect.c"
 
 /* ---- 最小の報告系 (libc 無し) ------------------------------------------ */
 
@@ -166,11 +223,11 @@ static void case_gui_call(void)
     check(host_enter_calls == 0 && ring3_wm_depth == 0, "2b no WM -> no mark");
 
     /* シェル帯 (owner 1) からの登録。 */
-    host_owner = 1;
+    res_owner_set(1);
     check(gui_register((void *)host_handler, (void *)0) == 0, "2c register from owner 1");
 
     /* アプリ (owner 2) の gui_call: ハンドラの中は深さ 1、戻ると 0。 */
-    host_owner = 2;
+    res_owner_set(2);
     r = gui_call(GUI_OP_WAIT, 5);
     check(r == 7, "2d handler result passes through");
     check(last_op == GUI_OP_WAIT, "2e op passes through");
@@ -190,7 +247,7 @@ static void case_gui_call(void)
     check(host_enter_calls == 3 && host_leave_calls == 3, "2m enter/leave paired for both levels");
 
     /* 入れ子の中の深さそのものは 2。 */
-    host_owner = 1;
+    res_owner_set(1);
     check(gui_register((void *)nested_probe, (void *)0) == 0, "2n re-register probe");
     ring3_wm_enter();                       /* 外側の WM 文脈を装う */
     (void)gui_call(GUI_OP_POLL, 0);
@@ -220,7 +277,7 @@ static void case_owner_exit(void)
 
     report("3 gui_owner_exit の前後で深さが対になる\n");
 
-    host_owner = 1;
+    res_owner_set(1);
     check(gui_register((void *)exit_handler, (void *)0) == 0, "3a register");
     before_enter = host_enter_calls;
     before_leave = host_leave_calls;
@@ -242,11 +299,111 @@ static void case_owner_exit(void)
     check(host_enter_calls == before_enter, "3g owner_exit without WM -> no mark");
 }
 
+/* ========================================================================
+ *  4. 門はポインタの由来で決める — アプリが登録したバッファは WM の中でも歩く
+ *     (2026-09-26、代行レビュー P2。fs/fd_redirect.c の最後の砦)
+ *
+ *  筋書き: アプリ (ID 2) が fd 1 を自分のページへリダイレクト → そのページが
+ *  RO になる (sys_shm_lock 等) → gui_call(OP_WAIT) → WM のハンドラ (深さ 1)
+ *  が fd 1 へ書く。直す前は深さ 1 で門が素通しになり、CR0.WP=0 のカーネルが
+ *  アプリの指定した番地へ書いていた。
+ * ======================================================================== */
+static int wm_wrote_rc = -99;
+static int wm_seen_depth = -99;
+static i32 wm_writes_fd1(u32 op, u32 arg, int owner)
+{
+    (void)op; (void)arg; (void)owner;
+    wm_seen_depth = ring3_wm_depth;
+    wm_wrote_rc = fd_redirect_write(1, "Z", 1);
+    return 0;
+}
+
+static void case_registered_ptr(void)
+{
+    int kills0, walks0;
+
+    report("4 アプリが登録したバッファは WM の中でも表を歩く\n");
+    fd_redirect_init();
+    ring3_wm_depth = 0;
+
+    /* 4a-4c 登録: アプリの syscall (深さ 0) から自分のページを張る → 由来はアプリ。 */
+    res_owner_set(2);
+    host_in_syscall = 1;
+    host_page_rw = 1;
+    walks0 = host_walks;
+    check(fd_redirect_to_buffer(1, app_page, 16u, 0) == 0, "4a app registers its page");
+    check(redir_table[1].user_origin == 1 && redir_table[1].owner == 2,
+          "4b entry is marked app-origin (owner 2)");
+    check(host_walks == walks0 + 1, "4c registration walks the table");
+
+    /* 4d-4g WM の文脈 (gui_call のハンドラ、深さ 1) で fd 1 へ書く。ページは RO。 */
+    res_owner_set(1);
+    check(gui_register((void *)wm_writes_fd1, (void *)0) == 0, "4d WM registers");
+    res_owner_set(2);
+    host_page_rw = 0;                      /* 登録の後で RO になった */
+    kills0 = host_kills;
+    walks0 = host_walks;
+    (void)gui_call(GUI_OP_WAIT, 0);
+    check(wm_seen_depth == 1, "4e the write runs with depth 1 (WM context)");
+    check(host_walks == walks0 + 1, "4f depth 1 still walks the table (always)");
+    check(host_kills == kills0 + 1, "4g RO app page is refused even inside WM");
+
+    /* 4h 同じ筋書きでページが書けるなら素通しに書ける (過剰に殺さない)。 */
+    host_page_rw = 1;
+    kills0 = host_kills;
+    (void)gui_call(GUI_OP_WAIT, 0);
+    check(host_kills == kills0 && wm_wrote_rc == 1 && app_page[1] == 'Z',
+          "4h writable app page is written inside WM");
+
+    /* 4i 深さ 0 (アプリ自身の syscall) の RO も従来どおり断る。 */
+    host_page_rw = 0;
+    kills0 = host_kills;
+    (void)fd_redirect_write(1, "Q", 1);
+    check(host_kills == kills0 + 1, "4i depth 0 RO app page is refused (unchanged)");
+
+    /* 4j-4k 登録時の二重の守り: アプリが RO / 帯外のページを張ろうとすると断り、
+     * 表は変えない。 */
+    host_page_rw = 0;
+    check(fd_redirect_to_buffer(2, app_page, 16u, 0) == -1, "4j app cannot register RO page");
+    check(redir_table[2].target_type == FD_TARGET_CONSOLE, "4k refused registration leaves table");
+    host_page_rw = 1;
+    check(fd_redirect_to_buffer(2, wm_buf, 16u, 0) == -1, "4l app cannot register non-user page");
+
+    /* 4m-4o WM (深さ 1) が自分のバッファを張って書くのは素通し (由来は WM)。 */
+    ring3_wm_enter();
+    walks0 = host_walks;
+    kills0 = host_kills;
+    check(fd_redirect_to_buffer(2, wm_buf, 16u, 0) == 0 &&
+          redir_table[2].user_origin == 0, "4m WM registers its own buffer (not app-origin)");
+    check(fd_redirect_write(2, "W", 1) == 1 && wm_buf[0] == 'W' &&
+          host_kills == kills0, "4n WM buffer written inside WM");
+    check(host_walks == walks0, "4o WM buffer is not walked");
+    ring3_wm_leave();
+
+    /* 4p 退避と復帰 (park / resume) で由来の印が落ちない。 */
+    {
+        FdRedirectState st;
+        fd_redirect_save(&st);
+        check(st.fd[1].user_origin == 1, "4p save keeps app-origin mark");
+        fd_redirect_restore(&st);
+        check(redir_table[1].user_origin == 1, "4q restore keeps app-origin mark");
+    }
+
+    /* 4r 解除すると印も落ちる。 */
+    fd_redirect_reset(1);
+    check(redir_table[1].user_origin == 0, "4r reset clears the mark");
+
+    host_in_syscall = 0;
+    res_owner_set(1);
+    gui_owner_exit(GUI_SHELL_OWNER);
+}
+
 int main(void)
 {
     case_table();
     case_gui_call();
     case_owner_exit();
+    case_registered_ptr();
     if (failures) {
         report("ring3_guard_host: FAIL\n");
         die(1);

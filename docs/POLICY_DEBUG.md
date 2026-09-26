@@ -1358,6 +1358,10 @@ read-modify-write で保つ。
   syscall の中から呼び返す**設計 (契約 T8) では成り立たない。呼び手の判定は「いまどの文脈のコードが走っているか」で
   持つ。検査を足したら、その検査が**常駐側の経路**でも通ることを GUI アプリの起動まで見て確かめる — デスクトップの
   表示は WM の top-level (syscall の外) なので、この穴を踏まない。
+- **追記 (同日、代行レビュー P2)**: 深さで素通しにしてよいのは **WM がいま渡すポインタ**だけ。アプリが**前に登録した**
+  ポインタ (`fd_redirect_to_buffer` のバッファ) を WM の文脈で書く経路は、登録時の由来 (`FdRedirect.user_origin`) を見て
+  `ring3_user_ranges_writable_always` で必ず表を歩く — 門は「呼び手の文脈」ではなく「ポインタの由来」で決める。
+  深さ 0 での `ring3_wm_leave` は `ring3_wm_depth_underflow` が数える。
 
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 

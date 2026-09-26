@@ -342,9 +342,23 @@ void ring3_wm_enter(void)
     ring3_wm_depth++;
 }
 
+volatile u32 ring3_wm_depth_underflow = 0;
+
 void ring3_wm_leave(void)
 {
-    if (ring3_wm_depth > 0) ring3_wm_depth--;
+    if (ring3_wm_depth > 0) {
+        ring3_wm_depth--;
+    } else {
+        /* 対になっていない出口。深さは 0 で止める (負にすると門が安全側に
+         * 倒れて WM のポインタでアプリが kill される) が、黙って止めずに
+         * 数える (exec.h の注記)。 */
+        ring3_wm_depth_underflow++;
+    }
+}
+
+int ring3_call_from_user(void)
+{
+    return ring3_guard_active(ring3_in_syscall, ring3_wm_depth);
 }
 
 /* ======================================================================== */
@@ -823,17 +837,23 @@ static int ring3_writable_trivial(u32 p, u32 len)
 
 int ring3_user_ranges_writable(u32 pa, u32 la, u32 pb, u32 lb)
 {
-    unsigned int saved;
-    u32 app_cr3, master;
-    int ok, ta, tb;
-
     /* **CPL=0 の直呼びは対象外** (常駐シェル / gshell はローカル変数を渡す)。
      * 判定は「呼び出し経路」で決める — CR3 が master かどうかで代用しない
      * (Approve 後の注意 2)。既存の ring3_user_range_ok と同じ門。
      * **WM の文脈 (ring3_wm_depth > 0) も常駐側の直呼び扱い** — WM はアプリの
      * syscall の中で走るので ring3_in_syscall だけでは区別できない
-     * (2026-09-26、ring3_wm_depth の注記)。 */
+     * (2026-09-26、ring3_wm_depth の注記)。
+     * これは**いま渡されたポインタ**の門。アプリが**前に登録した**ポインタは
+     * 文脈に関係なく _always で歩く (fs/fd_redirect.c、exec.h の注記)。 */
     if (!ring3_guard_active(ring3_in_syscall, ring3_wm_depth)) return 1;
+    return ring3_user_ranges_writable_always(pa, la, pb, lb);
+}
+
+int ring3_user_ranges_writable_always(u32 pa, u32 la, u32 pb, u32 lb)
+{
+    unsigned int saved;
+    u32 app_cr3, master;
+    int ok, ta, tb;
 
     ta = ring3_writable_trivial(pa, la);
     tb = ring3_writable_trivial(pb, lb);

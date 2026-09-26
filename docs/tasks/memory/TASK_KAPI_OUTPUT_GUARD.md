@@ -86,3 +86,6 @@
 WM が選ぶ (gshell は `arg` をポインタとして解釈しない — 入力は SHM のスロット経由)。#PF/#GP の帰属は変えない。
 試験: `tools/tests/ring3_guard_tdd.md` (ホスト、変異 4/4 RED) + kselftest `test_ring3_wm_guard` (ゲスト)。
 教訓: `docs/POLICY_DEBUG.md` §4-61。
+追記 (同日、代行レビュー P2): 実装レビュー 4 の「最後の砦」(`fd_redirect_write`) はアプリが登録したバッファ
+(`user_origin`) なら深さに関係なく `ring3_user_ranges_writable_always` で歩き、登録時も同じ歩きで RW + USER を確かめる
+(試験 `ring3_guard_host.c` §4、変異 7/7 RED、kselftest `test_fd_redirect_origin_guard`)。

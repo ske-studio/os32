@@ -29,6 +29,7 @@
 #include "appslot.h"
 #include "launch.h"
 #include "exec.h"
+#include "fd_redirect.h"  /* fd_redirect_buf_write_ok (門はポインタの由来で決める) */
 #include "kapi_db.h"
 #include "cpu_calibrate.h"
 #include "cpu_calibrate_math.h"
@@ -1561,13 +1562,76 @@ static void test_ring3_wm_guard(void)
     check(ring3_wm_depth == 0, "wm-guard: leave -> depth 0");
     check(ring3_user_range_writable((u32)&local, sizeof(u32)) == 0,
           "wm-guard: refused again after leaving WM");
-    ring3_wm_leave();                   /* 余分な leave は負にしない */
-    check(ring3_wm_depth == 0, "wm-guard: leave at 0 stays 0");
+    {
+        u32 u0 = ring3_wm_depth_underflow;
+        ring3_wm_leave();               /* 余分な leave は負にしない */
+        check(ring3_wm_depth == 0, "wm-guard: leave at 0 stays 0");
+        /* 黙って止めずに数える (代行レビュー P3、exec.h の注記)。 */
+        check(ring3_wm_depth_underflow == u0 + 1u,
+              "wm-guard: leave at 0 is counted (underflow)");
+    }
 
     /* 負の深さ (壊れた状態) は安全側 = ガードを効かせる。 */
     ring3_wm_depth = -1;
     check(ring3_user_range_writable((u32)&local, sizeof(u32)) == 0,
           "wm-guard: negative depth still guards");
+
+    ring3_wm_depth = saved_depth;
+    ring3_in_syscall = saved;
+}
+
+/* ------------------------------------------------------------------------ */
+/*  門はポインタの由来で決める (2026-09-26、代行レビュー P2。POLICY_DEBUG      */
+/*  §4-61)。アプリが fd_redirect_to_buffer で**登録した**バッファは、あとで    */
+/*  WM (深さ 1) の中で書かれても表を歩いて断る — さもないとアプリが fd 1 を     */
+/*  RO ページへ向けてから gui_call し、WM が fd 1 へ書くだけで CR0.WP=0 の      */
+/*  カーネルがアプリ指定の番地へ書く。ここでは表を変えずに、判定関数          */
+/*  (fd_redirect_buf_write_ok) を「アプリ由来」の印を付けた作りものの項目で    */
+/*  叩く。バッファはカーネル帯のローカル変数 (USER 無し = アプリには書けない   */
+/*  ページの代わり)。筋書きの全体はホスト (tools/tests/ring3_guard_host.c §4)。*/
+/* ------------------------------------------------------------------------ */
+static void test_fd_redirect_origin_guard(void)
+{
+    u8 kbuf[16];
+    FdRedirect r;
+    int saved = ring3_in_syscall;
+    int saved_depth = ring3_wm_depth;
+    u32 base;
+
+    kmemset(&r, 0, sizeof(r));
+    r.target_type = FD_TARGET_BUFFER;
+    r.file_fd = -1;
+    r.buffer = kbuf;
+    r.buf_capacity = sizeof(kbuf);
+    r.owner = 2;                        /* アプリ (ID 2) が張った */
+    r.user_origin = 1;
+
+    ring3_in_syscall = 1;               /* ディスパッチ中を装う */
+    ring3_wm_depth = 0;
+    ring3_wm_enter();                   /* WM の文脈 (gui_call のハンドラ) */
+    base = ring3_range_reject_count;
+
+    check(fd_redirect_buf_write_ok(&r, 1u) == 0,
+          "origin-guard: app-registered buffer refused at depth 1");
+    check(ring3_range_reject_count == base + 1u &&
+          ring3_range_reject_addr == (u32)kbuf,
+          "origin-guard: refusal walked and counted");
+
+    /* 同じ番地でも WM (常駐側) が張ったものなら深さ 1 では素通し。 */
+    r.user_origin = 0;
+    r.owner = 1;
+    check(fd_redirect_buf_write_ok(&r, 1u) == 1 &&
+          ring3_range_reject_count == base + 1u,
+          "origin-guard: WM-registered buffer passes at depth 1");
+    ring3_wm_leave();
+
+    /* 登録時の二重の守り: 深さ 0 (アプリの syscall) から USER の無い番地を
+     * 張ろうとすると断り、表は変えない。 */
+    check(ring3_wm_depth == 0 &&
+          fd_redirect_to_buffer(2, kbuf, sizeof(kbuf), 0) == -1,
+          "origin-guard: app cannot register a non-user buffer");
+    check(!fd_is_redirected(2),
+          "origin-guard: refused registration leaves the table");
 
     ring3_wm_depth = saved_depth;
     ring3_in_syscall = saved;
@@ -1605,6 +1669,7 @@ int kselftest_run(void)
     test_irq_dynamic();
     test_time_now();
     test_ring3_wm_guard();
+    test_fd_redirect_origin_guard();
 
     if (ksel_fail == 0) {
         kprintf(0xA1, "[selftest] %d/%d passed\n", ksel_pass, ksel_pass);

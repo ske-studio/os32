@@ -13,6 +13,8 @@ ring3_guard_active(in_syscall, wm_depth) に寄せること。
 見るもの:
   (1) 判定表 — in_syscall × wm_depth (負は安全側)
   (2) gui_call / gui_owner_exit の前後で深さが対になる (入れ子も)
+  (3) アプリが登録したバッファ (fs/fd_redirect.c) は WM の中でも表を歩く
+      — 門は呼び手の文脈ではなくポインタの由来で決める (代行レビュー P2)
 
 test_ring3_str.py と同じ様式 — ホスト ILP32 GNU89 で走らせたあと、同じ
 ソースが i386-elf-gcc -Werror でも通ることを見る ([C1])。libc は使わない。
@@ -31,9 +33,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
          "-fno-stack-protector", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement"]
-INC_DIRS = ("include", "kernel", "lib", "exec", "sdk/include/os32")
+INC_DIRS = ("include", "kernel", "lib", "exec", "fs", "sdk/include/os32")
 HOST_SRC = ROOT / "tools/tests/ring3_guard_host.c"
-KERNEL_SRCS = [ROOT / "exec/ring3_str.c", ROOT / "kernel/gui.c"]
+KERNEL_SRCS = [ROOT / "exec/ring3_str.c", ROOT / "kernel/gui.c", ROOT / "fs/fd_redirect.c"]
 
 # 否定側: 実物の 1 行を壊すと RED になることを見る (写しの上で。ソースは触らない)。
 MUTATIONS = [
@@ -53,6 +55,19 @@ MUTATIONS = [
      "        ring3_wm_enter();\n        g_gui_handler(GUI_OP_OWNER_EXIT, 0, owner);\n",
      "        g_gui_handler(GUI_OP_OWNER_EXIT, 0, owner);\n",
      "owner_exit が印を立てない"),
+    # 代行レビュー P2 (2026-09-26): 門はポインタの由来で決める。
+    ("fs/fd_redirect.c",
+     "        return ring3_user_ranges_writable_always(dst, to_write, 0, 0);\n",
+     "        return ring3_user_ranges_writable(dst, to_write, 0, 0);\n",
+     "アプリが登録したバッファの書きを文脈つきの門に戻す (= 直す前)"),
+    ("fs/fd_redirect.c",
+     "    redir_table[fd].user_origin = user;\n",
+     "    redir_table[fd].user_origin = 0;\n",
+     "登録の由来を記録しない"),
+    ("fs/fd_redirect.c",
+     "    if (user && !ring3_user_ranges_writable_always((u32)buf, size, 0, 0))\n        return -1;\n",
+     "",
+     "登録時の二重の守りを外す"),
 ]
 
 

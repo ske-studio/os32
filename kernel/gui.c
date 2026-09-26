@@ -29,7 +29,13 @@ extern void appslot_gui_op_leave(void);
  * 窓も出さずに消えた件)。ハンドラ / owner_exit の前後で必ず対にする。
  * ハンドラが longjmp で戻らないとき (OP_WAIT の中の exec_park、fault kill) は
  * leave を通らないが、exec 側が longjmp の地点とディスパッチャの入口で 0 に
- * 戻す。実体は exec/exec.c (kernel/ は -Iexec 非依存)。 */
+ * 戻す。実体は exec/exec.c (kernel/ は -Iexec 非依存)。
+ * 深さ 1 以上の間 CPL=3 が走らないのは、gshell が契約 T1 を守る限り
+ * (OWNER_EXIT ハンドラから exec_start / exec_resume を呼ばない)。呼んでも
+ * 入れ子の syscall はディスパッチャ入口で深さ 0 に戻るので門の穴にはならない
+ * (対の崩れは ring3_wm_depth_underflow が数える)。また深さが素通しにするのは
+ * **WM がいま渡すポインタ**だけで、アプリが前に登録したポインタ
+ * (fd_redirect のバッファ) は深さに関係なく表を歩く (exec/ring3_str.h)。 */
 extern void ring3_wm_enter(void);
 extern void ring3_wm_leave(void);
 
