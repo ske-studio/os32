@@ -19,6 +19,13 @@ PC-98キーボードコントローラ制御。IRQ1割り込みハンドラで�
 | `kbd_getchar()` | ASCII文字を1文字返す (ブロッキング) |
 | `kbd_getkey()` | スキャンコード+ASCII (u16) を返す |
 | `kbd_has_key()` | バッファにデータがあるか |
+| `kbd_get_modifiers()` | 修飾状態 (`SHIFT_*`: SHIFT 01 / CAPS 02 / カナ 04 / GRPH 08 / CTRL 10) |
+
+**修飾キー**: SHIFT・CTRL・GRPH は make で ON、break で OFF。**カナ・CAPS は機械式ロック**で、ロックすると make、
+外すと break が来るので同じく make で ON、break で OFF (方式 B。2026-09-26 までは make で反転して break を捨てていた
+ため、外しても ON のままだった)。根拠は BIOS ワークエリア 0000:053Ah (INT 09h が make でセット・break でリセット) と
+NP21/W の観測 — 経緯と未確認点 (実機) は [TASK_KBD_NAV](tasks/gui/TASK_KBD_NAV.md) §2。カナ・CAPS は V86 セッション中も
+追う。起動時は `kbd_init` が 053Ah のカナ・CAPS ビットを引き継ぐ (起動行 `[kbd] ... lock=XX`)。
 
 **特殊キー (kbd_getkey()のスキャンコード)**:
 
