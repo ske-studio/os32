@@ -1013,6 +1013,81 @@ fn review_p3_5_frame_is_erased_when_the_window_goes_away() {
     run(&mut st, &tap(0x1C, 0)); /* 移動モードは終わっている */
 }
 
+/// [P3-A] キーボードの移動中に窓が消えた後、同じ添字に作られた窓のマウスドラッグは
+/// 枠が追従する (移動の状態 `kn.kmode` が残って「キーボードの移動中」に見えていた)。
+#[test]
+fn review_p3_a_mouse_drag_works_on_a_new_window_at_the_same_index() {
+    mocks::init();
+    fep_off();
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(40, 40, 300, 200)]);
+    park_pointer(&mut st, 600, 10);
+    let w0 = id(&st, 0);
+    kbdnav::winmenu_run(&mut st, w0, kbdnav::WM_MOVE);
+    run(&mut st, &tap(0x3C, 0)); /* → 8 */
+    assert!(kbdnav::kmove_busy(&st));
+    assert_eq!(wm::destroy_window(&mut st, 2, w0), 0);
+    /* 同じ添字 0 に新しい窓 (世代は destroy が進めた値のまま) */
+    let gen = st.windows[0].gen;
+    let mut w = Win::EMPTY;
+    w.used = true;
+    w.visible = true;
+    w.owner = 2;
+    w.gen = gen;
+    w.flags = os32api::gui::proto::GUI_WF_DEFAULT;
+    w.x = 40;
+    w.y = 40;
+    w.w = 300;
+    w.h = 200;
+    st.windows[0] = w;
+    st.zorder[st.z_count] = 0;
+    st.z_count += 1;
+    let (tx, ty) = titlebar_point(&st);
+    park_pointer(&mut st, tx, ty);
+    *mocks::MOUSE.lock().unwrap() = (tx as i16, ty as i16, 1);
+    input::capture(&mut st, input::Ctx::Wait);
+    assert_eq!(st.drag_index, 0, "マウスのドラッグが始まらない");
+    assert!(!kbdnav::kmove_busy(&st), "マウスのドラッグがキーボードの移動中に見える");
+    *mocks::MOUSE.lock().unwrap() = ((tx + 30) as i16, (ty + 10) as i16, 1);
+    input::capture(&mut st, input::Ctx::Wait);
+    assert_eq!((st.drag_frame.x, st.drag_frame.y), (70, 50), "枠がマウスに追従しない");
+    *mocks::MOUSE.lock().unwrap() = ((tx + 30) as i16, (ty + 10) as i16, 0);
+    input::capture(&mut st, input::Ctx::Wait);
+    assert_eq!((st.windows[0].x, st.windows[0].y), (70, 50), "離しで窓が移らない");
+    assert_eq!(st.drag_index, -1);
+    /* 矢印キーは WM の移動に食われずアプリへ届く */
+    clear_rings(&st);
+    run(&mut st, &tap(0x3C, 0));
+    assert_eq!((st.windows[0].x, st.windows[0].y), (70, 50), "矢印で窓が動いた");
+    assert_eq!(keys(&st, 0).len(), 2, "矢印キーがアプリへ届かない");
+}
+
+/// [P3-B] GRPH+TAB の途中でモーダルが開いたら、以後の TAB は選択を進めず取り消す
+/// (タスクバーの押し込みが動き続けていた)。GRPH↑ でも切り替えない。
+#[test]
+fn review_p3_b_tab_during_a_modal_cancels_the_switch() {
+    mocks::init();
+    fep_off();
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(20, 20, 200, 120), (60, 60, 200, 120), (100, 100, 200, 120)]);
+    park_pointer(&mut st, 600, 10);
+    run(&mut st, &[SC_GRPH | DOWN | GRPH, SC_TAB | DOWN | GRPH, SC_TAB | GRPH]);
+    assert_eq!(kbdnav::switch_selection(&st), Some(id(&st, 1)));
+    modal::open_wm_message(&mut st, GUI_MODAL_YES_NO, b"x\0", modal::WM_PURPOSE_NOTIFY);
+    run(&mut st, &tap(SC_TAB, GRPH));
+    assert_eq!(kbdnav::switch_selection(&st), None, "モーダル中の TAB で選択が進んだ");
+    assert!(modal::is_open(), "TAB でダイアログが閉じた");
+    run(&mut st, &tap(SC_TAB, GRPH));
+    assert_eq!(kbdnav::switch_selection(&st), None, "取り消した後の TAB で切り替えが始まった");
+    run(&mut st, &[SC_GRPH]);
+    assert_eq!(st.front_index(), Some(2), "モーダル中に切り替わった");
+    for s in 0..3 {
+        assert!(keys(&st, s).is_empty(), "TAB がアプリへ漏れた: slot {s}");
+    }
+    modal::on_key(&mut st, 0, 0x1B, 0);
+    assert!(!modal::is_open());
+}
+
 /// GRPH+f･4 は前面の窓へ Close を送る。
 #[test]
 fn grph_f4_sends_close_to_the_front_window() {

@@ -91,7 +91,8 @@ def check_manifest():
 
     man = (ROOT / "docs/manpages/hsync.1").read_text(encoding="utf-8")
     for word in (".hs~", "--unsafe-overwrite", "replace_partial", "--root",
-                 "root_not_ext2", "root_not_mount", "root_is_source"):
+                 "root_not_ext2", "root_not_mount", "root_is_source",
+                 "root_stat_failed"):
         if word not in man:
             raise SystemExit("docs/manpages/hsync.1 に %s の記載が無い "
                              "(予約名の明記が決裁 D3 (a') の前提)" % word)
@@ -112,9 +113,33 @@ MUTATIONS = [
     # ---- --root (2026-09-26) の否定側 ----
     # 変異: 根が ext2 かを見ない版 (/hd1 = FAT、/cd0 = ISO9660 へ書き出す)
     ("root_ext2_unchecked",
-     "            if (rc != 0 || (st.st_mode & OS_S_IFMT) != OS_S_IFDIR ||\n"
-     "                st.st_ino != HS_EXT2_ROOT_INO)",
-     "            if (rc != 0 || (st.st_mode & OS_S_IFMT) != OS_S_IFDIR)"),
+     "            else if ((st.st_mode & OS_S_IFMT) != OS_S_IFDIR ||\n"
+     "                     st.st_ino != HS_EXT2_ROOT_INO)",
+     "            else if ((st.st_mode & OS_S_IFMT) != OS_S_IFDIR)"),
+    # ---- 着地後の P3 (2026-09-26) の否定側 ----
+    # 変異: 根の stat の失敗を「ext2 でない」と言う版 (直す前の姿、err も出ない)
+    ("root_stat_fail_as_ext2",
+     "                why = HR_ROOT_STAT_FAIL;",
+     "                why = HR_ROOT_NOT_EXT2;"),
+    # 変異: --root /sys の案内を「シェル再起動」のままにする版
+    ("root_sys_note_shell",
+     "        if (g_touched_sys && g_root_len > 0)",
+     "        if (g_touched_sys && 0)"),
+    # 変異: --root /boot の案内を「再起動」のままにする版
+    ("root_boot_note_reset",
+     "        if (g_touched_boot && g_root_len > 0)",
+     "        if (g_touched_boot && 0)"),
+    # 変異: --root を正規化しない版 (/hd0/ や //hd0/./ がマウントの根に見えない)
+    ("root_not_normalized",
+     "!hsp_normalize(root_arg, rnorm, (int)sizeof(rnorm))",
+     "!str_ncpy(rnorm, root_arg, (int)sizeof(rnorm))"),
+    # 変異: -n では vmkernel.old の門を通さない版 (-n が「通る」と言って本番で断る)
+    ("old_gate_skipped_on_dry_run",
+     "    if (!g_no_backup && api->version >= 65 &&\n"
+     "        api->boot_image_info(&bi) == 0 && bi.crc_valid)",
+     "    if (g_dry_run) return 0;\n"
+     "    if (!g_no_backup && api->version >= 65 &&\n"
+     "        api->boot_image_info(&bi) == 0 && bi.crc_valid)"),
     # 変異: 根がマウントの根かを見ない版 (/hd0/bin や HDD 起動の /hd0)
     ("root_mount_unchecked",
      "        if (!dev[0]) {\n            why = HR_ROOT_NOT_MOUNT;",

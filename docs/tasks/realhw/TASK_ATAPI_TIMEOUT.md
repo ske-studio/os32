@@ -83,7 +83,20 @@ ASC/ASCQ を 1 行出す (START UNIT を出したときも 1 行)。DEVICE RESET
 | 2 台とも準備中 (04h/01h) が続く | 250ms × 20 × 2 台 | 10 秒 (以前どおり) |
 
 §2 の「装置が 2 台あると最大 10 秒」は準備中の待ちの数で、固まった装置の数は上の表。居ない装置の ALT_STATUS が BSY に
-見える機械 (0x80 など、`np2_absent`) では、シグネチャの確認が居ない装置 1 台につき 5 秒延びる (以前は 1 秒弱)。
+見える機械 (0x80 など、`np2_absent`) では、居る装置が 1 台でもあればシグネチャの確認が居ない装置の分だけ 5 秒延びる
+(以前は 1 秒弱)。**1 台も居なければ 41.002 秒** — シグネチャが出ないので SRST し、`s_present_mask` が空のまま 0x80 を
+「マスターの BSY」と見て 31 秒待つ (表の「2 台とも BSY」と同じ内訳。`np2_boot_worst` の (c) 5 秒 / (d) 41.002 秒で固定)。
+スレーブの SRST 後の BSY は `atapi_srst` では待たず、選び直した後の待ち (`s_wait_limit_us`) までしか待たない。
+
+### 着地後の直し (2026-09-26、代行レビューの P3)
+
+- **バスが死んだ印**: SRST が 31 秒で期限切れになったら `s_bus_dead` を立て、以後の `atapi_read_sectors` /
+  `atapi_read_capacity` / `atapi_test_unit_ready` はバスに触らず即 `ATAPI_ERR_TIMEOUT` (それまでは `ls /cd0` のたびに約 61 秒 =
+  選択の前後 10 + 10、DEVICE RESET の後 10、SRST 31)。解くのは次の `atapi_init` だけ (呼び直しがバスの再試行。前回の
+  `cdrom_present` も持ち越さない)。診断は SRST の行 `[atapi] SRST: BSY did not clear, bus marked dead ... limit=31s` と、
+  最初に断ったときだけの `[atapi] bus dead since SRST timeout, failing at once until atapi_init ...` の 1 行。断った数は
+  `AtapiStats.dead_fails`。SRST の行の `limit=` は PACKET の上限でなく `ATAPI_SRST_TIMEOUT_US` を出す (`atapi_note_ex`)
+- **未実施 (計測待ち)**: データ相のブロック間の 100µs 待ち。実機 T3 で cdinst が遅く見えたら、最初の数百回は待たずに読む
 
 ### ホスト試験 (`tools/tests/test_cd_read.py`、記録 `tools/tests/cd_read_tdd.md` §3-6)
 
@@ -95,6 +108,9 @@ ASC/ASCQ を 1 行出す (START UNIT を出したときも 1 行)。DEVICE RESET
   諦め、DRV_HEAD も PACKET も書かずに期限切れ
 - `np2_boot_worst` — **T2**: 上の 41.002 / 46.002 秒
 - `np2_start_unit` — §2: START UNIT 1 回で読める / 直らない装置には 1 回だけ出して媒体なし + ASC/ASCQ の行
+- `np2_bus_dead` — 着地後: SRST の 31 秒切れの後、読み・容量確認・TEST UNIT READY は時計を進めず PACKET / DEVICE RESET /
+  SRST を 1 つも出さずに期限切れ、即失敗の行は 1 回、`atapi_init` の後は読める。変異 6 本 (印を立てない、読み / 容量確認が
+  印を見ない、init が解かない、行を毎回出す、SRST の行の limit= を PACKET の上限にする) が RED
 - 変異 12 本 (上限を回数に戻す × 2、PACKET 上限 1 秒、SRST の戻り値無視、SRST を PACKET の上限で諦める、init の SRST の
   戻り値無視、init も 10 秒、init 後に上限を戻さない、START UNIT を出さない / 何度も出す、ASCQ を読まない、ASC/ASCQ の
   行を出さない) を足して全 73 本 RED

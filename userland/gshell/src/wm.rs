@@ -23,7 +23,8 @@ use os32api::gui::proto::{
 
 use crate::cursor::Cursor;
 use crate::{
-    chrome, cursor, damage, desktop, fep, input, lease, modal, session, startmenu, taskbar, visible,
+    chrome, cursor, damage, desktop, fep, input, kbdnav, lease, modal, session, startmenu, taskbar,
+    visible,
 };
 
 /* ================================================================ */
@@ -786,10 +787,14 @@ impl GuiState {
 
 /// ドラッグ (マウス / キーボードの移動・サイズ) 中の窓が消えた: 枠を消して
 /// 終わらせる (代行レビュー P3-5: 枠が画面に残っていた)。
+/// キーボードの移動・サイズの状態 (`kn.kmode`) もここで終わらせる — 残すと、
+/// 同じ添字に後から作られた窓のマウスドラッグが「キーボードの移動中」に見えて
+/// 枠が追従しなかった (代行レビュー P3-A)。
 fn drop_drag_frame(st: &mut GuiState) {
     let f = st.drag_frame;
     st.drag_index = -1;
     st.drag_frame = Rect::EMPTY;
+    kbdnav::drop_kmove(st);
     input::erase_frame(st, f);
 }
 

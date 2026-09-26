@@ -808,6 +808,22 @@ curl -s http://127.0.0.1:8025/api/screenshot > screenshot.png
 > レジスタ・メモリ・逆アセンブル・ブレークポイントまで要るときは
 > `tools/np21w_mcp/` の MCP サーバを使う。
 
+### `emu_read_mem` で読むカーネルシンボル
+
+KAPI ではない**カーネルの大域変数** (カウンタ・印)。番地は毎回その版の `build/kernel.map` から引き、
+`emu_read_mem` (または `/api/mem`) で読む。どれも起動時 0。
+
+| シンボル | 定義 | 意味 |
+|---|---|---|
+| `fault_kill_count` | `exec/exec.c` | CPL=3 アプリを例外・ポインタ検証で畳んだ数 |
+| `ring3_abort_count` | `exec/exec.c` | CTRL+STOP (`ring3_abort_request`) で畳んだ数 |
+| `ring3_range_reject_count` / `_last` / `_addr` / `_page` / `_heap_top` | `exec/exec.c` | KAPI のポインタ早期検証が断った数と、最後に断った種別 (7〜10 は書き側、§4 の該当節)・番地・ページ・その時の heap の上端 |
+| `ring3_switch_count` / `ring3_transition_count` / `ring3_park_reject_count` / `ring3_resume_bad_frame_count` | `exec/appslot.c` | 多重アプリの切り替え (受入 G7、[KAPI_SPEC](KAPI_SPEC.md)) |
+| `gui_ime_render_rejected` | `kernel/gui.c` | アプリ (CPL=3 由来) の `ime_set_render` を断った数 (常駐側だけが差し替えられる、2026-09-26) |
+| `ring3_wm_depth` | `exec/exec.c` | いまカーネルが WM (gshell) のコードへ入っている深さ。ふだん 0、アプリの syscall の中で WM を呼んでいる間だけ 1 以上 |
+| `ring3_wm_depth_underflow` | `exec/exec.c` | WM の出入りの対が崩れて深さを 0 未満へ下げかけた数 (0 でなければ対の崩れ) |
+| `kselftest_pass` / `kselftest_fail` | `kernel/kselftest.c` | 起動時の自己試験 (§2) |
+
 ### 有用なゲスト側コマンド
 
 | コマンド | 用途 |

@@ -138,7 +138,9 @@ typedef struct {
 /* ======== 公開API ======== */
 
 /* ATAPI初期化: セカンダリバンクのCD-ROMを検出
- * 戻り値: 1=CD-ROM検出, 0=未検出 */
+ * 戻り値: 1=CD-ROM検出, 0=未検出
+ * 呼び直すとバスの再試行になる: バスが死んだ印 (下の「バスが死んだ印」) を
+ * 解くのはこれだけ */
 int atapi_init(void);
 
 /* CD-ROM 存在チェック */
@@ -148,8 +150,16 @@ int atapi_present(void);
  * 両方のシグネチャを見て、2 台あれば媒体の入っている方 (マスター優先) を選ぶ */
 int atapi_drive_index(void);
 
+/* バスが死んだ印: SRST の後もマスターが ATAPI_SRST_TIMEOUT_US (31 秒) BSY の
+ * ままなら立つ。立っているあいだ atapi_test_unit_ready / atapi_read_capacity /
+ * atapi_read_sectors はバスに触らず即 ATAPI_ERR_TIMEOUT を返す (触れば 1 回
+ * 約 61 秒 = 選択の前後の待ち 10 + 10、DEVICE RESET の後 10、SRST 31)。最初に断ったとき
+ * だけ "[atapi] bus dead since SRST timeout, ..." の 1 行を出す。
+ * 解くのは次の atapi_init */
+
 /* TEST UNIT READY: メディア挿入確認
- * 戻り値: ATAPI_OK=メディアあり, ATAPI_ERR_NO_MEDIA=なし */
+ * 戻り値: ATAPI_OK=メディアあり, ATAPI_ERR_NO_MEDIA=なし,
+ * ATAPI_ERR_TIMEOUT=バスが死んだ印 */
 int atapi_test_unit_ready(void);
 
 /* READ CAPACITY: メディア容量取得 */
@@ -184,6 +194,7 @@ typedef struct {
     u32 soft_resets;      /* DEVICE RESET でも戻らず SRST した数 */
     u32 ready_retries;    /* READ CAPACITY を UNIT ATTENTION / NOT READY で出し直した数 */
     u32 start_units;      /* NOT READY / 04h/02h に START STOP UNIT (開始) を出した数 */
+    u32 dead_fails;       /* バスが死んだ印 (SRST の 31 秒切れ) のためにバスに触らず断った数 */
 } AtapiStats;
 
 void atapi_get_stats(AtapiStats *out);

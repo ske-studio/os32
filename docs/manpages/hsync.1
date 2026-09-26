@@ -57,13 +57,16 @@ HDD を更新する」)。NP21/W でも FD 起動 + HostDrv の `/host` で同�
 | 同期元 `/host` 自身とその下 | `root_is_source` |
 | **マウントの根そのもの**でない (`vfs_devname` が空。`/hd0/bin`、HDD 起動のときの `/hd0` = 自動マウントされない) | `root_not_mount` |
 | デバイス名が `fd` で始まる | `dest_on_fd` |
+| 根の `stat` が失敗する (I/O 失敗・NOMOUNT。`err=` に戻り値を出す) | `root_stat_failed` |
 | FS が ext2 と確かめられない (`/cd0` の ISO9660、FAT の区画、SerialFS / HostDrv) | `root_not_ext2` |
 
 ext2 かどうかは KAPI を足さずに**根の `stat`** で見る: ext2 はマウントの根に
 ルート inode (`EXT2_ROOT_INO` = 2) を返し、ほかの FS は 2 を返さない
 (FAT・HostDrv・SerialFS は 0、根を stat できない FS の VFS の合成も 0、ISO9660 は
 根ディレクトリの LBA = 16 以上)。カーネル内の `vfs_fstype` は KAPI に出ていない。
-`--root /` は既定と同じ同期になる (門は通す)。
+`--root /` は既定と同じ同期になる (門は通す)。`/hd0/` や `//hd0/./` は正規化して `/hd0` と同じ。
+`--root` で `/sys`・`/boot` を更新したときの案内は「HDD (`<根>`) から起動し直す」
+(走っているのは別の媒体なので、シェル再起動やリセットでは切り替わらない)。
 
 **根からの相対で効くもの**:
 

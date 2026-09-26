@@ -215,7 +215,7 @@ IDEセカンダリバンクに接続されたATAPI CD-ROMデバイスをPIOモ�
 | `atapi_read_capacity(cap)` | メディア容量取得 (AtapiCapacity構造体)。UNIT ATTENTION は REQUEST SENSE で消して出し直す、NOT READY は ASC 3Ah (媒体なし) だけ `ATAPI_ERR_NO_MEDIA` で確定し、04h/02h (initializing command required) には START STOP UNIT (開始) を 1 回だけ出して待たずに出し直し、他は 250ms 置いて `ATAPI_READY_RETRIES` (20) まで出し直す (待ちの合計は 1 装置あたり最大 5 秒 — トレイを閉じた直後の準備中 2〜5 秒を待ちきる。装置が 2 台なら `atapi_init` で最大 10 秒。`cpu_delay_us` は 1 回 100ms (`CPU_DELAY_US_MAX`) で丸めるので、`atapi_delay_us` が 100ms 以下の塊に分けて回す)。準備中のまま諦めたら `[atapi] NOT READY, gave up drv= st= asc/ascq=04/01` の形で最後の ASC/ASCQ を 1 行出す |
 | `atapi_read_sectors(lba, count, buf)` | セクタ読み出し (2048B/セクタ, LBA指定)。連続する count セクタを `ATAPI_READ_MAX_SECTORS` (既定 16 = 32KB) ずつの READ(10) で読む。複数セクタが失敗したらその範囲を 1 セクタずつ読み直し、1 セクタでも落ちればそこで失敗 |
 | `atapi_media_gen()` | 媒体の世代。エラーレジスタのセンスキーが UNIT ATTENTION (6) / NOT READY (2) のたびに進む。READ(10) の UNIT ATTENTION は `ATAPI_UA_RETRIES` (3) 回まで出し直す (UA を複数積む装置がある) |
-| `atapi_get_stats(out)` | READ(10) の数・セクタ数・1 セクタずつへ落ちた数・DEVICE RESET / SRST の数・容量確認の出し直しの数・START UNIT の数 |
+| `atapi_get_stats(out)` | READ(10) の数・セクタ数・1 セクタずつへ落ちた数・DEVICE RESET / SRST の数・容量確認の出し直しの数・START UNIT の数・バスが死んだ印で断った数 (`dead_fails`) |
 
 - **PIO の受け取り**: byte count limit (Cylinder Low/High) には `min(バッファ, ATAPI_PIO_BCL_MAX = 0xF800)` を書き、
   データは DRQ ごとに Cylinder Low/High のバイト数だけ読む。各ブロックの後に ALT_STATUS の空読みで 400ns 置く
@@ -229,7 +229,8 @@ IDEセカンダリバンクに接続されたATAPI CD-ROMデバイスをPIOモ�
   選択の待ちが期限切れ (下の「待ちの上限」) なら **DEVICE RESET (08h、その装置だけ。BSY でも受ける)** → それでも戻らなければ **SRST** (バンクで選んだ
   バスの 2 台。プライマリの HDD には届かない — UNDOCUMENTED io_ide 074Ch、NP21/W `ideio_o74c`。**同じバンク (セカンダリ) の
   ATA HDD (`ide.c` の drive 2 / 3) も戻す**)。SRST は解いてから 2ms 置き (`ATAPI_SRST_SETTLE_US`)、マスターの BSY=0 を最大 31 秒待ってから
-  (マスターが居なければ待たない) 使う装置を選び直す (DRV_HEAD → 400ns → BSY=0)。31 秒経っても BSY なら DRV_HEAD を書かずに
+  (マスターが居なければ待たない) 使う装置を選び直す (DRV_HEAD → 400ns → BSY=0)。スレーブの SRST 後の BSY は、選び直した後の
+  待ち (`s_wait_limit_us`、ふだん 10 秒) までしか待たない。31 秒経っても BSY なら DRV_HEAD を書かずに
   期限切れを返す (`atapi_srst` の戻り値。`atapi_init` はそこで諦める)。どちらの後も装置は
   UNIT ATTENTION を立てるので、次のコマンドの出し直しは呼び手が行う。
   2026-09-26 まではマスターしか見ず、NP21/W で ide2 が空の CD のまま ide3 (セカンダリのスレーブ) に ISO を付けると
@@ -249,15 +250,23 @@ IDEセカンダリバンクに接続されたATAPI CD-ROMデバイスをPIOモ�
   **「遅いだけ」と「固まった」の境目**: コマンドの待ちが期限切れになっても DEVICE RESET はしない (期限切れを返すだけ)。
   次のコマンドの装置選択で**さらに上限まで待っても** BSY / DRQ のときだけ DEVICE RESET する — READ(10) の経路では
   BSY が 20 秒続いた装置だけがリセットされる。スピンアップ 3〜9 秒の READ(10) は 1 回目で読める (ホスト試験 `np2_spinup`)。
-  DEVICE RESET / SRST の期限切れ / START UNIT は `[atapi] DEVICE RESET (BSY/DRQ past the limit twice) drv= st= limit=10s`、`[atapi] SRST: BSY did not clear in 31s ...`、`[atapi] NOT READY, START UNIT ... asc/ascq=04/02` の行を
+  DEVICE RESET / SRST の期限切れ / START UNIT は `[atapi] DEVICE RESET (BSY/DRQ past the limit twice) drv= st= limit=10s`、`[atapi] SRST: BSY did not clear, bus marked dead drv= st= limit=31s`、`[atapi] NOT READY, START UNIT ... asc/ascq=04/02` の行を
   `ATAPI_DIAG_MAX` (8) 行まで出す。
+
+  **バスが死んだ印** (`s_bus_dead`): SRST が 31 秒で期限切れになったら立てる。立っているあいだ `atapi_read_sectors` /
+  `atapi_read_capacity` / `atapi_test_unit_ready` はバスに触らず即 `ATAPI_ERR_TIMEOUT` を返し (`AtapiStats.dead_fails` を数える)、
+  最初の 1 回だけ `[atapi] bus dead since SRST timeout, failing at once until atapi_init drv= st= limit=31s` を出す。
+  それまでは `ls /cd0` のたびに約 61 秒 (選択の前後 10 + 10、DEVICE RESET の後 10、SRST 31) 待っていた。解くのは次の
+  `atapi_init` だけ (呼び直しがバスの再試行)。ホスト試験 `np2_bus_dead`
 
   **起動の最悪時間** (`atapi_init`、`cpu_delay_us` が数える時間。ホスト試験 `np2_boot_worst` が同じ数に固定):
   装置なし (浮いたバス 0xFF) は SRST の 2ms だけ。2 台とも電源投入から BSY のまま (シグネチャも出ない) は
   マスター 5 秒 + スレーブ 5 秒 + SRST 2ms + SRST の後 31 秒 = **41.0 秒**で「CD なし」。2 台ともシグネチャは出るが最初の
   PACKET で固まる形は、容量確認 5 秒 + スレーブを選ぶ前の待ち 5 秒 + DEVICE RESET の後 5 秒 + SRST 2ms + 31 秒 = **46.0 秒**
   (これが上限)。どちらも `cpu_delay_us` の誤差 (±10%) と inp の時間 (読み 1 回ごとに約 1µs = +1%) の分だけ前後する。
-  居ない装置の ALT_STATUS が BSY に見える機械 (0x80 など) では、シグネチャの確認が居ない装置 1 台につき 5 秒延びる
+  居ない装置の ALT_STATUS が BSY に見える機械 (0x80 など) では、居る装置が 1 台でもあればシグネチャの確認が居ない装置の
+  分だけ 5 秒延びる。**1 台も居なければ 41.0 秒** — シグネチャが出ないので SRST し、`s_present_mask` が空のまま 0x80 を
+  「マスターの BSY」と見て 31 秒待つ (上の「2 台とも BSY」と同じ形。`np2_boot_worst` の (c) 5 秒 / (d) 41.002 秒)
 - **読みの失敗の行**: `[atapi] READ(10) drv= lba= n= ret= st= err= sense= got= req=` を起動から `ATAPI_DIAG_MAX` (8) 行まで出す。
   `lba` / `n` と `st` / `err` / `sense` / `got` は**最後に落ちた READ(10)** (複数セクタが落ちて 1 セクタずつ読み直したなら
   その 1 セクタ) とその終わった時点の値、`req=` は呼び手の範囲。`sense=5` は範囲外か空のドライブ (NP21/W は空のドライブへの

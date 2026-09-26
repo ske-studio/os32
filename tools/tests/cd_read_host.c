@@ -2069,6 +2069,70 @@ static void t_np2_srst_long(void)
     }
 }
 
+/* 着地後の P3 (1): SRST が 31 秒で期限切れ (バスが死んだ) になったら印を立て、
+ * 以後の読み・容量確認・TEST UNIT READY はバスに触らず即 ATAPI_ERR_TIMEOUT。
+ * 1 回目は t_np2_srst_long の 40 秒と同じ形で 31 秒待って落ちる。2 回目以後は
+ * 時計が進まず、PACKET / DEVICE RESET / SRST を 1 つも出さない。「即失敗」の行は
+ * 1 回だけ。装置が戻った後の atapi_init で印が解け、読めるようになる */
+static void t_np2_bus_dead(void)
+{
+    u8 buf[SEC];
+    AtapiCapacity cap;
+    AtapiStats st0, st;
+    unsigned long t0;
+    u32 pk0, sr0, dr0;
+    const char *p;
+    int lines = 0;
+    g_np2cfg.strict = 1;
+    g_np2cfg.sel_lag = 2;
+    setup_np2_layout(3);                 /* マスターに媒体、スレーブは空 */
+    s_cursel = ATAPI_DRV_SLAVE; N.drivesel = 1;   /* 白箱: バスはスレーブ */
+    N.d[0].stuck_on_select = 1; N.d[0].ignore_devreset = 1;
+    N.d[0].srst_busy_us = N.d[1].srst_busy_us = 40000000ul;
+    g_klog_n = 0; g_klog[0] = '\0';
+    t0 = np2_now();
+    CHECK(atapi_read_sectors(20, 1, buf) == ATAPI_ERR_TIMEOUT);
+    CHECK(np2_now() - t0 >= ATAPI_SRST_TIMEOUT_US);
+    if (strstr(g_klog, "[atapi] SRST: BSY did not clear, bus marked dead drv=0") == NULL
+        || strstr(g_klog, "limit=31s") == NULL) {
+        fprintf(stderr, "klog: %s", g_klog);
+        CHECK(0);
+    }
+    np2_check_protocol();
+
+    /* 2 回目以後: 待たずに断る */
+    atapi_get_stats(&st0);
+    pk0 = M.n_packets; sr0 = N.n_srst; dr0 = N.n_devreset;
+    t0 = np2_now();
+    CHECK(atapi_read_sectors(20, 1, buf) == ATAPI_ERR_TIMEOUT);
+    CHECK(atapi_read_capacity(&cap) == ATAPI_ERR_TIMEOUT);
+    CHECK(atapi_test_unit_ready() == ATAPI_ERR_TIMEOUT);
+    printf("bus dead: second reads waited %lu us\n", np2_now() - t0);
+    CHECK(np2_now() == t0);
+    CHECK(M.n_packets == pk0 && N.n_srst == sr0 && N.n_devreset == dr0);
+    atapi_get_stats(&st);
+    CHECK(st.dead_fails - st0.dead_fails == 3);
+    CHECK(st.soft_resets == st0.soft_resets && st.dev_resets == st0.dev_resets);
+    CHECK(st.read10_cmds == st0.read10_cmds);
+    for (p = g_klog; (p = strstr(p, "[atapi] bus dead since SRST timeout")) != NULL; p++) lines++;
+    if (lines != 1 || strstr(g_klog, "failing at once until atapi_init drv=0") == NULL) {
+        fprintf(stderr, "bus dead lines=%d klog: %s", lines, g_klog);
+        CHECK(0);
+    }
+
+    /* 装置が戻った後の atapi_init (再試行) で印が解ける */
+    N.d[0].busy_until = N.d[1].busy_until = 0;
+    N.d[0].busy_left = N.d[1].busy_left = 0;
+    N.d[0].srst_busy_us = N.d[1].srst_busy_us = 0;
+    CHECK(atapi_init() == 1);
+    CHECK(atapi_drive_index() == 0);
+    CHECK(atapi_read_sectors(20, 1, buf) == ATAPI_OK);
+    CHECK(memcmp(buf, g_media_a.img + 20u * SEC, SEC) == 0);
+    atapi_get_stats(&st0);
+    CHECK(st0.dead_fails == st.dead_fails);
+    np2_check_protocol();
+}
+
 /* T2: 起動の最悪時間。atapi_init の待ちの合計 (贋の cpu_delay_us が数えた µs) を
  * 票と docs/05_drivers.md §5-6 の数に固定する。
  * (a) 2 台とも電源投入から BSY のまま (シグネチャも出ない): マスター 5 秒 +
@@ -2103,6 +2167,26 @@ static void t_np2_boot_worst(void)
     CHECK(g_delay_us == 46002000ul);
     CHECK(s_wait_limit_us == ATAPI_CMD_TIMEOUT_US);
     np2_check_protocol();
+
+    /* (c) 居ない装置が BSY (0x80) に見える機械で、1 台は居る: 居ない方のシグネチャの
+     * 確認だけ 5 秒延びる (SRST はしない) */
+    g_np2cfg.absent_status = 0x80;
+    g_np2cfg_no_init = 1;
+    setup_np2_layout(0);
+    g_np2cfg_no_init = 0;
+    CHECK(atapi_init() == 1);
+    printf("boot worst (c): %lu us\n", g_delay_us);
+    CHECK(g_delay_us == ATAPI_INIT_TIMEOUT_US);
+    /* (d) 同じ機械で 1 台も居ない: シグネチャが無いので SRST し、s_present_mask が空の
+     * まま 0x80 を「マスターの BSY」と見て 31 秒待つ = (a) と同じ 41.002 秒 */
+    g_np2cfg_no_init = 1;
+    setup_np2_layout(0);
+    g_np2cfg_no_init = 0;
+    N.d[0].present = 0;
+    CHECK(atapi_init() == 0);
+    printf("boot worst (d): %lu us\n", g_delay_us);
+    CHECK(g_delay_us == 2ul * ATAPI_INIT_TIMEOUT_US + ATAPI_SRST_SETTLE_US + ATAPI_SRST_TIMEOUT_US);
+    g_np2cfg.absent_status = 0xFF;
 }
 
 /* 票 §2: NOT READY / ASC 04h ASCQ 02h (initializing command required) は待っても
@@ -2198,6 +2282,7 @@ int main(int argc, char **argv)
     else if (!strcmp(cs, "np2_srst_long"))   t_np2_srst_long();
     else if (!strcmp(cs, "np2_boot_worst"))  t_np2_boot_worst();
     else if (!strcmp(cs, "np2_start_unit"))  t_np2_start_unit();
+    else if (!strcmp(cs, "np2_bus_dead"))    t_np2_bus_dead();
     else { fprintf(stderr, "unknown case '%s'\n", cs); return 2; }
     return 0;
 }

@@ -148,8 +148,15 @@ MUTATIONS = [
      '            m().cursor = i;\n            break;', '            break;',
      'winmenu_move_by_arrows'),
     ('P3-5 the frame stays when the window goes away', 'src/wm.rs',
-     '    st.drag_frame = Rect::EMPTY;\n    input::erase_frame(st, f);', '    let _ = f;',
+     '    st.drag_frame = Rect::EMPTY;\n    kbdnav::drop_kmove(st);\n    input::erase_frame(st, f);',
+     '    kbdnav::drop_kmove(st);\n    let _ = f;',
      'review_p3_5'),
+    ('P3-A the keyboard move state survives the window', 'src/wm.rs',
+     '    kbdnav::drop_kmove(st);\n', '',
+     'review_p3_a'),
+    ('P3-B TAB during a modal keeps advancing the switch', 'src/kbdnav.rs',
+     '    if st.kn.sw_active && modal::is_open() {\n        cancel_switch(st);\n    }\n', '',
+     'review_p3_b'),
 ]
 
 

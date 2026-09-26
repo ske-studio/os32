@@ -174,6 +174,7 @@
 #define HR_ROOT_NOT_MOUNT "root_not_mount"  /* --root がマウントの根でない */
 #define HR_ROOT_NOT_EXT2  "root_not_ext2"   /* --root の FS が ext2 と確かめられない */
 #define HR_ROOT_IS_SOURCE "root_is_source"  /* --root が同期元 (/host) 自身かその下 */
+#define HR_ROOT_STAT_FAIL "root_stat_failed" /* --root の根を stat できない (I/O 失敗・NOMOUNT) */
 
 /* ext2 のルート inode 番号。**fs/ext2.h の EXT2_ROOT_INO が正典**で、外部
  * プログラムからは引けないので写しを置く (ずれは tools/tests/test_hsync_h2.py
@@ -1737,7 +1738,10 @@ static int kernel_backup(const char *dst_path, const OS32_Stat *ds)
      * ときは HDD の vmkernel と一致せず断る (not_booted_image) — 下の案内。 */
     if (!str_ncpy(old, g_root, (int)sizeof(old)) ||
         !str_ncat(old, HS_KERNEL_OLD, (int)sizeof(old))) {
-        fail_file(HS_KERNEL_OLD, HR_NAME_TOO_LONG, 0);
+        /* 組めなかった名前も根付きで出す (--root /hd0 なら /hd0/boot/vmkernel.old) */
+        api->kprintf(ATTR_RED, "  FAIL %s%s reason=%s err=0\n", g_root,
+                     HS_KERNEL_OLD, HR_NAME_TOO_LONG);
+        g_errors++;
         return -1;
     }
 
@@ -2414,6 +2418,8 @@ static int dst_on_floppy(const char *dst, const char **devout)
  *     (HDD 起動の /hd0 は自動マウントされない = ここで断る。ルート / の下の
  *      ただのディレクトリへ書き分ける用途は持たない)
  *   - デバイス名が fd で始まる                     → dest_on_fd
+ *   - 根の stat が失敗 (rc != 0: I/O 失敗・NOMOUNT) → root_stat_failed err=rc
+ *     (FS の種類の話ではないので root_not_ext2 と分ける)
  *   - 根の stat がディレクトリ + inode 2 でない     → root_not_ext2
  *     (/cd0 = ISO9660、FAT の区画、SerialFS など。HS_EXT2_ROOT_INO の注)
  * 戻り値 0 = 受け入れる / 1 = 断った (表示は済み)。 */
@@ -2422,7 +2428,7 @@ static int root_guard(const char *root)
     OS32_Stat st;
     const char *dev;
     const char *why = 0;
-    int rc;
+    int rc = 0;
 
     if (str_cmp(root, "/host") == 0 || str_has_prefix(root, "/host/")) {
         why = HR_ROOT_IS_SOURCE;
@@ -2436,15 +2442,21 @@ static int root_guard(const char *root)
             why = HR_DST_ON_FD;
         } else {
             rc = api->sys_stat(root, &st);
-            if (rc != 0 || (st.st_mode & OS_S_IFMT) != OS_S_IFDIR ||
-                st.st_ino != HS_EXT2_ROOT_INO)
+            if (rc != 0)
+                why = HR_ROOT_STAT_FAIL;
+            else if ((st.st_mode & OS_S_IFMT) != OS_S_IFDIR ||
+                     st.st_ino != HS_EXT2_ROOT_INO)
                 why = HR_ROOT_NOT_EXT2;
         }
     }
     if (!why) return 0;
 
-    api->kprintf(ATTR_RED, "Error: --root %s は同期先にできない reason=%s%s%s%s\n",
-                 root, why, dev[0] ? " (dev " : "", dev, dev[0] ? ")" : "");
+    if (rc != 0)
+        api->kprintf(ATTR_RED, "Error: --root %s は同期先にできない reason=%s err=%d%s (dev %s)\n",
+                     root, why, rc, err_tag(rc), dev);
+    else
+        api->kprintf(ATTR_RED, "Error: --root %s は同期先にできない reason=%s%s%s%s\n",
+                     root, why, dev[0] ? " (dev " : "", dev, dev[0] ? ")" : "");
     api->kprintf(ATTR_RED,
                  "  --root に渡せるのはマウントの根そのもので、FD でない ext2 だけ\n"
                  "  (例: FD 起動のとき HDD は /hd0)。**1 件も書かない**\n");
@@ -2894,11 +2906,24 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     if (!g_dry_run && (g_copied > 0 || g_touched_sys || g_touched_boot)) {
         api->kprintf(ATTR_YELLOW,
                      "NOTE: ディスク上を更新しただけ。稼働中の版は切り替わっていない\n");
-        if (g_touched_sys)
+        /* --root のときは走っている版とは別の媒体を更新している。シェルの
+         * 再起動もリセットも FD (起動した媒体) を読み直すだけなので、
+         * 案内は「HDD から起動し直す」 */
+        if (g_touched_sys && g_root_len > 0)
+            api->kprintf(ATTR_YELLOW,
+                         "NOTE: %s/sys を更新した -> HDD (%s) から起動し直すと使われる "
+                         "(いまの媒体のシェル再起動では切り替わらない)\n",
+                         g_root, g_root);
+        else if (g_touched_sys)
             api->kprintf(ATTR_YELLOW,
                          "NOTE: /sys を更新した -> シェル再起動が必要 "
                          "(shlib は起動時ロード)\n");
-        if (g_touched_boot)
+        if (g_touched_boot && g_root_len > 0)
+            api->kprintf(ATTR_YELLOW,
+                         "NOTE: %s/boot を更新した -> HDD (%s) から起動し直すと使われる "
+                         "(いまの媒体のリセットでは切り替わらない)\n",
+                         g_root, g_root);
+        else if (g_touched_boot)
             api->kprintf(ATTR_YELLOW,
                          "NOTE: /boot を更新した -> 再起動が必要 "
                          "(カーネルはブート時ロード)\n");

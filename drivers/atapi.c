@@ -55,6 +55,14 @@ static u32 s_note_lines = 0;
  * 間だけ ATAPI_INIT_TIMEOUT_US (atapi.h「待ちの上限」) */
 static u32 s_wait_limit_us = ATAPI_CMD_TIMEOUT_US;
 
+/* バスが死んだ印: SRST の後もマスターが ATAPI_SRST_TIMEOUT_US (31 秒) BSY の
+ * ままだった。立っているあいだ、公開の読み・容量確認・TEST UNIT READY は
+ * バスに触らず ATAPI_ERR_TIMEOUT を返す (触れば毎回 DEVICE RESET と SRST の
+ * 待ちで約 61 秒かかる)。解くのは atapi_init だけ (再試行は atapi_init を
+ * 呼び直す)。s_dead_noted = 「即失敗」の行を今回の印で出したか */
+static int s_bus_dead = 0;
+static int s_dead_noted = 0;
+
 /* ======================================================================== */
 /*  内部ヘルパー                                                             */
 /* ======================================================================== */
@@ -170,8 +178,10 @@ static int atapi_sel_present(u8 sel)
 }
 
 /* リセット・準備中の 1 行 (ATAPI_DIAG_MAX 行まで)。実機で DEVICE RESET / SRST /
- * START UNIT を踏んだかを画面で分けるため。with_asc なら ASC / ASCQ も出す */
-static void atapi_note(const char *what, int with_asc, u8 asc, u8 ascq)
+ * START UNIT を踏んだかを画面で分けるため。with_asc なら ASC / ASCQ も出し、
+ * そうでなければ limit= にその待ちの上限 (limit_us、秒) を出す */
+static void atapi_note_ex(const char *what, int with_asc, u8 asc, u8 ascq,
+                          u32 limit_us)
 {
     if (s_note_lines >= ATAPI_DIAG_MAX) return;
     s_note_lines++;
@@ -182,8 +192,28 @@ static void atapi_note(const char *what, int with_asc, u8 asc, u8 ascq)
     } else {
         kprintf(0x07, "[atapi] %s drv=%d st=%02x limit=%us\n", what,
                 (s_cursel == ATAPI_DRV_SLAVE) ? 1 : 0, (unsigned)s_diag_st,
-                (unsigned)(s_wait_limit_us / 1000000UL));
+                (unsigned)(limit_us / 1000000UL));
     }
+}
+
+/* 上限がふだんの待ち (s_wait_limit_us) の行 */
+static void atapi_note(const char *what, int with_asc, u8 asc, u8 ascq)
+{
+    atapi_note_ex(what, with_asc, asc, ascq, s_wait_limit_us);
+}
+
+/* バスが死んでいれば 1 を返す (公開の入口の最初で見る)。印を立ててから最初の
+ * 1 回だけ「待たずに断る」行を出し、断った数を s_stats.dead_fails に数える */
+static int atapi_bus_dead_fail(void)
+{
+    if (!s_bus_dead) return 0;
+    s_stats.dead_fails++;
+    if (!s_dead_noted) {
+        s_dead_noted = 1;
+        atapi_note_ex("bus dead since SRST timeout, failing at once until atapi_init",
+                      0, 0, 0, ATAPI_SRST_TIMEOUT_US);
+    }
+    return 1;
 }
 
 /* SRST: セカンダリのバスの 2 台ともリセットする (バンクで選んだバスだけ。
@@ -195,8 +225,11 @@ static void atapi_note(const char *what, int with_asc, u8 asc, u8 ascq)
  * 使う装置の選び直し (DRV_HEAD → 400ns → BSY=0) は呼び手が行う。
  * マスターが居ない (シグネチャが出なかった、または浮いたバス) なら待たない。
  * マスターの BSY は ATA の規定の最大 ATAPI_SRST_TIMEOUT_US (31 秒) まで待つ。
+ * スレーブの SRST 後の BSY はここでは待たない — 選び直した後の待ち
+ * (s_wait_limit_us) までしか待たない。
  * 戻り値: ATAPI_OK / ATAPI_ERR_TIMEOUT (マスターが BSY のまま — 呼び手は
- * DRV_HEAD を書かない。BSY の装置が選ばれているあいだは書いても届かない) */
+ * DRV_HEAD を書かない。BSY の装置が選ばれているあいだは書いても届かない)。
+ * 期限切れならバスが死んだ印 (s_bus_dead) を立てる */
 static int atapi_srst(void)
 {
     int i;
@@ -209,7 +242,10 @@ static int atapi_srst(void)
     if (s_present_mask != 0 && !atapi_sel_present(0x00)) return ATAPI_OK;
     if (atapi_status() == ATAPI_ST_FLOAT) return ATAPI_OK;
     if (atapi_wait_clear(IDE_ST_BSY, ATAPI_SRST_TIMEOUT_US) != ATAPI_OK) {
-        atapi_note("SRST: BSY did not clear in 31s", 0, 0, 0);
+        s_bus_dead = 1;
+        s_dead_noted = 0;
+        atapi_note_ex("SRST: BSY did not clear, bus marked dead", 0, 0, 0,
+                      ATAPI_SRST_TIMEOUT_US);
         return ATAPI_ERR_TIMEOUT;
     }
     return ATAPI_OK;
@@ -570,6 +606,11 @@ int atapi_init(void)
     /* 起動の最悪時間を抑える短い上限 (atapi.h の ATAPI_INIT_TIMEOUT_US)。
      * 戻る前に ATAPI_CMD_TIMEOUT_US に戻す */
     s_wait_limit_us = ATAPI_INIT_TIMEOUT_US;
+    /* 呼び直し (バスの再試行) のとき前回の結果を持ち越さない。バスが死んだ印も
+     * ここでだけ解く */
+    cdrom_present = 0;
+    s_bus_dead = 0;
+    s_dead_noted = 0;
 
     /* セカンダリバンクに切替 */
     atapi_select_bank(1);
@@ -641,6 +682,7 @@ int atapi_test_unit_ready(void)
     int ret;
 
     if (!cdrom_present) return ATAPI_ERR_NO_DRIVE;
+    if (atapi_bus_dead_fail()) return ATAPI_ERR_TIMEOUT;
 
     atapi_select_bank(1);
 
@@ -661,6 +703,7 @@ int atapi_read_capacity(AtapiCapacity *cap)
 
     if (!cdrom_present) return ATAPI_ERR_NO_DRIVE;
     if (!cap) return ATAPI_ERR_IO;
+    if (atapi_bus_dead_fail()) return ATAPI_ERR_TIMEOUT;
 
     atapi_select_bank(1);
     ret = atapi_capacity_ready(cap);
@@ -732,6 +775,7 @@ int atapi_read_sectors(u32 lba, u32 count, void *buf)
     u8 *p = (u8 *)buf;
 
     if (!cdrom_present) return ATAPI_ERR_NO_DRIVE;
+    if (atapi_bus_dead_fail()) return ATAPI_ERR_TIMEOUT;
 
     atapi_select_bank(1);
 
