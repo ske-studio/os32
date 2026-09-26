@@ -1,6 +1,6 @@
 # 実機 (PC-9821Ra266) の回 — 2026-09-26 発行の手順: 入れ直しと v2.1 の確認
 
-> 発行: PM (Claude Code `claude-opus-5-5`)。使う成果物: **CI の artifact `os32-feat-gui-b8f76e0`** (KAPI **v66**)。
+> 発行: PM (Claude Code `claude-opus-5-5`)。使う成果物: **CI の artifact `os32-feat-gui-b8f76e0`** (KAPI **v66**)。手順 10 (`kbdstat -w`) は **5992fd5 以降 (KAPI v67)** の成果物が要る — その回の最新の CI 成果物を使い、ver の Commit を記録する。
 > ノートの取り方: `cd ~/os32 && git pull && tools/ci_fetch.sh --sha b8f76e0` → `./os32-ci/os32-feat-gui-b8f76e0/`。
 > 前回の手順: [CHECKLIST_2026-09-25.md](CHECKLIST_2026-09-25.md) (HDD インストール、合格)。v2.1 の条件は [ROADMAP](../../ROADMAP.md) §0。
 
@@ -32,6 +32,7 @@
 | 7 | ノート | `cmd "ls -l /cd0"` (CD を入れたまま再起動した場合) か、CD を入れて `cmd "mount /cd0 cd0 iso9660"` → `cmd "ls -l /cd0"` | 5 本のパッケージが見える |
 | 8 | ユーザー | `gfxmode pegc` → リセット → GUI 起動 → ずれた画面で**液晶の自動調整ボタン** | 直るか・変わらないか。液晶の OSD の**水平/垂直周波数と解像度の写真** ([TASK_PEGC480_REALHW](TASK_PEGC480_REALHW.md) 段 0) |
 | 9 | ユーザー | `gfxmode pc98` に戻してリセット | CUI が正しく出る |
+| 10 | ユーザー + ノート | 本体で `kbdstat -w` → カナを押し込む (3 秒保持) → 離す → もう一度押して解除 → CAPS で同じ → ESC | 画面の行を写真 ([TASK_KBD_NAV](../gui/TASK_KBD_NAV.md) §3)。**解除のときに break が来るか**、押している間に make が繰り返すか。NP21/W は「押下で make・解除で break」だった (§3-1) |
 
 ## v2.1 の判定 (手順 1〜7)
 
@@ -51,7 +52,7 @@
 
 - **ERASE の試験**: 他の OS の区画がある HDD が要る。今の HDD は OS32 の区画なので確認画面に出ない (出たら写真)。
   試すなら、ノートで壊れた表を書いた別の HDD を用意する回にする。
-- **カナキーの観測** ([TASK_KBD_NAV](../gui/TASK_KBD_NAV.md) §3): 記録用の `kbdstat -w` が未実装。次の回へ。
+
 - インストール後の e2fsck (ユーザー決定でしない)。
 
 ## 持ち帰るもの

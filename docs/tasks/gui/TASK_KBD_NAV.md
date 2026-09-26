@@ -165,6 +165,21 @@ WM の共通経路 (`wm::set_focus` とその同類) に入れるので、**マ�
 | 5 | CAPS で 2〜4 | 同上 |
 | 6 | カナをロックしたまま再起動 → `kbdstat -w` | 起動時の mods の KANA が実際のロックと合うか |
 
+### 3-1. NP21/W での観測 (2026-09-26、5992fd5、`kbdstat -w`)
+
+`/api/key` で KANA・KANA・CAPS・a・ESC の順に送った:
+
+```
+seq=1 code=72 make  key=72 KANA mods=KANA
+seq=2 code=F2 break key=72 KANA mods=KANA
+seq=3 code=71 make  key=71 CAPS mods=CAPS|KANA
+```
+
+- **NP21/W のカナ・CAPS は機械式ロックの模擬**: 1 回目の押下で make (ロック)、2 回目で break (解除)。
+- 今のドライバ (方式 A、make で反転・break を無視) では 2 回目の後も `mods=KANA` のまま = **ロックを外しても OS32 はカナ ON と思う**。
+  NP21/W の上では**方式 B (make で ON、break で OFF) が要る**。実機が同じかは下の手順で確かめる (NP21/W の模擬が実機に倣っている可能性は高い)。
+- `kbdstat -w` の出力は `/api/cmd` の EOT 待ちが先に切れて返らない (画面には出る)。NP21/W では本体の画面 (`/api/tvram`) で読む。
+
 ## 4. 受入
 
 | ID | 内容 | 場 |
