@@ -53,7 +53,7 @@ S="python3 tools/rshell_serial.py --port /dev/ttyUSB0 --fast 115200 --timeout 60
 | # | 誰が | やること | 見るもの / 記録 |
 |---|---|---|---|
 | R1 | ユーザー | 新しい FD で起動 (HDD は繋いだまま) | `Commit: <SHA>`。ノートで `cmd "ls /hd0/boot"` が見える |
-| R2 | ノート | `$S cmd "sfs run hsync -n --root /hd0 boot"` | `hsync: /host/boot -> /hd0/boot`、`PLAN /hd0/boot/vmkernel.lz4`、`sfs: exit=0`。`reason=root_…` / `dest_on_fd` なら止めて写す |
+| R2 | ノート | `$S cmd "sfs run hsync -n --root /hd0 --no-backup boot"` | `hsync: /host/boot -> /hd0/boot`、`PLAN /hd0/boot/vmkernel.lz4`、`sfs: exit=0`。`reason=root_…` / `dest_on_fd` なら止めて写す |
 | R3 | ノート | `$S cmd "sfs run hsync --root /hd0 --no-backup boot"` | `UPDATE /hd0/boot/vmkernel.lz4`、`sfs: exit=0`。**所要時間を計る** (見積もり約 40 秒、実測ではない) |
 | R4 | ノート | `$S cmd "sfs run hsync --root /hd0 sys"` | `sfs: exit=0` |
 | R5 | ノート | `$S cmd "sfs run hsync --root /hd0"` | `PROTECTED /hd0/etc/settings.db` は正常、`sfs: exit=0`。**所要時間を計る** (初回の全体は約 10MB で 15 分程度の見積もり、実測ではない) |
@@ -61,7 +61,7 @@ S="python3 tools/rshell_serial.py --port /dev/ttyUSB0 --fast 115200 --timeout 60
 | R7 | ノート | `python3 tools/rshell_serial.py --port /dev/ttyUSB0 cmd ver` | `Commit: <SHA>`、`API: v66` 以上 = HDD のカーネルが入れ替わった |
 
 - `cmd` の行は**必ず引用符で括る** — 括らないと `--root` を rshell_serial.py が拾って止まる。
-- R3 の `--no-backup` は必須 (FD 起動では「起動した版」が FD の版なので `vmkernel.old` の門が `not_booted_image` で断る)。HDD の旧カーネルは残らない。起動しなくなったら**この FD で起動**して R2〜R5 をやり直す。
+- R3 の `--no-backup` は必須 (FD 起動では「起動した版」が FD の版なので `vmkernel.old` の門が `not_booted_image` で断る)。HDD の旧カーネルは残らない。起動しなくなったら**この FD で起動**し、**前の成果物** (`tools/ci_fetch.sh --sha <前の SHA>` を展開して `--serve-host` に指す) で R3〜R5 をやり直す (同じ成果物を同期し直しても HDD 起動だけの障害は直らない)。`--no-backup` を付けない dry-run は `FAIL … reason=not_booted_image` と `--root` の案内で exit=1 になる — 門が効いている印で、壊れてはいない。
 - R3〜R5 は 1 回の FD 起動の中で続けて打つ (途中でやめて HDD 起動すると、カーネルと `/sys` の版が食い違い得る)。
 - 次の回からは HDD 起動のまま `sfs run hsync boot` → 再起動 → `sfs run hsync sys` / `sfs run hsync` (`--root` 無し、`.old` も作られる)。
 

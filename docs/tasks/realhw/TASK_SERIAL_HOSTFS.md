@@ -154,7 +154,7 @@ S="python3 tools/rshell_serial.py --port /dev/ttyUSB0 --fast 115200 --timeout 60
 | # | 誰が | やること | 見るもの |
 |---|---|---|---|
 | 1 | ユーザー | 新しい FD で起動 (HDD は繋いだまま) | `Commit: <SHA>`、`API: v66` 以上。`/hd0` がマウントされている (`ls /hd0/boot`) |
-| 2 | ノート | `$S cmd "sfs run hsync -n --root /hd0 boot"` | `DEPLOY build=<SHA>…`、`hsync: /host/boot -> /hd0/boot`、`PLAN /hd0/boot/vmkernel.lz4`。`reason=root_*` / `dest_on_fd` が出たら止まる |
+| 2 | ノート | `$S cmd "sfs run hsync -n --root /hd0 --no-backup boot"` | `DEPLOY build=<SHA>…`、`hsync: /host/boot -> /hd0/boot`、`PLAN /hd0/boot/vmkernel.lz4`。`reason=root_*` / `dest_on_fd` が出たら止まる |
 | 3 | ノート | `$S cmd "sfs run hsync --root /hd0 --no-backup boot"` | `UPDATE /hd0/boot/vmkernel.lz4`、`NOTE: /boot を更新した`、`sfs: exit=0` |
 | 4 | ノート | `$S cmd "sfs run hsync --root /hd0 sys"` | `UPDATE /hd0/sys/…`、`sfs: exit=0` |
 | 5 | ノート | `$S cmd "sfs run hsync --root /hd0"` | 全体 (ルート直下の `sys` は除く)。`PROTECTED /hd0/etc/settings.db` は正常。`sfs: exit=0` |
@@ -173,7 +173,7 @@ NP21/W では `/host` が HostDrv のまま使えるので、SerialFS 抜きで 
 
 1. `make all` → `make deploy` (HostDrv に配備元と名札)。FD イメージは `build/` の新しいもの。
 2. `tools/np21w_ctl.py stop` → `tools/np21w_ctl.py start --ini <HDD 付きの ini> --fd <新しい FD イメージ> --wait-ready` (ini は変えない)。
-3. `/api/cmd` で `ver` (FD の版)、`ls /hd0/boot`、`hsync -n` (→ `dest_on_fd`)、`hsync -n --root /hd0 boot`、`hsync --root /hd0 --no-backup boot`、`hsync --root /hd0 sys`、`hsync --root /hd0`。断る側: `hsync -n --root /hd0/bin` (`root_not_mount`)、`hsync -n --root /host` (`root_is_source`)、`/cd0` があれば `hsync -n --root /cd0` (`root_not_ext2`)。
+3. `/api/cmd` で `ver` (FD の版)、`ls /hd0/boot`、`hsync -n` (→ `dest_on_fd`)、`hsync -n --root /hd0 --no-backup boot`、`hsync --root /hd0 --no-backup boot`、`hsync --root /hd0 sys`、`hsync --root /hd0`。断る側: `hsync -n --root /hd0/bin` (`root_not_mount`)、`hsync -n --root /host` (`root_is_source`)、`/cd0` があれば `hsync -n --root /cd0` (`root_not_ext2`)。
 4. 停止 → FD 無しで起動 (NHD 起動) → `ver` の `Image CRC … src=hdd` と Commit が新しい版、kselftest。
 5. 注意: NHD の中身を変える試験なので、終わったら `build/nhd/os32.nhd` を元へ戻すかは PM が決める ([D2] の対象になる操作はしない — hsync は NHD をゲストの中から書くだけ)。
 
