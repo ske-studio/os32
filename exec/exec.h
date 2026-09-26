@@ -185,6 +185,13 @@ void ring3_fault_kill(void);
  * 実機のログと突き合わせるとき意味が変わると困る)。 */
 #define RING3_RANGE_NOPRESENT  5   /* (廃止) 帯の中だが非 present */
 #define RING3_RANGE_NOUSER     6   /* (廃止) present だが USER 無し */
+/* 7〜10 は書き側 (ring3_user_ranges_writable) の理由 (2026-09-26 に追加。それ
+ * までは書き側は数えておらず、wrap_mouse_poll で kill されても count が 0 の
+ * ままだった)。addr = 断ったポインタ、page = 見ていたページ (TRIVIAL は 0)。 */
+#define RING3_RANGE_WR_TRIVIAL 7   /* NULL か p + len の折り返し (長さ > 0) */
+#define RING3_RANGE_WR_TABLE   8   /* PD / PT の物理が読めない */
+#define RING3_RANGE_WR_PDE     9   /* PDE に present / RW / USER が無い (か PS) */
+#define RING3_RANGE_WR_PTE    10   /* PTE に present / RW / USER が無い */
 extern volatile u32 ring3_range_reject_count;
 extern volatile u32 ring3_range_reject_last;
 extern volatile u32 ring3_range_reject_addr;
@@ -193,5 +200,12 @@ extern volatile u32 ring3_range_reject_heap_top;
 
 /* 現在のネスト深度 (0=外部プログラム未実行) */
 extern volatile int exec_nest_level;
+
+/* カーネルが WM (gshell) のコードへ入っている深さ (exec/exec.c の定義の注記)。
+ * 入口 (gui_call のハンドラ / ポンプ / owner_exit) で enter、出口で leave。
+ * 3 つの門は ring3_guard_active(ring3_in_syscall, ring3_wm_depth) で判定する。 */
+extern volatile int ring3_wm_depth;
+void ring3_wm_enter(void);
+void ring3_wm_leave(void);
 
 #endif /* __EXEC_H */

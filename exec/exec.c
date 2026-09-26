@@ -321,6 +321,32 @@ volatile u32 exec_sbrk_tier_count[2] = { 0, 0 };
  * 非 static (isr_handlers.c が extern で参照)。 */
 volatile int ring3_in_syscall = 0;
 
+/* カーネルが WM (gshell、CPL=0 の常駐シェル) のコードへ入っている深さ
+ * (2026-09-26、filer が窓も出さずに消えた件)。gui_call のハンドラ (X1 / X3)、
+ * syscall 境界のポンプ (X4)、exec_exit の owner_exit の入口で +1、出口で -1。
+ * WM は**アプリの syscall の中で**走る (契約 T8) ので、この間も
+ * ring3_in_syscall は 1 のまま。ring3_user_range_ok / ring3_user_ranges_writable
+ * / tramp_copy の 3 つの門は `ring3_guard_active(ring3_in_syscall,
+ * ring3_wm_depth)` (exec/ring3_str.c) で「アプリ由来か」を決め、深さが 1 以上
+ * なら WM 自身のポインタ (自分のスタックの MouseInfo 等) を素通しする。
+ * #PF/#GP の帰属 (kernel/isr_handlers.c) は ring3_in_syscall だけを見るので
+ * **変わらない**。
+ * WM を longjmp で抜ける経路 (exec_park* / ring3_kill_kind / sys_exit) は
+ * 出口を通らないので、そこと **ディスパッチャの入口** で 0 に戻す —
+ * 「CPL=3 の syscall は必ず深さ 0 から始まる」が不変条件。
+ * 非 static (kernel/gui.c が extern で参照、kselftest が読む)。 */
+volatile int ring3_wm_depth = 0;
+
+void ring3_wm_enter(void)
+{
+    ring3_wm_depth++;
+}
+
+void ring3_wm_leave(void)
+{
+    if (ring3_wm_depth > 0) ring3_wm_depth--;
+}
+
 /* ======================================================================== */
 /*  vfs_cwd_user — sys_getcwd の実体 (票 T9 §12 R1、KAPI の追加はしない)     */
 /*                                                                          */
@@ -343,7 +369,8 @@ static const char *tramp_copy(const char *src)
     if (ring3_tramp_page != 0) {
         scratch = (char *)(ring3_tramp_page + RING3_USTR_OFF);
     }
-    return ring3_user_str(ring3_in_syscall, scratch, RING3_USTR_CAP, src);
+    return ring3_user_str(ring3_guard_active(ring3_in_syscall, ring3_wm_depth),
+                          scratch, RING3_USTR_CAP, src);
 }
 
 const char *vfs_cwd_user(void) { return tramp_copy(vfs_cwd()); }
@@ -504,6 +531,15 @@ u32 exec_tramp_user_selftest(void)
     if (path_get_drive_user() != path_get_drive() ||
         path_get_cwd_user() != path_get_cwd())
         bad |= 1u << 4;
+
+    /* (5) WM の文脈 (ring3_wm_depth > 0) ではディスパッチ中でも元の番地が
+     * 返る — WM はカーネル帯を直接読める常駐側 (2026-09-26)。 */
+    ring3_in_syscall = 1;
+    ring3_wm_enter();
+    if (vfs_cwd_user() != vfs_cwd() || vfs_devname_user("/") != vfs_devname("/"))
+        bad |= 1u << 5;
+    ring3_wm_leave();
+    if (vfs_cwd_user() != (const char *)addr) bad |= 1u << 5;
     ring3_in_syscall = saved;
 
     return bad;
@@ -622,7 +658,11 @@ static void ring3_gui_pump(void)
     g_gui_pump_tick_valid = 1;
 
     g_gui_pump_busy = 1;
+    /* ここは ring3_in_syscall = 0 の区間だが、WM の文脈である印は同じ形で
+     * 立てる (ポンプの位置が動いても 3 つの門の判定が変わらないように)。 */
+    ring3_wm_enter();
     pump();
+    ring3_wm_leave();
     g_gui_pump_busy = 0;
 }
 
@@ -743,20 +783,28 @@ static int ring3_pd_range_writable(u32 pd_phys, u32 p, u32 len)
 {
     u32 page, last_page;
 
-    if (!pd_phys) return 0;
+    /* 断った理由は ring3_range_refuse で数える (RING3_RANGE_WR_*)。読み側の
+     * ring3_user_range_ok と同じ観測点 — 2026-09-26 まで書き側は数えておらず、
+     * wrap_mouse_poll で kill されても ring3_range_reject_count が 0 のまま
+     * だった。ここは master CR3 の下 (カーネル帯は恒等写像) なので書ける。 */
+    if (!pd_phys) return ring3_range_refuse(RING3_RANGE_WR_TABLE, p, 0);
     /* 表そのものが読めなければ判定しない (安全側で拒否)。 */
-    if (!paging_is_present(pd_phys)) return 0;
+    if (!paging_is_present(pd_phys))
+        return ring3_range_refuse(RING3_RANGE_WR_TABLE, p, pd_phys);
 
     last_page = (p + len - 1u) & ~(u32)(PAGE_SIZE - 1);
     for (page = p & ~(u32)(PAGE_SIZE - 1); ; page += PAGE_SIZE) {
         u32 pde = ((const volatile u32 *)pd_phys)[page >> 22];
         u32 pt_phys, pte;
 
-        if (!ring3_pde_walkable_ok(pde)) return 0;
+        if (!ring3_pde_walkable_ok(pde))
+            return ring3_range_refuse(RING3_RANGE_WR_PDE, p, page);
         pt_phys = pde & ~(u32)0xFFFu;
-        if (!paging_is_present(pt_phys)) return 0;
+        if (!paging_is_present(pt_phys))
+            return ring3_range_refuse(RING3_RANGE_WR_TABLE, p, page);
         pte = ((const volatile u32 *)pt_phys)[(page >> 12) & 0x3FFu];
-        if (!ring3_pte_writable_ok(pte)) return 0;
+        if (!ring3_pte_writable_ok(pte))
+            return ring3_range_refuse(RING3_RANGE_WR_PTE, p, page);
 
         if (page >= last_page) break;
     }
@@ -781,12 +829,17 @@ int ring3_user_ranges_writable(u32 pa, u32 la, u32 pb, u32 lb)
 
     /* **CPL=0 の直呼びは対象外** (常駐シェル / gshell はローカル変数を渡す)。
      * 判定は「呼び出し経路」で決める — CR3 が master かどうかで代用しない
-     * (Approve 後の注意 2)。既存の ring3_user_range_ok と同じ門。 */
-    if (!ring3_in_syscall) return 1;
+     * (Approve 後の注意 2)。既存の ring3_user_range_ok と同じ門。
+     * **WM の文脈 (ring3_wm_depth > 0) も常駐側の直呼び扱い** — WM はアプリの
+     * syscall の中で走るので ring3_in_syscall だけでは区別できない
+     * (2026-09-26、ring3_wm_depth の注記)。 */
+    if (!ring3_guard_active(ring3_in_syscall, ring3_wm_depth)) return 1;
 
     ta = ring3_writable_trivial(pa, la);
     tb = ring3_writable_trivial(pb, lb);
-    if (ta == 0 || tb == 0) return 0;
+    if (ta == 0 || tb == 0)
+        return ring3_range_refuse(RING3_RANGE_WR_TRIVIAL,
+                                  (ta == 0) ? pa : pb, 0);
     if (ta == 1 && tb == 1) return 1;
 
     /* **2 本を 1 回の往復でまとめて見る** (Approve 後の注意 3)。出力ごとに
@@ -823,7 +876,8 @@ int ring3_user_range_ok(u32 p, u32 len)
 {
     u32 page, last_page;
 
-    if (!ring3_in_syscall) return 1;      /* CPL=0 の直呼び */
+    /* CPL=0 の直呼び、または WM の文脈 (ring3_wm_depth の注記) */
+    if (!ring3_guard_active(ring3_in_syscall, ring3_wm_depth)) return 1;
     if (p == 0) return ring3_range_refuse(RING3_RANGE_NULL, p, 0);
     if (len == 0) return 1;               /* 0 バイトは読まない */
     if (p + len < p) return ring3_range_refuse(RING3_RANGE_OVERFLOW, p, 0);
@@ -1316,6 +1370,7 @@ void __cdecl kapi_sys_exit(int status)
      * master CR3 復帰・AS 破棄・per-app 物理の返却は exec_exit が ID 単位で
      * 行う。CPL=0 プログラム (シェル等) は g_cur_app が 0 なので従来どおり。 */
     ring3_in_syscall = 0;   /* syscall(sys_exit) を抜ける — ガードを下ろす */
+    ring3_wm_depth = 0;
     exec_exit(status, EXEC_KIND_EXITED);
 }
 
@@ -1353,6 +1408,10 @@ void __cdecl ring3_syscall_dispatch(u32 *frame)
     u32 *prev_frame = g_cur_frame;
 
     g_cur_frame = frame;
+    /* WM の文脈の深さは **CPL=3 の syscall の入口で必ず 0** (不変条件)。
+     * WM を longjmp で抜けた (park / kill) 後に 1 が残っていても、ここで
+     * 立ち直る — 残ると 3 つの門がアプリのポインタを素通しする穴になる。 */
+    ring3_wm_depth = 0;
     /* 暴走判定の起点 (票 T9 §12 S6b)。**代入 1 つだけ** — ここは hot path。
      * start / resume だけを起点にしていると、GetMessage 型の GUI アプリ
      * (端末) が WM の op_wait の中で待っている間は更新されず、2 秒待った
@@ -1428,6 +1487,7 @@ static void ring3_kill_kind(int kind)
 {
     fault_kill_count++;
     ring3_in_syscall = 0;   /* syscall 途中で畳む場合も必ずガードを下ろす */
+    ring3_wm_depth = 0;     /* WM の中から畳んだ場合も深さを戻す (出口を通らない) */
     exec_exit(EXEC_ERR_FAULT, kind);   /* longjmp するので戻らない */
 }
 
@@ -2200,6 +2260,7 @@ i32 exec_park(void)
 
     exec_heap_save_state(&a->exec_heap_used);
     ring3_in_syscall = 0;       /* この syscall はここで終わる */
+    ring3_wm_depth = 0;         /* OP_WAIT の中から longjmp する — 出口を通らない */
     g_cur_frame = 0;
 
     /* master へ戻してから状態を切り替える (WM は master の下で走る)。 */
@@ -2251,6 +2312,7 @@ int exec_park_kbd(void)
 
     exec_heap_save_state(&a->exec_heap_used);
     ring3_in_syscall = 0;       /* この syscall はここで終わる */
+    ring3_wm_depth = 0;         /* OP_WAIT の中から longjmp する — 出口を通らない */
     g_cur_frame = 0;
 
     paging_load_cr3(paging_kernel_pd_phys());
@@ -2309,6 +2371,7 @@ int exec_park_poll(u32 now_tick)
 
     exec_heap_save_state(&a->exec_heap_used);
     ring3_in_syscall = 0;       /* この syscall はここで終わる */
+    ring3_wm_depth = 0;         /* OP_WAIT の中から longjmp する — 出口を通らない */
     g_cur_frame = 0;
 
     paging_load_cr3(paging_kernel_pd_phys());
@@ -2366,6 +2429,7 @@ i32 exec_sys_yield(void)
 
     exec_heap_save_state(&a->exec_heap_used);
     ring3_in_syscall = 0;       /* この syscall はここで終わる */
+    ring3_wm_depth = 0;         /* OP_WAIT の中から longjmp する — 出口を通らない */
     g_cur_frame = 0;
 
     paging_load_cr3(paging_kernel_pd_phys());

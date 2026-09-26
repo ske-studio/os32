@@ -192,6 +192,9 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   「LAN 未設定だから [D2] の承認が要る」と誤判断しかけた。 → §4-45
 - GUI アプリの窓が静かに出ない → **共有ライブラリが古い**。`hsync` は既定で `/sys` を外すので
   `libos32gui` を変えたら **`hsync sys` + リセット**。例外 0 件で窓だけ出ないのが目印。 → §4-42
+- GUI アプリが窓も出さずに消えて **`fault_kill_count` だけ増える** (例外 0 件) → WM (gshell) はアプリの syscall の中で
+  走るので、KAPI の検査を `ring3_in_syscall` だけで「アプリ由来」と決めると **gshell 自身のポインタを弾いてアプリを kill** する。
+  門は `ring3_guard_active(ring3_in_syscall, ring3_wm_depth)` で判定する。→ §4-61
 - ビルドは既定で `-j$(nproc)`。`make check` は 2 段 (書き換えない 48 本を並列 → 変異する 10 本を逐次) で **152 秒**。
   各段の後に `tools/check_tree_unchanged.py` がソースの残留を見る。 → §4-41
 - `make check` を途中で止めると**変異試験が当てた変更がソースに残る**。打ち切ったら

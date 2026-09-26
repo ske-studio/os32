@@ -56,3 +56,14 @@ int ring3_range_overlaps(u32 p, u32 len, u32 base, u32 end)
     if (p >= end) return 0;
     return 1;
 }
+
+int ring3_guard_active(int in_syscall, int wm_depth)
+{
+    /* ディスパッチャの外 (CPL=0 の直呼び) は対象外。ディスパッチの中でも、
+     * カーネルが WM のコードへ入っているあいだは常駐側の呼び出しとして扱う
+     * (根拠は ring3_str.h の同名の節)。負の深さは壊れた状態 — 安全側に
+     * 「ガードを効かせる」。 */
+    if (!in_syscall) return 0;
+    if (wm_depth > 0) return 0;
+    return 1;
+}

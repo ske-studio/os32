@@ -1332,6 +1332,33 @@ read-modify-write で保つ。
   `/api/instance` `/api/quit` `/api/fdd` `/api/dialog` `/api/appshot` を足し、np21w_ctl は
   `/api/quit` で止め、強制終了は exe パス一致だけ、起動後は pid/exe の照合とダイアログの確認をする。
 
+### 4-61. GUI アプリが窓も出さずに静かに消える — WM はアプリの syscall の中で走るので、出力検査が gshell 自身のポインタを弾いていた (2026-09-26)
+
+- **症状**: GUI で File Manager (`filer.bin`) を Start メニューからでもマウスからでも起動すると、窓が出ずに消える。
+  例外は 0 件、シリアルにも何も出ない。`fault_kill_count` だけが起動ごとに +1。ブレークで捕まえると
+  `ring3_fault_kill` の呼び手は **`wrap_mouse_poll+0x35`** (KAPI ラッパ先頭の出力検査
+  `ring3_user_ranges_writable` が偽)。そのとき CR3 = アプリの PD、渡されたポインタは **0x0037ea88 = シェル帯
+  (gshell のスタック)**。`ring3_range_reject_count` は 0 のまま。
+- **原因**: WM (gshell、CPL=0 の常駐シェル) は**アプリの syscall の中でしか走らない** (契約 T8 の X1 / X3)。
+  `wrap_gui_call` → `gui_call` → `gshell_gui_handler(OP_WAIT)` → `wm_cycle` → `mouse_poll(&mut mi)` の間も
+  `ring3_in_syscall` は 1 のままなので、出力検査 (7ef4437 / 7ec4023、2026-09-23) が gshell のスタックを
+  「アプリの出力先」としてアプリの PD で PTE を見た。シェル帯には USER が無いので拒否 → **アプリを kill**。
+  この検査が入って以後、ポンプ / OP_WAIT を通る GUI アプリは全部この経路で落ちていた (デスクトップまでしか
+  確かめていなかった)。書き側の拒否は数えていなかったので観測点も沈黙した。
+- **直し**: 「カーネルが WM のコードへ入っている深さ」`ring3_wm_depth` を `gui_call` のハンドラ / ポンプ /
+  `gui_owner_exit` の前後で数え、3 つの門 (`ring3_user_ranges_writable` / `ring3_user_range_ok` / `tramp_copy`) の判定を
+  `ring3_guard_active(ring3_in_syscall, ring3_wm_depth)` (`exec/ring3_str.c`) に寄せた。深さ 1 以上 = 常駐側の直呼び扱い。
+  `ring3_in_syscall` の意味 (#PF/#GP の帰属) は変えない。longjmp で WM を抜ける地点 (`exec_park*` / kill / `sys_exit`) と
+  ディスパッチャの入口で深さを 0 に戻す (CPL=3 の syscall は必ず深さ 0 から始まる)。書き側の拒否も
+  `RING3_RANGE_WR_*` (7〜10) で数える。試験は `tools/tests/ring3_guard_tdd.md` (ホスト) + kselftest `test_ring3_wm_guard` (ゲスト)。
+- **見分け方**: 「例外 0 件・窓だけ出ない・`fault_kill_count` が増える」なら §4-42 (古い shlib) ではなくこれ。
+  `ring3_fault_kill` にブレークを置き、呼び手が **`wrap_*+小さなオフセット`** (= ラッパ先頭の出力検査) で、
+  渡されたポインタが **0x300000 台 (シェル帯)** なら確定。`ring3_range_reject_last` が 7〜10 なら書き側の拒否。
+- **教訓**: 「CPL=0 の直呼びは `ring3_in_syscall = 0` で見分けられる」は、**カーネルが CPL=0 のシェルのコードを
+  syscall の中から呼び返す**設計 (契約 T8) では成り立たない。呼び手の判定は「いまどの文脈のコードが走っているか」で
+  持つ。検査を足したら、その検査が**常駐側の経路**でも通ることを GUI アプリの起動まで見て確かめる — デスクトップの
+  表示は WM の top-level (syscall の外) なので、この穴を踏まない。
+
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 
 - **症状**: NHD 配備 (`os32-cycle deploy`) 直後に、試験用ファイルを 1 本足す目的でゲストの `hsync` を実行したら、

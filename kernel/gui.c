@@ -22,6 +22,17 @@ extern int res_owner_get(void);
 extern void appslot_gui_op_enter(int is_wait);
 extern void appslot_gui_op_leave(void);
 
+/* 「カーネルが WM のコードへ入っている」印 (exec/exec.c の ring3_wm_depth、
+ * 2026-09-26)。WM はアプリの syscall の中で走るので、この印が無いと WM 自身の
+ * ポインタ (自分のスタックの MouseInfo 等) が KAPI の出力検査でアプリの番地と
+ * して見られ、シェル帯に USER が無いので拒否 → アプリが kill された (filer が
+ * 窓も出さずに消えた件)。ハンドラ / owner_exit の前後で必ず対にする。
+ * ハンドラが longjmp で戻らないとき (OP_WAIT の中の exec_park、fault kill) は
+ * leave を通らないが、exec 側が longjmp の地点とディスパッチャの入口で 0 に
+ * 戻す。実体は exec/exec.c (kernel/ は -Iexec 非依存)。 */
+extern void ring3_wm_enter(void);
+extern void ring3_wm_leave(void);
+
 /* GUI_SHELL_OWNER (= 1) は gui.h。K2 の syscall 境界ポンプも同じ値を使う。 */
 
 /* ======== WM 登録状態 ======== */
@@ -47,7 +58,9 @@ i32 gui_call(u32 op, u32 arg)
      * (票 K5 の D0/C4)。WM が OP_WAIT の中で exec_park() を呼んだときは
      * longjmp するのでこの関数へは戻ってこない。 */
     appslot_gui_op_enter(op == GUI_OP_WAIT);
+    ring3_wm_enter();
     r = g_gui_handler(op, arg, res_owner_get());
+    ring3_wm_leave();
     appslot_gui_op_leave();
     return r;
 }
@@ -85,7 +98,9 @@ i32 gui_register(void *handler, void *pump)
 void gui_owner_exit(int owner)
 {
     if (g_gui_handler != 0) {
+        ring3_wm_enter();
         g_gui_handler(GUI_OP_OWNER_EXIT, 0, owner);
+        ring3_wm_leave();
     }
     /* WM 自身 (gshell = shell 帯 owner 1) が終了するなら登録を解除する。
      * これをしないと、gshell.bin が抜けて同じ 0x300000 に shell.bin が
