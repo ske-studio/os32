@@ -15,6 +15,8 @@ ring3_guard_active(in_syscall, wm_depth) に寄せること。
   (2) gui_call / gui_owner_exit の前後で深さが対になる (入れ子も)
   (3) アプリが登録したバッファ (fs/fd_redirect.c) は WM の中でも表を歩く
       — 門は呼び手の文脈ではなくポインタの由来で決める (代行レビュー P2)
+  (4) KAPI ime_set_render (kernel/gui.c の gui_ime_set_render) は常駐側
+      (owner 1、CPL=0 の直呼び) だけ、gshell の終了で NULL に戻る (同 P2)
 
 test_ring3_str.py と同じ様式 — ホスト ILP32 GNU89 で走らせたあと、同じ
 ソースが i386-elf-gcc -Werror でも通ることを見る ([C1])。libc は使わない。
@@ -68,6 +70,23 @@ MUTATIONS = [
      "    if (user && !ring3_user_ranges_writable_always((u32)buf, size, 0, 0))\n        return -1;\n",
      "",
      "登録時の二重の守りを外す"),
+    # 代行レビュー P2 (2026-09-26): ime_set_render は常駐側だけ。
+    ("kernel/gui.c",
+     "    if (res_owner_get() != GUI_SHELL_OWNER || ring3_call_from_user()) {\n        gui_ime_render_rejected++;\n",
+     "    if (0) {\n        gui_ime_render_rejected++;\n",
+     "ime_set_render の門を外す (= 直す前)"),
+    ("kernel/gui.c",
+     "    if (res_owner_get() != GUI_SHELL_OWNER || ring3_call_from_user()) {\n        gui_ime_render_rejected++;\n",
+     "    if (res_owner_get() != GUI_SHELL_OWNER) {\n        gui_ime_render_rejected++;\n",
+     "ime_set_render の門が由来 (ring3_call_from_user) を見ない"),
+    ("kernel/gui.c",
+     "    if (res_owner_get() != GUI_SHELL_OWNER || ring3_call_from_user()) {\n        gui_ime_render_rejected++;\n",
+     "    if (ring3_call_from_user()) {\n        gui_ime_render_rejected++;\n",
+     "ime_set_render の門が owner を見ない"),
+    ("kernel/gui.c",
+     "        ime_set_render((void *)0);\n    }\n}\n",
+     "    }\n}\n",
+     "gshell の終了で FEP の描画先を戻さない"),
 ]
 
 
@@ -113,9 +132,23 @@ def mutate():
     return 0 if red == len(MUTATIONS) else 1
 
 
+def kapi_target_ok(root):
+    """KAPI ime_set_render が門 (gui_ime_set_render) を通ること (sdk/kapi.json)。"""
+    import json
+    api = json.loads((root / "sdk/kapi.json").read_text(encoding="utf-8"))["api"]
+    for f in api:
+        if isinstance(f, dict) and f.get("name") == "ime_set_render":
+            return f.get("target") == "gui_ime_set_render"
+    return False
+
+
 if __name__ == "__main__":
     if "--mutate" in sys.argv:
         sys.exit(mutate())
+    if not kapi_target_ok(ROOT):
+        print("FAIL: sdk/kapi.json の ime_set_render の target が gui_ime_set_render でない")
+        sys.exit(1)
+    print("KAPI ime_set_render -> gui_ime_set_render OK", flush=True)
     with tempfile.TemporaryDirectory(prefix="os32-ring3-guard-") as tmp:
         tmp = pathlib.Path(tmp)
         rc = run_host(ROOT, tmp)

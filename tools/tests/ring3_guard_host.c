@@ -65,7 +65,12 @@ void appslot_gui_op_enter(int is_wait) { (void)is_wait; host_op_enter++; }
 void appslot_gui_op_leave(void) { host_op_leave++; }
 
 void kbd_set_gui_mode(int on) { (void)on; }
-void ime_set_render(void *r) { (void)r; }
+/* kernel/ime.c の実物の代わり: 控えた表を覚えるだけ。初期値は「TVRAM 版」
+ * の代わりの印 (NULL と区別する)。gui_ime_set_render の門の試験 (5) が読む。 */
+static int host_tvram_mark;
+static void *host_ime_render = &host_tvram_mark;
+static int host_ime_set_calls;
+void ime_set_render(void *r) { host_ime_set_calls++; host_ime_render = r; }
 
 /* exec/exec.c の ring3_wm_depth / enter / leave と同じ振る舞い。
  * 深さは試験が読む。 */
@@ -398,12 +403,81 @@ static void case_registered_ptr(void)
     gui_owner_exit(GUI_SHELL_OWNER);
 }
 
+/* ========================================================================
+ *  5. ime_set_render の門 — 常駐側 (owner 1、CPL=0 の直呼び) だけが登録できる
+ *     (2026-09-26、代行レビュー P2。kernel/gui.c の gui_ime_set_render)
+ *
+ *  カーネルは控えた IME_Render 表の関数を以後ずっと CPL=0 で呼ぶ。アプリが
+ *  自分のメモリの表を渡せると、そのコードが CPL=0 で走り、アプリが消えた
+ *  後は解放済みの物理へ飛ぶ。
+ * ======================================================================== */
+static u32 app_render_table[4];   /* アプリのユーザ帯の関数表の代わり */
+static u32 wm_render_table[4];    /* gshell (シェル帯) の関数表の代わり */
+
+static void case_ime_render(void)
+{
+    u32 rej0;
+
+    report("5 ime_set_render は常駐側だけ\n");
+    ring3_wm_depth = 0;
+
+    /* 5a-5b gshell の top-level (owner 1、ディスパッチの外) の登録は通る。 */
+    res_owner_set(1);
+    host_in_syscall = 0;
+    rej0 = gui_ime_render_rejected;
+    gui_ime_set_render(wm_render_table);
+    check(host_ime_render == (void *)wm_render_table, "5a owner 1 CPL0 registers");
+    check(gui_ime_render_rejected == rej0, "5b no rejection counted");
+
+    /* 5c-5e アプリ (owner 2、CPL=3 の syscall) の登録は断り、表は変えない。 */
+    res_owner_set(2);
+    host_in_syscall = 1;
+    gui_ime_set_render(app_render_table);
+    check(host_ime_render == (void *)wm_render_table, "5c app table refused (render unchanged)");
+    check(gui_ime_render_rejected == rej0 + 1, "5d rejection counted");
+    /* アプリが NULL で WM の描画先を外すこともさせない。 */
+    gui_ime_set_render((void *)0);
+    check(host_ime_render == (void *)wm_render_table, "5e app NULL refused");
+
+    /* 5f owner 1 のままでも CPL=3 の syscall 由来 (ring3_call_from_user 真) は断る。 */
+    res_owner_set(1);
+    host_in_syscall = 1;
+    gui_ime_set_render(app_render_table);
+    check(host_ime_render == (void *)wm_render_table, "5f owner 1 but from user -> refused");
+
+    /* 5g アプリ (owner 2) の syscall の中の WM の文脈 (深さ 1) も owner が違うので断る
+     * (gshell はそこで ime_set_render を呼ばない)。 */
+    res_owner_set(2);
+    ring3_wm_enter();
+    gui_ime_set_render(app_render_table);
+    ring3_wm_leave();
+    check(host_ime_render == (void *)wm_render_table, "5g owner 2 inside WM -> refused");
+
+    /* 5h 常駐側の NULL (登録の解除) は通る。 */
+    res_owner_set(1);
+    host_in_syscall = 0;
+    gui_ime_set_render((void *)0);
+    check(host_ime_render == (void *)0, "5h owner 1 CPL0 NULL passes");
+
+    /* 5i-5k 寿命: gshell (owner 1) の終了で TVRAM 版 (NULL) へ戻る。
+     * アプリ (owner 3) の回収では触らない。 */
+    gui_ime_set_render(wm_render_table);
+    res_owner_set(0);                        /* exec_exit はシェルの回収で owner 0 */
+    gui_owner_exit(3);
+    check(host_ime_render == (void *)wm_render_table, "5i app exit leaves render");
+    gui_owner_exit(GUI_SHELL_OWNER);
+    check(host_ime_render == (void *)0, "5j shell exit resets render to NULL");
+    res_owner_set(1);
+    check(gui_ime_render_rejected == rej0 + 4, "5k four refusals counted");
+}
+
 int main(void)
 {
     case_table();
     case_gui_call();
     case_owner_exit();
     case_registered_ptr();
+    case_ime_render();
     if (failures) {
         report("ring3_guard_host: FAIL\n");
         die(1);

@@ -501,7 +501,7 @@ V86 ゲストを起動する。MS-DOS 5.00A の起動確認に使う。
 
 - `kbd_trygetrawkey`: 戻り値 `keycode | down<<8 | mods<<9` (mods = そのイベント時点の `SHIFT_*`、GUI モード中のみ記録)、無ければ -1。WM (gshell) が Key down/up を作る。
 - `ime_feed_key(keydata)`: WM が打鍵 `(scancode<<8)|ascii` を FEP に通す (GUI 中はカーネルが cooked に積まないため)。負 = 確定文字列の続きだけ。戻り値: <0 消費 / >=0x100 素通り / 0x1B ESC 素通り / 1..0xFF 確定 UTF-8 の 1 バイト (W2)。
-- `ime_set_render(table)`: FEP の描画バックエンド (`IME_Render` 関数表) を差し替える。NULL で TVRAM 版へ戻す。gshell が GFX 版を渡す (W2)。
+- `ime_set_render(table)`: FEP の描画バックエンド (`IME_Render` 関数表) を差し替える。NULL で TVRAM 版へ戻す。gshell が GFX 版を渡す (W2)。**常駐側だけ** (2026-09-26): 実体は `kernel/gui.c` の `gui_ime_set_render` で、shell 帯 (owner 1) の CPL=0 の直呼びだけを通し、アプリ (CPL=3 の syscall 由来、`ring3_call_from_user()` が真) の呼び出しは NULL も含めて黙って無視する (戻りは void のまま、`gui_ime_render_rejected` が数える)。カーネルは表の関数を以後 CPL=0 で呼ぶため。gshell が終わると `gui_owner_exit(1)` が TVRAM 版へ戻す。
 
 `gfx_screen_info` の `out` は `GFX_ScreenInfo` (`os32_kapi_shared.h`): 画面サイズ・bpp・
 画素形式 (`GFX_FMT_*`)・能力ビット (`GFX_CAP_*`)・パレットリース範囲。GUI とアプリは

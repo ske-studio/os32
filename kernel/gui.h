@@ -36,6 +36,12 @@ i32 gui_register(void *handler, void *pump);
  * ハンドラが登録済みなら GUI_OP_OWNER_EXIT を渡して WM に回収させる。 */
 void gui_owner_exit(int owner);
 
+/* KAPI ime_set_render の入口 (sdk/kapi.json の target)。shell 帯 (owner 1) の
+ * CPL=0 の直呼びだけを通し、アプリ由来 (ring3_call_from_user) は黙って断って
+ * gui_ime_render_rejected を数える。 */
+void gui_ime_set_render(void *table);
+extern volatile u32 gui_ime_render_rejected;
+
 /* K2 用: 登録された入力ポンプ (gui_pump) を返す。未登録なら NULL。
  * 実体の型は GuiPump (void (*)(void))。 */
 void *gui_get_pump(void);

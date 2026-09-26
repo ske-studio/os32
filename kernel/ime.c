@@ -789,6 +789,9 @@ int ime_feed_key(int keydata)
 /*  WM (gshell、CPL=0) が GFX 版の IME_Render 関数表を渡す。NULL で TVRAM 版  */
 /*  に戻す。表の実体は呼び手が常駐している間だけ有効なので、gshell は終了時    */
 /*  (CUI へ戻る前) に NULL を渡すこと。                                      */
+/*  KAPI からは kernel/gui.c の gui_ime_set_render を経由する (owner 1 の     */
+/*  CPL=0 の直呼びだけを通す門、2026-09-26)。ここはカーネル内の直呼び用で、   */
+/*  呼び手を検査しない — gui_owner_exit(1) の NULL 戻しもここへ来る。         */
 /* ======================================================================== */
 void ime_set_render(void *table)
 {

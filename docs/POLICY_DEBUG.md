@@ -1378,6 +1378,14 @@ read-modify-write で保つ。
   ポインタ (`fd_redirect_to_buffer` のバッファ) を WM の文脈で書く経路は、登録時の由来 (`FdRedirect.user_origin`) を見て
   `ring3_user_ranges_writable_always` で必ず表を歩く — 門は「呼び手の文脈」ではなく「ポインタの由来」で決める。
   深さ 0 での `ring3_wm_leave` は `ring3_wm_depth_underflow` が数える。
+- **追記 2 (同日、代行レビュー P2)**: KAPI `ime_set_render(table)` は呼び手を見ずに関数表を `g_ime.render` に控え、カーネルは
+  以後その `putc` / `putw` / `clear_row` を **CPL=0 で**呼んでいた — アプリが自分のメモリの表を渡すとアプリのコードが CPL=0 で走り、
+  控えたまま別アプリの syscall や WM の top-level でも呼ばれ、登録したアプリが消えた後は解放済みの物理へ飛ぶ。正当な呼び手は
+  gshell の top-level (起動時 / CUI 切替 / 停止、owner 1、ディスパッチの外) だけ。KAPI の target を `kernel/gui.c` の
+  `gui_ime_set_render` に替え、`gui_register` と同じ「owner 1 から」に加えて `ring3_call_from_user()` が真なら黙って断る
+  (戻りは void のまま、`gui_ime_render_rejected` が数える。NULL も同じ規則)。gshell が抜けたときの NULL 戻しは従来どおり
+  `gui_owner_exit(1)`。試験は `ring3_guard_host.c` §5 (変異 11/11 RED) + kselftest `test_ime_render_gate`。
+  **関数ポインタを受け取って後で呼ぶ KAPI は、ポインタの帯ではなく呼び手 (常駐側か) で断る** — 帯検査は「呼べるか」を保証しない。
 
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 

@@ -74,6 +74,22 @@ MUTATION 7 RED: 登録時の二重の守りを外す
 MUTATIONS 7/7 RED
 ```
 
+### 追記 (2026-09-26、代行レビュー P2) — ime_set_render は常駐側だけ
+
+KAPI `ime_set_render` の target を `kernel/gui.c` の `gui_ime_set_render` に替え、owner 1 かつ
+`ring3_call_from_user()` が偽のときだけ `ime_set_render` へ渡す。ホストの §5 (5a〜5k) が
+「アプリ由来の登録 (表 / NULL) は断って描画先を変えない」「owner 1 でも CPL=3 由来は断る」
+「owner 2 の WM 文脈も断る」「常駐側の登録と NULL は通る」「アプリの回収では触らず、gshell (owner 1)
+の終了で NULL に戻る」を見る。`sdk/kapi.json` の target は試験の入口で確かめる。
+
+```
+MUTATION 8 RED: ime_set_render の門を外す (= 直す前)
+MUTATION 9 RED: ime_set_render の門が由来 (ring3_call_from_user) を見ない
+MUTATION 10 RED: ime_set_render の門が owner を見ない
+MUTATION 11 RED: gshell の終了で FEP の描画先を戻さない
+MUTATIONS 11/11 RED
+```
+
 ## この試験が見ていないもの
 
 - **実際に filer の窓が出ること** — NP21/W で PM が確かめる (`fault_kill_count` が増えない、`ring3_range_reject_count` が 0 のまま)。

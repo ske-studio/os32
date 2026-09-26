@@ -20,7 +20,7 @@
 | A. 長さ引数つきの出力バッファ | 12 | `sys_read(fd, buf, size)`, `np2_get_*(buf, size)`, `sys_get_build_info`, `con_sink_read(buf, cap)`, `host_read(h, buf, cap)`, `launch_take(buf, cap, …)`, `ime_user_list(prefix, out, max)`, `dev_get_info(idx, name, nm, …)`, `sys_redirect_fd_buf(fd, buf, size, len)`, `dev_blk_read(dev, lba, count, buf)` (count × セクタ長) | `writable(buf, len)` |
 | B. 固定長の構造体 / スカラ出力 | 24 | `rtc_read`, `ide_identify` / `ide_get_info`, `path_parse`, `sys_stat` / `sys_fstat`, `mouse_poll`, `gfx_screen_info`, `gfx_stats`, `pci_get` (40B), `console_get_size(int*, int*)`, `gfx_get_palette(idx, u8*, u8*, u8*)`, `kcg_read_ank` / `kcg_read_kanji` (16B / 32B)、`tvram_readchar_at(x, y, u16*, u8*)`, `loop_status`, `con_sink_stat`, `launch_poll`, `host_status`, `exec_last_result`, `serial_get_status`, `ide_read_sector(drv, lba, buf)` (512B), `gfx_get_framebuffer(fb)` | `writable(p, sizeof)` — 1 本の KAPI に複数あるものは**全部検査してから 1 つも書かない** (TASK_HAL_WIRING 1-5 と同じ規則) |
 | C. 入力だけのポインタ (解放・ロック) | 3 | `mem_free(ptr)`, `sys_shm_lock(ptr)`, `sys_shm_free(ptr)` | 書かないので対象外 (既存の所有者検査のまま) |
-| D. 関数ポインタ / 表 | 4 | `sys_ls(path, cb, ctx)`, `gui_register(handler, pump)`, `gfx_present_raster(table)` (読むだけ), `ime_set_render(table)` (読むだけ) | 書かないので対象外。ただし **cb / handler はアプリのコード帯 (present + USER) であること**を確かめる (別の穴: 帯検査だけでは SHM や VRAM を関数として呼べる) |
+| D. 関数ポインタ / 表 | 4 | `sys_ls(path, cb, ctx)`, `gui_register(handler, pump)`, `gfx_present_raster(table)` (読むだけ), `ime_set_render(table)` (後で CPL=0 で呼ぶ — §6 追記 2 で常駐側だけに) | 書かないので対象外。ただし **cb / handler はアプリのコード帯 (present + USER) であること**を確かめる (別の穴: 帯検査だけでは SHM や VRAM を関数として呼べる) |
 
 計: A 12 + B 24 + C 3 + D 4 = 43。**A と B の 36 本が対象**。
 
@@ -89,3 +89,11 @@ WM が選ぶ (gshell は `arg` をポインタとして解釈しない — 入�
 追記 (同日、代行レビュー P2): 実装レビュー 4 の「最後の砦」(`fd_redirect_write`) はアプリが登録したバッファ
 (`user_origin`) なら深さに関係なく `ring3_user_ranges_writable_always` で歩き、登録時も同じ歩きで RW + USER を確かめる
 (試験 `ring3_guard_host.c` §4、変異 7/7 RED、kselftest `test_fd_redirect_origin_guard`)。
+追記 2 (同日、代行レビュー P2): §1 の D 行の `ime_set_render(table)` は「読むだけ」ではなかった — カーネルは控えた
+`IME_Render` 表の関数を**以後ずっと CPL=0 で呼ぶ**ので、アプリの表を受け取るとアプリのコードが CPL=0 で走り、アプリの終了後は
+解放済みの物理へ飛ぶ。KAPI の target を `gui_ime_set_render` (`kernel/gui.c`) に替え、owner 1 かつ `ring3_call_from_user()` が偽の
+呼び手 (gshell の top-level) だけを通す (戻り void・番号・引数は不変、断った回数は `gui_ime_render_rejected`)。同じ形の残り:
+`gui_register(handler, pump)` は owner 1 の検査だけで `ring3_call_from_user` は見ない (owner 1 は常駐シェルだけなので現状は穴ではない)、
+`sys_ls(path, cb, ctx)` の `cb` は**同期的に** CPL=0 で呼ばれる (CPL=3 の呼び手のコードが CPL=0 で走る。寿命の問題は無いが特権の
+問題は残る — 別票)、`gfx_present_raster(table)` はデータの表で関数を含まない。試験 `ring3_guard_host.c` §5 (変異 11/11 RED)、
+kselftest `test_ime_render_gate`。

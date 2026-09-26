@@ -806,6 +806,7 @@ checks:
   - kernel/gui.h
   - kernel/ime.h
   - kernel/ime_render.h
+  - sdk/kapi.json
   - tools/tests/ring3_guard_host.c
   - tools/tests/test_ring3_guard.py
   check-ring3-str-host:
@@ -1114,6 +1115,7 @@ checks:
     - kernel/cpu_calibrate.h
     - kernel/cpu_calibrate_math.h
     - kernel/dma_pool.h
+    - kernel/gui.h
     - kernel/idt.h
     - kernel/irq.h
     - kernel/irq_math.h
