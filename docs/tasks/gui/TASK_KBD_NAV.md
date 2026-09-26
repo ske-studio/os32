@@ -206,6 +206,16 @@ seq=3 code=71 make  key=71 CAPS mods=CAPS|KANA
 | K2 | NP21/W、`/api/key` だけで: CTRL+ESC → アプリ 2 本 (edit_gui、filer) を起動 → 1 本を窓メニューで最小化 → GRPH+TAB で戻す → 窓メニューで移動 (矢印 + RETURN) → カナ + テンキーで filer のボタンを押す → GRPH+f･4 で閉じる → 窓が無い状態で GRPH+f･4 → Shut Down の確認が出て ESC で戻る。各段で `/api/screenshot` | NP21/W |
 | K3 | 実機: バスマウスなしで K2 と同じ操作 (写真)。§3 の記録を票に残す | 実機 |
 
+### 4-1. K2 の結果 (NP21/W、2026-09-26、カーネル 0d2acad = feat/gui 5f44cef + WM の門の修正)
+
+`/api/key` だけで: CTRL+ESC → DOWN → RETURN で **File Manager が開く** / GRPH+SPACE で窓メニュー (Restore が灰色、初期カーソルは Move) /
+Minimize で窓が消えタスクバーにボタンが残る / GRPH+TAB で戻る / 窓メニューの Move → 矢印 + RETURN で窓が動く / カナで `[M]`、テンキー 3 の連打でポインタが右下へ /
+GRPH+f･4 で閉じる / 窓が無い状態の GRPH+f･4 で Shut Down の確認 → ESC で戻る / Start → CUI mode の確認ダイアログ。**合格**。
+マウスキーでボタンを押す (5 / - / +) は NP21/W では未確認 (ホスト試験 K1 ④ のみ)。
+
+注意 (試験の手順): `/api/mouse` の `ax/ay` を使った後は **`abs=off`** に戻す。絶対座標の上書きが残っていると、gshell はそれを実マウスとして扱い、マウスキーの位置を毎周巻き戻す (ポインタが動かないように見える)。
+途中で見つけた不具合: 2026-09-23 以降 **GUI アプリが起動直後に kill されていた** (WM の中の mouse_poll が KAPI の出力の門で弾かれる) — docs/POLICY_DEBUG.md §4-61、wt/pump-guard で修正。
+
 ## 5. しないこと
 
 Alt+TAB の窓一覧の表示 (v2、v1 はタスクバーのボタンで代用)、GRPH 単独でのメニューバー (v2)、タスクバーへのフォーカス (v2)、`libos32ui` アプリへの合成ポインタ (v2、KAPI が要る)、
