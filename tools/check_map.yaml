@@ -71,6 +71,7 @@ checks:
     - tools/tests/test_bootinfo.py
     - drivers/ide_addr.h
   check-hdd-stage1-host:
+    - tools/tests/mutpar.py
     - boot/boot_main.c
     - build/core.yaml
     - drivers/ide.h
@@ -103,6 +104,7 @@ checks:
     - fs/vfs.h
     - sdk/include/os32/os32_kapi_generated.h
   check-hdd-stage2-host:
+    - tools/tests/mutpar.py
     - boot/boot_defs.h
     - boot/boot_hdd.asm
     - boot/boot_main.c
@@ -175,6 +177,7 @@ checks:
     - tools/tests/test_vmkernel_lz4.py
     - tools/tests/vmkernel_lz4_host.c
   check-vk32-crc-host:
+    - tools/tests/mutpar.py
     - boot/boot_defs.h
     - boot/loader_fat_new.asm
     - boot/lz4_mini.c
@@ -657,6 +660,7 @@ checks:
     - tools/serialfs_host.py
     - tools/tests/test_rshell_serial.py
   check-serialfs-host:
+    - tools/tests/mutpar.py
     - boot/boot_defs.h
     - drivers/serial.c
     - drivers/serial.h
@@ -1022,6 +1026,7 @@ checks:
     - fs/ext2_priv.h
     - sdk/include/os32/os32_kapi_generated.h
   check-vfs-fd-path-host:
+    - tools/tests/mutpar.py
     - build/core.yaml
     - drivers/pc98pt.c
     - drivers/pc98pt.h
@@ -1297,6 +1302,7 @@ checks:
     - fs/vfs.h
     - fs/vfs_name_rules.inc
   check-cd-read-host:
+    - tools/tests/mutpar.py
     - drivers/atapi.c
     - drivers/atapi.h
     - fs/iso9660.c
