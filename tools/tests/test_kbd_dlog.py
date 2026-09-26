@@ -1,6 +1,7 @@
 """キーボードの受信記録 (KAPI v67 kbd_diag_log) と `kbdstat -w` の行のホスト試験。
 
-票:   docs/tasks/gui/TASK_KBD_NAV.md §3 (カナ / CAPS の make / break を実機で見る準備)
+票:   docs/tasks/gui/TASK_KBD_NAV.md §3 (カナ / CAPS の make / break を実機で見る準備)、
+      §2 (方式 B: カナ / CAPS は make で ON、break で OFF。起動時は 053Ah から)
 記録: tools/tests/kbd_dlog_tdd.md
 
 実物の drivers/kbd_dlog.c・drivers/kbd.c (IRQ1 ハンドラと kbd_diag_log)・
@@ -31,7 +32,7 @@ SOURCES = {
 }
 
 CASES = ["ring_basic", "ring_wrap", "irq_skip", "irq_mods", "irq_flags_api",
-         "watch_fmt", "watch_lost"]
+         "irq_locks", "watch_fmt", "watch_lost"]
 
 # -Wno-attributes: __cdecl は x86-64 のホストでは無視される (警告だけ)。
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror", "-Wno-attributes",
@@ -76,6 +77,25 @@ MUTATIONS = [
     ("k", r"    if \(out == NULL \|\| max <= 0\) \{\n        return OS32_ERR_INVAL;\n    \}\n",
      "",
      "引数を検査しない (NULL へ書く / 0 件を成功と答える)"),
+    # ロックキーの方式 B (票 TASK_KBD_NAV §2)
+    ("k", r"    if \(is_break\) kbd_shift_state &= \(u8\)~bit;\n    else          kbd_shift_state \|= bit;\n",
+     "    if (!is_break) kbd_shift_state ^= bit;\n",
+     "ロックキーを方式 A に戻す (make で反転、break を無視)"),
+    ("k", r"    if \(is_break\) kbd_shift_state &= \(u8\)~bit;\n    else          kbd_shift_state \|= bit;\n",
+     "    if (!is_break) kbd_shift_state |= bit;\n",
+     "ロックキーの break を無視する (make で立てるだけ = 外しても落ちない)"),
+    ("k", r"    is_lock = kbd_lock_apply\(keycode, is_break\);\n",
+     "    is_lock = v86_is_active() ? 0 : kbd_lock_apply(keycode, is_break);\n",
+     "V86 中はロックを追わない (セッション後に食い違う)"),
+    ("k", r"kbd_shift_state = kbd_lock_bits_from_bios\(kbd_bios_shift_peek\(\)\);",
+     "kbd_shift_state = 0;",
+     "起動時に 053Ah を見ない (ロックしたまま起動すると OFF と思う)"),
+    ("k", r"kbd_shift_state = kbd_lock_bits_from_bios\(kbd_bios_shift_peek\(\)\);",
+     "kbd_shift_state = kbd_bios_shift_peek();",
+     "053Ah を丸ごと写す (SHIFT / GRPH / CTRL まで引き継ぐ)"),
+    ("k", r"if \(bios_shift & BIOS_KB_SHIFT_CAPS\) s \|= SHIFT_CAPS;",
+     "if (bios_shift & BIOS_KB_SHIFT_CAPS) s |= SHIFT_KANA;",
+     "053Ah の CAPS をカナと取り違える"),
     ("w", r'kbdw_str\(&o, \(code & KBD_DLOG_BREAK\) \? " break" : " make "\);',
      'kbdw_str(&o, (code & KBD_DLOG_BREAK) ? " make " : " break");',
      "make と break を取り違える"),

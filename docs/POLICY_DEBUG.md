@@ -1222,7 +1222,7 @@ read-modify-write で保つ。
   同じ変更で IRQ1 ハンドラが **0041h の前に 0043h を読む**: RxRDY = 0 は空 IRQ (0041h を読まない)、
   PE/OE/FE は読み捨て + 0x16 を書き直して解除 (ホスト試験 `make check-kbd-status-host`)。
 - **「RTY# LOW で沈黙する」機構そのものは資料では証明できない**。0x16 で直らなかったときのために観測を入れた:
-  起動行 `[kbd] st=XX -> YY cmd=16 flushed=N` と、シェルの **`kbdstat`** (KAPI v62 `kbd_diag`、rshell から読める)。
+  起動行 `[kbd] st=XX -> YY cmd=16 flushed=N lock=XX` (lock は 2026-09-26 から) と、シェルの **`kbdstat`** (KAPI v62 `kbd_diag`、rshell から読める)。
   `kbd irq=… empty=… err=… flushed=… init=XX->YY cmd=16 st=… code=… now=…` の読み方:
   - `irq=0` かつ `now` の RxRDY (bit1、0x02) = 1 → 8251 は受けている。**PIC / IRQ1 の経路**を疑う (IMR、ICW)。
   - `irq=0` かつ RxRDY = 0 → **キーボードが送っていない** (RTY# / RST# / 電源・コネクタ、次は第 2 段のモード語)。
@@ -1255,6 +1255,9 @@ read-modify-write で保つ。
   「押すたびに make だけ」か): シリアルから `kbdstat -w` を始め、本体のキーだけを触って行を読む。
   ホスト試験は `make check-kbd-dlog-host`。
   最長 30 秒 (+ 出力の分) 走るので、`/api/cmd` や `rshell_serial.py` の待ちは **60 秒以上**にする ([V3]) — 短いと写しが途中で切れ、LOST の判定を欠けた写しでしてしまう。
+- **カナ・CAPS は方式 B (2026-09-26)**: NP21/W の `kbdstat -w` でカナ・CAPS が機械式ロック (ロックで make・解除で break) と
+  分かり、make で反転・break を捨てるドライバでは外しても KANA のままだった。make で ON・break で OFF に直し、起動時は
+  BIOS の 0000:053Ah から引き継ぐ (起動行 `lock=XX`)。実機の確認は CHECKLIST_2026-09-26 の手順 10 — 根拠と残りは票 §2。
 
 ### 4-58. OS32 の ext2 が読めることは**正しい ext2 である証拠にならない** — cdinst の NHD に名前の無いディレクトリ (2026-09-23)
 

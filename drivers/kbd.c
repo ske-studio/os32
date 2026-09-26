@@ -204,6 +204,68 @@ static const u8 scancode_to_ascii_shift[128] = {
 };
 
 /* ======================================================================== */
+/*  ロックキー (カナ・CAPS) — 方式 B: make で ON、break で OFF              */
+/*                                                                          */
+/*  PC-98 のカナ・CAPS は機械式ロックで、押し込んで留まると make、もう一度  */
+/*  押して外れると break が来る。根拠:                                      */
+/*    - BIOS 自身がこの扱い。0000:053Ah (KB_SHFT_STS) の bit2 カナ / bit1   */
+/*      CAPS は SHIFT・CTRL と同じ「1= 押されている」で、「INT 09h ハンドラ */
+/*      がセット／リセットする」(memsys.md)。反転ではない。                  */
+/*    - シフト系キーはキーボード側でリピートしない (memsys.md 052A〜0539h)。 */
+/*    - NP21/W の keystat.c「シフトメカニカル処理」も 1 回目 make・2 回目     */
+/*      break を送る。kbdstat -w で観測 (TASK_KBD_NAV §3-1)。                */
+/*  以前 (方式 A) は make で反転して break を捨てていたので、ロックを外して  */
+/*  も KANA / CAPS が立ったままになった。make の繰り返しが来ても ON のまま   */
+/*  (冪等) なので、ロックの物理状態から外れない。                            */
+/*  V86 セッション中も追う (打鍵はゲストへ回すが、ロックの物理状態は OS32   */
+/*  側でも正しく持っておく — セッション後に食い違わないように)。            */
+/*  戻り値: ロックキーなら 1。書くのは IRQ1 の中だけ (kbd_shift_state の    */
+/*  所有権どおり)。                                                          */
+/* ======================================================================== */
+static int kbd_lock_apply(u8 keycode, int is_break)
+{
+    u8 bit;
+
+    if (keycode == KEY_CAPS)      bit = SHIFT_CAPS;
+    else if (keycode == KEY_KANA) bit = SHIFT_KANA;
+    else return 0;
+
+    if (is_break) kbd_shift_state &= (u8)~bit;
+    else          kbd_shift_state |= bit;
+    return 1;
+}
+
+/* 起動時のロックの初期値。ロックしたまま電源を入れた / リセットした場合、
+ * OS32 が IRQ1 を開く前の make は OS32 には届かない (BIOS が受けたか、kbd_init
+ * の読み捨てで消える)。そこで BIOS が INT 09h で追ってきた 0000:053Ah の
+ * カナ・CAPS ビットを引き継ぐ。電源投入時にロック済みのキーを BIOS が知って
+ * いるかは資料に無い (実機は票 TASK_KBD_NAV §3 の表の 6 で見る)。
+ * SHIFT / CTRL / GRPH は引き継がない
+ * (押しっぱなしなら離したときの break で落ち、押し続けていなければ 0 が正しい)。 */
+static u8 kbd_lock_bits_from_bios(u8 bios_shift)
+{
+    u8 s = 0;
+
+    if (bios_shift & BIOS_KB_SHIFT_CAPS) s |= SHIFT_CAPS;
+    if (bios_shift & BIOS_KB_SHIFT_KANA) s |= SHIFT_KANA;
+    return s;
+}
+
+/* 0000:053Ah を読む。kbd_init (paging_init より前、PG=0 で低位物理がそのまま
+ * 見える) からだけ呼ぶ。番地を volatile 変数に通すのは kernel/sysclk.c と同じ
+ * 理由 (GCC の -Warray-bounds の誤診断)。ホスト試験は模型の値に差し替える。 */
+#if defined(KBD_HOST_TEST) && !defined(__KERNEL_BUILD__)
+extern u8 kbd_host_bios_shift;   /* tools/tests/kbd_dlog_host.c */
+static u8 kbd_bios_shift_peek(void) { return kbd_host_bios_shift; }
+#else
+static u8 kbd_bios_shift_peek(void)
+{
+    volatile u32 a = BIOS_WORK_KB_SHIFT;
+    return *(volatile u8 *)a;
+}
+#endif
+
+/* ======================================================================== */
 /*  kbd_irq_handler — IRQ1 割り込みハンドラ (Cレベル)                      */
 /*  ASMスタブ (kernel/isr_stub.asm の irq_stub_1、呼び手はここだけ) から    */
 /*  呼ばれる。戻り値は「IRQ1 を V86 ゲストへ反射してよいか」:               */
@@ -281,6 +343,14 @@ static void kbd_deliver(u8 scancode)
     u8 ascii;
     int is_break;
     int is_mod;
+    int is_lock;
+
+    is_break = scancode & SCANCODE_BREAK;
+    keycode  = scancode & SCANCODE_KEY;
+
+    /* ロックキー (カナ・CAPS) の状態は V86 分岐より前に追う (方式 B、
+     * kbd_lock_apply の説明)。打鍵そのものは下の分岐どおりゲストへ回す。 */
+    is_lock = kbd_lock_apply(keycode, is_break);
 
     /* V86 セッション中はキーをまるごとゲストへ回す。
      * 8251A のデータレジスタは読んだら消えるので、ここで OS32 側の
@@ -297,9 +367,6 @@ static void kbd_deliver(u8 scancode)
         return;
     }
 
-    is_break = scancode & SCANCODE_BREAK;
-    keycode  = scancode & SCANCODE_KEY;
-
     /* キー押下状態ビットマップの更新 (全キー対象) */
     if (is_break) {
         kbd_key_pressed[keycode >> 3] &= ~(1 << (keycode & 7));
@@ -311,7 +378,7 @@ static void kbd_deliver(u8 scancode)
      * 「このイベント時点の修飾状態」を焼き込む (レビュー #3 ②: WM が取り込む
      * ときの最新状態で変換すると Shift↓ A↓ A↑ Shift↑ が溜まった場合に
      * a/A を取り違える)。修飾キー自身のイベントは更新後の状態を載せる。 */
-    is_mod = 0;
+    is_mod = is_lock;   /* カナ・CAPS は kbd_lock_apply で更新済み */
     if (keycode == KEY_SHIFT) {
         if (is_break) kbd_shift_state &= ~SHIFT_SHIFT;
         else          kbd_shift_state |=  SHIFT_SHIFT;
@@ -319,12 +386,6 @@ static void kbd_deliver(u8 scancode)
     } else if (keycode == KEY_CTRL) {
         if (is_break) kbd_shift_state &= ~SHIFT_CTRL;
         else          kbd_shift_state |=  SHIFT_CTRL;
-        is_mod = 1;
-    } else if (keycode == KEY_CAPS) {
-        if (!is_break) kbd_shift_state ^= SHIFT_CAPS;
-        is_mod = 1;
-    } else if (keycode == KEY_KANA) {
-        if (!is_break) kbd_shift_state ^= SHIFT_KANA;
         is_mod = 1;
     } else if (keycode == KEY_GRPH) {
         if (is_break) kbd_shift_state &= ~SHIFT_GRPH;
@@ -451,7 +512,9 @@ void kbd_init(void)
     kbd_tail = 0;
     kbd_count = 0;
     kbd_dropped = 0;
-    kbd_shift_state = 0;
+    /* カナ・CAPS のロックは BIOS の 053Ah から引き継ぐ (kbd_lock_bits_from_bios)。
+     * IRQ1 はまだ閉じているので ISR の所有権に触れない。 */
+    kbd_shift_state = kbd_lock_bits_from_bios(kbd_bios_shift_peek());
     kbd_gui_mode = 0;       /* 起動直後は CUI (WM 未登録) */
 
     /* キー状態ビットマップクリア */
@@ -464,9 +527,9 @@ void kbd_init(void)
     /* キーボードIRQを有効化 */
     irq_enable(KBD_IRQ);
 
-    kprintf(TATTR_WHITE, "[kbd] st=%02x -> %02x cmd=%02x flushed=%u\n",
+    kprintf(TATTR_WHITE, "[kbd] st=%02x -> %02x cmd=%02x flushed=%u lock=%02x\n",
             (u32)kbd_diag_init_before, (u32)kbd_diag_init_after,
-            (u32)kbd_diag_cmd, kbd_diag_flushed);
+            (u32)kbd_diag_cmd, kbd_diag_flushed, (u32)kbd_shift_state);
 }
 
 /* ======================================================================== */

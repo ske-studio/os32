@@ -318,6 +318,16 @@
 #define BIOS_WORK_MEM_128KB  0x00000401UL  /* BYTE: 15MB までの容量 */
 #define BIOS_WORK_MEM_HIGH_MB 0x00000594UL /* WORD: 16MB 超の容量 (MB) */
 
+/* BIOS ワークエリア: キーボード (正典 docs/hw/undocumented/memsys.md、Bible §2-5 表2-16)。
+ *   053Ah  BYTE  KB_SHFT_STS シフトキー押下状態フラグ。INT 09h ハンドラが make で
+ *                セット、break でリセットする (「1= 押されている」)。INT 18h AH=02h の値。
+ *                bit4 CTRL / bit3 GRPH / bit2 カナ / bit1 CAPS / bit0 SHIFT。
+ *                読むのは drivers/kbd.c の kbd_init (paging_init より前) だけで、
+ *                カナ・CAPS のロックの初期値にする (TASK_KBD_NAV §2)。 */
+#define BIOS_WORK_KB_SHIFT   0x0000053AUL  /* BYTE: シフトキー押下状態 */
+#define BIOS_KB_SHIFT_CAPS   0x02
+#define BIOS_KB_SHIFT_KANA   0x04
+
 #define BIOS_ROM_BASE        0x000E8000UL  /* BIOS ROM先頭 */
 #define BIOS_ROM_END         0x00100000UL  /* BIOS ROM末端 (1MB) */
 

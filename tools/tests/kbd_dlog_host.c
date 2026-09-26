@@ -13,6 +13,8 @@
 /*        (先頭の seq の飛びで分かる)、max を超えて書かない                */
 /*    (c) IRQ1: EMPTY / ERROR のバイトは積まない、OVERRUN は積んで印を付ける */
 /*    (d) IRQ1: 修飾は配った**後**の値 (カナの make で KANA が立った行)      */
+/*    (d') ロックキー (カナ・CAPS) は方式 B: make で ON、break で OFF、make の */
+/*        繰り返しでも ON のまま。V86 中も追う。起動時は 053Ah から引き継ぐ  */
 /*    (e) V86 / GUI の印、kbd_diag_log の引数検査と禁止区間の釣り合い        */
 /*    (f) kbdstat -w の行と LOST 行の書式                                   */
 /* ======================================================================== */
@@ -24,6 +26,10 @@
 #include "types.h"
 #undef STATIC_ASSERT
 #define STATIC_ASSERT(cond, name) typedef char host_skip_static_assert_##name
+
+/* kbd.c の 0000:053Ah の読みを模型 (kbd_host_bios_shift) へ回す */
+#define KBD_HOST_TEST 1
+u8 kbd_host_bios_shift;
 
 #include "drivers/kbd_status.c"
 #include "drivers/kbd_dlog.c"
@@ -87,6 +93,7 @@ static void irq(unsigned int st, unsigned int data)
 static void fresh(void)
 {
     shim_st = 0;         /* kbd_init の読み捨てループが空で抜ける */
+    kbd_host_bios_shift = 0;
     stub_v86 = 0;
     stub_v86_pushed = 0;
     kbd_set_gui_mode(0);
@@ -189,7 +196,7 @@ static void case_irq_skip(void)
     CHECK(kbd_shim_irq_depth == 0);
 }
 
-/* (d) 修飾は配った後の値。カナは今のドライバ (方式 A: make で反転、break は無視) */
+/* (d) 修飾は配った後の値。カナ・CAPS は方式 B (make で ON、break で OFF) */
 static void case_irq_mods(void)
 {
     KbdDiagLogEnt out[KBD_DLOG_CAP];
@@ -197,19 +204,19 @@ static void case_irq_mods(void)
 
     fresh();
     irq(KBD_STAT_RXRDY, 0x72);   /* KANA make  → KANA */
-    irq(KBD_STAT_RXRDY, 0xF2);   /* KANA break → KANA のまま (方式 A) */
-    irq(KBD_STAT_RXRDY, 0x72);   /* KANA make  → 解除 */
+    irq(KBD_STAT_RXRDY, 0xF2);   /* KANA break → 解除 (方式 B) */
+    irq(KBD_STAT_RXRDY, 0x72);   /* KANA make  → KANA (もう一度ロック) */
     irq(KBD_STAT_RXRDY, 0x70);   /* SHIFT make → SHIFT */
     irq(KBD_STAT_RXRDY, 0x71);   /* CAPS make  → SHIFT|CAPS */
     irq(KBD_STAT_RXRDY, 0xF0);   /* SHIFT break → CAPS */
     n = kbd_diag_log(0, out, KBD_DLOG_CAP);
     CHECK(n == 6);
     CHECK(out[0].code == 0x72 && out[0].mods == KBD_DLOG_MOD_KANA);
-    CHECK(out[1].code == 0xF2 && out[1].mods == KBD_DLOG_MOD_KANA);
-    CHECK(out[2].code == 0x72 && out[2].mods == 0);
-    CHECK(out[3].mods == KBD_DLOG_MOD_SHIFT);
-    CHECK(out[4].mods == (KBD_DLOG_MOD_SHIFT | KBD_DLOG_MOD_CAPS));
-    CHECK(out[5].mods == KBD_DLOG_MOD_CAPS);
+    CHECK(out[1].code == 0xF2 && out[1].mods == 0);
+    CHECK(out[2].code == 0x72 && out[2].mods == KBD_DLOG_MOD_KANA);
+    CHECK(out[3].mods == (KBD_DLOG_MOD_KANA | KBD_DLOG_MOD_SHIFT));
+    CHECK(out[4].mods == (KBD_DLOG_MOD_KANA | KBD_DLOG_MOD_SHIFT | KBD_DLOG_MOD_CAPS));
+    CHECK(out[5].mods == (KBD_DLOG_MOD_KANA | KBD_DLOG_MOD_CAPS));
     CHECK((u32)out[5].mods == kbd_get_modifiers());
     /* 読み手の続き: 最後に読んだ seq を渡すと新しい分だけ */
     irq(KBD_STAT_RXRDY, 0x00);   /* ESC make */
@@ -225,15 +232,19 @@ static void case_irq_flags_api(void)
 
     fresh();
     stub_v86 = 1;
-    irq(KBD_STAT_RXRDY, 0x72);   /* V86 へ回す: 修飾は OS32 側で更新しない */
+    irq(KBD_STAT_RXRDY, 0x72);   /* V86 へ回す: ロックの状態だけは OS32 側でも追う */
+    irq(KBD_STAT_RXRDY, 0x70);   /* SHIFT はゲストのもの: OS32 側で更新しない */
     stub_v86 = 0;
     kbd_set_gui_mode(1);
     irq(KBD_STAT_RXRDY, 0x1D);
     kbd_set_gui_mode(0);
     n = kbd_diag_log(0, out, KBD_DLOG_CAP);
-    CHECK(n == 2);
-    CHECK(out[0].flags == KBD_DLOG_F_V86 && out[0].mods == 0 && stub_v86_pushed == 1);
-    CHECK(out[1].flags == KBD_DLOG_F_GUI);
+    CHECK(n == 3);
+    CHECK(out[0].flags == KBD_DLOG_F_V86 && out[0].mods == KBD_DLOG_MOD_KANA);
+    CHECK(out[1].flags == KBD_DLOG_F_V86 && out[1].mods == KBD_DLOG_MOD_KANA);
+    CHECK(stub_v86_pushed == 2);
+    CHECK(kbd_is_pressed(0x72) == 0 && kbd_is_pressed(0x70) == 0);
+    CHECK(out[2].flags == KBD_DLOG_F_GUI && out[2].mods == KBD_DLOG_MOD_KANA);
 
     CHECK(kbd_diag_log(0, (KbdDiagLogEnt *)0, 4) == OS32_ERR_INVAL);
     CHECK(kbd_diag_log(0, out, 0) == OS32_ERR_INVAL);
@@ -254,6 +265,80 @@ static void case_irq_flags_api(void)
     irq(KBD_STAT_RXRDY, 0x1D);
     n = kbd_diag_log(0, out, KBD_DLOG_CAP);
     CHECK(n == 1 && out[0].seq == 1);
+}
+
+/* (d') ロックキーの方式 B。raw リング (GUI 中) と cooked (CUI 中) の両方と、
+ * 起動時の初期値 (0000:053Ah) を見る。 */
+static void case_irq_locks(void)
+{
+    KbdDiagLogEnt out[KBD_DLOG_CAP];
+    int n, r;
+
+    /* KANA: make で ON、make の繰り返しでも ON のまま、break で OFF */
+    fresh();
+    irq(KBD_STAT_RXRDY, 0x72);
+    CHECK(kbd_get_modifiers() == SHIFT_KANA);
+    irq(KBD_STAT_RXRDY, 0x72);
+    CHECK(kbd_get_modifiers() == SHIFT_KANA);
+    irq(KBD_STAT_RXRDY, 0xF2);
+    CHECK(kbd_get_modifiers() == 0);
+    irq(KBD_STAT_RXRDY, 0xF2);   /* break の重複でも OFF のまま */
+    CHECK(kbd_get_modifiers() == 0);
+    n = kbd_diag_log(0, out, KBD_DLOG_CAP);
+    CHECK(n == 4);
+    CHECK(out[0].mods == KBD_DLOG_MOD_KANA && out[1].mods == KBD_DLOG_MOD_KANA);
+    CHECK(out[2].mods == 0 && out[3].mods == 0);
+
+    /* CAPS: 同じ扱い。KANA とは独立 */
+    fresh();
+    irq(KBD_STAT_RXRDY, 0x72);
+    irq(KBD_STAT_RXRDY, 0x71);
+    irq(KBD_STAT_RXRDY, 0x71);
+    CHECK(kbd_get_modifiers() == (SHIFT_CAPS | SHIFT_KANA));
+    irq(KBD_STAT_RXRDY, 0xF1);
+    CHECK(kbd_get_modifiers() == SHIFT_KANA);
+    irq(KBD_STAT_RXRDY, 0xF2);
+    CHECK(kbd_get_modifiers() == 0);
+
+    /* cooked: CAPS を外したら小文字に戻る (A = key 0x1D) */
+    fresh();
+    irq(KBD_STAT_RXRDY, 0x71);
+    irq(KBD_STAT_RXRDY, 0x1D);
+    irq(KBD_STAT_RXRDY, 0x9D);
+    irq(KBD_STAT_RXRDY, 0xF1);
+    irq(KBD_STAT_RXRDY, 0x1D);
+    CHECK(kbd_trygetkey() == ((0x1D << 8) | 'A'));
+    CHECK(kbd_trygetkey() == ((0x1D << 8) | 'a'));
+
+    /* raw (GUI 中): 修飾キー自身の行は更新後の状態を載せる */
+    fresh();
+    kbd_set_gui_mode(1);
+    irq(KBD_STAT_RXRDY, 0x72);
+    irq(KBD_STAT_RXRDY, 0x72);
+    irq(KBD_STAT_RXRDY, 0xF2);
+    r = kbd_trygetrawkey();
+    CHECK(r == (0x72 | 0x100 | (SHIFT_KANA << 9)));
+    r = kbd_trygetrawkey();
+    CHECK(r == (0x72 | 0x100 | (SHIFT_KANA << 9)));
+    r = kbd_trygetrawkey();
+    CHECK(r == 0x72);            /* break、KANA は落ちている */
+    CHECK(kbd_trygetrawkey() == -1);
+    kbd_set_gui_mode(0);
+
+    /* 起動時: 053Ah のカナ・CAPS だけを引き継ぐ (SHIFT / GRPH / CTRL は捨てる) */
+    shim_st = 0;
+    kbd_host_bios_shift = 0x1F;
+    kbd_init();
+    CHECK(kbd_get_modifiers() == (SHIFT_CAPS | SHIFT_KANA));
+    irq(KBD_STAT_RXRDY, 0xF2);   /* 起動後に外すと落ちる */
+    CHECK(kbd_get_modifiers() == SHIFT_CAPS);
+    kbd_host_bios_shift = BIOS_KB_SHIFT_KANA;
+    kbd_init();
+    CHECK(kbd_get_modifiers() == SHIFT_KANA);
+    kbd_host_bios_shift = 0x19;  /* SHIFT | GRPH | CTRL だけ */
+    kbd_init();
+    CHECK(kbd_get_modifiers() == 0);
+    kbd_host_bios_shift = 0;
 }
 
 /* (f) kbdstat -w の行 */
@@ -318,6 +403,7 @@ static const struct { const char *name; void (*fn)(void); } cases[] = {
     { "irq_skip",       case_irq_skip },
     { "irq_mods",       case_irq_mods },
     { "irq_flags_api",  case_irq_flags_api },
+    { "irq_locks",      case_irq_locks },
     { "watch_fmt",      case_watch_fmt },
     { "watch_lost",     case_watch_lost },
 };
