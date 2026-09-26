@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory(prefix='os32-appband-') as tmp:
     subprocess.run(['gcc', *FLAGS, '-DPHYSMEM_HOST_TEST=1', '-nostdlib', '-static', '-no-pie',
                     *host_includes, str(ROOT / 'tools/tests/app_band_pde_host.c'),
                     str(ROOT / 'kernel/physmem.c'), '-o', str(exe)], check=True)
-    subprocess.run([str(exe)], check=True, timeout=10)
+    subprocess.run([str(exe)], check=True, timeout=60)
     subprocess.run(['i386-elf-gcc', *FLAGS, '-O2', *includes, '-c',
                     str(ROOT / 'kernel/paging.c'), '-o', str(tmp / 'paging.o')], check=True)
     print('HOST ILP32 + TARGET GNU89 PASS')

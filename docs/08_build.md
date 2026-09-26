@@ -77,8 +77,8 @@ GUI アプリ      → libos32gui_stub (ジャンプ表への薄いスタブ) �
 ```
 
 日常のターゲット (`make all` に含まれる): `kernel` `programs` `libs` `gshell` `shlib` `external`
-(`apps` + `game`)。検査: `make check` (= `check-kapi-version` `check-manifests` `check-constraints`
-`check-privileged` `check-ne2000-ring` `check-shlib` `check-gui-proto`)。`emu_agent` (ローカル AI) の `make` は
+(`apps` + `game`)。検査: `make check-fast` / `make check-changed` / `make check` の 3 通り
+([§8-4 検査の 3 段](#検査の3段))。`emu_agent` (ローカル AI) の `make` は
 許可リスト (`tools/emu_agent/agent.py` の `MAKE_TARGETS`) に載ったターゲットしか実行しない。
 
 **GitHub Actions** (`.github/workflows/check.yml`、2026-09-06): push / PR で、クロスツールチェーン無しで
@@ -185,6 +185,39 @@ Makefile ターゲットとの対応 (`build/deploy.mk`)。**このリポジト�
 `apps` / `game` / `clean` / `clean-kernel` / `clean-libs` / `clean-programs`。
 KernelAPI の構造体を変えたときは `make clean` → `make all` が必須
 (古い `.o` が残ると ABI 不整合で静かに壊れる)。
+
+<a id="検査の3段"></a>
+#### 検査の 3 段 (`check-fast` / `check-changed` / `check`、2026-09-26)
+
+どれも `make all` の後に回す (成果物を読む検査がある)。列 (`build/sdk.mk` の
+`CHECK_PAR_TARGETS` / `CHECK_MUT_TARGETS`) と recipe は共通で、違うのは**変異
+(否定側 — 実装を壊して試験が RED になるか) を回すかどうか**だけ。
+
+| ターゲット | 回すもの | いつ | 実測 (16 コア) |
+|---|---|---|---|
+| `make check-fast` | 全部の検査を**変異なし**で 1 段の並列 | 作業中に何度でも | **約 40 秒** |
+| `make check-changed` | 変更したファイルに関係する検査だけ変異込み、残りは変異なし | コミットの前 | docs だけ **0.7 秒**、`drivers/serial.c` **137 秒**、変更なし **48 秒** |
+| `make check` | 全部を**変異込み** (1 段目 並列 → 2 段目 `-j1`) | 取り込み (merge) の前に 1 回 | **約 9 分 (529 秒)** |
+
+- **変異の切り替え**: recipe は `--mutate` / `--mutants` の代わりに `$(MUT)` / `$(MUTS)` と書く。
+  `MUTATE=1` (既定) で付く、`MUTATE=0` で付かない、`MUTATE=sel` なら `MUTATE_TARGETS` に
+  名前のある検査だけ付く。新しい変異試験を足すときもこの書き方にする。
+- **`check-changed` の選び方** (`tools/check_select.py`、対応表は `tools/check_map.yaml`):
+  変更 = `git diff --name-only $(BASE)...HEAD` + 未コミット + 追跡外。`BASE` の既定は
+  `feat/gui` との merge-base。`FILES="a b"` を渡すと git を見ずにその一覧で選ぶ (試し用)。
+  - 変更なし → 全部を変異なし (= `check-fast`)
+  - `full:` (`Makefile` `build/*.mk` `sdk/kapi.json`) に当たる変更、または**対応表のどの
+    glob にも当たらない変更** → 全部を変異込み (= `check`)。表の漏れで否定側を落とさないための安全側
+  - 変更が全部 `docs_only:` (`**/*.md` など) → 当たった検査 (文書系) だけ
+  - それ以外 → 当たった検査は変異込み、残りは変異なし
+- **対応表の漏れは `make check-map` が見る** (両方の列に入っている): 列と表の検査名の過不足、
+  どのファイルにも当たらない古い glob、各検査の recipe から辿れる試験スクリプトが開く /
+  `#include` する / `#[path]` で取り込むソースがその検査の glob に入っていること。
+  辿り方は静的なので、ツリーを舐める検査器 (`check-arch-asm` など) は glob を手で広く書いてある。
+  表が欠けても**試験そのものは変異なしで必ず回る** — 落とすのは否定側だけ。
+- 新しい検査を列に足したら `python3 tools/check_select.py --suggest <検査名>` の出力を
+  下書きにして対応表へ足す (`make check-map` が足りないと言う)。
+- `tools/check_tree_unchanged.py` の番人 ([POLICY_DEBUG §4-40](POLICY_DEBUG.md)) は 3 通りとも各段の後で回る。
 
 <a id="kapi-v63-移行"></a>
 #### KAPI v63 への移行 (データ欄の固定配置、票 [TASK_KAPI_DATA_FIELDS](tasks/memory/TASK_KAPI_DATA_FIELDS.md))

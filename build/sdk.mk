@@ -190,7 +190,7 @@ check-boot-splash-host:
 # NP21/W の停止・起動 (tools/np21w_ctl.py) の変異まで回す。ケースだけなら
 # check-tools-host の discover でも回る。
 check-np21w-ctl-host:
-	python3 -B tools/tests/test_np21w_ctl.py --mutate
+	python3 -B tools/tests/test_np21w_ctl.py $(MUT)
 
 check-tools-host:
 	python3 -B -m unittest discover -s tools/tests -p 'test_np21w_*.py'
@@ -208,7 +208,7 @@ check-tools-host:
 # --mutate は票 KBD_NAV の K1 の変異 (host/integration.py の MUTATIONS) を
 # 一時の写しに当てて RED を確かめる (ソースは書き換えない)。
 check-gshell-host:
-	python3 userland/gshell/host/integration.py --mutate
+	python3 userland/gshell/host/integration.py $(MUT)
 
 check-db-owned-host:
 	python3 -B -m unittest discover -s tools/tests -p 'test_kapi_db_owned.py'
@@ -224,7 +224,7 @@ check-vfs-fd-sqlite-host:
 # --target はカーネルと同じ i386-elf で drivers/fdc.c ごと通す。
 # 記録は tools/tests/fdc_seek_tdd.md。
 check-fdc-seek-host:
-	python3 -B tools/tests/test_fdc_seek.py --target --mutate
+	python3 -B tools/tests/test_fdc_seek.py --target $(MUT)
 
 # FD のトラック単位の読み出し (drivers/fdc_track.c) と、同じシリンダでの
 # シークの省略・まとめ読み (drivers/fdc.c)。実機 PC-9821Ra266 で既定フォント
@@ -240,7 +240,7 @@ check-fdc-seek-host:
 # イメージ・ISO が食い違い、check-packages-host / check-vk32-crc-host が落ちた
 # (2026-09-24、PM 判断で「無ければ失敗」に)。make all が先。
 check-fdc-track-host:
-	python3 -B tools/tests/test_fdc_track.py --target --mutate --require-image
+	python3 -B tools/tests/test_fdc_track.py --target $(MUT) --require-image
 
 # CD の読み (drivers/atapi.c の複数セクタの READ(10)、fs/iso9660.c の覚えた
 # パス・先読みの窓・ディレクトリの LRU、userland/lib/rt/pkg.c の区切り)。
@@ -250,7 +250,7 @@ check-fdc-track-host:
 # 上で回す。変異は一時の木の写しに当てるのでソースは書き換えない (check-par)。
 # 記録は tools/tests/cd_read_tdd.md。
 check-cd-read-host:
-	python3 -B tools/tests/test_cd_read.py --target --mutate
+	python3 -B tools/tests/test_cd_read.py --target $(MUT)
 
 # PCI コンフィギュレーションの復号 (drivers/pci_decode.c)。実機 PC-9821Ra266 の
 # 内蔵 LAN (Intel 82557) を `lspci` で見つけるための土台 (票 TASK_LAN_82557 L-A)。
@@ -269,7 +269,7 @@ check-cd-read-host:
 # --mutate は写しの上で変異させるので並列 (check-par) で回せる。
 # 記録は tools/tests/pci_decode_tdd.md。
 check-pci-decode-host:
-	python3 -B tools/tests/test_pci_decode.py --target --mutate
+	python3 -B tools/tests/test_pci_decode.py --target $(MUT)
 
 # シリアルの速度判定 (drivers/serial_plan.c)。実機 PC-9821Ra266 との会話が
 # シリアルしかなく、9600 で 490B/s しか出ていなかった件 (票 TASK_SERIAL_VFAST)。
@@ -283,7 +283,7 @@ check-pci-decode-host:
 # --mutate は写しの上で変異させるので並列 (check-par) で回せる。
 # 記録は tools/tests/serial_vfast_tdd.md。
 check-serial-vfast-host:
-	python3 -B tools/tests/test_serial_vfast.py --target --mutate
+	python3 -B tools/tests/test_serial_vfast.py --target $(MUT)
 
 # 8255 ポート C (0035h) を丸ごと書かないこと (drivers/serial.c)。実機
 # PC-9821Ra266 で rshell 中にビープが鳴り続けた件 (2026-09-24、
@@ -296,7 +296,7 @@ check-serial-vfast-host:
 # 経路・kernel/sys.c の buz_on/buz_off が書く値 (06h/07h) を見る。
 # --mutate は写しの上で変異させるので並列 (check-par) で回せる。
 check-serial-portc-host:
-	python3 -B tools/tests/test_serial_portc.py --mutate
+	python3 -B tools/tests/test_serial_portc.py $(MUT)
 
 # CPU 校正の止め方と丸め (kernel/cpu_calibrate_math.c)。実機 PC-9821Ra266 の
 # シリアルが 9600 でも 38400 でも 1 バイト約 2ms しか出なかった件の真因
@@ -312,7 +312,7 @@ check-serial-portc-host:
 # --mutate は写しの上で変異するので並列 (check-par) で回せる。
 # 記録は tools/tests/cpu_calibrate_tdd.md。
 check-cpu-calibrate-host:
-	python3 -B tools/tests/test_cpu_calibrate.py --target --mutate
+	python3 -B tools/tests/test_cpu_calibrate.py --target $(MUT)
 
 # PIT の分周 (kernel/pit_math.c)。pit_init が 1.9968MHz 決め打ちで割っていて、
 # 2.4576MHz 系 (実機 PC-9821Ra266、0000:0501h bit7 = 0) では 100Hz のつもりの
@@ -327,7 +327,7 @@ check-cpu-calibrate-host:
 # --mutate は写しの上で変異するので並列 (check-par) で回せる。
 # 記録は tools/tests/pit_clock_tdd.md。
 check-pit-clock-host:
-	python3 -B tools/tests/test_pit_clock.py --target --mutate
+	python3 -B tools/tests/test_pit_clock.py --target $(MUT)
 
 # vmkernel.lz4 の LZ4 高圧縮 (tools/mkvmkernel.py、HC level 12) と展開側 3 実装。
 # 票 TASK_SERIAL_HOSTFS 部品 A-1 / TASK_HDD_INSTALL N8 (生成側の上限検査)。
@@ -340,7 +340,7 @@ check-pit-clock-host:
 # --mutate は写しの上で変異するので並列 (check-par) で回せる。
 # 記録は tools/tests/vmkernel_lz4_tdd.md。
 check-vmkernel-lz4-host:
-	python3 -B tools/tests/test_vmkernel_lz4.py --real --target --mutate
+	python3 -B tools/tests/test_vmkernel_lz4.py --real --target $(MUT)
 
 # VK32 v2 (CRC32 表 + 完全長) の生成と両ローダの検査。票 TASK_SERIAL_HOSTFS 部品 A-4。
 # tools/mkvmkernel.py の生成物を zlib.crc32 と突き合わせ、HDD ローダの
@@ -354,13 +354,13 @@ check-vmkernel-lz4-host:
 # --mutate は写しの上で変異 (組めない変異は ERROR、何も変えない対照を含む)。
 # 記録は tools/tests/vk32_crc_tdd.md。
 check-vk32-crc-host:
-	python3 -B tools/tests/test_vk32_crc.py --real --target --mutate
+	python3 -B tools/tests/test_vk32_crc.py --real --target $(MUT)
 
 # カーネルに埋め込むコミット ID の生成器 (tools/gen_build_id.py)。一時の git
 # リポジトリで clean / -dirty (未追跡は数えない) / unknown / 同じなら書かない を見る。
 # 票 TASK_SERIAL_HOSTFS 部品 A-4 (ver の Commit)。記録は tools/tests/vk32_crc_tdd.md。
 check-build-id-host:
-	python3 -B tools/tests/test_build_id.py --mutate
+	python3 -B tools/tests/test_build_id.py $(MUT)
 
 # ブート情報域 0x7E00 (kernel/bootinfo_check.c + boot/bootinfo.inc)。票 TASK_HDD_INSTALL 段 0。
 # ローダが INT 1Bh AH=84h の結果を書き、kernel_main が最初に写す。見るのは
@@ -371,7 +371,7 @@ check-build-id-host:
 # --mutate は写しの上で変異するので並列 (check-par) で回せる。
 # 記録は tools/tests/bootinfo_tdd.md。
 check-bootinfo-host:
-	python3 -B tools/tests/test_bootinfo.py --target --mutate
+	python3 -B tools/tests/test_bootinfo.py --target $(MUT)
 
 # HDD の一時置き場 (票 TASK_HDD_INSTALL 段 1)。区画表の共有部 (drivers/pc98pt.c、
 # 標準配置)、ATA の LBA28 / 現在の CHS / 既定の CHS の選択と範囲検査
@@ -382,7 +382,7 @@ check-bootinfo-host:
 # → e2fsck -fn clean、開始 LBA 不変)。--mutate は写しの上で変異するので並列で回せる。
 # 記録は tools/tests/hdd_stage1_tdd.md。
 check-hdd-stage1-host:
-	python3 -B tools/tests/test_hdd_stage1.py --target --mutate
+	python3 -B tools/tests/test_hdd_stage1.py --target $(MUT)
 
 # HDD インストーラ (票 TASK_HDD_INSTALL 段 2)。cdinst / install の共有部
 # (userland/system/inst_disk.c・inst_hdd.c) の判定、実物の cdinst.c と install.c を
@@ -392,7 +392,7 @@ check-hdd-stage1-host:
 # 508KiB 超を切り詰めない。--mutate は写しの上で変異するので並列で回せる。
 # 記録は tools/tests/hdd_stage2_tdd.md。
 check-hdd-stage2-host:
-	python3 -B tools/tests/test_hdd_stage2.py --target --mutate
+	python3 -B tools/tests/test_hdd_stage2.py --target $(MUT)
 
 # 8237 DMA 共通部の算数 (drivers/dma8237_math.c)。票 TASK_HAL_WIRING §1-2。
 # 見るのは 4 つ: 64KB バンクまたぎの判定、16MB の壁、TC 後の FFFFh を弾く
@@ -404,7 +404,7 @@ check-hdd-stage2-host:
 # --mutate は写しの上で変異するので並列 (check-par) で回せる。
 # 記録は tools/tests/dma8237_tdd.md。
 check-dma8237-host:
-	python3 -B tools/tests/test_dma8237.py --target --mutate
+	python3 -B tools/tests/test_dma8237.py --target $(MUT)
 
 # DMA プールの表 (kernel/dma_pool_math.c)。票 TASK_HAL_WIRING §1-3。
 # 池は 0x2E8000〜0x2F7FFF で **0x2F0000 の 64KB 境界を跨ぐ**ので、跨ぐ候補を
@@ -414,7 +414,7 @@ check-dma8237-host:
 # --mutate は写しの上で変異するので並列 (check-par) で回せる。
 # 記録は tools/tests/dma_pool_tdd.md。
 check-dma-pool-host:
-	python3 -B tools/tests/test_dma_pool.py --target --mutate
+	python3 -B tools/tests/test_dma_pool.py --target $(MUT)
 
 # CS4231 (MATE-X PCM) の再生ドライバ (drivers/pcm_cs4231_math.c + pcm_cs4231.c)。
 # 票 docs/tasks/v3/TASK_PCM_CS4231.md §2-3 / E1。
@@ -428,7 +428,7 @@ check-dma-pool-host:
 # --mutate は写しの上で変異するので並列 (check-par) で回せる。
 # 記録は tools/tests/pcm_cs4231_tdd.md。
 check-pcm-cs4231-host:
-	python3 -B tools/tests/test_pcm_cs4231.py --target --mutate
+	python3 -B tools/tests/test_pcm_cs4231.py --target $(MUT)
 
 # キーボード 8251 のステータス判定 (drivers/kbd_status.c)。実機 PC-9821Ra266 で
 # 本体キーボードの打鍵が一切届かなかった件 (docs/POLICY_DEBUG.md §4-57)。
@@ -443,7 +443,7 @@ check-pcm-cs4231-host:
 # --mutate は写しの上で変異するので並列 (check-par) で回せる。
 # 記録は tools/tests/kbd_status_tdd.md。
 check-kbd-status-host:
-	python3 -B tools/tests/test_kbd_status.py --target --mutate
+	python3 -B tools/tests/test_kbd_status.py --target $(MUT)
 
 # キーボードの受信記録 (drivers/kbd_dlog.c、KAPI v67 kbd_diag_log) と `kbdstat -w`
 # の行 (userland/shell/kbd_watch.c)。票 docs/tasks/gui/TASK_KBD_NAV.md §3 — 実機で
@@ -456,7 +456,7 @@ check-kbd-status-host:
 # --mutate は写しの上で変異するので並列 (check-par) で回せる。
 # 記録は tools/tests/kbd_dlog_tdd.md。
 check-kbd-dlog-host:
-	python3 -B tools/tests/test_kbd_dlog.py --target --mutate
+	python3 -B tools/tests/test_kbd_dlog.py --target $(MUT)
 
 # PCI の結線表 (drivers/pci_bind_match.c)。票 TASK_HAL_WIRING §1-4。
 # **NP21/W には PCI が無い**ので、この層はエミュレータでは 1 行も走らない。
@@ -467,7 +467,7 @@ check-kbd-dlog-host:
 # --mutate は写しの上で変異するので並列 (check-par) で回せる。
 # 記録は tools/tests/pci_bind_tdd.md。
 check-pci-bind-host:
-	python3 -B tools/tests/test_pci_bind.py --target --mutate
+	python3 -B tools/tests/test_pci_bind.py --target $(MUT)
 # 動的 IRQ の判断 (kernel/irq_math.c、票 TASK_HAL_WIRING §1-1)。
 # 見るのは **NP21/W でも実機でも狙って作れない**重なり: A と B が同時に要因を
 # 持つ (最初の HANDLED で打ち切らない)、1 巡目で受けて 2 巡目が空
@@ -478,7 +478,7 @@ check-pci-bind-host:
 # --target はカーネルと同じ i386-elf で kernel/irq.c ごと通す。
 # 記録は tools/tests/irq_math_tdd.md。
 check-irq-math-host:
-	python3 -B tools/tests/test_irq_math.py --target --mutate
+	python3 -B tools/tests/test_irq_math.py --target $(MUT)
 
 # µs 時計の判定と算数 (kernel/time_math.c、票 TASK_HAL_WIRING §1-5)。
 # 見るのは p1/p2 の判定表 3 分岐 (実 PIT では呼び出しから p1 読みまでに境界を
@@ -487,7 +487,7 @@ check-irq-math-host:
 # 戻る。起動から 71 分はエミュレータでも実機でも 1 度も回していない)。
 # --target は kernel/ktime.c ごと通す。記録は tools/tests/time_math_tdd.md。
 check-time-math-host:
-	python3 -B tools/tests/test_time_math.py --target --mutate
+	python3 -B tools/tests/test_time_math.py --target $(MUT)
 
 # ホスト道具 tools/rshell_serial.py の「応答の識別」。実機の rshell と
 # 話すときに **EOT の対応が 1 つずれる** 事故を止める (票 TASK_SERIAL_VFAST
@@ -500,7 +500,7 @@ check-time-math-host:
 # --mutate は写しの上で変異するので並列 (check-par) で回せる。
 # 記録は tools/tests/serial_vfast_tdd.md。
 check-rshell-serial-host:
-	python3 -B tools/tests/test_rshell_serial.py --mutate
+	python3 -B tools/tests/test_rshell_serial.py $(MUT)
 
 # シリアル越しの /host (票 TASK_SERIAL_HOSTFS 部品 B、受入 T1 と T5 のホスト部分)。
 # ゲスト側の実物 (fs/sfs_proto.c・fs/sfs_client.c・fs/serialfs.c、drivers/serial.c の
@@ -513,7 +513,7 @@ check-rshell-serial-host:
 # --target はカーネルと同じ i386-elf -Werror。--mutate は写しの上で変異 (組めない
 # 変異は ERROR、恒等の対照を C と Python に 1 本ずつ)。記録は tools/tests/serialfs_tdd.md。
 check-serialfs-host:
-	python3 -B tools/tests/test_serialfs.py --target --mutate
+	python3 -B tools/tests/test_serialfs.py --target $(MUT)
 
 # kprintf の属性変換 (lib/kprintf_attr.c)。呼び出し側の 70 か所以上が渡す
 # PC/AT (CGA) 流の 0x07 などを、PC-98 のテキスト属性 (bit0 = 表示 /
@@ -525,7 +525,7 @@ check-serialfs-host:
 # --target はカーネルと同じ i386-elf で lib/kprintf.c ごと通す。
 # 記録は tools/tests/kprintf_attr_tdd.md。
 check-kprintf-attr-host:
-	python3 -B tools/tests/test_kprintf_attr.py --target --mutate
+	python3 -B tools/tests/test_kprintf_attr.py --target $(MUT)
 
 # fs/vfs.c + fs/ext2_vfs.c の mount 経路。fd0 が hd0 に化けて同じ
 # パーティションを二重マウントする回帰 (2026-09-10) を止める。
@@ -549,7 +549,7 @@ check-con-sink-host:
 # 同じソースが i386-elf-gcc -Werror でも通ることを見る。記録は
 # tools/tests/bootlog_tdd.md。
 check-bootlog-host:
-	python3 -B tools/tests/test_bootlog.py --target --mutate
+	python3 -B tools/tests/test_bootlog.py --target $(MUT)
 
 # kernel/kbd_inject.c の 256B リング (票 K7)。実物のソースを kernel/con_sink.c と
 # 同じ翻訳単位で走らせ (注入の権限は con_sink の読み手 1 本)、同じソースが
@@ -605,7 +605,7 @@ check-sh-truncation-host:
 # `exit` の値を捨てる / `set -e` を拾わない 版などが RED になる)。
 # 記録は tools/tests/sh_status_tdd.md。
 check-sh-status-host:
-	python3 -B tools/tests/test_sh_status.py --mutate
+	python3 -B tools/tests/test_sh_status.py $(MUT)
 
 # 通常配備が /etc/settings.db* を作らない・上書きしない・消さない (票 S0-D / D0)。
 # temp dir + mock だけで走り、sudo / mount / 実配備は試験側が遮断する。記録は tools/tests/s0_tdd.md 節 D。
@@ -629,7 +629,7 @@ check-hsync-h1-host:
 # --mutate は否定側 (日時が不明なのに省略する版などで落ちることの確認)。
 # 記録は tools/tests/h3_tdd.md。
 check-hsync-h3-host:
-	python3 -B tools/tests/test_hsync_h3.py --target --mutate
+	python3 -B tools/tests/test_hsync_h3.py --target $(MUT)
 
 # 排他的作成 O_EXCL (票 H2 §2-1、KAPI v53)。実物の fs/vfs.c + fs/vfs_fd.c を
 # #include し、create_excl を**持つ / 持たない**合成 VfsOps で、既存 (ファイル /
@@ -639,7 +639,7 @@ check-hsync-h3-host:
 # --mutate は否定側 (読めなかったを無いと読む版 / 非対応の判定を後ろへ動かした版)。
 # 記録は tools/tests/vfs_excl_tdd.md。
 check-vfs-excl-host:
-	python3 -B tools/tests/test_vfs_excl.py --target --mutate
+	python3 -B tools/tests/test_vfs_excl.py --target $(MUT)
 
 # 配備マニフェストと世代の確認 (票 H4、docs/tasks/shell/TASK_H4.md §2-1〜§2-3)。
 # **読む側**は H1 / H2 / H3 と同じく実物の userland/system/hsync.c を #include し、
@@ -656,8 +656,8 @@ check-vfs-excl-host:
 # --mutate は否定側 (壊れた名札を一致と扱う版 / 名札の CRC で比較を省く版など)。
 # 記録は tools/tests/h4_manifest_tdd.md。
 check-h4-manifest-host:
-	python3 -B tools/tests/test_h4_manifest.py --target --mutate
-	python3 -B tools/tests/test_hostdrv_manifest.py --mutate
+	python3 -B tools/tests/test_h4_manifest.py --target $(MUT)
+	python3 -B tools/tests/test_hostdrv_manifest.py $(MUT)
 
 # KAPI データ欄の固定配置と OS32X ヘッダ v3 (票 docs/tasks/memory/TASK_KAPI_DATA_FIELDS.md)。
 # exec / shlib ローダ / 常駐シェルの判定関数 (exec/os32x_hdr.c を
@@ -667,7 +667,7 @@ check-h4-manifest-host:
 # リンクで落ちること。--mutate は判定・拒否を崩した版で落ちることを見る
 # (ソースを書き換えるので check-mut)。i386-elf の道具を使う。
 check-kapi-layout-host:
-	python3 -B tools/tests/test_kapi_layout.py --mutate
+	python3 -B tools/tests/test_kapi_layout.py $(MUT)
 
 # hsync の置換安全化 (票 H2、docs/tasks/shell/TASK_H2.md §2-3 / §2-4)。H1 / H3 と
 # 同じく実物の userland/system/hsync.c を #include し、贋 FS に O_EXCL /
@@ -677,7 +677,7 @@ check-kapi-layout-host:
 # 保護が予約より優先されること、KAPI v53 未満を既定で断ることを見る。
 # 記録は tools/tests/hsync_h2_tdd.md。
 check-hsync-h2-host:
-	python3 -B tools/tests/test_hsync_h2.py --target --mutate
+	python3 -B tools/tests/test_hsync_h2.py --target $(MUT)
 
 # hdrv_list_dir の列挙ループ (票 H1 の「I/O 失敗を成功にしない」/ 対象
 # 「HostDrv のエラー処理」)。実物の fs/hostdrv_list_rules.inc を #include し、
@@ -701,7 +701,7 @@ check-fs-kind-host:
 # 既に在るディレクトリへの上書きコピーだけは通す)。--mutate は否定側。
 # 記録は tools/tests/fs_kind_callers_tdd.md。
 check-fs-kind-callers-host:
-	python3 -B tools/tests/test_fs_kind_callers.py --target --mutate
+	python3 -B tools/tests/test_fs_kind_callers.py --target $(MUT)
 
 # `cat -n` の行番号は行の先頭でだけ出る。実物の cmd_fs_shared.c + cmd_file.c を
 # #include し、sys_write(1, ...) に出た全バイトを試験側の素朴な参照実装と 1 バイト
@@ -712,7 +712,7 @@ check-fs-kind-callers-host:
 # --mutate は否定側で、(a) (b) と §6 の 3 つを壊した版が RED になることを見る。
 # 記録は tools/tests/cat_linenum_tdd.md。
 check-cat-linenum-host:
-	python3 -B tools/tests/test_cat_linenum.py --target --mutate
+	python3 -B tools/tests/test_cat_linenum.py --target $(MUT)
 
 # vfs_path_kind のプローブ (票 H1 / 往復 3 の B6)。実物の fs/vfs.c を #include し、
 # 「読めなかったディレクトリ」が get_file_size 経由でファイルに化けないことを見る。
@@ -729,7 +729,7 @@ check-vfs-kind-host:
 # パイプを S_IFCHR と答える版 / 実体ではなく作り話を返す版)。
 # 記録は tools/tests/fstat_redir_tdd.md。
 check-fstat-redir-host:
-	python3 -B tools/tests/test_fstat_redir.py --target --mutate
+	python3 -B tools/tests/test_fstat_redir.py --target $(MUT)
 
 # 読み取り失敗を「不存在」にしない (票 B8)。実物の ext2 を RAM ディスクへ載せ、
 # **間接ブロックを使う大きなディレクトリ**の読み出しを一度だけ落として、
@@ -750,7 +750,7 @@ check-b8-open-host:
 # --mutants は fs/ の**写し**を変異させるので実物は書き換えない (並列段に置ける)。
 # 記録は tools/tests/ext2_empty_name_tdd.md。
 check-ext2-empty-name-host:
-	python3 -B tools/tests/test_ext2_empty_name.py --target --mutants
+	python3 -B tools/tests/test_ext2_empty_name.py --target $(MUTS)
 
 # 票 TASK_VFS_FD_PATH: FD は open 時の inode で読み書きし、unlink・置き換え
 # rename・umount で失効する (欠陥 1: 開いた FD の書き込みが同じ名前に作り直した
@@ -761,7 +761,7 @@ check-ext2-empty-name-host:
 # 変異させるので実物は書き換えない (並列段に置ける)。
 # 記録は tools/tests/vfs_fd_path_tdd.md。
 check-vfs-fd-path-host:
-	python3 -B tools/tests/test_vfs_fd_path.py --target --mutants
+	python3 -B tools/tests/test_vfs_fd_path.py --target $(MUTS)
 
 # KAPI v50 (db_open_existing / prepare_only / bind_* / error_code、票 S0-K)。実 SQLite + 実 VFS + RAM backend。
 check-db-v50-host:
@@ -800,7 +800,7 @@ check-host-agent:
 # --mutate は写しの上で変異させるので並列 (check-par) で回せる。
 # 記録は tools/tests/lan_bridge_tdd.md。
 check-lan-bridge-host:
-	python3 -B tools/tests/test_lan_bridge.py --mutate
+	python3 -B tools/tests/test_lan_bridge.py $(MUT)
 
 # net/link.c (ワイヤ v2) + kapi/kapi_host.c (KAPI v51) のホスト TDD (票 N1 段 4)。
 # 実物のソースを #include し、NIC / cli-sti / 100Hz タイマ / ディスパッチャだけを
@@ -831,7 +831,7 @@ check-host-lib-host:
 # --mutate は否定側 (どれもコンパイルは通る変異)。
 # 記録は tools/tests/result_conv_tdd.md。
 check-result-conv-host:
-	python3 -B tools/tests/test_result_conv.py --target --mutate
+	python3 -B tools/tests/test_result_conv.py --target $(MUT)
 
 # ゲストで一括実行してホストで集計するランナー (票 docs/tasks/test/
 # TASK_TEST_RUNNER.md)。**2 つのターゲットは別物なので混ぜないこと。**
@@ -854,7 +854,7 @@ check-result-conv-host:
 #                     `make check` はホストだけで完結する約束だから (票 §4)。
 #                     走らせる一覧は tools/tests/guest_tests.txt。
 check-guest-host:
-	python3 -B tools/tests/test_guest_tests.py --mutate
+	python3 -B tools/tests/test_guest_tests.py $(MUT)
 
 check-guest:
 	python3 tools/guest_tests.py
@@ -866,7 +866,7 @@ check-guest:
 # --mutate は否定側 (kstrcmp を符号付きにすると日本語ファイル名の並び順が
 # アセンブリ版と食い違って落ちる、など)。記録は tools/tests/kstring_c_host.c。
 check-kstring-c-host:
-	python3 -B tools/tests/test_kstring_c.py --mutate
+	python3 -B tools/tests/test_kstring_c.py $(MUT)
 
 # kstring の実測プログラム kstr_bench の**計測の枠組み** (票
 # docs/tasks/portability/TASK_KSTRING_BENCH.md)。実物の
@@ -880,7 +880,7 @@ check-kstring-c-host:
 # --mutate は否定側 (倍にしない版 / 欄を入れ替えた版 / 飛ばさない版 など)。
 # 記録は tools/tests/kstr_bench_tdd.md。
 check-kstr-bench-host:
-	python3 -B tools/tests/test_kstr_bench.py --target --mutate
+	python3 -B tools/tests/test_kstr_bench.py --target $(MUT)
 
 # ARM コンパイル計測 (移植性準備の順序 1)。カーネル側の C ソースを 1 本ずつ
 # arm-none-eabi-gcc に通し、通った本数と失敗の分類を出す。
@@ -930,29 +930,69 @@ check-tests-inventory:
 check-packages-host:
 	python3 -B tools/tests/test_packages.py
 
-# check は**必ず逐次**で回す (2026-09-17)。変異試験は実物のソースを書き換えて
-# 戻す作りなので、同時に走ると互いのファイルを壊し合う。しかも壊れ方が
-# 再現しない (docs/POLICY_DEBUG.md §4-40)。Makefile が既定で -j を足すので、
-# ここで -j1 を明示して打ち消す。並列化するには各試験が写しの上で変異する
-# 作りに変える必要があり、それは別作業。
 # check は 2 段。**遅さの正体は逐次ではなく、変異試験が同じソースを奪い合う
 # ことだった** (2026-09-17)。変異試験は実物のソースを書き換えて戻す作りなので、
 # 同時に走ると互いのファイルを壊し合い、しかも壊れ方が再現しない
 # (docs/POLICY_DEBUG.md §4-40)。
 #
-#   1 段目 check-par  書き換えない 48 本 → **並列**
-#   2 段目 check-mut  --mutate を渡す 10 本 → **逐次 (-j1)**
+#   1 段目 check-par  写しの上で変異する / 書き換えない試験 → **並列**
+#   2 段目 check-mut  実物のソースを書き換える変異試験     → **逐次 (-j1)**
 #
 # 各段の後で tools/check_tree_unchanged.py が「試験がソースを書き換えたまま
 # 戻していないか」を見る。1 段目で引っかかれば、その試験を 2 段目へ移すこと。
-# 全部を並列にするには各試験が写しの上で変異する作りに変える必要がある。
+#
+# 検査は 3 通りの回し方がある (2026-09-26、docs/08_build.md §8-4)。列と recipe は
+# 共通で、違うのは**変異 (否定側) を回すかどうか**だけ:
+#
+#   make check-fast     全部の検査を変異なしで並列に。作業中に何度でも
+#   make check-changed  変更したファイルに関係する検査だけ変異込み、残りは
+#                       変異なし (BASE=<ref>、既定は feat/gui との merge-base)。
+#                       対応表は tools/check_map.yaml、選び方は tools/check_select.py
+#   make check          全部を変異込み。取り込みの前に 1 回
+#
+# 変異の有無は MUTATE で切り替える。recipe は --mutate / --mutants の代わりに
+# $(MUT) / $(MUTS) と書く。MUTATE=1 で全部、MUTATE=0 で無し、MUTATE=sel なら
+# MUTATE_TARGETS に名前のある検査だけ ($@ で引く)。
+MUTATE ?= 1
+MUTATE_TARGETS ?=
+mut_on = $(or $(filter 1,$(MUTATE)),$(filter $@,$(MUTATE_TARGETS)))
+MUT = $(if $(mut_on),--mutate)
+MUTS = $(if $(mut_on),--mutants)
+
 check:
 	@python3 tools/check_tree_unchanged.py --save par
-	@$(MAKE) check-par
+	@$(MAKE) check-par MUTATE=1
 	@python3 tools/check_tree_unchanged.py --verify par
 	@python3 tools/check_tree_unchanged.py --save mut
-	@$(MAKE) -j1 check-mut
+	@$(MAKE) -j1 check-mut MUTATE=1
 	@python3 tools/check_tree_unchanged.py --verify mut
+
+# 変異なしなら check-mut の試験もソースを書き換えないので、全部を 1 段で並べる。
+check-fast:
+	@python3 tools/check_tree_unchanged.py --save fast
+	@$(MAKE) $(CHECK_PAR_TARGETS) $(CHECK_MUT_TARGETS) MUTATE=0
+	@python3 tools/check_tree_unchanged.py --verify fast
+
+# 1 段目: 並列 (選ばれた check-par の検査だけ変異込み)、
+# 2 段目: 選ばれた check-mut の検査を変異込みで逐次。
+# FILES="<パス>..." を渡すと git を見ずにその一覧を変更とみなす (選び方の試し。
+# `FILES=` と空で渡せば「変更なし」)。
+BASE ?=
+check-changed:
+	@mkdir -p $(BUILD_OUT)
+	@python3 tools/check_select.py --select --base "$(BASE)" \
+	  $(if $(filter command line,$(origin FILES)),--files $(FILES)) > $(BUILD_OUT)/check_changed.sh
+	@. $(BUILD_OUT)/check_changed.sh; \
+	  python3 tools/check_tree_unchanged.py --save chg1 && \
+	  { [ -z "$$CC_STAGE1" ] || $(MAKE) $$CC_STAGE1 MUTATE=sel MUTATE_TARGETS="$$CC_MUT1"; } && \
+	  python3 tools/check_tree_unchanged.py --verify chg1 && \
+	  python3 tools/check_tree_unchanged.py --save chg2 && \
+	  { [ -z "$$CC_STAGE2" ] || $(MAKE) -j1 $$CC_STAGE2 MUTATE=1; } && \
+	  python3 tools/check_tree_unchanged.py --verify chg2
+
+# 対応表 tools/check_map.yaml の検査 (列との過不足・古い glob・入力の漏れ)。
+check-map:
+	@python3 tools/check_select.py --lint
 
 # キー注入 (票 docs/tasks/tools/TASK_KEY_INJECT.md)。**np21w-src の
 # aidebug_keys.cpp を実物のまま g++ にリンクして**変換表を照合する
@@ -962,9 +1002,40 @@ check:
 check-key-inject-host:
 	python3 -B tools/tests/test_key_inject.py
 
-check-par: check-bootinfo-host check-hdd-stage1-host check-hdd-stage2-host check-vmkernel-lz4-host check-vk32-crc-host check-build-id-host check-kbd-status-host check-kbd-dlog-host check-pcm-cs4231-host check-kprintf-attr-host check-key-inject-host check-kapi-version check-kapi-out check-docs-links check-docs-orphans check-tests-inventory check-manifests check-packages-host check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-np21w-ctl-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-serial-portc-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-serialfs-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-bootlog-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-lan-bridge-host check-pci-decode-host check-irq-math-host check-time-math-host check-fdc-track-host check-cd-read-host
+CHECK_PAR_TARGETS := check-bootinfo-host check-hdd-stage1-host \
+    check-hdd-stage2-host check-vmkernel-lz4-host check-vk32-crc-host \
+    check-build-id-host check-kbd-status-host check-kbd-dlog-host \
+    check-pcm-cs4231-host check-kprintf-attr-host check-key-inject-host \
+    check-kapi-version check-kapi-out check-docs-links check-docs-orphans \
+    check-tests-inventory check-manifests check-packages-host \
+    check-constraints check-privileged check-arch-asm check-le-access \
+    check-ne2000-ring check-shlib check-gui-proto check-term-model \
+    check-term-render check-t5a-host check-memory-host check-memmap-host \
+    check-memmap check-boot-splash-host check-tools-host check-np21w-ctl-host \
+    check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host \
+    check-fdc-seek-host check-serial-vfast-host check-serial-portc-host \
+    check-cpu-calibrate-host check-pit-clock-host check-dma8237-host \
+    check-dma-pool-host check-pci-bind-host check-rshell-serial-host \
+    check-serialfs-host check-vfs-mount-dev-host check-sqlite-groups-host \
+    check-con-sink-host check-bootlog-host check-kbd-inject-host \
+    check-launch-host check-ring3-str-host check-sh-launch-host \
+    check-sh-shell-host check-sh-truncation-host check-multiapp-model-host \
+    check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host \
+    check-fs-kind-host check-vfs-kind-host check-b8-open-host \
+    check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host \
+    check-db-errstr-host check-cfg-host check-gui-host \
+    check-install-recover-host check-install-fresh-host check-host-agent \
+    check-net-link-host check-host-lib-host check-lan-bridge-host \
+    check-pci-decode-host check-irq-math-host check-time-math-host \
+    check-fdc-track-host check-cd-read-host check-map
+check-par: $(CHECK_PAR_TARGETS)
 
-check-mut: check-kapi-layout-host check-edit-doc-host check-fstat-redir-host check-kstring-c-host check-kstr-bench-host check-sh-status-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host check-cat-linenum-host check-result-conv-host check-guest-host
+CHECK_MUT_TARGETS := check-kapi-layout-host check-edit-doc-host \
+    check-fstat-redir-host check-kstring-c-host check-kstr-bench-host \
+    check-sh-status-host check-hsync-h3-host check-hsync-h2-host \
+    check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host \
+    check-cat-linenum-host check-result-conv-host check-guest-host
+check-mut: $(CHECK_MUT_TARGETS)
 
 # エディタ GUI 版の本文と libos32gui の桁・折り返し (票 TASK_EDIT_GUI 受入 E8 / E10)。
 # 実物の userland/rust/edit_gui/src/doc.rs と
@@ -977,9 +1048,9 @@ check-mut: check-kapi-layout-host check-edit-doc-host check-fstat-redir-host che
 # (受入 E10。textbox が下請けを通っていること自体は静的に突き合わせる)。
 # --mutate は否定側。記録は tools/tests/edit_gui_tdd.md。
 check-edit-doc-host:
-	python3 -B tools/tests/test_edit_doc.py --mutate
+	python3 -B tools/tests/test_edit_doc.py $(MUT)
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: check-packages-host check-kapi-layout-host check-bootinfo-host check-hdd-stage1-host check-hdd-stage2-host check-vmkernel-lz4-host check-vk32-crc-host check-build-id-host check-kbd-status-host check-kbd-dlog-host check-pcm-cs4231-host check-kapi-out check-dma8237-host check-dma-pool-host check-pci-bind-host check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-np21w-ctl-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-serial-portc-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-serialfs-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-bootlog-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host check-irq-math-host check-time-math-host check-fdc-track-host check-cd-read-host
+.PHONY: check-fast check-changed check-map check-par check-mut check-packages-host check-kapi-layout-host check-bootinfo-host check-hdd-stage1-host check-hdd-stage2-host check-vmkernel-lz4-host check-vk32-crc-host check-build-id-host check-kbd-status-host check-kbd-dlog-host check-pcm-cs4231-host check-kapi-out check-dma8237-host check-dma-pool-host check-pci-bind-host check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-np21w-ctl-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-serial-portc-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-serialfs-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-bootlog-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host check-irq-math-host check-time-math-host check-fdc-track-host check-cd-read-host

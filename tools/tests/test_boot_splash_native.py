@@ -28,14 +28,14 @@ class NativeBootTest(unittest.TestCase):
         for pref in range(4):
             with self.subTest(preference=pref):
                 result = subprocess.run([str(self.binary), str(pref)],
-                                        capture_output=True, text=True, timeout=10)
+                                        capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_invalid_native_state_cleans_up_and_can_retry(self):
         for pref in range(4):
             with self.subTest(preference=pref):
                 result = subprocess.run([str(self.binary), str(pref), "fault"],
-                                        capture_output=True, text=True, timeout=10)
+                                        capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

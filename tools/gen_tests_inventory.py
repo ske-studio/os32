@@ -128,6 +128,10 @@ def parse_makefiles():
                     while cmd.rstrip().endswith("\\") and i + 1 < len(lines):
                         i += 1
                         cmd = cmd.rstrip()[:-1] + " " + lines[i].strip()
+                    # 変異の有無は $(MUT) / $(MUTS) で切り替える (build/sdk.mk)。
+                    # 表には `make check` (MUTATE=1) で回る形を出す。
+                    cmd = cmd.replace("$(MUTS)", "--mutants").replace(
+                        "$(MUT)", "--mutate")
                     recipe.append(cmd)
                 i += 1
             if target in rules and not recipe:
@@ -140,6 +144,19 @@ def parse_makefiles():
                 "comment": "\n".join(comment).strip(),
             }
     return rules
+
+
+def parse_variables():
+    """build/*.mk の `NAME := …` (行継続込み) を {NAME: [語…]} で返す。"""
+    out = {}
+    for mk in MK_FILES:
+        text = read(mk)
+        if text is None:
+            continue
+        text = re.sub(r"\\\n", " ", text)
+        for m in re.finditer(r"^([A-Z_][A-Z0-9_]*)\s*:?=\s*(.*)$", text, re.M):
+            out[m.group(1)] = m.group(2).split()
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -513,16 +530,26 @@ RULE_TEXT = """## 1. 名前の対応規則
 
 ## 2. `make check` の列 ({n} ターゲット)
 
-`build/sdk.mk` の `check:` の 1 行が正典。この表はその列をそのまま展開したもの。
+`build/sdk.mk` の `CHECK_PAR_TARGETS` / `CHECK_MUT_TARGETS` (`check-par` / `check-mut` の依存) が
+正典。この表はその列をそのまま展開したもの。コマンド列は `make check` (変異込み) の形。
 """
 
 
 def render(manual):
     rules = parse_makefiles()
-    check = rules.get("check")
-    names = list(check["deps"]) if check else []
-    all_check_targets = sorted(t for t in rules
-                               if t.startswith("check-") and rules[t]["recipe"])
+    # `make check` が回すのは check-par と check-mut の依存 (2026-09-17 に 2 段、
+    # 2026-09-26 から列は変数 CHECK_PAR_TARGETS / CHECK_MUT_TARGETS)。
+    variables = parse_variables()
+    names = []
+    for stage in ("check-par", "check-mut"):
+        for dep in (rules.get(stage) or {}).get("deps", []):
+            m = re.match(r"^\$\((\w+)\)$", dep)
+            names += variables.get(m.group(1), []) if m else [dep]
+    # check-fast / check-changed は列を回す側 (recipe が $(MAKE)) なので数えない。
+    all_check_targets = sorted(
+        t for t in rules
+        if t.startswith("check-") and rules[t]["recipe"]
+        and not any("$(MAKE)" in c for c in rules[t]["recipe"]))
     outside = [t for t in all_check_targets if t not in names]
 
     ci = ci_targets(rules, names + outside)

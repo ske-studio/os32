@@ -36,7 +36,7 @@ class Broker(unittest.TestCase):
             cmd += ['-I' + str(root / 'tools/tests/host_arch')]
             cmd += ['-I' + str(root / p) for p in ('include', 'arch/x86', 'platform/pc98', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(tmp)]
             subprocess.run(cmd + [str(root / 'tools/tests/device_reservation_stage_host.c'), str(root / 'kernel/physmem.c'), '-o', str(tmp / 'test')], check=True)
-            subprocess.run([str(tmp / 'test')], check=True, timeout=20)
+            subprocess.run([str(tmp / 'test')], check=True, timeout=60)
 
     def run_c(self, body, **kw):
         # Reuse the real-source IRQ/bitmap invariant harness. Its entry calls

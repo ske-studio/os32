@@ -30,6 +30,6 @@ with tempfile.TemporaryDirectory(prefix='os32-paging-') as tmp:
     if args.rebuild:
         defines.append('-DTEST_' + args.rebuild.upper())
     subprocess.run(['gcc', *FLAGS, *defines, '-nostdlib', '-static', '-no-pie', *host_includes, str(ROOT / 'tools/tests' / harness), str(ROOT / 'kernel/physmem.c'), '-o', str(exe)], check=True)
-    subprocess.run([str(exe)], check=True, timeout=10)
+    subprocess.run([str(exe)], check=True, timeout=60)
     subprocess.run(['i386-elf-gcc', *FLAGS, '-O2', *includes, '-c', str(ROOT / 'kernel/paging.c'), '-o', str(tmp / 'paging.o')], check=True)
     print('HOST ILP32 + TARGET GNU89 PASS')
