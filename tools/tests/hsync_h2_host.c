@@ -1953,6 +1953,88 @@ static void case_root(void)
               "名札の写しは /hd0/.deploy へ (FD には置かない)");
     }
 
+    /* ---- 根の書き方の揺れ: 末尾の / と // と . は正規化して /hd0 と同じ ---- */
+    {
+        static const char *const roots[2] = { "/hd0/", "//hd0/./" };
+        int k;
+        char m[160];
+        for (k = 0; k < 2; k++) {
+            const char *a[] = { "--root", 0, "bin", 0 };
+            a[1] = roots[k];
+            setup_root_fd();
+            sprintf(m, "--root %s bin: /hd0 と同じ (/host/bin -> /hd0/bin、FD は無変更)", roots[k]);
+            check(run_args(a) == 0 && log_has("hsync: /host/bin -> /hd0/bin") &&
+                  node_equal_bytes("/hd0/bin/a.bin", g_root_src, 3000) &&
+                  dst_unchanged() && node_of("/hd0//bin") < 0, m);
+        }
+    }
+
+    /* ---- 同期する dir が根の外へ出る (--root /hd0 ../x) は断る ---- */
+    setup_root_fd();
+    {
+        const char *a[] = { "--root", "/hd0", "../x", 0 };
+        root_refused(a, 0, "--root /hd0 ../x (根の外)");
+    }
+
+    /* ---- 根の stat が落ちる (I/O 失敗) は root_stat_failed + err (ext2 でない、ではない) ---- */
+    setup_root_fd();
+    {
+        const char *a[] = { "--root", "/hd0", 0 };
+        char m[64];
+        fs_nodes[node_of("/hd0")].stat_err = OS32_ERR_IO;
+        root_refused(a, "root_stat_failed", "--root /hd0 (根の stat が I/O 失敗)");
+        sprintf(m, "root_stat_failed err=%d", OS32_ERR_IO);
+        check(log_has(m) && !log_has("root_not_ext2"),
+              "根の stat の失敗は err を出し、root_not_ext2 と言わない");
+        fs_nodes[node_of("/hd0")].stat_err = 0;
+    }
+
+    /* ---- --root /hd0 sys: 案内は「HDD から起動し直す」 ---- */
+    setup_root_fd();
+    {
+        const char *a[] = { "--root", "/hd0", "sys", 0 };
+        u8 *b = make_blob(70, 9);
+        fs_add_dir("/host/sys");
+        fs_add_file("/host/sys/x.shlib", b, 70);
+        fs_add_dir("/hd0/sys");
+        free(b);
+        check(run_args(a) == 0 && node_of("/hd0/sys/x.shlib") >= 0 && node_of("/sys") < 0,
+              "--root /hd0 sys: /hd0/sys に書く (FD の /sys には書かない)");
+        check(log_has("NOTE: /hd0/sys を更新した -> HDD (/hd0) から起動し直す") &&
+              !log_has("シェル再起動が必要"),
+              "--root /hd0 sys: 案内は「HDD から起動し直す」(シェル再起動ではない)");
+    }
+
+    /* ---- --root / は既定と同じ (HDD 起動、ルートが ext2) ---- */
+    {
+        const char *a0[] = { 0 };
+        const char *a1[] = { "--root", "/", 0 };
+        u8 *after0;
+        int n, same;
+        setup_pair(3000, 1, 111, 3000, 2, 222);
+        fk_root_dev = "hd0";
+        fk_sub_prefix = 0;
+        n = fs_add_dir("/");
+        fs_nodes[n].ino = 2;
+        check(run_args(a0) == 0, "既定 (HDD 起動): 成功");
+        after0 = (u8 *)malloc(3000);
+        memcpy(after0, fs_nodes[node_of(DST_PATH)].data, 3000);
+        setup_pair(3000, 1, 111, 3000, 2, 222);
+        n = fs_add_dir("/");
+        fs_nodes[n].ino = 2;
+        check(run_args(a1) == 0 && log_has("hsync: /host -> /"),
+              "--root / (HDD 起動): 成功、見出しは /host -> /");
+        same = node_equal_bytes(DST_PATH, after0, 3000) && node_mtime(DST_PATH) == 111;
+        check(same && !log_has("HDD ("), "--root /: 既定と同じ結果 (/bin/a.bin を更新、根付きの案内は無い)");
+        free(after0);
+    }
+    /* FD 起動の --root / は既定と同じく dest_on_fd */
+    setup_root_fd();
+    {
+        const char *a[] = { "--root", "/", 0 };
+        root_refused(a, "dest_on_fd", "FD 起動の --root / (既定と同じ = FD)");
+    }
+
     /* ---- 断る門: 1 件も書かない ---- */
     setup_root_fd();
     {
@@ -2039,7 +2121,9 @@ static void case_root(void)
               node_of("/boot/vmkernel.old") < 0 && node_of("/boot") < 0,
               "--root /hd0 boot: .old は /hd0/boot に作る (FD には作らない)");
         check(node_size("/hd0/boot/vmkernel.lz4") == 240, "--root /hd0 boot: 新版に置き換わった");
-        check(log_has("NOTE: /boot を更新した"), "--root /hd0 boot: /boot の再起動の案内を出す");
+        check(log_has("NOTE: /hd0/boot を更新した -> HDD (/hd0) から起動し直す") &&
+              !log_has("再起動が必要"),
+              "--root /hd0 boot: 案内は「HDD から起動し直す」(いまの媒体のリセットではない)");
 
         /* FD 起動の実際: 起動記録は FD の版 = /hd0 の版と一致しない → 断る */
         fs_drop(node_of("/hd0/boot/vmkernel.lz4"));
@@ -2049,6 +2133,16 @@ static void case_root(void)
         check(run_args(a) != 0 && log_has("reason=not_booted_image") &&
               log_has("--root /hd0") && node_size("/hd0/boot/vmkernel.lz4") == 200,
               "--root /hd0 boot (FD の起動記録): not_booted_image で置き換えない");
+        {
+            /* -n でも同じ門: 起動記録が FD の版なら not_booted_image (--no-backup 無し) */
+            const char *an[] = { "-n", "--root", "/hd0", "boot", 0 };
+            fk_mkdir_calls = 0;
+            check(run_args(an) != 0 && log_has("reason=not_booted_image") &&
+                  node_size("/hd0/boot/vmkernel.lz4") == 200 &&
+                  node_of("/hd0/boot/vmkernel.old") < 0 && fk_mkdir_calls == 0 &&
+                  fk_write_calls == 0 && fk_rename_calls == 0,
+                  "-n --root /hd0 boot (FD の起動記録、--no-backup 無し): not_booted_image で断る");
+        }
         check(run_args(anb) == 0 && node_size("/hd0/boot/vmkernel.lz4") == 240 &&
               node_of("/hd0/boot/vmkernel.old") < 0,
               "--no-backup --root /hd0 boot: .old を作らずに置き換える");

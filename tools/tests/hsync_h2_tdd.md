@@ -313,3 +313,12 @@ FD の新しいカーネルで起動し、SerialFS 越しの /host から /hd0 (
 `root_note_by_full_path` `root_subdir_not_prefixed`) がすべて RED。既存 20 本も RED のまま。
 `check_manifest` に「HS_EXT2_ROOT_INO が fs/ext2.h の EXT2_ROOT_INO と同じ」と man ページの
 `--root` / `root_*` の記載を足した。
+
+着地後の P3 (2026-09-26、代行レビュー): 根の stat が落ちたら `root_stat_failed err=` (I/O 失敗を
+`root_not_ext2` と言わない)、`--root` で /sys・/boot を更新したときの案内は「HDD (`<根>`) から起動し直す」、
+`FAIL <根>/boot/vmkernel.old` (name_too_long の表示を根付きに)。case_root に `/hd0/` と `//hd0/./`
+(正規化して /hd0 と同じ)、`--root /hd0 ../x` の拒否、`--root /hd0 sys` の案内、HDD 起動の `--root /` =
+既定と同じ結果、FD 起動の `--root /` = `dest_on_fd`、`-n --root /hd0 boot` + FD の起動記録 = `not_booted_image`
+を足した。変異 5 本 (`root_stat_fail_as_ext2` `root_sys_note_shell` `root_boot_note_reset`
+`root_not_normalized` `old_gate_skipped_on_dry_run`) が RED、`root_ext2_unchecked` は新しい形に合わせて
+直した (全 35 本 RED)。

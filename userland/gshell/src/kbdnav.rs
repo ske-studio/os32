@@ -343,6 +343,13 @@ pub fn kmove_busy(st: &GuiState) -> bool {
     kmove_active(st)
 }
 
+/// ドラッグ中の窓が消えた (`wm::drop_drag_frame`): キーボードの移動・サイズの
+/// 状態を捨てる。枠は呼び手が消す。
+#[inline]
+pub fn drop_kmove(st: &mut GuiState) {
+    st.kn.kmode = KM_NONE;
+}
+
 /* ================================================================ */
 /*  X4 の判定 (票 §1-4)                                              */
 /* ================================================================ */
@@ -444,7 +451,8 @@ pub fn on_key(st: &mut GuiState, scan: u8, down: bool, mods: u32) -> bool {
         return false;
     }
     if st.kn.kmode != KM_NONE && !kmove_active(st) {
-        st.kn.kmode = KM_NONE; /* 窓が消えた (枠は wm::drop_drag_frame が消した) */
+        /* 念のため (窓が消えたときは wm::drop_drag_frame が drop_kmove で戻す) */
+        st.kn.kmode = KM_NONE;
     }
     let c = make(st, scan, mods);
     if c {
@@ -458,6 +466,13 @@ fn make(st: &mut GuiState, scan: u8, mods: u32) -> bool {
     if kmove_active(st) {
         kmove_key(st, scan, mods);
         return true;
+    }
+    /* 切り替え中にモーダルが開いた: GRPH↑ では切り替えない (finish_switch) ので、
+     * 以後の TAB で選択を進めず (タスクバーの押し込みを動かさず) ここで取り消す。
+     * TAB 自体は下の run_shortcut がモーダル中の「無視」として消費する
+     * (代行レビュー P3-B) */
+    if st.kn.sw_active && modal::is_open() {
+        cancel_switch(st);
     }
     if st.kn.sw_active {
         if scan == SC_TAB {

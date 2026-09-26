@@ -48,7 +48,8 @@ READ_CASES = ["stream_4k", "stream_odd", "stream_32k", "read_file", "multi_fallb
               "np2_slave_strict", "cap_len", "np2_sel_lag", "np2_absent", "np2_sel_busy",
               "np2_stuck", "np2_ua_init", "np2_becoming_ready", "np2_no_medium",
               "np2_ready_total", "np2_srst", "ua_multi",
-              "np2_spinup", "np2_srst_long", "np2_boot_worst", "np2_start_unit"]
+              "np2_spinup", "np2_srst_long", "np2_boot_worst", "np2_start_unit",
+              "np2_bus_dead"]
 # N = 32 の版で回すもの (1 回 64KB)
 WIDE_CASES = ["stream_4k", "stream_32k", "read_file", "multi_drq", "multi_fallback",
               "np2_read", "np2_async", "np2_sel_lag", "np2_stuck"]
@@ -434,7 +435,7 @@ MUTATIONS = [
      "",
      "SRST を解いた直後に 2ms 置かずステータスを読む (レビュー 2 の P3)"),
     ("drivers/atapi.c",
-     r"    if \(atapi_status\(\) == ATAPI_ST_FLOAT\) return ATAPI_OK;\n    if \(atapi_wait_clear\(IDE_ST_BSY, ATAPI_SRST_TIMEOUT_US\) != ATAPI_OK\) \{\n.*\n.*\n    \}\n",
+     r"    if \(atapi_status\(\) == ATAPI_ST_FLOAT\) return ATAPI_OK;\n    if \(atapi_wait_clear\(IDE_ST_BSY, ATAPI_SRST_TIMEOUT_US\) != ATAPI_OK\) \{\n(?:.*\n)*?    \}\n",
      "",
      "SRST の後にマスターの BSY=0 を待たずに DRV_HEAD を書く (レビュー 2 の P3)"),
     ("drivers/atapi.c",
@@ -490,6 +491,31 @@ MUTATIONS = [
      r"    if \(ret == ATAPI_ERR_NO_MEDIA\) atapi_note\(\"NOT READY, gave up\", 1, last_asc, last_ascq\);\n",
      "    (void)last_asc; (void)last_ascq;\n",
      "準備中のまま諦めたときに ASC/ASCQ の行を出さない"),
+    # --- 着地後の P3: バスが死んだ印 (SRST の 31 秒切れの後は即失敗)
+    ("drivers/atapi.c",
+     r"        s_bus_dead = 1;\n",
+     "",
+     "SRST が 31 秒で切れても印を立てない (読みのたびに約 61 秒待つ)"),
+    ("drivers/atapi.c",
+     r"    if \(atapi_bus_dead_fail\(\)\) return ATAPI_ERR_TIMEOUT;\n\n    atapi_select_bank\(1\);\n\n    /\* 連続",
+     "\n    atapi_select_bank(1);\n\n    /* 連続",
+     "atapi_read_sectors が印を見ない"),
+    ("drivers/atapi.c",
+     r"    if \(!cap\) return ATAPI_ERR_IO;\n    if \(atapi_bus_dead_fail\(\)\) return ATAPI_ERR_TIMEOUT;\n",
+     "    if (!cap) return ATAPI_ERR_IO;\n",
+     "atapi_read_capacity が印を見ない"),
+    ("drivers/atapi.c",
+     r"    cdrom_present = 0;\n    s_bus_dead = 0;\n",
+     "    cdrom_present = 0;\n",
+     "atapi_init が印を解かない (装置が戻っても読めない)"),
+    ("drivers/atapi.c",
+     r"    if \(!s_dead_noted\) \{",
+     "    if (1) {",
+     "即失敗の行を毎回出す (ATAPI_DIAG_MAX 行を食い潰す)"),
+    ("drivers/atapi.c",
+     r"\"SRST: BSY did not clear, bus marked dead\", 0, 0, 0,\n                      ATAPI_SRST_TIMEOUT_US\);",
+     "\"SRST: BSY did not clear, bus marked dead\", 0, 0, 0,\n                      s_wait_limit_us);",
+     "SRST の行の limit= に PACKET の上限を出す (31 秒を待ったのに 10s と出る)"),
     # 対照: 何も変えない。SURVIVED でなければ試験が不安定 (偽の RED)。
     ("fs/iso9660.c", r"(#include \"iso9660\.h\")", r"\1", "対照 (何も変えない)"),
 ]
