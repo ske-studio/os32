@@ -48,6 +48,12 @@ static u32 s_diag_lba = 0;
 static u32 s_diag_n = 0;
 /* 読みの失敗の行を出した数 (ATAPI_DIAG_MAX で止める) */
 static u32 s_diag_lines = 0;
+/* リセット・準備中の行を出した数 (これも ATAPI_DIAG_MAX で止める) */
+static u32 s_note_lines = 0;
+
+/* BSY / DRQ の待ちの上限 (µs)。ふだんは ATAPI_CMD_TIMEOUT_US、atapi_init の
+ * 間だけ ATAPI_INIT_TIMEOUT_US (atapi.h「待ちの上限」) */
+static u32 s_wait_limit_us = ATAPI_CMD_TIMEOUT_US;
 
 /* ======================================================================== */
 /*  内部ヘルパー                                                             */
@@ -69,50 +75,47 @@ static u8 atapi_status(void)
     return st;
 }
 
+/* ALT_STATUS の mask のビットが全部落ちるまで、最大 limit_us 待つ。
+ * 読むごとに cpu_delay_us(ATAPI_POLL_US) を挟み、挟んだ時間の合計で数える
+ * (時間の上限。回数ではない — atapi.h「待ちの上限」)。すぐ落ちていれば待たない */
+static int atapi_wait_clear(u8 mask, u32 limit_us)
+{
+    u32 waited = 0;
+    for (;;) {
+        if (!(atapi_status() & mask)) return ATAPI_OK;
+        if (waited >= limit_us) return ATAPI_ERR_TIMEOUT;
+        cpu_delay_us(ATAPI_POLL_US);
+        waited += ATAPI_POLL_US;
+    }
+}
+
 /* BSY=0 待ち */
 static int atapi_wait_bsy(void)
 {
-    int timeout = IDE_TIMEOUT_LOOP;
-    while (timeout-- > 0) {
-        if (!(atapi_status() & IDE_ST_BSY)) return ATAPI_OK;
-    }
-    return ATAPI_ERR_TIMEOUT;
+    return atapi_wait_clear(IDE_ST_BSY, s_wait_limit_us);
 }
 
 /* BSY=0 かつ DRQ=0 待ち (コマンドを出せる状態) */
 static int atapi_wait_idle(void)
 {
-    int timeout = IDE_TIMEOUT_LOOP;
-    while (timeout-- > 0) {
-        if (!(atapi_status() & (IDE_ST_BSY | IDE_ST_DRQ))) return ATAPI_OK;
-    }
-    return ATAPI_ERR_TIMEOUT;
+    return atapi_wait_clear(IDE_ST_BSY | IDE_ST_DRQ, s_wait_limit_us);
 }
 
-/* DRQ待ち (BSY=0 && DRQ=1) */
+/* DRQ待ち (BSY=0 && DRQ=1)。BSY=0 で ERR なら ATAPI_ERR_IO。上限は合わせて
+ * s_wait_limit_us (数え方は atapi_wait_clear と同じ) */
 static int atapi_wait_drq(void)
 {
-    int timeout = IDE_TIMEOUT_LOOP;
-    u8 st;
-
-    while (timeout-- > 0) {
-        st = atapi_status();
-        if (!(st & IDE_ST_BSY)) break;
+    u32 waited = 0;
+    for (;;) {
+        u8 st = atapi_status();
+        if (!(st & IDE_ST_BSY)) {
+            if (st & IDE_ST_ERR) return ATAPI_ERR_IO;
+            if (st & IDE_ST_DRQ) return ATAPI_OK;
+        }
+        if (waited >= s_wait_limit_us) return ATAPI_ERR_TIMEOUT;
+        cpu_delay_us(ATAPI_POLL_US);
+        waited += ATAPI_POLL_US;
     }
-    if (timeout <= 0) return ATAPI_ERR_TIMEOUT;
-
-    st = atapi_status();
-    if (st & IDE_ST_ERR) return ATAPI_ERR_IO;
-    if (st & IDE_ST_DRQ) return ATAPI_OK;
-
-    /* DRQ追加待ち */
-    timeout = IDE_TIMEOUT_BSY;
-    while (timeout-- > 0) {
-        st = atapi_status();
-        if (st & IDE_ST_DRQ) return ATAPI_OK;
-        if (st & IDE_ST_ERR) return ATAPI_ERR_IO;
-    }
-    return ATAPI_ERR_TIMEOUT;
 }
 
 /* ERR を見たときに呼ぶ。センスキーを覚え、媒体が替わった/替わりつつある
@@ -166,6 +169,23 @@ static int atapi_sel_present(u8 sel)
     return 0;
 }
 
+/* リセット・準備中の 1 行 (ATAPI_DIAG_MAX 行まで)。実機で DEVICE RESET / SRST /
+ * START UNIT を踏んだかを画面で分けるため。with_asc なら ASC / ASCQ も出す */
+static void atapi_note(const char *what, int with_asc, u8 asc, u8 ascq)
+{
+    if (s_note_lines >= ATAPI_DIAG_MAX) return;
+    s_note_lines++;
+    if (with_asc) {
+        kprintf(0x07, "[atapi] %s drv=%d st=%02x asc/ascq=%02x/%02x\n", what,
+                (s_cursel == ATAPI_DRV_SLAVE) ? 1 : 0, (unsigned)s_diag_st,
+                (unsigned)asc, (unsigned)ascq);
+    } else {
+        kprintf(0x07, "[atapi] %s drv=%d st=%02x limit=%us\n", what,
+                (s_cursel == ATAPI_DRV_SLAVE) ? 1 : 0, (unsigned)s_diag_st,
+                (unsigned)(s_wait_limit_us / 1000000UL));
+    }
+}
+
 /* SRST: セカンダリのバスの 2 台ともリセットする (バンクで選んだバスだけ。
  * プライマリの HDD には届かない — UNDOCUMENTED io_ide 074Ch、NP21/W ideio_o74c)。
  * 同じバンク (セカンダリ) に ATA の HDD (drivers/ide.c の drive 2 / 3) が
@@ -173,8 +193,11 @@ static int atapi_sel_present(u8 sel)
  * リセット後はマスターが選ばれる。順序は ATA の規定どおり:
  *   SRST を立てる → 5µs 以上 → 解く → 2ms 以上置く → マスターの BSY=0 を待つ。
  * 使う装置の選び直し (DRV_HEAD → 400ns → BSY=0) は呼び手が行う。
- * マスターが居ない (シグネチャが出なかった、または浮いたバス) なら待たない */
-static void atapi_srst(void)
+ * マスターが居ない (シグネチャが出なかった、または浮いたバス) なら待たない。
+ * マスターの BSY は ATA の規定の最大 ATAPI_SRST_TIMEOUT_US (31 秒) まで待つ。
+ * 戻り値: ATAPI_OK / ATAPI_ERR_TIMEOUT (マスターが BSY のまま — 呼び手は
+ * DRV_HEAD を書かない。BSY の装置が選ばれているあいだは書いても届かない) */
+static int atapi_srst(void)
 {
     int i;
     outp(IDE_DEV_CTRL, IDE_NIEN | IDE_SRST);
@@ -183,28 +206,36 @@ static void atapi_srst(void)
     s_cursel = 0x00;
     s_stats.soft_resets++;
     atapi_delay_us(ATAPI_SRST_SETTLE_US);
-    if (s_present_mask != 0 && !atapi_sel_present(0x00)) return;
-    if (atapi_status() == ATAPI_ST_FLOAT) return;
-    (void)atapi_wait_bsy();
+    if (s_present_mask != 0 && !atapi_sel_present(0x00)) return ATAPI_OK;
+    if (atapi_status() == ATAPI_ST_FLOAT) return ATAPI_OK;
+    if (atapi_wait_clear(IDE_ST_BSY, ATAPI_SRST_TIMEOUT_US) != ATAPI_OK) {
+        atapi_note("SRST: BSY did not clear in 31s", 0, 0, 0);
+        return ATAPI_ERR_TIMEOUT;
+    }
+    return ATAPI_OK;
 }
 
-/* 選ばれている装置のコマンドが期限までに終わらなかった (BSY / DRQ のまま)。
+/* 選ばれている装置が「固まった」: atapi_select_device が s_wait_limit_us 待っても
+ * BSY / DRQ のまま (「遅いだけ」と「固まった」の境目は秒 — atapi.h の
+ * ATAPI_CMD_TIMEOUT_US。コマンド自身の待ちが期限切れになってもここへは来ない)。
  * まず DEVICE RESET (08h) — PACKET 装置が BSY でも受ける唯一のコマンドで、
  * その装置だけを戻す。それでも動かなければ SRST でバスの 2 台とも戻し、
- * SRST はマスターを選び直すので使う装置を選び直す。
+ * SRST はマスターを選び直すので使う装置を選び直す。SRST の後もマスターが
+ * BSY のままなら DRV_HEAD を書かずに ATAPI_ERR_TIMEOUT。
  * どちらの後も装置は UNIT ATTENTION を立てるので、次のコマンドの出し直しは
  * 呼び手 (atapi_read10 / atapi_capacity_ready) が行う */
-static void atapi_recover(void)
+static int atapi_recover(void)
 {
+    atapi_note("DEVICE RESET (BSY/DRQ past the limit twice)", 0, 0, 0);
     outp(IDE_COMMAND, ATAPI_CMD_DEVICE_RESET);
     s_stats.dev_resets++;
     atapi_settle();
-    if (atapi_wait_idle() == ATAPI_OK) return;
-    atapi_srst();
+    if (atapi_wait_idle() == ATAPI_OK) return ATAPI_OK;
+    if (atapi_srst() != ATAPI_OK) return ATAPI_ERR_TIMEOUT;
     outp(IDE_DRV_HEAD, s_drvsel);
     s_cursel = s_drvsel;
     atapi_settle();
-    (void)atapi_wait_idle();
+    return atapi_wait_idle();
 }
 
 /* 使う装置 (s_drvsel) を選ぶ。順序は ATA の規定どおり:
@@ -221,13 +252,14 @@ static int atapi_select_device(void)
 
     if (st != ATAPI_ST_FLOAT && (st & (IDE_ST_BSY | IDE_ST_DRQ))
         && atapi_sel_present(s_cursel)) {
-        if (atapi_wait_idle() != ATAPI_OK) atapi_recover();
+        if (atapi_wait_idle() != ATAPI_OK
+            && atapi_recover() != ATAPI_OK) return ATAPI_ERR_TIMEOUT;
     }
     outp(IDE_DRV_HEAD, s_drvsel);
     s_cursel = s_drvsel;
     atapi_settle();
     if (atapi_wait_idle() != ATAPI_OK) {
-        atapi_recover();
+        if (atapi_recover() != ATAPI_OK) return ATAPI_ERR_TIMEOUT;
         if (atapi_wait_idle() != ATAPI_OK) return ATAPI_ERR_TIMEOUT;
     }
     return ATAPI_OK;
@@ -398,7 +430,7 @@ static int atapi_probe_sig(u8 sel)
     s_cursel = sel;
     atapi_settle();
     if (atapi_status() == ATAPI_ST_FLOAT) return 0;
-    if (atapi_wait_bsy() != ATAPI_OK) return 0;
+    if (atapi_wait_bsy() != ATAPI_OK) return 0;   /* 上限は ATAPI_INIT_TIMEOUT_US */
 
     /* NP21/W ideio.c: ATAPI デバイスはリセット後 CylLo=0x14, CylHi=0xEB */
     cl = (u8)inp(IDE_CYL_LO);
@@ -433,9 +465,9 @@ static int atapi_capacity_raw(AtapiCapacity *cap)
     return ATAPI_OK;
 }
 
-/* REQUEST SENSE: センスキーと ASC を読む。UNIT ATTENTION はこれで消える。
- * 読めなければ ATAPI_ERR_IO (sk / asc は触らない) */
-static int atapi_request_sense(u8 *sk, u8 *asc)
+/* REQUEST SENSE: センスキーと ASC / ASCQ を読む。UNIT ATTENTION はこれで消える。
+ * 読めなければ ATAPI_ERR_IO (sk / asc / ascq は触らない) */
+static int atapi_request_sense(u8 *sk, u8 *asc, u8 *ascq)
 {
     u8 cdb[12];
     u8 buf[ATAPI_SENSE_LEN];
@@ -448,47 +480,76 @@ static int atapi_request_sense(u8 *sk, u8 *asc)
     ret = atapi_packet_read(cdb, buf, ATAPI_SENSE_LEN, &got);
     if (ret != ATAPI_OK) return ret;
     if (got < ATAPI_SENSE_MIN) return ATAPI_ERR_IO;
-    *sk  = (u8)(buf[2] & 0x0F);
-    *asc = buf[12];
+    *sk   = (u8)(buf[2] & 0x0F);
+    *asc  = buf[12];
+    *ascq = buf[13];
     return ATAPI_OK;
+}
+
+/* START STOP UNIT (開始)。IMMED = 0 なので回り始めるまで BSY — 待ちは PACKET の
+ * 上限 (ATAPI_CMD_TIMEOUT_US) */
+static int atapi_start_unit(void)
+{
+    u8 cdb[12];
+    atapi_clear_cdb(cdb);
+    cdb[0] = SCSI_CMD_START_STOP_UNIT;
+    cdb[4] = SCSI_SSU_START;
+    s_stats.start_units++;
+    return atapi_packet_nodata(cdb);
 }
 
 /* READ CAPACITY を、装置が準備中のあいだ出し直す (ATAPI_READY_RETRIES まで):
  *   UNIT ATTENTION (6): 電源投入・リセット・媒体交換の後の最初のコマンドは
  *       仕様どおりこれで落ちる。REQUEST SENSE で消して出し直す
  *   NOT READY (2): ASC 3Ah (媒体なし) だけを ATAPI_ERR_NO_MEDIA と確定する。
- *       それ以外 (04h 準備中など) は ATAPI_READY_WAIT_US 待って出し直す
+ *       04h/02h (initializing command required) は待っても変わらないので
+ *       START STOP UNIT (開始) を 1 回だけ出して、待たずに出し直す (票 §2)。
+ *       それ以外 (04h/01h 準備中など) は ATAPI_READY_WAIT_US 待って出し直す
  *   他のエラー・期限切れ・長さ違い: そのまま返す
- * 回数が尽きたら、最後が NOT READY なら ATAPI_ERR_NO_MEDIA、他は最後の結果 */
+ * 回数が尽きたら、最後が NOT READY なら ATAPI_ERR_NO_MEDIA (最後の ASC / ASCQ を
+ * 1 行出す)、他は最後の結果 */
 static int atapi_capacity_ready(AtapiCapacity *cap)
 {
     int tries;
+    int started = 0;
     int ret = ATAPI_ERR_IO;
+    u8 last_asc = 0, last_ascq = 0;
 
     for (tries = 0; tries < ATAPI_READY_RETRIES; tries++) {
         u8 sk = ATAPI_SK_NO_SENSE;
         u8 asc = 0;
+        u8 ascq = 0;
 
         s_last_sense = ATAPI_SK_NO_SENSE;
         ret = atapi_capacity_raw(cap);
         if (ret != ATAPI_ERR_IO) return ret;
         if (s_last_sense == ATAPI_SK_UNIT_ATTENTION) {
-            (void)atapi_request_sense(&sk, &asc);
+            (void)atapi_request_sense(&sk, &asc, &ascq);
             s_stats.ready_retries++;
             continue;
         }
         if (s_last_sense == ATAPI_SK_NOT_READY) {
-            if (atapi_request_sense(&sk, &asc) == ATAPI_OK
+            if (atapi_request_sense(&sk, &asc, &ascq) == ATAPI_OK
                 && asc == ATAPI_ASC_MEDIUM_NOT_PRESENT) {
                 return ATAPI_ERR_NO_MEDIA;
             }
+            last_asc = asc;
+            last_ascq = ascq;
             s_stats.ready_retries++;
-            atapi_delay_us(ATAPI_READY_WAIT_US);
             ret = ATAPI_ERR_NO_MEDIA;
+            if (asc == ATAPI_ASC_BECOMING_READY
+                && ascq == ATAPI_ASCQ_INIT_CMD_REQUIRED && !started) {
+                started = 1;
+                atapi_note("NOT READY, START UNIT", 1, asc, ascq);
+                (void)atapi_start_unit();
+                continue;
+            }
+            atapi_delay_us(ATAPI_READY_WAIT_US);
             continue;
         }
         return ret;
     }
+    if (ret == ATAPI_ERR_NO_MEDIA) atapi_note("NOT READY, gave up", 1, last_asc, last_ascq);
     return ret;
 }
 
@@ -505,6 +566,10 @@ int atapi_init(void)
     u8 found[2] = { 0, 0 };
     int n = 0;
     int i;
+
+    /* 起動の最悪時間を抑える短い上限 (atapi.h の ATAPI_INIT_TIMEOUT_US)。
+     * 戻る前に ATAPI_CMD_TIMEOUT_US に戻す */
+    s_wait_limit_us = ATAPI_INIT_TIMEOUT_US;
 
     /* セカンダリバンクに切替 */
     atapi_select_bank(1);
@@ -523,9 +588,10 @@ int atapi_init(void)
         }
     }
 
-    if (n == 0) {
-        /* シグネチャが出ない場合、ソフトリセット後に再確認 */
-        atapi_srst();
+    if (n == 0 && atapi_srst() == ATAPI_OK) {
+        /* シグネチャが出ない場合、ソフトリセット後に再確認。SRST の後も
+         * マスターが BSY のまま (31 秒) なら諦める (BSY の装置が選ばれている
+         * あいだは DRV_HEAD を書いても届かない) */
         for (i = 0; i < 2; i++) {
             if (atapi_probe_sig(sels[i])) {
                 found[n++] = sels[i];
@@ -553,6 +619,7 @@ int atapi_init(void)
     /* バスの選択はそのまま (以後のコマンドは出す直前に選び直す) */
     /* プライマリバンクに戻す */
     atapi_select_bank(0);
+    s_wait_limit_us = ATAPI_CMD_TIMEOUT_US;
 
     return cdrom_present;
 }

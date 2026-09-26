@@ -1,6 +1,6 @@
 # TASK_ATAPI_TIMEOUT — ATAPI の待ち上限を秒単位にする
 
-> 状態: **票 (未着手)**。発行: PM (Claude Code `claude-opus-5-5`)、2026-09-26。
+> 状態: **実装済み・レビュー待ち** (wt/atapi-timeout、コーダー `claude-opus-5-5`、2026-09-26。T1・T2 済、T3 は実機)。発行: PM (Claude Code `claude-opus-5-5`)、2026-09-26。
 > 関係: `drivers/atapi.c` / `drivers/ide.h` (`IDE_TIMEOUT_LOOP`)、[`../../05_drivers.md`](../../05_drivers.md) §5-6、
 > ATAPI 装置選びの修正 (wt/cd-fix、2026-09-26 着地) の代行レビュー (Fable 5.1) の P3。
 
@@ -33,3 +33,73 @@ Ra266 では 0.5〜1 秒の桁。実機の CD ドライブは次の場面でこ�
 - T1: ホスト試験で、スピンアップ 3 秒の READ が 1 回目で読める (DEVICE RESET 0 回)。SRST 後 10 秒 BSY の装置を待ちきる。
 - T2: 起動の最悪時間 (装置 2 台とも応答なし) を計算して票と docs/05_drivers.md に書く。
 - T3: 実機 Ra266 で、CD を 5 分放置した後の `ls /cd0` が 1 回で通る (`atapi_get_stats` の dev_resets が増えない)。
+
+## 4. 実装 (2026-09-26)
+
+### 待ち方
+
+- 時計は **`cpu_delay_us` の 1 本だけ**。`atapi_wait_clear(mask, limit_us)` が ALT_STATUS を 1 回読むごとに
+  `cpu_delay_us(ATAPI_POLL_US = 100µs)` を挟み、挟んだ時間の合計で上限を数える (`atapi_wait_bsy` / `atapi_wait_idle` /
+  `atapi_wait_drq` / SRST の待ち)。すぐ落ちていれば待たない。
+- **tick_count と使い分けない理由**: 起動時の `atapi_init` と KAPI 経由の読みのどちらでも、PIT の割り込みが来ている
+  (IF=1) と決められない。場面ごとに時計を替えると、ホスト試験で見えない経路ができる。`cpu_delay_us` の誤差 ±10% と
+  読みの間の inp の時間 (上限を長い側へ約 1% ずらす) は、上限を規定・実測の 2 倍以上に取って吸う。
+  `cpu_calibrate` より前に呼ばれると `cpu_delay_us` は待たない (上限は 10 万回の読み ≒ 0.1 秒に縮む) — `atapi_init` は
+  `cpu_calibrate` の後 (`kernel/kernel.c`)。
+
+### 上限と根拠 (`drivers/atapi.h`)
+
+| 定数 | 値 | 使う場面 | 根拠 |
+|---|---|---|---|
+| `ATAPI_CMD_TIMEOUT_US` | 10 秒 | 通常の PACKET、装置の選択、DEVICE RESET の後 | スピンアップ 2〜4 秒の 2 倍 + 余裕。-10% に外れても 9 秒 |
+| `ATAPI_INIT_TIMEOUT_US` | 5 秒 | `atapi_init` の間だけ (シグネチャ、2 台のときの容量確認) | スピンアップ 4 秒は待ちきり、起動の最悪時間を抑える。電源投入直後の長い BSY は SRST の 31 秒が受け持つ。init で期限切れになった遅い装置も以後は 10 秒で待つ |
+| `ATAPI_SRST_TIMEOUT_US` | 31 秒 | SRST の後のマスターの BSY | ATA の規定の最大 |
+
+### 「遅いだけ」と「固まった」の境目
+
+コマンドの待ちが期限切れになっても DEVICE RESET はせず、期限切れを返す。次のコマンドの装置選択 (`atapi_select_device`) で
+**さらに上限まで待っても** BSY / DRQ のときだけ DEVICE RESET (`atapi_recover`)。READ(10) の経路では、複数セクタの
+READ(10) が 10 秒で期限切れ → 1 セクタずつの 1 本目の選択で 10 秒 → そこで初めてリセット、つまり **BSY が 20 秒続いた装置
+だけ**がリセットされる。スピンアップ (2〜4 秒。20 秒未満なら 1 セクタずつの 1 本目で読める) ではリセットしない。
+`atapi_srst` は int を返し、31 秒で BSY が落ちなければ `atapi_recover` は DRV_HEAD を書かずに期限切れ、`atapi_init` は
+シグネチャの再確認をせず「CD なし」。
+
+### §2 (04h/02h)
+
+`atapi_capacity_ready` の NOT READY で ASC 04h / ASCQ 02h なら START STOP UNIT (開始、IMMED=0) を**1 回だけ**出し、
+250ms 待たずに出し直す。準備中のまま諦めたら `[atapi] NOT READY, gave up drv= st= asc/ascq=04/01` の形で最後の
+ASC/ASCQ を 1 行出す (START UNIT を出したときも 1 行)。DEVICE RESET と SRST の期限切れも 1 行ずつ。どれも
+`ATAPI_DIAG_MAX` (8) 行まで。`AtapiStats` に `start_units` を足した (KAPI 外、カーネル内だけの構造体)。
+
+### T2: 起動の最悪時間 (`atapi_init`)
+
+`cpu_delay_us` が数える時間。ホスト試験 `np2_boot_worst` が同じ数に固定している (誤差 ±10% と inp の +1% は別)。
+
+| 形 | 内訳 | 合計 |
+|---|---|---|
+| 装置なし (浮いたバス 0xFF) | SRST の 2ms | 0.002 秒 |
+| 2 台とも電源投入から BSY のまま (シグネチャも出ない) | マスター 5 + スレーブ 5 + SRST 0.002 + SRST 後 31 | **41.002 秒** で「CD なし」 |
+| 2 台ともシグネチャは出るが最初の PACKET で固まる | 容量確認 5 + スレーブを選ぶ前 5 + DEVICE RESET の後 5 + SRST 0.002 + 31 | **46.002 秒** で「マスター」(上限) |
+| 2 台とも準備中 (04h/01h) が続く | 250ms × 20 × 2 台 | 10 秒 (以前どおり) |
+
+§2 の「装置が 2 台あると最大 10 秒」は準備中の待ちの数で、固まった装置の数は上の表。居ない装置の ALT_STATUS が BSY に
+見える機械 (0x80 など、`np2_absent`) では、シグネチャの確認が居ない装置 1 台につき 5 秒延びる (以前は 1 秒弱)。
+
+### ホスト試験 (`tools/tests/test_cd_read.py`、記録 `tools/tests/cd_read_tdd.md` §3-6)
+
+模型 (strict) に時計 `np2_now()` (贋 `cpu_delay_us` の合計 + ステータスの読み 1 回 1µs) を入れ、秒で見せる BSY を足した。
+
+- `np2_spinup` — **T1**: スピンアップ 3 秒・9 秒の READ(10) が 1 回で読める、DEVICE RESET 0 回。25 秒はリセット 1 回、
+  それは BSY が上限を越えた後。PACKET から CDB の DRQ までの 3 秒も待つ
+- `np2_srst_long` — **T1**: SRST 後 10 秒・25 秒の BSY を待ちきって読む (BSY の装置へ DRV_HEAD を書かない)。40 秒は 31 秒で
+  諦め、DRV_HEAD も PACKET も書かずに期限切れ
+- `np2_boot_worst` — **T2**: 上の 41.002 / 46.002 秒
+- `np2_start_unit` — §2: START UNIT 1 回で読める / 直らない装置には 1 回だけ出して媒体なし + ASC/ASCQ の行
+- 変異 12 本 (上限を回数に戻す × 2、PACKET 上限 1 秒、SRST の戻り値無視、SRST を PACKET の上限で諦める、init の SRST の
+  戻り値無視、init も 10 秒、init 後に上限を戻さない、START UNIT を出さない / 何度も出す、ASCQ を読まない、ASC/ASCQ の
+  行を出さない) を足して全 73 本 RED
+
+### T3 (実機で見ること)
+
+Ra266 で CD を入れて 5 分放置 → `ls /cd0` が 1 回で通り、`atapi_get_stats` の `dev_resets` / `soft_resets` が増えない
+こと、`[atapi] DEVICE RESET` の行が出ないこと。所要時間 (スピンアップの秒数) も見る。

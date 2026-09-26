@@ -224,6 +224,26 @@ SURVIVED でなければ試験が不安定。変異の一覧と結果は `test_c
   UA を 1 回しか出し直さない) は全部 RED。全 61 本 RED / 0 SURVIVED (対照は SURVIVED)
 - ATAPI の待ち上限 (ループ回数) を tick の秒単位にする件は別票
 
+## 3-6. 待ちの上限を秒で (2026-09-26、[TASK_ATAPI_TIMEOUT](../../docs/tasks/realhw/TASK_ATAPI_TIMEOUT.md))
+
+- BSY / DRQ の待ちを `IDE_TIMEOUT_LOOP` (100 万回の inp) から**時間**へ: `atapi_wait_clear` が読み 1 回ごとに
+  `cpu_delay_us(ATAPI_POLL_US = 100µs)` を挟んで合計を数える。上限は `ATAPI_CMD_TIMEOUT_US` 10 秒 (init の間は
+  `ATAPI_INIT_TIMEOUT_US` 5 秒)、SRST の後は `ATAPI_SRST_TIMEOUT_US` 31 秒。tick は使わない (割り込みが開いている保証が無い)
+- DEVICE RESET は、コマンドの待ちが期限切れになった後、次の選択でさらに上限まで待っても BSY / DRQ のときだけ
+- `atapi_srst` は int を返し、31 秒で BSY が落ちなければ `atapi_recover` / `atapi_init` は DRV_HEAD を書かずに諦める
+- NOT READY / 04h/02h には START STOP UNIT (開始) を 1 回出して出し直す。準備中のまま諦めたら ASC/ASCQ の行
+- 模型 (strict): 時計 `np2_now()` = 贋の `cpu_delay_us` の合計 + ステータスの読み 1 回 1µs。秒で見せる BSY
+  (`busy_until`)、スピンアップ (`spinup_us`)、CDB の前の BSY (`cdb_busy_us`)、SRST 後の BSY (`srst_busy_us`)、
+  固まったまま戻らない装置 (`dead` / `die_on_packet`)、START UNIT が要る装置 (`need_start` / `start_ignored`)。
+  `np2_sel_busy` (1) の「30 万回 BSY」は「5 秒 BSY」に書き換えた (回数の模型では 100µs 刻みの待ちが 30 秒になる)
+- ケース 4 本: `np2_spinup` (3 秒・9 秒は READ(10) 1 回・リセット 0、25 秒はリセット 1 回で、それは BSY が上限を
+  越えた後、CDB の前の 3 秒)、`np2_srst_long` (SRST 後 10 秒・25 秒を待ちきる、40 秒は 31 秒で諦め DRV_HEAD も PACKET も
+  書かない)、`np2_boot_worst` (起動の最悪時間 41.002 秒 / 46.002 秒に固定)、`np2_start_unit`
+- 変異 62〜73 (上限を回数に戻す × 2、PACKET 上限 1 秒、SRST の戻り値無視、SRST を PACKET の上限で諦める、init の SRST
+  戻り値無視、init も 10 秒、init 後に上限を戻さない、START UNIT を出さない、何度も出す、ASCQ を読まない、ASC/ASCQ の行
+  を出さない) は全部 RED。既存の変異のうち待ち・回復の形が変わった 7 本はパターンを新しい形に合わせた。
+  全 73 本 RED / 0 SURVIVED (対照は SURVIVED)
+
 ## 4. 未検証
 
 - **実機・NP21/W での速さは測っていない** (PM が測る)。NP21/W は CD のシーク・回転を模擬しないので
@@ -231,7 +251,8 @@ SURVIVED でなければ試験が不安定。変異の一覧と結果は `test_c
 - 実機の CD ドライブが 16 セクタの READ(10) と 0x8000 の byte count limit を受けるか。困ったら
   `ATAPI_READ_MAX_SECTORS` を下げる
 - 実機のドライブが READ(10) で UNIT ATTENTION を返すか (返さなければ 2 秒規則だけが効く)
-- DEVICE RESET (08h) / SRST の回復と、NOT READY / 04h の待ち (250ms × 20 = 最大 5 秒) は実機でしか踏まない
+- DEVICE RESET (08h) / SRST の回復と、NOT READY / 04h の待ち (250ms × 20 = 最大 5 秒)、秒の上限
+  (スピンアップ・SRST 後の BSY・START UNIT) は実機でしか踏まない
   (NP21/W は固まらず、READ CAPACITY で UA / NOT READY を返さない)。`atapi_get_stats` の
   `dev_resets` / `soft_resets` / `ready_retries` で踏んだかが分かる
 - HDD (ext2) への書き込みの速さは見ていない。CD 側が速くなった後は、そちらが律速になりうる
