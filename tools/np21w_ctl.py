@@ -43,7 +43,7 @@ ExecutablePath が一致するプロセス**に限る。名前に np21 を含む
   NP21W_DIR/np21w_aidebug_<port>.token の順で探して読み、`X-Aidebug-Token` ヘッダで
   送る。中身は出力しない ([D3])。読めなければ stop は強制終了に落ち、fdd / cd は失敗する。
 
-fdd --insert は `/api/fdd` の 200 の後、`/api/instance` の fdd[].path にその媒体が
+fdd --insert は `/api/fdd` の 200 (か 503 `being applied`) の後、`/api/instance` の fdd[].path にその媒体が
 現れる (DISK_DELAY = 0.4 秒のエミュレーション時間) まで --ready-wait 秒 (既定 5) 待つ。
 現れなければ失敗 (pending のまま = エミュレーションが進んでいない: ブレーク中・
 一時停止・背景で停止。空 = NP21/W が受け付けなかった)。
@@ -110,6 +110,8 @@ OLD_FORK_CD = ('NP21/W のフォークが古い (/api/cd が無い、api_version
 CD_API_VERSION = 3                # NP21/W aidebug_app.h AIDEBUG_APP_API_VERSION (/api/cd)
 # /api/cd の HTTP の待ち。サーバーは最悪 21 秒 (UI の受け取り 5 + 実行待ち 6 + 適用中 10) 待って答える
 CD_POST_TIMEOUT = 25
+# /api/fdd も同じ状態機械 (np21w-src 02-architecture §18「媒体要求の状態機械」)。最悪 21 秒
+FDD_POST_TIMEOUT = 25
 
 WIN_SYS = '/mnt/c/Windows/System32'
 TASKKILL = WIN_SYS + '/taskkill.exe'
@@ -998,10 +1000,16 @@ class Ctl(object):
         if win_norm(inst.get('exe')) != win_norm(self.expected_exe(exe)):
             raise CtlError('aidebug に答えているのは別の場所の NP21/W (%s)' % inst.get('exe'))
         headers = self.token_headers(inst)
-        st, js = self.api('POST', '/api/fdd', urllib.parse.urlencode(params), timeout=15,
-                          headers=headers)
+        st, js = self.api('POST', '/api/fdd', urllib.parse.urlencode(params),
+                          timeout=FDD_POST_TIMEOUT, headers=headers)
         if st == 404 and (js or {}).get('error') == 'unknown endpoint':
             raise CtlError(OLD_FORK)
+        if st == 503 and 'being applied' in (js or {}).get('error', ''):
+            # 適用は始まった (COMMIT の後) が 10 秒で終わらなかった。結果は fdd[] で見る。
+            # それ以外の 503 は「何も変えていない」ので失敗
+            self.say('/api/fdd: 適用中のまま応答が返った (HTTP 503 being applied) — '
+                     '/api/instance で結果を確かめる')
+            return self.fdd_confirm(drive, params.get('path', ''), ready_wait)
         if st != 200:
             raise CtlError('/api/fdd が失敗した (HTTP %s): %s'
                            % (st, (js or {}).get('error', '応答なし')))
