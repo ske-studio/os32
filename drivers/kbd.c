@@ -22,6 +22,7 @@
 #include "pc98.h"        /* TATTR_WHITE */
 #include "serial.h"
 #include "kbd_inject.h"   /* K7: GUI 中の打鍵は注入リングから来る */
+#include "kbd_dlog.h"     /* KAPI v67 kbd_diag_log: 受信のたびの記録 */
 
 extern volatile int exec_nest_level;  /* exec/exec.c */
 
@@ -89,6 +90,20 @@ static u8  kbd_diag_init_after;
 static u8  kbd_diag_cmd;
 
 STATIC_ASSERT(sizeof(KbdDiag) == 24, kbd_diag_is_24);
+
+/* ======== 受信記録リング (KAPI v67 kbd_diag_log、シェルの `kbdstat -w`) ========
+ * 票 docs/tasks/gui/TASK_KBD_NAV.md §3。0041h から**使うバイトを読むたびに**
+ * 1 件 (seq / 生の code / 処理後の kbd_shift_state / フラグ)。last_code は最後の
+ * 1 件しか持たず、irq_count は EMPTY / ERROR も数えるので、カナの make / break の
+ * 方式はこちらで見る。書くのは kbd_irq_handler だけ (IF=0、再入しない —
+ * kbd_shift_state と同じ所有権)。読むのは kbd_diag_log が irq_save の間に写す。 */
+static KbdDlog kbd_dlog;
+
+STATIC_ASSERT(sizeof(KbdDiagLogEnt) == 8, kbd_diag_log_ent_is_8);
+STATIC_ASSERT(KBD_DLOG_MOD_SHIFT == SHIFT_SHIFT && KBD_DLOG_MOD_CAPS == SHIFT_CAPS &&
+              KBD_DLOG_MOD_KANA == SHIFT_KANA && KBD_DLOG_MOD_GRPH == SHIFT_GRPH &&
+              KBD_DLOG_MOD_CTRL == SHIFT_CTRL, kbd_dlog_mods_match_shift);
+STATIC_ASSERT(KBD_DLOG_BREAK == SCANCODE_BREAK, kbd_dlog_break_matches);
 
 /* ======== キー押下状態ビットマップ (128キー分) ======== */
 /* ビット1 = 押下中, ビット0 = 離されている */
@@ -204,6 +219,7 @@ int kbd_irq_handler(void)
     u8 scancode;
     u8 st;
     int kind;
+    u8 lflags;
 
     /* 0041h を読む前に 0043h を見る (票: 実機の打鍵不達、POLICY_DEBUG §4-57)。
      *   RxRDY = 0      → 空 IRQ。0041h は読まない (読んでも打鍵ではない)。
@@ -242,7 +258,18 @@ int kbd_irq_handler(void)
         kbd_diag_overrun++;
     }
 
+    /* 記録のフラグは配る前の状態で決める (配った結果で V86 を抜けることがある) */
+    lflags = 0;
+    if (kind == KBD_ST_OVERRUN) lflags |= KBD_DLOG_F_OVERRUN;
+    if (v86_is_active())        lflags |= KBD_DLOG_F_V86;
+    if (kbd_gui_mode)           lflags |= KBD_DLOG_F_GUI;
+
     kbd_deliver(scancode);
+
+    /* 配った**後**に積む — 修飾キー自身の行に更新後の kbd_shift_state を載せる
+     * (raw リングと同じ約束。カナの行の KANA ビットで「その make / break で
+     * 状態がどう変わったか」が読める)。 */
+    kbd_dlog_push(&kbd_dlog, scancode, kbd_shift_state, lflags);
     return kbd_status_reflects(kind);
 }
 
@@ -417,6 +444,7 @@ void kbd_init(void)
     kbd_diag_overrun = 0;
     kbd_diag_last_st = 0;
     kbd_diag_last_code = 0;
+    kbd_dlog_reset(&kbd_dlog);
 
     /* バッファクリア */
     kbd_head = 0;
@@ -480,6 +508,36 @@ int kbd_diag(KbdDiag *out)
     /* u16 に収まらなければ 0xFFFF で止める (折り返すと 0 に見える) */
     out->overrun_count  = (u16)(overrun > 0xFFFFu ? 0xFFFFu : overrun);
     return 0;
+}
+
+/* ======================================================================== */
+/*  kbd_diag_log — 受信記録を写す (KAPI v67、シェルの `kbdstat -w`)         */
+/*  after_seq より新しい分を古い順に最大 max 件 (KBD_DLOG_CAP で頭打ち)。    */
+/*  戻り = 写した件数 (0 = 新しい分なし) / OS32_ERR_INVAL (out が NULL・     */
+/*  max <= 0)。上書きで失われた分は飛ばすので、呼び手は先頭の seq が         */
+/*  after_seq + 1 かで取りこぼしを知る。禁止区間ではローカルへ写すだけ      */
+/*  (呼び手のページには IF=1 で書く — kbd_diag と同じ)。                   */
+/* ======================================================================== */
+int kbd_diag_log(u32 after_seq, KbdDiagLogEnt *out, int max)
+{
+    KbdDiagLogEnt tmp[KBD_DLOG_CAP];
+    unsigned int flags;
+    int n;
+    int i;
+
+    if (out == NULL || max <= 0) {
+        return OS32_ERR_INVAL;
+    }
+    if (max > KBD_DLOG_CAP) {
+        max = KBD_DLOG_CAP;
+    }
+    flags = irq_save();
+    n = kbd_dlog_copy(&kbd_dlog, after_seq, tmp, max);
+    irq_restore(flags);
+    for (i = 0; i < n; i++) {
+        out[i] = tmp[i];
+    }
+    return n;
 }
 
 /* ======================================================================== */

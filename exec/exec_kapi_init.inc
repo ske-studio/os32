@@ -236,10 +236,11 @@ extern int __cdecl wrap_boot_image_info(BootImageInfo *out);
 extern int __cdecl wrap_sfs_begin(void);
 extern int __cdecl wrap_sfs_end(int exit_code);
 extern int __cdecl wrap_serial_diag(SerialDiag *out);
+extern int __cdecl wrap_kbd_diag_log(u32 after_seq, KbdDiagLogEnt *out, int max);
 extern i32 __cdecl kapi_reserved_nosys(void);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 66;
+kapi->version = 67;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -479,6 +480,7 @@ kapi->version = 66;
     kapi->sfs_begin = wrap_sfs_begin;
     kapi->sfs_end = wrap_sfs_end;
     kapi->serial_diag = wrap_serial_diag;
+    kapi->kbd_diag_log = wrap_kbd_diag_log;
     {
         u32 _kr;
         for (_kr = 0; _kr < (u32)KAPI_FUNC_RESERVED; _kr++)

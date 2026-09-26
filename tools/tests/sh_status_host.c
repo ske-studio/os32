@@ -1129,6 +1129,7 @@ u32 save_crc32(const void *data, u32 len)
 #include "../../userland/shell/cmd_mnt.c"
 #include "../../userland/shell/cmd_script.c"
 #include "../../userland/shell/cmd_sys.c"
+#include "../../userland/shell/kbd_watch.c"   /* kbdstat -w の行 (票 TASK_KBD_NAV §3) */
 /* cmd_pci.c (lspci / pcidump、票 TASK_LAN_82557 L-A)。main.c が
  * shell_cmd_pci_init() を呼ぶので**取り込まないとリンクが通らない**。
  * 復号の実体 drivers/pci_decode.c は実ビルドでも同じ 1 本をリンクする

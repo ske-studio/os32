@@ -1241,6 +1241,20 @@ read-modify-write で保つ。
      PE / FE は従来どおり読み捨て (`err=`、OE と重なってもこちら)。
   3. **`sh` の要求版**: `userland/sh` は常駐シェルと同じソース (`kbdstat` / `lspci` を含む) なのに app.conf が 55 のままで、
      v61 以前のカーネルでは kbdstat が表の外へ飛ぶ。62 に上げた (kbd_diag を呼ぶのは shell と sh の 2 本だけ)。
+- **`kbdstat -w` — 受信 1 バイトごとの行 (KAPI v67 `kbd_diag_log`、2026-09-26)**: `kbdstat` の `code` は最後の 1 件だけ、
+  `irq` は EMPTY / ERROR も数え、`now` は 8251 のステータスなので、「どのキーで何が届いたか」の**順序**は分からない。
+  `-w` は IRQ1 が 0041h から使うバイトを読むたびに積む 32 件の循環リングを毎 tick 読み、1 行ずつ出す:
+  `seq=12 code=F2 break key=72 KANA mods=CAPS|KANA` (`code` は 0041h の生の値、`mods` はそのバイトを処理した**後**の
+  修飾、`[OE]` / `[V86]` / `[GUI]` は印)。最初の行 `kbdstat -w: ESC or 30s to stop. start seq=N mods=…` が始めた時点の
+  修飾 (カナの初期値)。**seq が飛んだら `LOST seq=a..b (n): cannot judge this span`** — 読み手が 32 件以上遅れて
+  上書きされた区間で、そこは判定しない (9600bps では 1 行 ≈ 50ms なので、押しっぱなしの連打で出やすい。それ自体が
+  「繰り返している」の印)。EMPTY / ERROR で捨てたバイトは行にならず、終わりの行
+  `kbdstat -w: end (ESC|timeout) shown=… lost=… mods=… empty+… err+… ovr+…` に増えた数だけ出る。ESC (本体でも
+  rshell のシリアルでも) か 30 秒で終わり、本体の ESC はそれ自身も `key=00 ESC` の make の行として出る。
+  用途は票 [`tasks/gui/TASK_KBD_NAV.md`](tasks/gui/TASK_KBD_NAV.md) §3 (カナ / CAPS が「ロックで make、解除で break」か
+  「押すたびに make だけ」か): シリアルから `kbdstat -w` を始め、本体のキーだけを触って行を読む。
+  ホスト試験は `make check-kbd-dlog-host`。
+  最長 30 秒 (+ 出力の分) 走るので、`/api/cmd` や `rshell_serial.py` の待ちは **60 秒以上**にする ([V3]) — 短いと写しが途中で切れ、LOST の判定を欠けた写しでしてしまう。
 
 ### 4-58. OS32 の ext2 が読めることは**正しい ext2 である証拠にならない** — cdinst の NHD に名前の無いディレクトリ (2026-09-23)
 

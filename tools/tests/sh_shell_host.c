@@ -496,6 +496,7 @@ static void show_prompt(void) { out_str("sh> "); }
 #include "../../userland/shell/cmd_mnt.c"
 #include "../../userland/shell/cmd_env.c"
 #include "../../userland/shell/cmd_sys.c"
+#include "../../userland/shell/kbd_watch.c"   /* kbdstat -w の行 (票 TASK_KBD_NAV §3) */
 
 /* ---- シェルの他モジュールの代わり -------------------------------------- */
 

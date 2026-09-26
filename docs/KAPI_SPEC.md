@@ -1,4 +1,4 @@
-# KernelAPI v66 仕様書
+# KernelAPI v67 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -110,6 +110,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v62 | **実装済み (2026-09-23、手元ビルドのみ)** | キーボード 8251 の診断 `kbd_diag` 1 本 (slot 229 = 0x39C、data_fields は 0x3A0 / 0x3A4 へ)。`KbdDiag` (24 バイト、`os32_kapi_shared.h`) を呼び手のバッファへ写す — IRQ1 回数・空 IRQ (RxRDY = 0)・エラー (PE/FE)・オーバーラン (OE だけ、バイトは使う)・起動時に読み捨てたバイト数・`kbd_init` の前後の 0043h・直近の 0043h とスキャンコード・書いたコマンド語・呼んだ時点の 0043h。戻り 0 / `OS32_ERR_INVAL` (`out` が NULL)。出力は生成ラッパの `out` 検査 (読み取り専用の USER ページなら `ring3_fault_kill`)。シェルの `kbdstat` が 1 行で出す。同じ変更でカーネルが 0043h に書くコマンド語を **0x14 → 0x16** (DTR = 1 = RTY# HIGH、BIOS の定常値) に直した — 実機 PC-9821Ra266 で打鍵が一切届かなかった件。実体は `drivers/kbd.c` / `drivers/kbd_status.c` | [POLICY_DEBUG.md](POLICY_DEBUG.md) §4-57 |
 | v65 | **実装済み (2026-09-24、手元ビルドのみ)** | 起動したイメージの識別 (票 TASK_SERIAL_HOSTFS 部品 A-4): `boot_image_info` 1 本 (slot 234 = 0x3B0)。`BootImageInfo` (40 バイト) に**ローダが検査して起動した** `vmkernel.lz4` のファイル全体の CRC32・長さ・記録の有無・どのローダか (FD / HDD) と、カーネルを組んだ git のコミット ID を写す。0 / `OS32_ERR_INVAL` (`out` が NULL)。同じ版で **VK32 を v2** (エントリごとの展開後 CRC32 + 完全長 + ファイル全体の CRC32、`boot/boot_defs.h`) に、**ブート情報域を v2** (0x30〜0x3F のイメージ欄、`include/bootinfo.h`) にした — v1 のイメージはどちらのローダも `VK32: unknown version` で止まる。**ローダ (FD イメージ / HDD の LBA 2〜17) と `vmkernel.lz4` を同時に入れ替える** (旧ローダと新イメージ・新ローダと旧イメージはどちらも起動しない)。`ver` と起動画面に `Commit:` / `Image CRC:` | [tasks/realhw/TASK_SERIAL_HOSTFS.md](tasks/realhw/TASK_SERIAL_HOSTFS.md) 部品 A-4 |
 | v66 | **実装済み (2026-09-25、手元ビルドとホスト試験のみ)** | シリアル越しの /host (票 TASK_SERIAL_HOSTFS 部品 B): `sfs_begin` / `sfs_end` / `serial_diag` の 3 本 (slot 235〜237 = 0x3B4〜0x3BC)。常駐シェルの `sfs run <コマンド行>` だけがセッションを開き (送受信のゲート → HELLO → `/host` に SerialFS)、子がどう終わっても BYE → アンマウント → 隔離 → 溜めた出力と終了コードを長さ付きのフレームで送る → ゲートを下ろす。`serial_diag` は受信の OE / FE / PE と受信リング溢れの数。同じ版で `vfs_mount` が同じ prefix の二重登録を断る | [tasks/realhw/TASK_SERIAL_HOSTFS.md](tasks/realhw/TASK_SERIAL_HOSTFS.md) 部品 B |
+| v67 | **実装済み (2026-09-26、手元ビルドとホスト試験のみ)** | キーボードの受信記録 `kbd_diag_log` 1 本 (slot 238 = 0x3C0)。IRQ1 が 0041h から**使うバイトを読むたびに** `KbdDiagLogEnt` (8 バイト: seq / 生の code / 処理後の修飾 / 印) を 32 件の循環リングへ積み、`after_seq` より新しい分を古い順に写す。EMPTY / ERROR で捨てたバイトは積まない。上書きで失われた分は写した先頭の seq の飛びで分かる。シェルの `kbdstat -w` が使う — 実機のカナ / CAPS が「ロックで make、解除で break」か「押すたびに make だけ」かを見る準備。実体は `drivers/kbd_dlog.c` / `drivers/kbd.c` | [tasks/gui/TASK_KBD_NAV.md](tasks/gui/TASK_KBD_NAV.md) §3 |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -178,7 +179,7 @@ v62 まではデータ欄 (`sbrk_heap_limit` / `shm_base`) を関数表の**直�
 |---|---|---|
 | 関数表の容量 R | **300** スロット (`KAPI_FUNC_CAPACITY`) | `sdk/kapi.json` の `func_capacity` |
 | データ欄の先頭 | **0x4B8** = 8 + 4 × R (`KAPI_DATA_FIELDS_OFF`) | `sdk/gen_kapi.py` が生成 |
-| 予約スロット | 238〜299 (`kapi_reserved[62]`、v66 時点。v65 は 235〜299、v64 は 234〜299、v63 は 230〜299)。カーネルの表は `kapi_reserved_nosys` (= `OS32_ERR_NOSYS`)、CPL=3 のトランポリンは int 0x80 のスタブ (ディスパッチャが `slot >= KAPI_FUNC_COUNT` で kill)。**NULL にしない** | `exec/exec.c` |
+| 予約スロット | 239〜299 (`kapi_reserved[61]`、v67 時点。v66 は 238〜299、v65 は 235〜299、v64 は 234〜299、v63 は 230〜299)。カーネルの表は `kapi_reserved_nosys` (= `OS32_ERR_NOSYS`)、CPL=3 のトランポリンは int 0x80 のスタブ (ディスパッチャが `slot >= KAPI_FUNC_COUNT` で kill)。**NULL にしない** | `exec/exec.c` |
 | R の上限 | トランポリン 1 ページ: `sizeof(KernelAPI)` + スタブ 8B × R + 写し場 256B ≤ 4096 → **R ≤ 318** (`STATIC_ASSERT`) | `exec/exec.c` |
 
 関数を足すときは `kapi_reserved[]` が 1 本減るだけで、データ欄は動かない。**関数数が R を
@@ -1132,6 +1133,36 @@ LBA28、無ければ word 53 bit0 の現在の CHS、それも無ければ既定
 - 同じ版で `vfs_mount` が**同じ prefix の二重登録**を `OS32_ERR_EXIST` で断るようにした
   (末尾の `/` の有無は同じ場所として比べる)。
 
+### キーボードの受信記録 (v67)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x3C0 | kbd_diag_log | `int(u32 after_seq, KbdDiagLogEnt *out, int max)` |
+
+票 [TASK_KBD_NAV](tasks/gui/TASK_KBD_NAV.md) §3 の準備。実機のカナ / CAPS が「ロックで make、
+解除で break」か「押すたびに make だけ」かを、受信 1 バイトごとの記録で見る
+(`kbd_diag` の `last_code` は最後の 1 件だけ、`irq_count` は EMPTY / ERROR も数えるので判定できない)。
+
+- IRQ1 が 0041h から**使うバイトを読むたびに** 1 件積む (DATA / OVERRUN)。EMPTY (RxRDY = 0) と
+  ERROR (PE / FE) のバイトは積まない — そちらは `KbdDiag` の `empty_count` / `err_count`。
+  CUI でも GUI でも V86 中でも積む。リングは `KBD_DLOG_CAP` (32) 件の循環で、溢れたら古い方を上書き。
+- **seq** は起動 (`kbd_init`) からの通し番号 (1 から)。`after_seq` より新しい分を**古い順**に
+  最大 `max` 件 (32 で頭打ち) 写し、件数を返す。上書きで失われた分は飛ばすので、
+  写した先頭の seq が `after_seq + 1` でなければその間は**取りこぼし**。初回は 0 を渡す。
+- 戻り: 件数 (0 = 新しい分なし) / `OS32_ERR_INVAL` (`out` が NULL・`max <= 0`)。
+  出力は生成ラッパの `out` 検査 (`max × 8` バイト。読み取り専用の USER ページなら `ring3_fault_kill`)。
+- シェルの `kbdstat -w` が毎 tick 読んで 1 行ずつ出す ([POLICY_DEBUG.md](POLICY_DEBUG.md) §4-57)。
+
+`KbdDiagLogEnt` (8 バイト、`os32_kapi_shared.h`):
+
+| Offset | 型 | フィールド | 内容 |
+|---|---|---|---|
+| 0 | `u32` | `seq` | 通し番号 (1 から) |
+| 4 | `u8` | `code` | 0041h の生の値。bit7 (`KBD_DLOG_BREAK`) = break、下位 7 ビット (`KBD_DLOG_KEY_MASK`) = キーコード |
+| 5 | `u8` | `mods` | このバイトを処理した**後**の修飾 (`kbd_get_modifiers()` と同じ並び: `KBD_DLOG_MOD_SHIFT` 0x01 / `CAPS` 0x02 / `KANA` 0x04 / `GRPH` 0x08 / `CTRL` 0x10) |
+| 6 | `u8` | `flags` | `KBD_DLOG_F_OVERRUN` 0x01 (0043h が OE だけ) / `KBD_DLOG_F_V86` 0x02 (V86 ゲストへ回した、`mods` は更新されない) / `KBD_DLOG_F_GUI` 0x04 (GUI モード中) |
+| 7 | `u8` | `reserved` | 0 |
+
 ### 排他的作成 (v53)
 
 **スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
@@ -1266,7 +1297,7 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 ### 予約スロット (v63〜)
 
-0x3C0〜0x4B4 (slot 238〜299、62 本、v66 時点) は `kapi_reserved[]`。関数を足すと先頭から使う
+0x3C4〜0x4B4 (slot 239〜299、61 本、v67 時点) は `kapi_reserved[]`。関数を足すと先頭から使う
 (§4-0)。カーネルの表は `kapi_reserved_nosys` (`OS32_ERR_NOSYS`)、トランポリンは
 int 0x80 のスタブで、CPL=3 からの呼び出しはアプリを kill する。
 

@@ -111,6 +111,10 @@ void kbd_init(void);
 /* 診断カウンタを写す (KAPI v62、`kbdstat`)。0 = 成功 / OS32_ERR_INVAL = out が NULL。
  * 並びは sdk/include/os32/os32_kapi_shared.h の KbdDiag (24 バイト)。 */
 int  kbd_diag(KbdDiag *out);
+/* 受信記録を写す (KAPI v67、`kbdstat -w`、票 TASK_KBD_NAV §3)。after_seq より新しい
+ * KbdDiagLogEnt を古い順に最大 max 件 (KBD_DLOG_CAP で頭打ち)。戻り = 件数 /
+ * OS32_ERR_INVAL (out が NULL・max <= 0)。 */
+int  kbd_diag_log(u32 after_seq, KbdDiagLogEnt *out, int max);
 int  kbd_getchar(void);     /* ブロッキング: ASCII部のみ返す */
 int  kbd_getkey(void);      /* ブロッキング: 上位=スキャンコード, 下位=ASCII */
 int  kbd_trygetchar(void);
