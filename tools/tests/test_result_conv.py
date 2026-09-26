@@ -57,6 +57,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mutpar                                                   # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 HARNESS = ROOT / "tools/tests/test_result_conv_host.c"
@@ -519,33 +522,58 @@ def check_header_quiet():
     return _quiet(check_header)
 
 
+SELF = "tools/tests/test_result_conv.py"
+
+
+def dep_cmds(tmp):
+    """build_host が流す gcc (-c) の並び。写しの木へ実体で複写する依存を
+    gcc -MM で拾うのに使う (取り込み側 run_*.c は "../../../userland/…" を
+    相対で引くので、依存を実体にしないと写しの外の実物を読む)。"""
+    cmds = [["gcc", *HOST_FLAGS, "-Werror", *HOST_INC,
+             "-c", str(HARNESS), "-o", str(tmp / "h.o")]]
+    for rel in SHIMS:
+        cmds.append(["gcc", *HOST_FLAGS, "-w", *HOST_INC,
+                     "-c", str(ROOT / rel), "-o", str(tmp / "s.o")])
+    return cmds
+
+
+def one_mutation(item):
+    """変異 1 本: 写しの木を壊し、写しの中のこの試験で一巡する (--mut-once)。
+    実物は読むだけ。(印字, 見逃し) を返す。"""
+    i, (relpath, old, new) = item
+    original = (ROOT / relpath).read_text(encoding="utf-8")
+    label = "%d %s" % (i, pathlib.Path(relpath).name)
+    if old not in original:
+        return "MUTATE %-28s SKIP (目印が見つからない)" % label, 1
+    with tempfile.TemporaryDirectory(prefix="os32-result-conv-mut-") as td:
+        td = pathlib.Path(td)
+        real = set()
+        for c in dep_cmds(td):
+            real |= mutpar.gcc_deps(c, ROOT)
+        p = mutpar.run_script_in_tree(
+            ROOT, td, {relpath: original.replace(old, new, 1)}, SELF,
+            ["--mut-once", "mut%d" % i], real=real,
+            capture_output=True, text=True, timeout=600)
+    m = re.search(r"^MUT-ONCE built=(\d) fails=(\d+)$", p.stdout, re.M)
+    if not m:
+        return ("MUTATE %-28s **写しの中の一巡が結果を返さない (rc=%d)**"
+                % (label, p.returncode), 1)
+    built, fails = m.group(1) == "1", int(m.group(2))
+    if not built:
+        return ("MUTATE %-28s **コンパイルが通らない = 目が働いていない**"
+                % label, 1)
+    if fails == 0:
+        return ("MUTATE %-28s **GREEN のまま = 試験が規則を見ていない**"
+                % label, 1)
+    return "MUTATE %-28s RED (期待どおり落ちた: %d 件)" % (label, fails), 0
+
+
 def run_mutations(tmp):
-    bad = 0
-    for i, (relpath, old, new) in enumerate(MUTATIONS, 1):
-        target = ROOT / relpath
-        original = target.read_text(encoding="utf-8")
-        label = "%d %s" % (i, pathlib.Path(relpath).name)
-        if old not in original:
-            print("MUTATE %-28s SKIP (目印が見つからない)" % label, flush=True)
-            bad += 1
-            continue
-        try:
-            target.write_text(original.replace(old, new, 1), encoding="utf-8")
-            built, fails = run_once(tmp, "mut%d" % i)
-            if not built:
-                print("MUTATE %-28s **コンパイルが通らない = 目が働いていない**"
-                      % label, flush=True)
-                bad += 1
-            elif fails == 0:
-                print("MUTATE %-28s **GREEN のまま = 試験が規則を見ていない**"
-                      % label, flush=True)
-                bad += 1
-            else:
-                print("MUTATE %-28s RED (期待どおり落ちた: %d 件)"
-                      % (label, fails), flush=True)
-        finally:
-            target.write_text(original, encoding="utf-8")
-    return bad
+    """否定側。変異は一時ディレクトリの写しにだけ当てる (mutpar で並列、
+    check-par で回せる)。"""
+    return mutpar.run_with_control(
+        one_mutation, list(enumerate(MUTATIONS, 1)),
+        (0, ("userland/lib/rt/testresult.h", "", "")))
 
 
 # --------------------------------------------------------------------------
@@ -568,6 +596,13 @@ def run_target(tmp):
 
 
 if __name__ == "__main__":
+    if "--mut-once" in sys.argv:
+        # 写しの木の中で一巡する (run_mutations の子)。
+        with tempfile.TemporaryDirectory(prefix="os32-result-conv-") as tmp:
+            built, fails = run_once(pathlib.Path(tmp),
+                                    sys.argv[sys.argv.index("--mut-once") + 1])
+        print("MUT-ONCE built=%d fails=%d" % (built, fails), flush=True)
+        sys.exit(0)
     with tempfile.TemporaryDirectory(prefix="os32-result-conv-") as tmp:
         tmp = pathlib.Path(tmp)
         failed = 0

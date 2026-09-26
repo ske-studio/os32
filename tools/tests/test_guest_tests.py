@@ -16,7 +16,7 @@
 
     python3 -B tools/tests/test_guest_tests.py [--mutate]
 
-`--mutate` は**否定側**。実物の tools/guest_tests.py を 1 か所ずつ壊し、
+`--mutate` は**否定側**。tools/guest_tests.py の写し (一時ディレクトリの木) を 1 か所ずつ壊し、
 この試験が**実行時に**落ちることを見る。壊し方はどれも Python として正しく、
 import は通る — 構文エラーで落ちるだけなら試験の目が働いたことにならない。
 
@@ -44,6 +44,8 @@ LIST_FILE = ROOT / "tools/tests/guest_tests.txt"
 
 sys.path.insert(0, str(TOOLS))
 import guest_tests as gt                                        # noqa: E402
+sys.path.insert(0, str(ROOT / "tools/tests"))
+import mutpar                                                   # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -759,39 +761,40 @@ def run_self():
     return len(FAILS)
 
 
-def run_mutations():
-    """実物の tools/guest_tests.py を 1 か所ずつ壊し、RED になるか見る。"""
-    bad = 0
+SELF = "tools/tests/test_guest_tests.py"
+
+
+def one_mutation(item):
+    """変異 1 本: 写しの木の tools/guest_tests.py を壊し、写しの中のこの試験を
+    --self で流し直す (実物は読むだけ)。(印字, 見逃し) を返す。"""
+    i, ((old, new), label) = item
+    tag = "%d %s" % (i, label)
     original = TARGET.read_text(encoding="utf-8")
-    for i, ((old, new), label) in enumerate(zip(MUTATIONS, MUT_LABELS), 1):
-        tag = "%d %s" % (i, label)
-        if old not in original:
-            print("MUTATE %-44s SKIP (目印が見つからない)" % tag, flush=True)
-            bad += 1
-            continue
-        try:
-            TARGET.write_text(original.replace(old, new, 1), encoding="utf-8")
-            p = subprocess.run([sys.executable, "-B", str(pathlib.Path(__file__)),
-                                "--self"], cwd=str(ROOT), capture_output=True,
-                               timeout=300)
-            if p.returncode == 0:
-                print("MUTATE %-44s **GREEN のまま = 試験が規則を見ていない**"
-                      % tag, flush=True)
-                bad += 1
-            else:
-                n = p.stdout.decode("utf-8", "replace").count("  FAIL ")
-                # 例外で死んだだけ / 構文が壊れただけは**検出に数えない**。
-                # 試験の目が規則を見ていた証拠は「検査が落ちたこと」だけ。
-                if n == 0:
-                    print("MUTATE %-44s **検査が 1 つも落ちていない "
-                          "(落ちただけ) = 目が働いていない**" % tag, flush=True)
-                    bad += 1
-                else:
-                    print("MUTATE %-44s RED (期待どおり落ちた: %d 件)"
-                          % (tag, n), flush=True)
-        finally:
-            TARGET.write_text(original, encoding="utf-8")
-    return bad
+    if old not in original:
+        return "MUTATE %-44s SKIP (目印が見つからない)" % tag, 1
+    with tempfile.TemporaryDirectory(prefix="os32-guest-tests-mut-") as td:
+        p = mutpar.run_script_in_tree(
+            ROOT, td, {str(TARGET.relative_to(ROOT)):
+                       original.replace(old, new, 1)},
+            SELF, ["--self"], capture_output=True, timeout=300)
+    if p.returncode == 0:
+        return ("MUTATE %-44s **GREEN のまま = 試験が規則を見ていない**" % tag,
+                1)
+    n = p.stdout.decode("utf-8", "replace").count("  FAIL ")
+    # 例外で死んだだけ / 構文が壊れただけは**検出に数えない**。
+    # 試験の目が規則を見ていた証拠は「検査が落ちたこと」だけ。
+    if n == 0:
+        return ("MUTATE %-44s **検査が 1 つも落ちていない "
+                "(落ちただけ) = 目が働いていない**" % tag, 1)
+    return "MUTATE %-44s RED (期待どおり落ちた: %d 件)" % (tag, n), 0
+
+
+def run_mutations():
+    """実物の tools/guest_tests.py の写しを 1 か所ずつ壊し、RED になるか見る
+    (変異は一時ディレクトリの写しにだけ当てる。mutpar で並列、check-par で回せる)。"""
+    return mutpar.run_with_control(
+        one_mutation, list(enumerate(zip(MUTATIONS, MUT_LABELS), 1)),
+        (0, (("", ""), "control")))
 
 
 if __name__ == "__main__":

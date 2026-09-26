@@ -1,7 +1,8 @@
 # TASK_CHECK_MUT_PARALLEL — `make check` の変異試験を並列にする
 
-> 状態: **一部実装**。check-par の重い 6 本 (案 4) は 2026-09-26 に実装した (コーダー
-> Claude Code `claude-opus-5-5`、worktree `wt/mut-parallel`)。**check-mut の 14 本 (§5) はまだ手を付けていない**。
+> 状態: **実装済み**。check-par の重い 6 本 (案 4) は 2026-09-26 に実装した (コーダー
+> Claude Code `claude-opus-5-5`、worktree `wt/mut-parallel`)。check-mut の 14 本 (§5) も同日に全部
+> 写しの木へ移し、`check-mut` の段と `-j1` を消した (コーダー `claude-opus-5-5`、worktree `wt/check-narrow`、§5-1)。
 > 発行: PM (Claude Code `claude-opus-5-5`)、2026-09-26。承認: ユーザー 2026-09-26 (案 4)。
 > 関係: [`docs/POLICY_DEBUG.md`](../../POLICY_DEBUG.md) §4-40 (打ち切りで変異が残る)・§4-41 (2 段に割った経緯)、
 > `build/sdk.mk` の `check:` / `check-par:` / `check-mut:`、共通部 `tools/tests/mutpar.py`。
@@ -175,6 +176,45 @@ check-par の wall はいま **check-pcm-cs4231-host (単独 248 秒、本票の
 - serialfs (単独 32 秒) の残りの大半は実物の結合試験 (6 秒) と C16 の 20 秒の上限。
 - vfs-fd-path の変異 1 本の大半は写しの `fs/` 全体の複写とハーネスのコンパイル。6 本同時の wall はいまこれで決まる。
 - check-par の wall を決めているのは check-pcm-cs4231-host (単独 248 秒)。本票では触っていない。
+
+### 5-1. 実施 (2026-09-26)
+
+**共通部** (`tools/tests/mutpar.py` に追加):
+
+- `overlay(root, dst, real)` — 写しの木。`real` (ファイルかディレクトリ) とその祖先のディレクトリだけ実体で、
+  ほかの項目は実物への symlink。symlink のディレクトリから `..` で辿る `#include` は実物へ出るので、
+  C の試験は **gcc -MM の依存を全部実体にする** (`mutant_tree(..., gcc_cmds=)`)。
+- `build_in_tree` (C: 写しの中で gcc を流す)、`run_script_in_tree` (Python: 試験スクリプト自身も実体で写し、
+  `ROOT = Path(__file__).resolve().parents[2]` が写しを指すようにして流し直す)。
+- `run_with_control` — **変異なしの写し**を変異と同じ関数で回し、GREEN であることを確かめる
+  (`CONTROL 変異なしの写しの木 GREEN`)。写しの作りが壊れて全変異が別の理由で RED になるのを見逃さない。
+
+**1 本ずつの時間** (移す前、`make check-<名前>-host MUTATE=1` を逐次、長い順):
+
+| 試験 | 前 (秒) | 移し方 |
+|---|---|---|
+| sh-status | 23.7 | C。2 通り (常駐 / sh.bin) を写しで組む |
+| kstr-bench | 20.7 | Python 流し直し (`--mut-scenario <台本>`、写しの中で指名した台本だけ) |
+| h4-manifest | 9.8 | C (h4_manifest_host) + Python 流し直し (test_hostdrv_manifest) |
+| hsync-h2 | 9.4 | C |
+| kapi-layout | 9.0 | Python 流し直し。exec/ sdk/ include/ kapi/ を実体に (gen_kapi.py が cwd 相対で書く) |
+| edit-doc | 8.4 | Rust。`#[path]` の 4 本を実体にして写しの木から組む |
+| result-conv | 5.1 | Python 流し直し (`--mut-once`)。run_*.c の gcc -MM の依存を実体に |
+| hsync-h3 | 3.0 | C |
+| kstring-c | 2.1 | C (写しの lib/kstring_c.c を組む) |
+| vfs-excl / fstat-redir / cat-linenum / fs-kind-callers | 1.6 / 1.4 / 1.4 / 1.2 | C |
+| guest | 0.7 | Python 流し直し (`--self`) |
+
+逐次の段の合計は約 98 秒。どれも移した後は `check-par` の中で並列に走り、段の wall を決めない。
+
+**結果** (同じ機械・同じ木、16 論理 CPU の WSL2):
+
+- C1: `make check` **238.5 秒 → 128.6 秒** (rc=0)。`make check-fast` 32.6 秒。
+- C2: 14 本 (+ test_hostdrv_manifest) の `MUTATE …` 行を前後で突き合わせ、**同じ行・同じ判定** (RED 173 行の
+  集合が一致、見逃し 0、SKIP 0)。違いは各試験に `CONTROL …` の 1 行が増えたことだけ。
+- C4: どの試験も実物のソースを書かないので、打ち切っても変異は残らない。番人 (`check_tree_unchanged.py`) は
+  `check:` の段の前後に残した。前後の `git status` に変異の残留なし。
+- C3 (2 つの worktree で同時に `make check`) は測っていない。
 
 ## 6. しないこと
 

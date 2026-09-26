@@ -21,23 +21,33 @@
     した後) なら HEAD~1
   * 変更が無い                     → 全部を変異なし (= check-fast)
   * `full:` に当たる変更がある     → 全部を変異込み (= check)
-  * どの検査の glob にも `docs_only:` にも当たらない変更がある
+  * どの検査の glob にも `docs_only:` にも `notest:` にも当たらない変更がある
                                    → 全部を変異込み (= check)。表の漏れで
                                      否定側を落とさないため。`broad:` の検査の
                                      `**` glob はこの判定に数えない
   * 変更が全部 `docs_only:` に当たる → 当たった検査 + `docs_always:` だけを回す
+  * 変更が全部 `notest:` (と docs) で、どの検査の glob にも当たらない
+                                   → 全部を変異なし (= check-fast)。
+                                     どのホスト試験の入力でもない場所の変更
   * それ以外                       → 当たった検査は変異込み、残りは変異なし
-  出力は sh の代入 (CC_MODE / CC_STAGE1 / CC_MUT1 / CC_STAGE2 / CC_SUMMARY)。説明は stderr。
+                                     (`notest:` の変更は何も足さない)
+  検査の glob に当たった変更は `notest:` にも当たっていても「当たった検査」に
+  数える (glob が勝つ)。
+  出力は sh の代入 (CC_MODE / CC_STAGE1 / CC_MUT1 / CC_SUMMARY)。説明は stderr。
   試験は tools/tests/test_check_select.py (make check-check-select-host)。
 
 --lint が見るもの (make check-map、check-fast / check の列に入っている):
-  (a) build/sdk.mk の CHECK_PAR_TARGETS / CHECK_MUT_TARGETS と対応表の検査名が
-      過不足なく一致すること
-  (b) 対応表の各 glob が追跡されているファイルに 1 つ以上当たること (古い glob)
-  (c) **漏れ**: 各検査の recipe から辿れる試験スクリプトが開く / #include する /
-      `#[path]` で取り込むソースが、その検査の glob に入っていること。
+  (a) build/sdk.mk の CHECK_PAR_TARGETS と対応表の検査名が過不足なく一致すること
+  (b) 対応表の各 glob (`notest:` も) が追跡されているファイルに 1 つ以上当たること
+      (古い glob)
+  (c) **漏れ**: 各検査の recipe から辿れる試験スクリプトが開く / #include する
+      (取り込む側の場所・ROOT・-I の探索先) / `#[path]` で取り込むソースが、
+      その検査の glob に入っていること。
       辿り方は静的 (文字列リテラルと #include "..." だけ) なので、
       os.walk で舐める検査器などは拾えない — そういう検査は glob を手で広く書く。
+  (d) **notest の番人**: 各検査の拾えた入力が `notest:` に当たらないこと。
+      試験が notest の場所を読むようになったら「notest なのに入力になっている」
+      と言って落ちる — notest を狭める (`except:` に足す) か外す。
 """
 import os
 import re
@@ -121,7 +131,27 @@ def load_map():
     m.setdefault("checks", {})
     m.setdefault("broad", [])
     m.setdefault("docs_always", [])
+    m.setdefault("notest", [])
     return m
+
+
+def compile_notest(entries):
+    """notest: の各項目 (glob の文字列、または {glob:, except: [...]}) を
+    [(glob, 正規表現, [except の正規表現])] にする。"""
+    out = []
+    for e in entries or []:
+        if isinstance(e, dict):
+            g = e["glob"]
+            ex = [glob_re(x) for x in e.get("except", []) or []]
+        else:
+            g, ex = e, []
+        out.append((g, glob_re(g), ex))
+    return out
+
+
+def is_notest(path, cnotest):
+    return any(r.match(path) and not any(x.match(path) for x in ex)
+               for _, r, ex in cnotest)
 
 
 # ---------------------------------------------------------------- Makefile
@@ -153,12 +183,16 @@ def read_makefiles():
 
 
 def check_lists(vars_):
+    """make check の列 (CHECK_PAR_TARGETS)。2026-09-26 までの逐次の 2 段目
+    (CHECK_MUT_TARGETS) は写しの木へ移して消えた — 戻ってきたら止める。"""
     par = vars_.get("CHECK_PAR_TARGETS", [])
-    mut = vars_.get("CHECK_MUT_TARGETS", [])
-    if not par or not mut:
-        raise SystemExit("check_select: build/sdk.mk に CHECK_PAR_TARGETS / "
-                         "CHECK_MUT_TARGETS が見つからない")
-    return par, mut
+    if not par:
+        raise SystemExit("check_select: build/sdk.mk に CHECK_PAR_TARGETS が見つからない")
+    if vars_.get("CHECK_MUT_TARGETS"):
+        raise SystemExit("check_select: CHECK_MUT_TARGETS (逐次の 2 段目) は廃止した — "
+                         "変異は写しの木に当てて CHECK_PAR_TARGETS へ "
+                         "(docs/tasks/tools/TASK_CHECK_MUT_PARALLEL.md §5)")
+    return par
 
 
 # ---------------------------------------------------------------- 入力の抽出
@@ -195,9 +229,21 @@ def tracked_under(d):
 
 
 class Extractor:
+    """1 つの検査の入力を静的に拾う。
+
+    C の `#include "x.h"` は、取り込む側の場所 → ROOT → **-I の探索先** の順に
+    探す。探索先はその検査の recipe の `-I<dir>` と、辿った試験スクリプトの
+    文字列 (`"-Iinclude"`、`"-I" + str(ROOT / p) for p in ("include", "fs")` の
+    "include" "fs" のような、追跡されている .h を持つディレクトリ名) から集める。
+    探索先が出そろってから C を読むため、C の走査は後回しの列 (pending) に積む。
+    どの探索先で見つかるかは -I の順で決まるが、順は追わずに**当たったもの全部**
+    を入力に数える (多めに数える = 変異を回す側に倒れる)。"""
+
     def __init__(self):
         self.seen = set()
         self.found = set()
+        self.inc_dirs = set()
+        self.pending = []
 
     def add(self, rel):
         rel = norm(rel)
@@ -207,9 +253,23 @@ class Extractor:
         if rel in self.seen:
             return
         self.seen.add(rel)
-        if rel.startswith(SCAN_ROOTS) or rel.endswith("/Cargo.toml") \
-                or "/host_tests/" in rel or rel.endswith(C_EXTS):
+        if rel.endswith(C_EXTS):
+            self.pending.append(rel)
+        elif rel.startswith(SCAN_ROOTS) or rel.endswith("/Cargo.toml") \
+                or "/host_tests/" in rel:
             self.scan(rel)
+
+    def add_inc_dir(self, d):
+        d = norm(d) if d not in ("", ".") else ""
+        if d.startswith("../") or os.path.isabs(d):
+            return
+        if d == "" or d in header_dirs():
+            self.inc_dirs.add(d)
+
+    def drain(self):
+        """後回しにした C を、集まった -I の探索先で読む。"""
+        while self.pending:
+            self.scan(self.pending.pop())
 
     def add_dir(self, rel):
         for f in tracked_under(norm(rel)):
@@ -236,15 +296,18 @@ class Extractor:
         if rel.endswith(".py"):
             self.scan_py(text, d)
         elif rel.endswith(C_EXTS):
-            # "..." はまず取り込む側の場所から、次に ROOT から探す (C の規則と
-            # 同じ順)。-I で探す <...> / 別ディレクトリのヘッダは追わない。
-            # 循環は add() の seen で止まる。
+            # "..." はまず取り込む側の場所から探し (C の規則)、無ければ ROOT と
+            # -I の探索先 (self.inc_dirs) で当たったものを全部数える。
+            # <...> は追わない (システムのヘッダ)。循環は add() の seen で止まる。
             for inc in C_INC.findall(text):
-                for base in (d, ""):
+                own = norm(os.path.join(d, inc))
+                if is_tracked_file(own):
+                    self.add(own)
+                    continue
+                for base in sorted(self.inc_dirs | {""}):
                     rel2 = norm(os.path.join(base, inc))
                     if is_tracked_file(rel2):
                         self.add(rel2)
-                        break
         elif rel.endswith(".rs"):
             for p in RS_PATH.findall(text):
                 self.add(os.path.join(d, p))
@@ -263,6 +326,14 @@ class Extractor:
 
     def scan_py(self, text, d):
         cands = set()
+        if re.search(r"""['"]-I""", text):
+            # -I の探索先: "-I<dir>" の文字列と、.h を持つディレクトリ名の文字列
+            for _, s in PY_STR.findall(text):
+                s = s.strip()
+                if s.startswith("-I"):
+                    self.add_inc_dir(s[2:])
+                elif " " not in s and not s.startswith("/"):
+                    self.add_inc_dir(s)
         for m in PY_JOIN.finditer(text):
             parts = re.findall(r"""['"]([^'"]+)['"]""", m.group(0))
             cands.add("/".join(parts))
@@ -310,13 +381,28 @@ class Extractor:
                             self.add(f)
                 elif "=" in t and t.split("=", 1)[0].isupper():
                     continue
+                elif t.startswith("-I"):
+                    self.add_inc_dir(t[2:])
                 elif is_tracked_file(norm(t)):
                     self.add(norm(t))
+
+
+_HDR_DIRS = None
+
+
+def header_dirs():
+    """追跡されている .h / .inc を直下に持つディレクトリ (-I の探索先の候補)。"""
+    global _HDR_DIRS
+    if _HDR_DIRS is None:
+        _HDR_DIRS = {os.path.dirname(f) for f in tracked()
+                     if f.endswith((".h", ".inc")) and "/" in f}
+    return _HDR_DIRS
 
 
 def extract(rules, target):
     ex = Extractor()
     ex.from_recipe(rules.get(target, []))
+    ex.drain()
     return ex.found
 
 
@@ -324,8 +410,8 @@ def extract(rules, target):
 def lint():
     m = load_map()
     rules, vars_ = read_makefiles()
-    par, mut = check_lists(vars_)
-    listed = set(par) | set(mut)
+    par = check_lists(vars_)
+    listed = set(par)
     mapped = set(m["checks"])
     errs = []
     for t in sorted(listed - mapped):
@@ -336,12 +422,19 @@ def lint():
         for t in m[key]:
             if t not in listed:
                 errs.append("%s: に列に無い検査がある: %s" % (key, t))
-    dup = set(par) & set(mut)
-    for t in sorted(dup):
-        errs.append("CHECK_PAR_TARGETS と CHECK_MUT_TARGETS の両方にある: %s" % t)
     trk = tracked()
     full = compile_globs(m["full"])
     ign = compile_globs(m["ignore"])
+    notest = compile_notest(m["notest"])
+    for g, r, ex in notest:
+        if not any(r.match(f) for f in trk):
+            errs.append("notest: glob %r が追跡されているどのファイルにも当たらない" % g)
+        for x in ex:
+            if not any(x.match(f) for f in trk):
+                errs.append("notest: %r の except %r が古い" % (g, x.pattern))
+    for f in sorted(trk):
+        if is_notest(f, notest) and matches(f, full):
+            errs.append("notest: と full: の両方に当たる: %s" % f)
     leaks = 0
     for t in sorted(mapped & listed):
         globs = m["checks"][t] or []
@@ -354,6 +447,9 @@ def lint():
                 errs.append("%s: glob %r が追跡されているどのファイルにも当たらない"
                             % (t, g))
         for f in sorted(extract(rules, t)):
+            if is_notest(f, notest):
+                errs.append("%s: 入力 %s が notest なのに入力になっている "
+                            "(notest: を狭めるか外す)" % (t, f))
             if not (matches(f, cg) or matches(f, full) or matches(f, ign)):
                 errs.append("%s: 入力 %s が glob に入っていない (漏れ)" % (t, f))
                 leaks += 1
@@ -402,13 +498,16 @@ def default_base():
 
 
 def plan(files):
-    """変更の一覧から (mode, stage1, mut1, stage2, 説明の行) を決める。git は見ない。"""
+    """変更の一覧から (mode, stage, mut, 説明の行) を決める。git は見ない。
+
+    stage は回す検査 (make の目標)、mut はそのうち変異込みで回す検査。"""
     m = load_map()
     _, vars_ = read_makefiles()
-    par, mut = check_lists(vars_)
+    par = check_lists(vars_)
     ign = compile_globs(m["ignore"])
     full = compile_globs(m["full"])
     docs = compile_globs(m["docs_only"])
+    notest = compile_notest(m["notest"])
     broad = set(m["broad"])
     checks = {t: compile_globs(g) for t, g in m["checks"].items()}
     # 走査型の検査 (broad:) の `**` を含む glob は「表に載っている」の判定に数えない
@@ -418,41 +517,49 @@ def plan(files):
              for t, cg in checks.items()}
     changed = [f for f in files if not matches(f, ign)]
 
-    hit, unmatched, full_hits = set(), [], []
+    hit, unmatched, full_hits, notest_hits = set(), [], [], []
     for f in changed:
         hit |= {t for t, cg in checks.items() if matches(f, cg)}
         if matches(f, full):
             full_hits.append(f)
+        elif is_notest(f, notest):
+            notest_hits.append(f)
         elif not matches(f, docs) and \
                 not any(matches(f, cg) for cg in cover.values()):
             unmatched.append(f)
 
     lines = []
     if not changed:
-        mode, s1, m1, s2 = "fast", par + mut, [], []
+        mode, st, mu = "fast", list(par), []
         lines.append("変更なし → 全部を変異なしで回す (= check-fast)")
     elif full_hits or unmatched:
-        mode, s1, m1, s2 = "full", list(par), list(par), list(mut)
+        mode, st, mu = "full", list(par), list(par)
         lines += ["full: に当たる: %s" % f for f in full_hits[:10]]
         lines += ["対応表に無い (broad の ** を除く): %s" % f for f in unmatched[:10]]
         lines.append("→ 安全側: 全部を変異込みで回す (= check)")
-    elif all(matches(f, docs) for f in changed):
+    elif not notest_hits and all(matches(f, docs) for f in changed):
         # 文書を読む検査は当たらなくても回す (表の漏れで文書の検査を落とさない)。
-        run = hit | (set(m["docs_always"]) & (set(par) | set(mut)))
+        run = hit | (set(m["docs_always"]) & set(par))
         mode = "docs"
-        s1 = [t for t in par if t in run]
-        m1 = list(s1)
-        s2 = [t for t in mut if t in run]
+        st = [t for t in par if t in run]
+        mu = list(st)
         lines.append("docs だけの変更 → %d 本だけ回す (当たった検査 + docs_always:): %s"
                      % (len(run), " ".join(sorted(run))))
+    elif not hit:
+        mode, st, mu = "fast", list(par), []
+        lines += ["notest: に当たる: %s" % f for f in notest_hits[:10]]
+        lines.append("→ どのホスト試験の入力でもない変更だけ: 全部を変異なしで回す "
+                     "(= check-fast)")
     else:
         mode = "sel"
-        s2 = [t for t in mut if t in hit]
-        s1 = [t for t in par + mut if t not in s2]
-        m1 = [t for t in par if t in hit]
-        lines.append("変異込み %d 本: %s" % (len(hit), " ".join(sorted(hit))))
-        lines.append("残り %d 本は変異なし" % (len(s1) - len(m1)))
-    return mode, s1, m1, s2, lines
+        st = list(par)
+        mu = [t for t in par if t in hit]
+        if notest_hits:
+            lines.append("notest: に当たる %d 件は変異の選び方に足さない"
+                         % len(notest_hits))
+        lines.append("変異込み %d 本: %s" % (len(mu), " ".join(sorted(mu))))
+        lines.append("残り %d 本は変異なし" % (len(st) - len(mu)))
+    return mode, st, mu, lines
 
 
 def select(base, files=None, base_note=""):
@@ -460,7 +567,7 @@ def select(base, files=None, base_note=""):
         committed, work = changed_files(base)
     else:
         committed, work = [], list(files)
-    mode, s1, m1, s2, lines = plan(sorted(set(committed) | set(work)))
+    mode, st, mu, lines = plan(sorted(set(committed) | set(work)))
     summary = ("check-changed: 基点 %s (%s)、コミット済みの変更 %d 件 + 未コミット %d 件 → %s"
                % (base[:12], base_note or "指定", len(committed), len(work), mode))
     for l in lines:
@@ -468,9 +575,8 @@ def select(base, files=None, base_note=""):
     sys.stderr.write("*** " + summary + " ***\n")
     q = lambda xs: shlex.quote(" ".join(xs))
     print("CC_MODE=%s" % mode)
-    print("CC_STAGE1=%s" % q(s1))
-    print("CC_MUT1=%s" % q(m1))
-    print("CC_STAGE2=%s" % q(s2))
+    print("CC_STAGE1=%s" % q(st))
+    print("CC_MUT1=%s" % q(mu))
     print("CC_SUMMARY=%s" % shlex.quote(summary))
     return 0
 

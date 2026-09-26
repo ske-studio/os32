@@ -530,15 +530,15 @@ RULE_TEXT = """## 1. 名前の対応規則
 
 ## 2. `make check` の列 ({n} ターゲット)
 
-`build/sdk.mk` の `CHECK_PAR_TARGETS` / `CHECK_MUT_TARGETS` (`check-par` / `check-mut` の依存) が
+`build/sdk.mk` の `CHECK_PAR_TARGETS` (`check-par` の依存) が
 正典。この表はその列をそのまま展開したもの。コマンド列は `make check` (変異込み) の形。
 """
 
 
 def render(manual):
     rules = parse_makefiles()
-    # `make check` が回すのは check-par と check-mut の依存 (2026-09-17 に 2 段、
-    # 2026-09-26 から列は変数 CHECK_PAR_TARGETS / CHECK_MUT_TARGETS)。
+    # `make check` が回すのは check-par の依存 (列は変数 CHECK_PAR_TARGETS)。
+    # 2026-09-17〜26 は逐次の 2 段目 check-mut があった — 残っていれば数える。
     variables = parse_variables()
     names = []
     for stage in ("check-par", "check-mut"):

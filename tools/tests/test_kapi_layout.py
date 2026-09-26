@@ -20,7 +20,7 @@
   python3 -B tools/tests/test_kapi_layout.py [--mutate]    (make check-kapi-layout-host)
 
 --mutate は否定側 — 通常の試験が通った後、判定や拒否を崩した版で、この試験が
-確かに落ちることを見る (ソースを一時的に書き換えるので check-mut で逐次に回す)。
+確かに落ちることを見る (変異は一時ディレクトリの写しの木に当てる — 実物は読むだけ)。
 make・エミュレータ・実配備には触れない (i386-elf-gcc / ld / objcopy は使う)。
 """
 import json
@@ -35,6 +35,8 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sdk"))
 import os32x_hdr as H  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mutpar  # noqa: E402
 
 CROSS_DIR = pathlib.Path(os.environ.get("CROSS_DIR", str(pathlib.Path.home() / "opt/cross")))
 TCC = "i386-elf-gcc"
@@ -458,42 +460,43 @@ MUTATIONS = [
 ]
 
 
+SELF = "tools/tests/test_kapi_layout.py"
+# 写しの木で実体にする場所。変異を当てるファイル (exec/ sdk/) と、生成器が
+# cwd 相対で書き出す先 (sdk/include/os32 kapi/ exec/)、子の試験が "..." で
+# 引く先 (include/) は丸ごと実体にする — symlink を通して書くと実物を壊す。
+MUT_REAL = ("exec", "sdk", "include", "kapi",
+            "tools/tests/os32x_layout_host.c")
+
+
+def one_mutation(item):
+    """変異 1 本: 写しの木を壊し (gen_kapi.py の変異なら写しの中で生成し直し)、
+    写しの中のこの試験を流し直す。実物は読むだけ。(印字, 見逃し) を返す。"""
+    rel, name, old, new = item
+    original = (ROOT / rel).read_text(encoding="utf-8")
+    if old not in original:
+        return "MUTATE %-26s SKIP (目印が見つからない)" % name, 1
+    regen = rel == "sdk/gen_kapi.py" and "CRT_KAPI_SYMBOL" in old
+    with tempfile.TemporaryDirectory(prefix="os32-kapi-layout-mut-") as td:
+        tree = mutpar.mutant_tree(ROOT, pathlib.Path(td) / "tree",
+                                  {rel: original.replace(old, new, 1)},
+                                  real=set(MUT_REAL) | {SELF})
+        if regen:
+            subprocess.run([sys.executable, "-B", "sdk/gen_kapi.py"],
+                           cwd=str(tree), check=True, capture_output=True)
+        rc = subprocess.run(
+            [sys.executable, "-B", str(tree / SELF)],
+            cwd=str(tree), capture_output=True, timeout=600).returncode
+    if rc == 0:
+        return ("MUTATE %-26s **GREEN のまま = 試験が規則を見ていない**" % name,
+                1)
+    return "MUTATE %-26s RED (期待どおり落ちた)" % name, 0
+
+
 def run_mutations():
-    bad = 0
-    for rel, name, old, new in MUTATIONS:
-        target = ROOT / rel
-        original = target.read_text(encoding="utf-8")
-        if old not in original:
-            print("MUTATE %-26s SKIP (目印が見つからない)" % name, flush=True)
-            bad += 1
-            continue
-        regen = rel == "sdk/gen_kapi.py" and "CRT_KAPI_SYMBOL" in old
-        hdr = ROOT / "sdk/include/os32/os32_kapi_generated.h"
-        saved_hdr = hdr.read_text(encoding="utf-8") if regen else None
-        saved_other = {}
-        try:
-            target.write_text(original.replace(old, new, 1), encoding="utf-8")
-            if regen:
-                for p in ("sdk/include/os32/os32_kapi_slots.h", "kapi/kapi_generated.c",
-                          "exec/exec_kapi_init.inc"):
-                    saved_other[p] = (ROOT / p).read_text(encoding="utf-8")
-                run([sys.executable, "-B", "sdk/gen_kapi.py"])
-            rc = subprocess.run(
-                [sys.executable, "-B", str(pathlib.Path(__file__).resolve())],
-                cwd=str(ROOT), capture_output=True, timeout=600).returncode
-            if rc == 0:
-                print("MUTATE %-26s **GREEN のまま = 試験が規則を見ていない**" % name,
-                      flush=True)
-                bad += 1
-            else:
-                print("MUTATE %-26s RED (期待どおり落ちた)" % name, flush=True)
-        finally:
-            target.write_text(original, encoding="utf-8")
-            if regen:
-                hdr.write_text(saved_hdr, encoding="utf-8")
-                for p, t in saved_other.items():
-                    (ROOT / p).write_text(t, encoding="utf-8")
-    return bad
+    """否定側。変異は一時ディレクトリの写しにだけ当てる (mutpar で並列、
+    check-par で回せる)。"""
+    return mutpar.run_with_control(one_mutation, MUTATIONS,
+                                   ("exec/os32x_hdr.c", "control", "", ""))
 
 
 if __name__ == "__main__":

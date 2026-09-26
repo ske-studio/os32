@@ -39,6 +39,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mutpar                                                   # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 PROG_SRC = ROOT / "userland/tests/kstr_bench.c"
@@ -587,35 +590,58 @@ MUTATIONS = [
 ]
 
 
+SELF = "tools/tests/test_kstr_bench.py"
+MUT_TARGET = "userland/tests/kstr_bench.c"
+RC_COMPILE = 3      # --mut-scenario: コンパイルが通らなかった
+
+
+def one_mutation(item):
+    """変異 1 本: 写しの木の kstr_bench.c を壊し、写しの中のこの試験で指名した
+    台本だけを回す (--mut-scenario)。実物は読むだけ。(印字, 見逃し) を返す。"""
+    i, (name, scenario, old, new) = item
+    original = (ROOT / MUT_TARGET).read_text(encoding="utf-8")
+    if old not in original:
+        return "MUTATE %-18s SKIP (目印が見つからない)" % name, 1
+    with tempfile.TemporaryDirectory(prefix="os32-kstr-bench-mut-") as td:
+        p = mutpar.run_script_in_tree(
+            ROOT, td, {MUT_TARGET: original.replace(old, new, 1)}, SELF,
+            ["--mut-scenario", scenario, "-m%d" % i],
+            real={str(HOST_SRC.relative_to(ROOT))},
+            capture_output=True, text=True, timeout=900)
+    text = p.stdout
+    if p.returncode == RC_COMPILE:
+        return (text + "MUTATE %-18s RED (コンパイルが通らない) [%s]"
+                % (name, scenario), 0)
+    if p.returncode != 0:
+        return (text + "MUTATE %-18s RED (期待どおり落ちた) [%s]"
+                % (name, scenario), 0)
+    return (text + "MUTATE %-18s **GREEN のまま = 試験が見ていない** [%s]"
+            % (name, scenario), 1)
+
+
 def run_mutations(tmp):
-    original = PROG_SRC.read_text(encoding="utf-8")
-    bad = 0
-    for i, (name, scenario, old, new) in enumerate(MUTATIONS):
-        if old not in original:
-            print("MUTATE %-18s SKIP (目印が見つからない)" % name, flush=True)
-            bad += 1
-            continue
+    """否定側。変異は一時ディレクトリの写しにだけ当てる (mutpar で並列、
+    check-par で回せる)。対照は変異なしの写しで format の台本を回す。"""
+    return mutpar.run_with_control(
+        one_mutation, list(enumerate(MUTATIONS)),
+        (len(MUTATIONS), ("control", "format", "", "")))
+
+
+def mut_scenario(scenario, tag):
+    """--mut-scenario の中身 (写しの木の中で呼ばれる)。落ちたら 1、
+    コンパイルが通らなければ RC_COMPILE。"""
+    with tempfile.TemporaryDirectory(prefix="os32-kstr-bench-") as tmp:
         try:
-            PROG_SRC.write_text(original.replace(old, new, 1), encoding="utf-8")
-            try:
-                failed = SCENARIOS[scenario](tmp, tag="-m%d" % i)
-            except subprocess.CalledProcessError:
-                print("MUTATE %-18s RED (コンパイルが通らない) [%s]"
-                      % (name, scenario), flush=True)
-                continue
-            if failed:
-                print("MUTATE %-18s RED (期待どおり落ちた) [%s]"
-                      % (name, scenario), flush=True)
-            else:
-                print("MUTATE %-18s **GREEN のまま = 試験が見ていない** [%s]"
-                      % (name, scenario), flush=True)
-                bad += 1
-        finally:
-            PROG_SRC.write_text(original, encoding="utf-8")
-    return bad
+            failed = SCENARIOS[scenario](pathlib.Path(tmp), tag=tag)
+        except subprocess.CalledProcessError:
+            return RC_COMPILE
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
+    if "--mut-scenario" in sys.argv:
+        k = sys.argv.index("--mut-scenario")
+        sys.exit(mut_scenario(sys.argv[k + 1], sys.argv[k + 2]))
     with tempfile.TemporaryDirectory(prefix="os32-kstr-bench-") as tmp:
         tmp = pathlib.Path(tmp)
         failed = 0

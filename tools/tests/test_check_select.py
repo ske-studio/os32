@@ -12,6 +12,15 @@
     「変更なし」に退化しない)
   * 実物の対応表に漏れが無い (--lint = 0)
 
+過剰な full を減らした改修 (2026-09-26) の筋書き:
+  * `#include "x.h"` を -I の探索先 (試験スクリプトの "-I…" / .h を持つ
+    ディレクトリ名の文字列) で解決する (os32api.h → sdk/include/os32/)
+  * `notest:` だけに当たり、どの検査の glob にも当たらない変更 → 全部を変異なし
+  * `notest:` の変更でも検査の glob (走査型の ** を含む) に当たればその検査は
+    変異込み (glob が勝つ)。`except:` に書いたものは notest に数えない
+  * notest の番人: 拾えた入力が notest に当たると --lint が落ちる
+  * 逐次の 2 段目 (CHECK_MUT_TARGETS) は無い — 列は 1 本で全部並列
+
   python3 -B tools/tests/test_check_select.py            # 筋書き
   python3 -B tools/tests/test_check_select.py --mutate   # 否定側 (選び方を壊して RED か)
 
@@ -41,8 +50,18 @@ def load(text=None):
 
 
 def run_plan(cs, files):
-    mode, s1, m1, s2, _ = cs.plan(files)
-    return mode, set(s1), set(m1), set(s2)
+    mode, st, mu, _ = cs.plan(files)
+    return mode, set(st), set(mu)
+
+
+def with_map(cs, edit):
+    """対応表を読み込んだ後に edit(m) で書き換えた版を cs.load_map に差す。
+    戻り値は元の load_map (呼び出し側が finally で戻す)。"""
+    orig = cs.load_map
+    m = orig()
+    edit(m)
+    cs.load_map = lambda: m
+    return orig
 
 
 def git(d, *args):
@@ -59,19 +78,20 @@ def case_inc_extract(cs):
 
 
 def case_hsync_protect(cs):
-    mode, s1, m1, s2 = run_plan(cs, ["userland/system/hsync_protect.inc"])
+    mode, st, mu = run_plan(cs, ["userland/system/hsync_protect.inc"])
     assert mode == "sel", mode
-    for t in ("check-hsync-h2-host", "check-hsync-h3-host", "check-h4-manifest-host"):
-        assert t in s2, (t, s2)                  # check-mut 側 → 2 段目で変異込み
-    assert "check-settings-protect-host" in m1, m1
+    for t in ("check-hsync-h2-host", "check-hsync-h3-host", "check-h4-manifest-host",
+              "check-settings-protect-host"):
+        assert t in mu, (t, mu)
+    assert mu <= st, "変異込みの検査が回す列に無い"
 
 
 def case_sh_pipe(cs):
-    mode, s1, m1, s2 = run_plan(cs, ["userland/shell/sh_pipe.inc"])
+    mode, st, mu = run_plan(cs, ["userland/shell/sh_pipe.inc"])
     assert mode == "sel", mode
-    assert "check-sh-status-host" in s2, s2
-    assert "check-sh-truncation-host" in m1, m1
-    assert "check-sh-status-host" not in s1, "変異込みの 2 段目と 1 段目の両方に出た"
+    assert {"check-sh-status-host", "check-sh-truncation-host"} <= mu, mu
+    assert "check-serialfs-host" in st and "check-serialfs-host" not in mu, \
+        "当たらない検査は変異なしで回す"
 
 
 def case_bare_extract(cs):
@@ -81,44 +101,111 @@ def case_bare_extract(cs):
 
 
 def case_readme(cs):
-    mode, s1, m1, s2 = run_plan(cs, ["README.md"])
+    mode, st, mu = run_plan(cs, ["README.md"])
     assert mode == "docs", mode
-    assert "check-kapi-version" in s1, s1
-    assert not s2, s2
-    assert "check-serialfs-host" not in s1, "docs だけなのに重い検査を回した"
+    assert "check-kapi-version" in st, st
+    assert "check-serialfs-host" not in st, "docs だけなのに重い検査を回した"
 
 
 def case_claude(cs):
-    mode, s1, m1, s2 = run_plan(cs, ["CLAUDE.md"])
+    mode, st, mu = run_plan(cs, ["CLAUDE.md"])
     assert mode == "docs", mode
-    assert {"check-manifests", "check-constraints"} <= s1, s1
+    assert {"check-manifests", "check-constraints"} <= st, st
 
 
 def case_docs_always(cs):
-    mode, s1, m1, s2 = run_plan(cs, ["docs/08_build.md"])
+    mode, st, mu = run_plan(cs, ["docs/08_build.md"])
     assert mode == "docs", mode
     for t in ("check-constraints", "check-kapi-version", "check-manifests",
               "check-packages-host", "check-tests-inventory"):
-        assert t in s1, (t, s1)
+        assert t in st, (t, st)
 
 
 def case_broad_only(cs):
     # drivers/dev.c は走査型 (arch-asm / le-access) の ** にしか当たらない。
     # 文字列を割ってあるのは、check-map の抽出がこの試験の入力と数えないため
     # (数えるとこの試験自身の glob に当たって筋書きが崩れる)。
-    mode, s1, m1, s2 = run_plan(cs, ["drivers/" + "dev.c"])
+    mode, st, mu = run_plan(cs, ["drivers/" + "dev.c"])
     assert mode == "full", mode
 
 
 def case_submodule(cs):
-    mode, s1, m1, s2 = run_plan(cs, ["apps", "game"])
+    mode, st, mu = run_plan(cs, ["apps", "game"])
     assert mode == "sel", mode
-    assert m1 == {"check-manifests", "check-packages-host"}, m1
+    assert mu == {"check-manifests", "check-packages-host"}, mu
 
 
 def case_nothing(cs):
-    mode, s1, m1, s2 = run_plan(cs, [])
-    assert mode == "fast" and not m1 and not s2, mode
+    mode, st, mu = run_plan(cs, [])
+    assert mode == "fast" and not mu, mode
+
+
+def case_single_stage(cs):
+    # 逐次の 2 段目は無い: full は列の全部を 1 段で変異込み
+    _, vars_ = cs.read_makefiles()
+    par = cs.check_lists(vars_)
+    assert "check-sh-status-host" in par and "check-kapi-layout-host" in par
+    mode, st, mu = run_plan(cs, ["Makefile"])
+    assert mode == "full" and st == set(par) and mu == set(par), mode
+
+
+def case_inc_dir_extract(cs):
+    # cat_linenum_host.c の #include "os32api.h" は取り込む側の場所にも ROOT にも
+    # 無く、test_cat_linenum.py の "-I" + ROOT / "sdk/include/os32" で見つかる。
+    rules, _ = cs.read_makefiles()
+    got = cs.extract(rules, "check-cat-linenum-host")
+    assert "sdk/include/os32/os32api.h" in got, sorted(got)[:20]
+    assert "include/types.h" in got, "-I の先のヘッダが取り込むヘッダも辿る"
+
+
+def case_notest_fast(cs):
+    # notest だけに当たり、どの検査の glob にも当たらない → 全部を変異なし
+    f = "sample/" + "x.bin"
+    orig = with_map(cs, lambda m: m["notest"].append("sample/**"))
+    try:
+        mode, st, mu = run_plan(cs, [f])
+        assert mode == "fast" and not mu, (mode, mu)
+        _, vars_ = cs.read_makefiles()
+        assert st == set(cs.check_lists(vars_)), "fast は全部を回す"
+        # notest の外 (表に無い) が混ざれば安全側
+        mode, st, mu = run_plan(cs, [f, "tools/" + "no_such_tool.py"])
+        assert mode == "full", mode
+    finally:
+        cs.load_map = orig
+
+
+def case_notest_glob_wins(cs):
+    # 外部コマンドは notest だが、userland/** を舐める走査型の検査は変異込み
+    mode, st, mu = run_plan(cs, ["userland/cmds/" + "cal.c"])
+    assert mode == "sel", mode
+    assert "check-privileged" in mu, mu
+    assert "check-serialfs-host" not in mu, mu
+    # except: に書いた cfg.c は notest ではない (check-cfg-host が読む)
+    assert not cs.is_notest("userland/cmds/" + "cfg.c",
+                            cs.compile_notest(cs.load_map()["notest"]))
+    # except を外して notest に入れても、検査の glob が勝つ
+    def drop_except(m):
+        m["notest"] = [e["glob"] if isinstance(e, dict) else e for e in m["notest"]]
+    orig = with_map(cs, drop_except)
+    try:
+        mode, st, mu = run_plan(cs, ["userland/cmds/" + "cfg.c"])
+        assert mode == "sel" and "check-cfg-host" in mu, (mode, mu)
+    finally:
+        cs.load_map = orig
+
+
+def case_notest_guard(cs):
+    # 試験が読むファイルを notest にすると --lint が落ちる (番人)
+    orig = with_map(cs, lambda m: m["notest"].append("userland/system/" + "hsync.c"))
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = cs.lint()
+    finally:
+        cs.load_map = orig
+    assert rc != 0, "notest の番人が黙った"
+    assert "notest なのに入力になっている" in err.getvalue(), err.getvalue()[:500]
 
 
 def case_featgui_commit(cs):
@@ -163,7 +250,9 @@ def case_lint_real(cs):
 
 CASES = [case_inc_extract, case_hsync_protect, case_sh_pipe, case_bare_extract,
          case_readme, case_claude, case_docs_always, case_broad_only,
-         case_submodule, case_nothing, case_featgui_commit, case_lint_real]
+         case_submodule, case_nothing, case_single_stage, case_inc_dir_extract,
+         case_notest_fast, case_notest_glob_wins, case_notest_guard,
+         case_featgui_commit, case_lint_real]
 
 
 def run_cases(cs, quiet=False):
@@ -187,21 +276,37 @@ def run_cases(cs, quiet=False):
 
 # ------------------------------------------------------------------ 否定側
 MUTATIONS = [
-    ('or rel.endswith(C_EXTS):', ':',
+    ('            self.pending.append(rel)\n', '            pass\n',
      "実装の .c / .inc の #include を辿らない (P2-1: .inc が表から落ちる)"),
     ('if "/" in s or s.endswith(BARE_EXTS):', 'if "/" in s:',
      "裸のファイル名 (README.md / CLAUDE.md) を候補にしない (P2-2)"),
     ('if not (t in broad and "**" in g)]', ']',
      "走査型の ** glob を「表に載っている」に数える (P2-1 の保険が外れる)"),
-    ('run = hit | (set(m["docs_always"]) & (set(par) | set(mut)))', 'run = hit',
+    ('run = hit | (set(m["docs_always"]) & set(par))', 'run = hit',
      "docs だけの変更で文書を読む検査を常には回さない (P2-2)"),
     ('        if mb != head:\n', '        if True:\n',
      "feat/gui の上でコミットした後も merge-base (== HEAD) を基点にする (P2-3)"),
     ('    elif full_hits or unmatched:\n', '    elif full_hits:\n',
      "表に無い変更でも安全側 (全部変異込み) に倒さない"),
-    ('        s2 = [t for t in mut if t in hit]\n        s1 = [t for t in par + mut if t not in s2]',
-     '        s2 = []\n        s1 = [t for t in par + mut if t not in s2]',
-     "check-mut 側の当たった検査を変異込みで回さない"),
+    ('        mu = [t for t in par if t in hit]\n',
+     '        mu = [t for t in par if t in hit][:1]\n',
+     "当たった検査の一部しか変異込みで回さない"),
+    ('                for base in sorted(self.inc_dirs | {""}):',
+     '                for base in [""]:',
+     "#include を -I の探索先で解決しない (ヘッダが表から落ちる)"),
+    ('            if is_notest(f, notest):\n                errs.append(',
+     '            if False:\n                errs.append(',
+     "notest の番人を外す (試験が読むファイルを notest にしても黙る)"),
+    ('    elif not hit:\n        mode, st, mu = "fast", list(par), []',
+     '    elif not hit:\n        mode, st, mu = "fast", [], []',
+     "notest だけの変更で検査を 1 本も回さない"),
+    ('    for f in changed:\n        hit |= {t for t, cg in checks.items() if matches(f, cg)}',
+     '    for f in changed:\n        hit |= {t for t, cg in checks.items() if matches(f, cg)'
+     ' and not is_notest(f, notest)}',
+     "notest の変更は検査の glob に当たっても数えない (glob が勝たない)"),
+    ('    return any(r.match(path) and not any(x.match(path) for x in ex)',
+     '    return any(r.match(path)',
+     "notest の except: を無視する"),
     ('    for f in changed:\n        hit |=', '    for f in changed[:0]:\n        hit |=',
      "変更を検査に突き合わせない"),
 ]

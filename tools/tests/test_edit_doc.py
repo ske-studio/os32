@@ -31,6 +31,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools/tests"))
 import os32api_host  # noqa: E402
+import mutpar  # noqa: E402
 
 TEXTCORE = ROOT / "userland/rust/libos32gui/src/textcore.rs"
 TEXTCORE_TESTS = ROOT / "userland/rust/libos32gui/host/textcore_tests.rs"
@@ -121,8 +122,14 @@ MUTATIONS = [
 ]
 
 
-def build_and_run(out, label):
-    """試験 2 本を組み立てて走らせる。戻り = (returncode, 出力)。"""
+def build_and_run(out, label, src_root=ROOT):
+    """試験 2 本を組み立てて走らせる。戻り = (returncode, 出力)。
+
+    src_root は取り込む実物の木 (変異のときは一時ディレクトリの写しの木)。"""
+    def at(path):
+        return src_root / path.relative_to(ROOT)
+    textcore, textcore_tests = at(TEXTCORE), at(TEXTCORE_TESTS)
+    doc, doc_tests = at(DOC), at(DOC_TESTS)
     rlib = os32api_host.build(out)
 
     # libos32gui (ホスト版) は textcore だけ。doc.rs の `use libos32gui::textcore`
@@ -130,13 +137,13 @@ def build_and_run(out, label):
     gui_src = out / "gui_host.rs"
     gui_src.write_text(
         "#![allow(dead_code)]\n"
-        f'#[path="{TEXTCORE}"] pub mod textcore;\n'
+        f'#[path="{textcore}"] pub mod textcore;\n'
     )
     gui_rlib = out / "liblibos32gui.rlib"
     subprocess.run(
         ["rustc", "--edition=2021", "--crate-type=rlib",
          "--crate-name=libos32gui", str(gui_src), "-o", str(gui_rlib)],
-        cwd=ROOT, check=True,
+        cwd=src_root, check=True,
     )
 
     results = []
@@ -144,13 +151,13 @@ def build_and_run(out, label):
     root = out / "textcore_root.rs"
     root.write_text(
         "#![allow(dead_code)]\n"
-        f'#[path="{TEXTCORE}"] pub mod textcore;\n'
-        f'#[path="{TEXTCORE_TESTS}"] mod textcore_tests;\n'
+        f'#[path="{textcore}"] pub mod textcore;\n'
+        f'#[path="{textcore_tests}"] mod textcore_tests;\n'
     )
     exe = out / ("textcore-tests-" + label)
     subprocess.run(
         ["rustc", "--edition=2021", "--test", str(root), "-o", str(exe)],
-        cwd=ROOT, check=True,
+        cwd=src_root, check=True,
     )
     results.append(("textcore", exe))
 
@@ -158,8 +165,8 @@ def build_and_run(out, label):
     root = out / "doc_root.rs"
     root.write_text(
         "#![allow(dead_code)]\n"
-        f'#[path="{DOC}"] pub mod doc;\n'
-        f'#[path="{DOC_TESTS}"] mod doc_tests;\n'
+        f'#[path="{doc}"] pub mod doc;\n'
+        f'#[path="{doc_tests}"] mod doc_tests;\n'
     )
     exe = out / ("doc-tests-" + label)
     subprocess.run(
@@ -168,14 +175,14 @@ def build_and_run(out, label):
          "--extern", "os32api=" + str(rlib),
          "--extern", "libos32gui=" + str(gui_rlib),
          "-o", str(exe)],
-        cwd=ROOT, check=True,
+        cwd=src_root, check=True,
     )
     results.append(("doc", exe))
 
     rc = 0
     text = ""
     for name, exe in results:
-        p = subprocess.run([str(exe), "--test-threads=1"], cwd=ROOT,
+        p = subprocess.run([str(exe), "--test-threads=1"], cwd=src_root,
                            capture_output=True, timeout=180)
         text += p.stdout.decode("utf-8", "replace")
         if p.returncode != 0:
@@ -249,32 +256,39 @@ def focus_notify_checks(widget_src):
     return bad
 
 
-def run_mutations():
-    bad = 0
+def one_mutation(item):
+    """変異 1 本: 一時ディレクトリの写しの木を壊して組んで回す (実物は読むだけ)。
+    (印字, 見逃し) を返す。"""
+    i, (name, target, old, new) = item
+    original = target.read_text(encoding="utf-8")
+    if old not in original:
+        return "MUTATE %-30s SKIP (当て先が見つからない)" % name, 1
+    rel = str(target.relative_to(ROOT))
     with tempfile.TemporaryDirectory(prefix="os32-edit-doc-mut-") as tmp:
-        out = pathlib.Path(tmp)
-        for i, (name, target, old, new) in enumerate(MUTATIONS):
-            original = target.read_text(encoding="utf-8")
-            if old not in original:
-                print("MUTATE %-30s SKIP (当て先が見つからない)" % name, flush=True)
-                bad += 1
-                continue
-            try:
-                target.write_text(original.replace(old, new, 1), encoding="utf-8")
-                try:
-                    rc, _text = build_and_run(out, "m%d" % i)
-                except subprocess.CalledProcessError:
-                    print("MUTATE %-30s RED (コンパイルが通らない)" % name, flush=True)
-                    continue
-                if rc == 0:
-                    print("MUTATE %-30s **GREEN のまま = 試験が規則を見ていない**"
-                          % name, flush=True)
-                    bad += 1
-                else:
-                    print("MUTATE %-30s RED (期待どおりに落ちた)" % name, flush=True)
-            finally:
-                target.write_text(original, encoding="utf-8")
-    return bad
+        tmp = pathlib.Path(tmp)
+        # #[path] で取り込む 4 本は実体にする (相対の mod 解決も写しの中で閉じる)
+        real = {str(p.relative_to(ROOT))
+                for p in (TEXTCORE, TEXTCORE_TESTS, DOC, DOC_TESTS)}
+        tree = mutpar.mutant_tree(ROOT, tmp / "tree",
+                                  {rel: original.replace(old, new, 1)},
+                                  real=real)
+        out = tmp / "out"
+        out.mkdir()
+        try:
+            rc, _text = build_and_run(out, "m%d" % i, src_root=tree)
+        except subprocess.CalledProcessError:
+            return "MUTATE %-30s RED (コンパイルが通らない)" % name, 0
+    if rc == 0:
+        return ("MUTATE %-30s **GREEN のまま = 試験が規則を見ていない**" % name,
+                1)
+    return "MUTATE %-30s RED (期待どおりに落ちた)" % name, 0
+
+
+def run_mutations():
+    """否定側。変異は一時ディレクトリの写しにだけ当てる (mutpar で並列、
+    check-par で回せる)。"""
+    return mutpar.run_with_control(one_mutation, list(enumerate(MUTATIONS)),
+                                   (len(MUTATIONS), ("control", DOC, "", "")))
 
 
 def main():

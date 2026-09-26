@@ -36,6 +36,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mutpar                                                   # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 HOST_FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
@@ -70,7 +73,7 @@ def build_host(tmp, name):
     return exe
 
 
-# 否定側。cmd_file.c を一時的に書き換えて、この試験が RED になることを見る。
+# 否定側。cmd_file.c の写しを書き換えて、この試験が RED になることを見る。
 MUTATIONS = [
     # 変異 1 = 欠陥 (a): 元の `for (i = 0; i <= len; i++)` は i == len でも
     # 1 行終わったことにして行番号を出していた。バッファが改行で終わっている
@@ -138,36 +141,41 @@ MUTATIONS = [
 ]
 
 
-def run_mutations(tmp):
-    target = ROOT / "userland/shell/cmd_file.c"
-    bad = 0
-    for name, old, new in MUTATIONS:
-        original = target.read_text(encoding="utf-8")
-        if old not in original:
-            print("MUTATE %-24s SKIP (目印が見つからない)" % name, flush=True)
-            bad += 1
-            continue
+MUT_TARGET = "userland/shell/cmd_file.c"
+
+
+def host_cmd(exe):
+    return ["gcc", *HOST_FLAGS, *HOST_INC, str(SRC), "-o", str(exe)]
+
+
+def one_mutation(item):
+    """変異 1 本を一時ディレクトリの写しで組んで回す (実物は読むだけ)。
+    返り値は (印字する行, 見逃し 1 / 0)。"""
+    name, old, new = item
+    original = (ROOT / MUT_TARGET).read_text(encoding="utf-8")
+    if old not in original:
+        return "MUTATE %-24s SKIP (目印が見つからない)" % name, 1
+    with tempfile.TemporaryDirectory(prefix="os32-cat-linenum-mut-") as td:
+        exe = pathlib.Path(td) / ("mut-" + name)
         try:
-            target.write_text(original.replace(old, new, 1), encoding="utf-8")
-            try:
-                exe = build_host(tmp, "mut-" + name)
-            except subprocess.CalledProcessError:
-                print("MUTATE %-24s RED (コンパイルが通らない)" % name,
-                      flush=True)
-                continue
-            out = subprocess.run([str(exe)], cwd=ROOT, timeout=120,
-                                 capture_output=True)
-            if out.returncode == 0:
-                print("MUTATE %-24s **GREEN のまま = 試験が規則を見ていない**"
-                      % name, flush=True)
-                bad += 1
-            else:
-                fails = out.stdout.decode("utf-8", "replace").count("FAIL ")
-                print("MUTATE %-24s RED (期待どおり落ちた: FAIL %d 件)"
-                      % (name, fails), flush=True)
-        finally:
-            target.write_text(original, encoding="utf-8")
-    return bad
+            tree = mutpar.build_in_tree(
+                ROOT, td, {MUT_TARGET: original.replace(old, new, 1)},
+                [host_cmd(exe)])
+        except subprocess.CalledProcessError:
+            return "MUTATE %-24s RED (コンパイルが通らない)" % name, 0
+        out = subprocess.run([str(exe)], cwd=str(tree), timeout=120,
+                             capture_output=True)
+    if out.returncode == 0:
+        return ("MUTATE %-24s **GREEN のまま = 試験が規則を見ていない**"
+                % name, 1)
+    fails = out.stdout.decode("utf-8", "replace").count("FAIL ")
+    return "MUTATE %-24s RED (期待どおり落ちた: FAIL %d 件)" % (name, fails), 0
+
+
+def run_mutations(tmp):
+    """否定側。cmd_file.c の写しを書き換えて、この試験が RED になることを見る
+    (変異は mutpar で並列、実物のソースには書かない — check-par で回せる)。"""
+    return mutpar.run_with_control(one_mutation, MUTATIONS, ("control", "", ""))
 
 
 if __name__ == "__main__":
