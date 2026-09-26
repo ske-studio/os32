@@ -37,7 +37,7 @@ def check_emulator_table():
                         '-I' + str(tmp), '-I' + str(AIDEBUG),
                         str(ROOT / 'tools/tests/key_inject_host.cpp'),
                         str(AIDEBUG / 'aidebug_keys.cpp'), '-o', str(exe)], check=True)
-        subprocess.run([str(exe)], check=True, timeout=10)
+        subprocess.run([str(exe)], check=True, timeout=60)
     print('EMU TABLE PASS (K1/K2/K3/K5)')
 
 

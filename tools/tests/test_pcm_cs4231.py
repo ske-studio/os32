@@ -268,16 +268,27 @@ def build_target(tmp):
     print("TARGET i386-elf GNU89 -Werror PASS", flush=True)
 
 
+# 変異 1 本の 1 ケースにかける時間の上限。正常なケースは 1 本 0.01 秒未満
+# (2026-09-26 に 28 ケースを実測、全部 0.00 秒)。変異の中には待ちが切れなく
+# なるもの (期限の入れ直しなど) があり、上限 60 秒のころは 4 本がそれを満了して
+# 変異試験だけで 241 秒かかっていた。3 秒は並列段の負荷を見込んでも数百倍の余裕。
+# 見逃し (GREEN) の調査は MUTANT_CASE_TIMEOUT を大きくして --mutate を手で回す。
+MUTANT_CASE_TIMEOUT = 3
+
+
 def run_mutant(exe):
-    hits = 0
+    """変異 1 本を回す。**最初に落ちたケースで打ち切る** — RED は 1 件で決まる。"""
     for c in CASES:
         try:
-            rc = subprocess.run([str(exe), c], cwd=ROOT, timeout=60,
+            rc = subprocess.run([str(exe), c], cwd=ROOT,
+                                timeout=MUTANT_CASE_TIMEOUT,
+                                stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL).returncode
         except subprocess.TimeoutExpired:
-            rc = 1          # 止まらなくなるのも RED
-        hits += rc != 0
-    return hits
+            return f"{c} (時間切れ {MUTANT_CASE_TIMEOUT} 秒)"  # 止まらなくなるのも RED
+        if rc != 0:
+            return c
+    return None
 
 
 def mutate(tmp):
@@ -304,10 +315,10 @@ def mutate(tmp):
         except subprocess.CalledProcessError:
             print(f"MUTATION {i} RED (compile): {why}", flush=True)
             continue
-        hits = run_mutant(exe)
-        status = "RED" if hits else "**GREEN (見逃し)**"
-        print(f"MUTATION {i} {status} ({hits} 件): {why}", flush=True)
-        bad += not hits
+        hit = run_mutant(exe)
+        status = f"RED ({hit})" if hit else "**GREEN (見逃し)**"
+        print(f"MUTATION {i} {status}: {why}", flush=True)
+        bad += not hit
     return bad
 
 

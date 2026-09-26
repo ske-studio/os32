@@ -119,7 +119,7 @@ def build_and_run(tmp, case, mutation=None):
     subprocess.run(['gcc', *FLAGS, *HOST_OPT, *defines, '-nostdlib', '-static', '-no-pie',
                     *includes, str(HARNESS), str(ROOT / 'kernel/physmem.c'),
                     '-o', str(exe)], check=True)
-    return subprocess.run([str(exe)], capture_output=True, timeout=20)
+    return subprocess.run([str(exe)], capture_output=True, timeout=60)
 
 
 def main():

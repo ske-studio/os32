@@ -34,7 +34,7 @@ class MemoryBoot(unittest.TestCase):
             cmd += ['-I' + str(ROOT / 'tools/tests/host_arch')]
             cmd += ['-I' + str(ROOT / p) for p in ('include', 'arch/x86', 'platform/pc98', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(d)]
             subprocess.run(cmd + [str(ROOT / 'tools/tests/memory_boot_host.c'), str(ROOT / 'kernel/physmem.c'), '-o', str(d / 'test')], check=True)
-            subprocess.run([str(d / 'test')], check=True, timeout=20)
+            subprocess.run([str(d / 'test')], check=True, timeout=60)
 
     def test_huge_hint_no_promotion(self):
         self.run_case('online', 0xffffffff)

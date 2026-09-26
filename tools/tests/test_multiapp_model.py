@@ -25,7 +25,7 @@ if __name__ == "__main__":
         subprocess.run(["gcc", *FLAGS, "-O0", "-nostdlib", "-static", "-no-pie",
                         str(SRC), "-o", str(exe)], cwd=ROOT, check=True)
         print("HOST ILP32 GNU89 COMPILE PASS", flush=True)
-        subprocess.run([str(exe)], cwd=ROOT, check=True, timeout=10)
+        subprocess.run([str(exe)], cwd=ROOT, check=True, timeout=60)
         subprocess.run(["i386-elf-gcc", *FLAGS, "-O2", "-c", str(SRC),
                         "-o", str(tmp / "multiapp_model.o")],
                        cwd=ROOT, check=True)

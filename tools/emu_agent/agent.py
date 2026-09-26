@@ -61,7 +61,7 @@ BUILD_OBS_LIMIT = 2400
 
 ROOT = os.environ.get("OS32_ROOT", os.path.abspath(os.path.join(HERE, "..", "..")))
 OS32_CYCLE = os.environ.get("OS32_CYCLE", os.path.expanduser("~/.local/bin/os32-cycle"))
-MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98", "check-net-m2", "check-net-m2-cpl3", "check-net-m4", "check-net-l0", "check-net-l1", "check-net-l2", "check-net-l3", "programs", "sdk", "all", "check", "clean", "deploy",
+MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98", "check-net-m2", "check-net-m2-cpl3", "check-net-m4", "check-net-l0", "check-net-l1", "check-net-l2", "check-net-l3", "programs", "sdk", "all", "check", "check-fast", "check-changed", "check-map", "check-check-select-host", "clean", "deploy",
                 "apps", "game", "external", "gshell",
                 # `make check` の個別ターゲット。いずれもホスト側の読み取り専用試験で、
                 # 落ちた 1 本だけを回し直すのに要る。build/sdk.mk に足したら

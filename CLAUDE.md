@@ -30,7 +30,7 @@ Which build and which verification a change actually needs: skill **`os32-build-
 ```bash
 make all / kernel / programs              # build (SDK and images come with `all`)
 make external                             # apps/ + game/ — after any KAPI or SDK library change
-make check                                # KAPI version, manifests, constraint IDs, GUI proto, etc.
+make check-fast / check-changed / check   # no mutants (約 40 秒) / mutants only for what you changed / all mutants (約 9 分 (529 秒), before merging)
 make clean                                # required after a KAPI struct change ([ABI3])
 make deploy                               # HostDrv (C:\os32) — no reboot, not verification ([V1])
 # userland delivery: make deploy (host -> C:\os32) then `hsync` in the guest
@@ -195,7 +195,7 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 - GUI アプリが窓も出さずに消えて **`fault_kill_count` だけ増える** (例外 0 件) → WM (gshell) はアプリの syscall の中で
   走るので、KAPI の検査を `ring3_in_syscall` だけで「アプリ由来」と決めると **gshell 自身のポインタを弾いてアプリを kill** する。
   門は `ring3_guard_active(ring3_in_syscall, ring3_wm_depth)` で判定する。→ §4-61
-- ビルドは既定で `-j$(nproc)`。`make check` は 2 段 (書き換えない 48 本を並列 → 変異する 10 本を逐次) で **152 秒**。
+- ビルドは既定で `-j$(nproc)`。検査は 3 段: `check-fast` (変異なし **約 40 秒**) / `check-changed` (変えた所だけ変異、`tools/check_map.yaml`) / `check` (全変異 **約 9 分 (529 秒)**、取り込み前)。
   各段の後に `tools/check_tree_unchanged.py` がソースの残留を見る。 → §4-41
 - `make check` を途中で止めると**変異試験が当てた変更がソースに残る**。打ち切ったら
   コミット前に必ず `git status` を見る (`git add -A` が壊れたコードを拾う)。全 55 本で 15 分以上。 → §4-40

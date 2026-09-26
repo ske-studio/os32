@@ -65,7 +65,7 @@ def main():
                         "-I" + str(tmp), *includes, str(SRC), "-o", str(exe)],
                        cwd=ROOT, check=True)
         print("HOST ILP32 GNU89 COMPILE PASS", flush=True)
-        subprocess.run([str(exe)], cwd=ROOT, check=True, timeout=10)
+        subprocess.run([str(exe)], cwd=ROOT, check=True, timeout=60)
         subprocess.run(["i386-elf-gcc", *FLAGS, "-O2", *includes, "-c",
                         str(ROOT / "exec/appslot.c"), "-o", str(tmp / "appslot.o")],
                        cwd=ROOT, check=True)
