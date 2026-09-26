@@ -130,3 +130,54 @@
 3. **本体キーボードからの `sfs run` → A**: 取り下げ。ホストから送った 1 行だけで使う。
 4. **初回導入と古いローダ → A**。ユーザー: 「まだ実機でインストールしていないので古いローダーの事は考えなくて良い」。→ 旧ローダ互換の扱いは不要。**条件: 部品 A (VK32 の CRC 表 + ローダの CRC 記録 + LZ4 高圧縮) を実機への最初の HDD インストールより前に入れる**。先にインストールした場合は CD から入れ直す。
 5. **カーネルを戻したときの `/sys` → C**: KAPI をまたぐ更新は復旧保証の対象外と明記する。
+
+## 5. FD 起動から HDD を更新する (`hsync --root`、2026-09-26、ユーザー提案)
+
+**状態**: 実装 (wt/hsync-root、`userland/system/hsync.c` の `--root`、ホスト試験 `check-hsync-h2-host` の `case_root`)。NP21/W・実機は未実施。
+
+**なぜ要るか**: HDD にある既存のカーネル (v65) は SerialFS (KAPI v66 の `sfs_begin`) を持たない。HDD から起動したままでは `sfs run` が使えず (`sfs: kernel KAPI v65 < 66`)、新しいカーネルを HDD へ運べない。そこで**新しいカーネルの FD で起動**し、FD 起動で自動マウントされる `/hd0` (HDD) を宛先にして `hsync` を回す。`/` は FD なので、`--root` が無いと `dest_on_fd` で断る。
+
+**`--root <根>` の門** (詳細は `docs/manpages/hsync.1`「同期先の根 (--root)」): `<根>` はマウントの根そのもの (`vfs_devname` が空でない)・デバイスが `fd` でない・FS が ext2 (根の `stat` の inode が `EXT2_ROOT_INO` = 2) のときだけ受ける。`/host` とその下・`/cd0`・`/hd0/bin`・HDD 起動の `/hd0` (マウントされない) は 1 件も書かずに断る。保護 (`/etc/settings.db` の一族)・予約名の掃除・マウントをまたがない規則・名札の照合・`vmkernel.old` は `<根>` からの相対で効く。**KAPI の門 (v53・名札の `kapi=`) は走っているカーネル (= FD の版) と比べる** — 書き込みをするのはそのカーネルなので。
+
+### 手順 (実機、ノートは `rshell_serial.py`)
+
+前提: FD と `hostdrv.tar.gz` は**同じ CI 成果物** (この変更を取り込んだ feat/gui 以降)。FD の hsync が `--root` を知らない版だと `Error: unknown option: --root` で止まる。
+
+```bash
+# ノート: 成果物を取り、配備元のディレクトリを作る (名札 .deploy/manifest.txt 入り)
+tools/ci_fetch.sh --sha <SHA>
+tar -xzf ./os32-ci/os32-feat-gui-<SHA>/hostdrv.tar.gz -C ./os32-ci/os32-feat-gui-<SHA>/
+H=./os32-ci/os32-feat-gui-<SHA>/hostdrv
+S="python3 tools/rshell_serial.py --port /dev/ttyUSB0 --fast 115200 --timeout 60 --serve-host $H"
+```
+
+| # | 誰が | やること | 見るもの |
+|---|---|---|---|
+| 1 | ユーザー | 新しい FD で起動 (HDD は繋いだまま) | `Commit: <SHA>`、`API: v66` 以上。`/hd0` がマウントされている (`ls /hd0/boot`) |
+| 2 | ノート | `$S cmd "sfs run hsync -n --root /hd0 boot"` | `DEPLOY build=<SHA>…`、`hsync: /host/boot -> /hd0/boot`、`PLAN /hd0/boot/vmkernel.lz4`。`reason=root_*` / `dest_on_fd` が出たら止まる |
+| 3 | ノート | `$S cmd "sfs run hsync --root /hd0 --no-backup boot"` | `UPDATE /hd0/boot/vmkernel.lz4`、`NOTE: /boot を更新した`、`sfs: exit=0` |
+| 4 | ノート | `$S cmd "sfs run hsync --root /hd0 sys"` | `UPDATE /hd0/sys/…`、`sfs: exit=0` |
+| 5 | ノート | `$S cmd "sfs run hsync --root /hd0"` | 全体 (ルート直下の `sys` は除く)。`PROTECTED /hd0/etc/settings.db` は正常。`sfs: exit=0` |
+| 6 | ユーザー | FD を抜いて再起動 (HDD 起動) | `Image CRC … src=hdd` |
+| 7 | ノート | `python3 tools/rshell_serial.py --port /dev/ttyUSB0 cmd ver` | `API: v66` 以上・`Commit: <SHA>` = HDD のカーネルが入れ替わった。以後は HDD 起動のまま `sfs run hsync …` (`--root` 無し) が使える |
+
+- **`cmd` の行は必ず引用符で 1 つに括る** (`cmd "sfs run hsync --root /hd0 boot"`)。括らないと `--root` を `rshell_serial.py` 自身の argparse が拾って `unrecognized arguments` で止まる (`cmd -- sfs run …` でもよい)。
+- 手順 3 の **`--no-backup`**: `vmkernel.old` は「起動した版と同じときだけ作る」規則で、FD 起動では起動した版 = FD の版なので HDD の版と一致せず、`--no-backup` 無しでは `not_booted_image` で断る (`--root` の案内が付く)。この形では HDD の旧カーネルは残らない — 戻す口は**この FD そのもの** (FD で起動すれば新しいカーネルで動く)。旧版を残す規則を `--root` で緩めるかは PM の判断待ち (§5 の末尾)。
+- 3 → 4 → 5 は **1 回の FD 起動の中で続けて**打つ。KAPI の門は FD のカーネルと比べるので、途中でやめて HDD から起動すると HDD のカーネルと `/sys` の版が食い違い得る。
+- 2 回目以降 (HDD のカーネルが v66 以上になった後) は HDD 起動のまま `sfs run hsync boot` → 再起動 → `sfs run hsync sys` / `sfs run hsync` で回せる (§1-v3、このときは `.old` が作られる)。
+- **時間の見積もり (実測ではない)**: 115200bps (≒ 11KB/s、8N1) で、カーネル (`/boot`) は**約 40 秒**、初回の全体 (`sys` と合わせて約 10MB) は**15 分程度**。CI のビルドは毎回全ファイルの mtime を変えるので、サイズが同じものも内容比較で両側を読む — 2 回目以降も大きくは縮まない。`--timeout` は進捗の無い時間なので 60 で足りるが、[V3] に合わせて短くしない。
+
+### NP21/W で先に試す (PM)
+
+NP21/W では `/host` が HostDrv のまま使えるので、SerialFS 抜きで `--root` だけを確かめられる。HDD 起動では `/hd0` がマウントされない (= `root_not_mount` で断るのが正しい) ので、**FD 起動 + NHD** で行う。
+
+1. `make all` → `make deploy` (HostDrv に配備元と名札)。FD イメージは `build/` の新しいもの。
+2. `tools/np21w_ctl.py stop` → `tools/np21w_ctl.py start --ini <HDD 付きの ini> --fd <新しい FD イメージ> --wait-ready` (ini は変えない)。
+3. `/api/cmd` で `ver` (FD の版)、`ls /hd0/boot`、`hsync -n` (→ `dest_on_fd`)、`hsync -n --root /hd0 boot`、`hsync --root /hd0 --no-backup boot`、`hsync --root /hd0 sys`、`hsync --root /hd0`。断る側: `hsync -n --root /hd0/bin` (`root_not_mount`)、`hsync -n --root /host` (`root_is_source`)、`/cd0` があれば `hsync -n --root /cd0` (`root_not_ext2`)。
+4. 停止 → FD 無しで起動 (NHD 起動) → `ver` の `Image CRC … src=hdd` と Commit が新しい版、kselftest。
+5. 注意: NHD の中身を変える試験なので、終わったら `build/nhd/os32.nhd` を元へ戻すかは PM が決める ([D2] の対象になる操作はしない — hsync は NHD をゲストの中から書くだけ)。
+
+### PM の判断待ち
+
+- FD 起動からの `--root` 更新で `vmkernel.old` を作る規則 (今は「起動した版と一致したときだけ」のまま、`--no-backup` が要る)。緩めるなら「`<根>` の vmkernel の `image_crc` 欄が中身と一致する (壊れていない) なら `.old` にしてよい」などの案があるが、「一度も起動していない版を `.old` にしない」という §1-v3 の決め (Codex N5) と衝突するので、この票では変えていない。
+- ext2 の判定を KAPI にするか: 今は根の `stat` の inode 番号 (KAPI 不要)。カーネル内の `vfs_fstype` を KAPI に出せば文字列で確かめられるが、KAPI の追加 ([ABI3] の clean ビルドと外部の再ビルド) を伴うので入れていない。

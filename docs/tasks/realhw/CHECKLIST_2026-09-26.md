@@ -12,7 +12,7 @@
 | **CD 読みの高速化** (READ(10) を 16 セクタ、先読み) と **ATAPI の装置選び** (マスター/スレーブ、UA・準備中の再試行、失敗の診断行) | cdinst の所要時間 (前回は Normal で **約 10 分**)。`[atapi] READ(10) …` の行が出たら写真 |
 | **起動ログ** `/var/log/boot.log` (前回分は `boot.log.1`) | セルフテストの数を画面ではなくログで読む |
 | **ERASE** (他 OS の区画・壊れた表を消して入れる) | 今の HDD は OS32 の区画なので**出てこない**のが正しい (下の「やらないこと」) |
-| hsync は FD 起動では断る (`dest_on_fd`) | 手順 4 で 1 回だけ |
+| hsync は FD 起動では断る (`dest_on_fd`) | 手順 4 で 1 回だけ。FD 起動から HDD を更新する口 `--root /hd0` は下の「追加」節 |
 
 ## 書き込む媒体
 
@@ -34,6 +34,36 @@
 | 9 | ユーザー | `gfxmode pc98` に戻してリセット | CUI が正しく出る |
 | 10 | ユーザー + ノート | 本体で `kbdstat -w` → カナを押し込む (3 秒保持) → 離す → もう一度押して解除 → CAPS で同じ → ESC | 画面の行を写真 ([TASK_KBD_NAV](../gui/TASK_KBD_NAV.md) §3)。**解除のときに break が来るか**、押している間に make が繰り返すか。NP21/W は「押下で make・解除で break」だった (§3-1) |
 | 11 | ユーザー + ノート | カナを**ロックしたまま**再起動 → 起動行の `[kbd] … lock=` と、`kbdstat -w` の 1 行目の `mods=` | `lock=04` (カナ) なら BIOS が電源投入・再起動時のロックを 053Ah に載せている。`lock=00` なら載せていない (1 回ロックし直せば追いつく) |
+
+## 追加: FD 起動 → SerialFS → `hsync --root /hd0` → HDD 起動 (更新の回し方)
+
+HDD のカーネル (v65) は SerialFS を持たないので、HDD の更新は**新しいカーネルの FD で起動して** `/hd0` を宛先に回す。
+**この節は `--root` を取り込んだ feat/gui 以降の成果物が要る** (b8f76e0 の hsync は `--root` を知らない = `unknown option` で止まる)。FD と `hostdrv.tar.gz` は同じ成果物から取る。
+正典は [TASK_SERIAL_HOSTFS](TASK_SERIAL_HOSTFS.md) §5 (手順の理由・判断待ち)、オプションは `docs/manpages/hsync.1`「同期先の根 (--root)」。
+
+ノートの準備 (`<SHA>` はその回の成果物):
+
+```bash
+tools/ci_fetch.sh --sha <SHA>
+tar -xzf ./os32-ci/os32-feat-gui-<SHA>/hostdrv.tar.gz -C ./os32-ci/os32-feat-gui-<SHA>/
+H=./os32-ci/os32-feat-gui-<SHA>/hostdrv
+S="python3 tools/rshell_serial.py --port /dev/ttyUSB0 --fast 115200 --timeout 60 --serve-host $H"
+```
+
+| # | 誰が | やること | 見るもの / 記録 |
+|---|---|---|---|
+| R1 | ユーザー | 新しい FD で起動 (HDD は繋いだまま) | `Commit: <SHA>`。ノートで `cmd "ls /hd0/boot"` が見える |
+| R2 | ノート | `$S cmd "sfs run hsync -n --root /hd0 boot"` | `hsync: /host/boot -> /hd0/boot`、`PLAN /hd0/boot/vmkernel.lz4`、`sfs: exit=0`。`reason=root_…` / `dest_on_fd` なら止めて写す |
+| R3 | ノート | `$S cmd "sfs run hsync --root /hd0 --no-backup boot"` | `UPDATE /hd0/boot/vmkernel.lz4`、`sfs: exit=0`。**所要時間を計る** (見積もり約 40 秒、実測ではない) |
+| R4 | ノート | `$S cmd "sfs run hsync --root /hd0 sys"` | `sfs: exit=0` |
+| R5 | ノート | `$S cmd "sfs run hsync --root /hd0"` | `PROTECTED /hd0/etc/settings.db` は正常、`sfs: exit=0`。**所要時間を計る** (初回の全体は約 10MB で 15 分程度の見積もり、実測ではない) |
+| R6 | ユーザー | FD を抜いて再起動 (HDD 起動) | `Image CRC … src=hdd`、プロンプトまで進む |
+| R7 | ノート | `python3 tools/rshell_serial.py --port /dev/ttyUSB0 cmd ver` | `Commit: <SHA>`、`API: v66` 以上 = HDD のカーネルが入れ替わった |
+
+- `cmd` の行は**必ず引用符で括る** — 括らないと `--root` を rshell_serial.py が拾って止まる。
+- R3 の `--no-backup` は必須 (FD 起動では「起動した版」が FD の版なので `vmkernel.old` の門が `not_booted_image` で断る)。HDD の旧カーネルは残らない。起動しなくなったら**この FD で起動**して R2〜R5 をやり直す。
+- R3〜R5 は 1 回の FD 起動の中で続けて打つ (途中でやめて HDD 起動すると、カーネルと `/sys` の版が食い違い得る)。
+- 次の回からは HDD 起動のまま `sfs run hsync boot` → 再起動 → `sfs run hsync sys` / `sfs run hsync` (`--root` 無し、`.old` も作られる)。
 
 ## v2.1 の判定 (手順 1〜7)
 
