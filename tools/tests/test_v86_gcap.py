@@ -1,5 +1,6 @@
 """`v86 -g` の記録器と引数の判定 (kernel/v86_gcap_math.c) のホスト試験。
 
+記録: tools/tests/v86_gcap_tdd.md
 票: docs/tasks/realhw/TASK_PEGC480_REALHW.md §3 段 1 (実機の ROM の INT 18h
     AH=31h/30h を V86 で呼び、その間の OUT を記録する)
 
@@ -37,7 +38,7 @@ GCAP_C = ROOT / "kernel/v86_gcap.c"
 TARGET_SRCS = ["kernel/v86_gcap_math.c", "kernel/v86_gcap.c"]
 
 CASES = ["port_list", "insn", "record_order", "overflow", "in_table",
-         "pass_ops", "decide", "mode_31k"]
+         "pass_ops", "decide", "mode_31k", "restore"]
 
 # -Wno-attributes: __cdecl は x86-64 のホストでは無視される (警告だけ)。
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror", "-Wno-attributes",
@@ -46,6 +47,19 @@ INCLUDES = ["-I" + str(ROOT / p) for p in ("sdk/include/os32", "kernel")]
 
 # 否定側。実装を 1 か所だけ壊して RED になることを見る。
 MUTATIONS = [
+    (r"    if \(!set_ran\) return 1;\n    return \(\(set_ah & 0xFFU\) == 0x05U\) \? 1 : 0;",
+     "    (void)set_ran; (void)set_ah;\n    return 1;",
+     "③ が断られても (無変化) ④ を呼ぶ — ④ も断られると OS32 の表で同期を書き換え、"
+     "並びの誤判定と重なると 24kHz 機に 31kHz を入れる (代行レビュー P2-2)"),
+    (r"    if \(!set_ran\) return 1;\n",
+     "    (void)set_ran;\n",
+     "③ が途中で終わったとき ④ を呼ばない (何を変えたか分からないまま放置)"),
+    (r"    if \(rst_ran && \(rst_ah & 0xFFU\) == 0x05U\) return V86G_RST_ROM;",
+     "    if (rst_ran || (rst_ah & 0xFFU) == 0x05U) return V86G_RST_ROM;",
+     "④ が途中で終わっても ROM で戻ったとみなす (FALLBACK を落とす)"),
+    (r"    return \(\(set_ah & 0xFFU\) == 0x05U\) \? 1 : 0;",
+     "    return (set_ah == 0x05U) ? 1 : 0;",
+     "③ の戻り AH の上位を見てしまう (AX を渡す呼び手で 05h を取りこぼす)"),
     (r"if \(port == 0x09A8U \|\| port == 0x09A0U\)",
      "if (port == 0x09A0U)",
      "09A8h (水平周波数) を通さない — 票の表の筆頭。捕まえて捨てると ROM の "

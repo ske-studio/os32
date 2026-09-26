@@ -294,6 +294,29 @@ static int case_mode_31k(void)
     return 0;
 }
 
+/* ③ の終わり方 → ④ を呼ぶか / ④ の終わり方 → 戻し方 (代行レビュー P2-2) */
+static int case_restore(void)
+{
+    /* ③ が最後まで走って断られた = 無変化 → ④ を呼ばない */
+    CHECK(v86g_need_restore(1, 0x01) == 0);
+    CHECK(v86g_need_restore(1, 0x00) == 0);
+    CHECK(v86g_need_restore(1, 0x31) == 0);
+    CHECK(v86g_need_restore(1, 0x0105) == 1);    /* 下位 8 ビットだけ見る */
+    /* ③ が 05h → 戻す */
+    CHECK(v86g_need_restore(1, 0x05) == 1);
+    /* ③ が途中で終わった (何を変えたか分からない) → 戻す */
+    CHECK(v86g_need_restore(0, 0x01) == 1);
+    CHECK(v86g_need_restore(0, 0x05) == 1);
+    CHECK(v86g_need_restore(0, 0x31) == 1);
+    /* ④ */
+    CHECK(v86g_restore_kind(1, 0x05) == V86G_RST_ROM);
+    CHECK(v86g_restore_kind(1, 0x01) == V86G_RST_FALLBACK);
+    CHECK(v86g_restore_kind(0, 0x05) == V86G_RST_FALLBACK);
+    CHECK(v86g_restore_kind(0, 0x00) == V86G_RST_FALLBACK);
+    CHECK(v86g_restore_kind(1, 0x1205) == V86G_RST_ROM);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *c = argc > 1 ? argv[1] : "";
@@ -305,6 +328,7 @@ int main(int argc, char **argv)
     else if (!strcmp(c, "pass_ops"))     case_pass_ops();
     else if (!strcmp(c, "decide"))       case_decide();
     else if (!strcmp(c, "mode_31k"))     case_mode_31k();
+    else if (!strcmp(c, "restore"))      case_restore();
     else {
         printf("unknown case %s\n", c);
         return 2;

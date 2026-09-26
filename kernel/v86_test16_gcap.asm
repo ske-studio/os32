@@ -11,6 +11,7 @@
 ;;   [16]     終わりの印 0xC0DE (ここまで来た = 打ち切られていない)
 ;;   [18]     INT 18h の後の FLAGS
 ;;   [0x20]   st_seq: IN AL の値 / [0x22] IN AX の値
+;;   [0x24]   st_hang: INT FFh の先で見た FLAGS (IF が立っているか)
 
 cpu 386
 bits 16
@@ -119,3 +120,28 @@ st_io32:
         hlt
 
         times 0x140-($-$$) db 0xF4
+
+;; ---------------------------------------------------------------- 0x140
+;; st_hang — ROM の呼び出しと同じ形 (IF を立てて始め、INT で入る) で、
+;; I/O も #GP も出さずに回り続ける。v86_gcap_keep_if() が効いていれば
+;; タイマ IRQ が来て時間の見切り (V86_EXIT_TIMEOUT) で戻る。効いていなければ
+;; 実 IF が落ちたまま回り、戻らない (= カーネルごと止まる。自己試験の中では
+;; 起きてはいけない)。IVT[FFh] は実機のページ 0 だが、v86_mem_teardown が
+;; 退避した IVT/BDA を書き戻す。
+st_hang:
+        mov     ax, DATA_SEG
+        mov     ds, ax
+        xor     ax, ax
+        mov     es, ax
+        mov     word [es:0x3FC], hang_isr
+        mov     word [es:0x3FE], 0x8A00
+        int     0xFF
+        mov     word [16], DONE
+        hlt
+hang_isr:
+        pushf
+        pop     ax
+        mov     [0x24], ax
+.spin:  jmp     .spin
+
+        times 0x180-($-$$) db 0xF4

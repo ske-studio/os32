@@ -21,6 +21,12 @@ int v86_gdc_capture(int mode, V86Gcap *out);
 /* 採取中か (v86_io.c の方針の切り替えに使う) */
 int v86_gcap_active(void);
 
+/* ゲストの INT n を IF を落とさずに流すか (v86_inject_int)。ROM の呼び出しと
+ * その見切りの自己試験の間だけ 1。ROM の 1 呼び出しを GCAP_TICK_LIMIT で
+ * 見切り、脱出ホットキーを効かせるため (タイマ・キーボードの実 IRQ は
+ * ゲストの IF = 実 IF が立っていないと来ない)。 */
+int v86_gcap_keep_if(void);
+
 /* ---- #GP / I/O 経路からの差し込み口。採取中でなければ何もせず 0 ---- */
 
 /* #GP で捕まえた命令を採取中に扱えないなら 1 (打ち切り。理由と CS:IP を

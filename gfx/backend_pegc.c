@@ -779,11 +779,15 @@ static void pegc_shutdown(void)
 /* ------------------------------------------------------------------------ */
 void pegc_restore_text_sync(int hsync31)
 {
-    if (s_probe_ok && pegc_stat(PEGC_STAT_SEL_GFXMODE)) {
-        mmio_w16(PEGC_MMIO_LINEAR, PEGC_LINEAR_OFF);
+    /* 6Ah の 07h/20h/68h/06h と 09A0h は PEGC の probe が通った機種の値。
+     * 9801 で ROM の戻しに失敗してここへ来ても書かない (代行レビュー P3-2)。 */
+    if (s_probe_ok) {
+        if (pegc_stat(PEGC_STAT_SEL_GFXMODE)) {
+            mmio_w16(PEGC_MMIO_LINEAR, PEGC_LINEAR_OFF);
+        }
+        ff2_locked_write(PEGC_FF2_STD_GFX);
+        ff2_locked_write(PEGC_FF2_VRAM_400L);
     }
-    ff2_locked_write(PEGC_FF2_STD_GFX);
-    ff2_locked_write(PEGC_FF2_VRAM_400L);
     pegc_text_sync_400(hsync31 ? PEGC_HSYNC_31KHZ : PEGC_HSYNC_24KHZ);
 
     gfx_current_height = GFX_HEIGHT;

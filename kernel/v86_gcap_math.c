@@ -231,6 +231,18 @@ int v86g_decide(unsigned int al, unsigned int bh,
     return V86G_LAYOUT_NONE;
 }
 
+int v86g_need_restore(int set_ran, unsigned int set_ah)
+{
+    if (!set_ran) return 1;
+    return ((set_ah & 0xFFU) == 0x05U) ? 1 : 0;
+}
+
+unsigned int v86g_restore_kind(int rst_ran, unsigned int rst_ah)
+{
+    if (rst_ran && (rst_ah & 0xFFU) == 0x05U) return V86G_RST_ROM;
+    return V86G_RST_FALLBACK;
+}
+
 int v86g_mode_is_31k(int layout, unsigned int al)
 {
     if (layout == V86G_LAYOUT_BIT2) return (al & 0x04U) ? 1 : 0;

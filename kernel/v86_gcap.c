@@ -86,7 +86,12 @@ static const u8 v86_gcap_code[] = {
     0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4,
     0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4,
     0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4,
-    0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4
+    0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xB8, 0x00, 0x8C, 0x8E,
+    0xD8, 0x31, 0xC0, 0x8E, 0xC0, 0x26, 0xC7, 0x06, 0xFC, 0x03, 0x60, 0x01,
+    0x26, 0xC7, 0x06, 0xFE, 0x03, 0x00, 0x8A, 0xCD, 0xFF, 0xC7, 0x06, 0x10,
+    0x00, 0xDE, 0xC0, 0xF4, 0x9C, 0x58, 0xA3, 0x24, 0x00, 0xEB, 0xFE, 0xF4,
+    0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4,
+    0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4, 0xF4
 };
 
 #define GCAP_ENTRY_ROM      0x0000U    /* rom_call */
@@ -94,6 +99,7 @@ static const u8 v86_gcap_code[] = {
 #define GCAP_ENTRY_OVF      0x0080U    /* st_ovf  */
 #define GCAP_ENTRY_OUTS     0x00C0U    /* st_outs */
 #define GCAP_ENTRY_IO32     0x0100U    /* st_io32 */
+#define GCAP_ENTRY_HANG     0x0140U    /* st_hang */
 
 /* ゲストのデータ (0x8C00:0000 = V86_TEST_MAGIC_ADDR) の番地 (バイト) */
 #define GD_IN_AX    0x00U
@@ -106,12 +112,16 @@ static const u8 v86_gcap_code[] = {
 #define GD_FLAGS    0x12U
 #define GD_SEQ_IN8  0x20U
 #define GD_SEQ_IN16 0x22U
-#define GD_SIZE     0x24U
+#define GD_HANG_FL  0x24U
+#define GD_SIZE     0x26U
 #define GD_DONE_MARK 0xC0DEU
 
-/* ROM の 1 呼び出しの時間上限 (100Hz の tick)。ゲストが CLI したまま回ると
- * タイマが止まるので、その場合は #GP のウォッチドッグ (V86_GP_LIMIT) が止める。 */
+/* ROM の 1 呼び出しの時間上限 (100Hz の tick)。ROM の呼び出しは IF を立てたまま
+ * 入る (v86_gcap_keep_if) のでタイマ IRQ が来て数えられる。ROM が自分で CLI
+ * したまま回ったときだけは効かず、#GP のウォッチドッグ (V86_GP_LIMIT) 頼み。 */
 #define GCAP_TICK_LIMIT     300U
+/* 自己試験の st_hang の上限 (見切りが効くことだけ確かめるので短く) */
+#define GCAP_HANG_TICKS     30U
 
 /* 採取の前後で残すテキスト VRAM (480 ラインで見える 30 行ぶん) */
 #define GCAP_TV_CELLS       (TVRAM_COLS * TVRAM_ROWS_30)
@@ -124,10 +134,16 @@ static const u8 v86_gcap_code[] = {
 V86Gcap *v86_gcap_rec = 0;
 u32 v86_gcap_phase = 0;
 static const V86gIoOps *gcap_ops = 0;
+static int gcap_keep_if = 0;    /* 1 = ゲストの INT n で IF を落とさない */
 
 int v86_gcap_active(void)
 {
     return v86_gcap_rec != 0;
+}
+
+int v86_gcap_keep_if(void)
+{
+    return v86_gcap_rec != 0 && gcap_keep_if;
 }
 
 int v86_gcap_insn_abort(int opsize16, u8 opcode)
@@ -214,9 +230,11 @@ static void gd_set(u32 off, u16 v)
     *(volatile u16 *)(V86_TEST_MAGIC_ADDR + off) = v;
 }
 
-/* 戻り: v86_run の終了理由。*done = ゲストが最後の印まで来たか。 */
+/* 戻り: v86_run の終了理由。*done = ゲストが最後の印まで来たか。
+ * keep_if = 1 は ROM の呼び出しの形 — IF を立てて始め、ゲストの INT n でも
+ * IF を落とさない (時間の見切りとホットキーを効かせる)。ticks は時間の上限。 */
 static int gcap_run(V86Gcap *g, u32 entry, u32 phase, u16 ax, u16 bx,
-                    u16 *oax, u16 *obx, int *done)
+                    u16 *oax, u16 *obx, int *done, int keep_if, u32 ticks)
 {
     struct v86_context ctx;
     u32 off;
@@ -230,7 +248,7 @@ static int gcap_run(V86Gcap *g, u32 entry, u32 phase, u16 ax, u16 bx,
 
     ctx.eip    = entry;
     ctx.cs     = (u32)(V86_TEST_CODE_ADDR >> 4);
-    ctx.eflags = V86_EFLAGS_INIT;
+    ctx.eflags = V86_EFLAGS_INIT | (keep_if ? EFLAGS_IF : 0);
     ctx.esp    = 0x0FFE;
     ctx.ss     = (u32)(V86_TEST_STACK_ADDR >> 4);
     ctx.es     = ctx.ss;
@@ -239,7 +257,9 @@ static int gcap_run(V86Gcap *g, u32 entry, u32 phase, u16 ax, u16 bx,
     ctx.gs     = ctx.ss;
 
     v86_gcap_phase = phase;
-    reason = v86_run_limit(&ctx, GCAP_TICK_LIMIT);
+    gcap_keep_if = keep_if;
+    reason = v86_run_limit(&ctx, ticks);
+    gcap_keep_if = 0;
 
     if (oax) *oax = gd_get(GD_OUT_AX);
     if (obx) *obx = gd_get(GD_OUT_BX);
@@ -257,6 +277,14 @@ static u32 gcap_run_status(const V86Gcap *g, int reason, int done)
     return V86G_ST_OK;
 }
 
+/* 最後まで走ったか (打ち切り・暴走・時間切れでない)。溢れは数えない —
+ * 記録が欠けただけで、ROM は最後まで動いている。 */
+static int gcap_ran(const V86Gcap *g, int reason, int done)
+{
+    return g->abort_kind == V86G_ABORT_NONE &&
+           reason == V86_EXIT_HLT && done;
+}
+
 /* ------------------------------------------------------------------------ */
 /*  実機の ROM の採取                                                       */
 /* ------------------------------------------------------------------------ */
@@ -265,7 +293,7 @@ static void gcap_rom(V86Gcap *g)
     volatile u32 ivt18 = 0x18U * 4U;    /* 定数畳み込みで -Warray-bounds を踏まない */
     u32 lin;
     u16 ax, bx;
-    int done, reason, dec;
+    int done, reason, dec, set_ran;
     u32 st, st3;
     unsigned int al480, bh480;
 
@@ -281,7 +309,8 @@ static void gcap_rom(V86Gcap *g)
     /* 1. AH=31h — 印 (FFh) を入れて呼ぶ */
     reason = gcap_run(g, GCAP_ENTRY_ROM, V86G_PH_READ31,
                       (u16)(0x3100U | V86G_SENTINEL_AL),
-                      (u16)(V86G_SENTINEL_BH << 8), &ax, &bx, &done);
+                      (u16)(V86G_SENTINEL_BH << 8), &ax, &bx, &done,
+                      1, GCAP_TICK_LIMIT);
     g->r31_ax = ax;
     g->r31_bx = bx;
     st = gcap_run_status(g, reason, done);
@@ -306,36 +335,42 @@ static void gcap_rom(V86Gcap *g)
     g->set_ax = (u16)(0x3000U | al480);
     g->set_bx = (u16)(bh480 << 8);
     reason = gcap_run(g, GCAP_ENTRY_ROM, V86G_PH_SET480, g->set_ax, g->set_bx,
-                      &ax, &bx, &done);
+                      &ax, &bx, &done, 1, GCAP_TICK_LIMIT);
     g->set_ret_ax = ax;
     g->set_ret_bx = bx;
     st = gcap_run_status(g, reason, done);
-    if (st == V86G_ST_OK && ((ax >> 8) & 0xFFU) != 0x05U) {
-        st = V86G_ST_REJECTED;
+    set_ran = gcap_ran(g, reason, done);
+    if (!v86g_need_restore(set_ran, (ax >> 8) & 0xFFU)) {
+        /* ROM が引数を断った (最後まで走って AH≠05h) = 何も変えていない。
+         * 戻しの AH=30h は呼ばない (それも断られると OS32 の表で同期を
+         * 書き換えることになり、並びの誤判定と重なると 24kHz 機に 31kHz の
+         * 同期を入れて画面を失う — 代行レビュー P2-2)。 */
+        g->restore = V86G_RST_NONE;
+        g->status = V86G_ST_REJECTED;
+        return;
     }
 
-    /* 4. AH=30h → 1 で読んだモード。3 がどう終わっても通る。
-     *    3 の打ち切りの理由は退避しておき、4 は印を消してから走らせる
-     *    (4 の打ち切りが 3 の理由を上書きしないように)。 */
+    /* 4. AH=30h → 1 で読んだモード。3 が 05h を返したか、途中で終わった
+     *    (何を変えたか分からない) ときに通る。3 の打ち切りの理由は退避して
+     *    おき、4 は印を消してから走らせる (4 の打ち切りが 3 の理由を上書き
+     *    しないように)。 */
     {
         u32 keep_kind = g->abort_kind;
         u16 keep_cs = g->abort_cs, keep_ip = g->abort_ip;
-        int ran;
 
         g->rst_ax = (u16)(0x3000U | (g->r31_ax & 0xFFU));
         g->rst_bx = g->r31_bx;
         g->abort_kind = V86G_ABORT_NONE;
         reason = gcap_run(g, GCAP_ENTRY_ROM, V86G_PH_RESTORE,
-                          g->rst_ax, g->rst_bx, &ax, &bx, &done);
+                          g->rst_ax, g->rst_bx, &ax, &bx, &done,
+                          1, GCAP_TICK_LIMIT);
         g->rst_ret_ax = ax;
         g->rst_ret_bx = bx;
 
         /* 戻れたかは「最後まで走って AH=05h」だけで決める。溢れは記録の
          * 欠けであって、ROM の戻しの成否とは関係ない。 */
-        ran = (g->abort_kind == V86G_ABORT_NONE &&
-               reason == V86_EXIT_HLT && done);
-        g->restore = (ran && ((ax >> 8) & 0xFFU) == 0x05U)
-                         ? V86G_RST_ROM : V86G_RST_FALLBACK;
+        g->restore = v86g_restore_kind(gcap_ran(g, reason, done),
+                                       (ax >> 8) & 0xFFU);
 
         /* status: 3 が失敗していれば 3 の理由 (打ち切りの印も 3 のもの)。
          * 3 が通って 4 で打ち切り・溢れなら記録が欠けているので 4 の理由。
@@ -366,6 +401,7 @@ static void gcap_rom(V86Gcap *g)
 #define STF_OVF          0x0040U   /* 溢れ */
 #define STF_OUTS         0x0080U   /* OUTSB で打ち切り */
 #define STF_IO32         0x0100U   /* OUT DX,EAX で打ち切り */
+#define STF_HANG         0x0200U   /* INT で入って回り続けるゲストを時間で見切れない / IF が落ちた */
 
 static const struct {
     u16 port;
@@ -401,7 +437,8 @@ static void gcap_selftest(V86Gcap *g)
 
     /* 溢れ: 513 回の OUT。溢れても最後まで走り、512 件で止まる */
     gcap_reset_keep(g);
-    reason = gcap_run(g, GCAP_ENTRY_OVF, V86G_PH_SELFTEST, 0, 0, 0, 0, &done);
+    reason = gcap_run(g, GCAP_ENTRY_OVF, V86G_PH_SELFTEST, 0, 0, 0, 0, &done,
+                      0, GCAP_TICK_LIMIT);
     if (reason != V86_EXIT_HLT || !done || !g->overflow ||
         g->n_out != V86G_OUT_MAX || g->seq_next != V86G_OUT_MAX + 1U ||
         g->out[V86G_OUT_MAX - 1].port != 0x0068U ||
@@ -412,7 +449,8 @@ static void gcap_selftest(V86Gcap *g)
 
     /* OUTSB: 打ち切り。印まで来ない、何も積まない */
     gcap_reset_keep(g);
-    reason = gcap_run(g, GCAP_ENTRY_OUTS, V86G_PH_SELFTEST, 0, 0, 0, 0, &done);
+    reason = gcap_run(g, GCAP_ENTRY_OUTS, V86G_PH_SELFTEST, 0, 0, 0, 0, &done,
+                      0, GCAP_TICK_LIMIT);
     if (reason != V86_EXIT_UNKNOWN_OP || done ||
         g->abort_kind != V86G_ABORT_INSOUTS ||
         g->abort_cs != cs || g->abort_ip != GCAP_OUTS_IP || g->n_out != 0) {
@@ -421,7 +459,8 @@ static void gcap_selftest(V86Gcap *g)
 
     /* 66h EFh: 打ち切り。幅 2 で通さない */
     gcap_reset_keep(g);
-    reason = gcap_run(g, GCAP_ENTRY_IO32, V86G_PH_SELFTEST, 0, 0, 0, 0, &done);
+    reason = gcap_run(g, GCAP_ENTRY_IO32, V86G_PH_SELFTEST, 0, 0, 0, 0, &done,
+                      0, GCAP_TICK_LIMIT);
     if (reason != V86_EXIT_UNKNOWN_OP || done ||
         g->abort_kind != V86G_ABORT_IO32 ||
         g->abort_cs != cs || g->abort_ip != GCAP_IO32_IP ||
@@ -429,9 +468,22 @@ static void gcap_selftest(V86Gcap *g)
         fail |= STF_IO32;
     }
 
+    /* 時間の見切り: ROM の呼び出しと同じ形 (IF を立てて始め、INT FFh で
+     * 入る) で、I/O も #GP も出さずに回るゲスト。IF が落ちずに入り
+     * (INT の先で見た FLAGS の IF)、タイマの見切りで戻ること。
+     * 代行レビュー P2-1: IF を落としていた頃は見切りが死んでいた。 */
+    gcap_reset_keep(g);
+    reason = gcap_run(g, GCAP_ENTRY_HANG, V86G_PH_SELFTEST, 0, 0, 0, 0, &done,
+                      1, GCAP_HANG_TICKS);
+    if (reason != V86_EXIT_TIMEOUT || done ||
+        !(gd_get(GD_HANG_FL) & (u16)EFLAGS_IF) || g->n_out != 0) {
+        fail |= STF_HANG;
+    }
+
     /* 決まった列 (最後に走らせて、この記録を呼び手へ返す) */
     gcap_reset_keep(g);
-    reason = gcap_run(g, GCAP_ENTRY_SEQ, V86G_PH_SELFTEST, 0, 0, 0, 0, &done);
+    reason = gcap_run(g, GCAP_ENTRY_SEQ, V86G_PH_SELFTEST, 0, 0, 0, 0, &done,
+                      0, GCAP_TICK_LIMIT);
     if (reason != V86_EXIT_HLT || !done || g->abort_kind != V86G_ABORT_NONE) {
         fail |= STF_SEQ_RUN;
     }

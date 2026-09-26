@@ -75,6 +75,20 @@ void v86g_pass_out(V86Gcap *g, const V86gIoOps *ops, unsigned int port,
 int  v86g_decide(unsigned int al, unsigned int bh,
                  unsigned int *al480, unsigned int *bh480);
 
+/* ③ (AH=30h → 480) の終わり方から ④ (AH=30h → 元のモード) を呼ぶか。
+ *   set_ran = ③ が最後まで走った (打ち切り・暴走・時間切れでない。溢れは
+ *             記録の欠けで ROM の動作とは関係ないので「走った」に数える)
+ *   set_ah  = ③ の戻り AH
+ * ③ が最後まで走って AH≠05h (ROM が引数を断った = 何も変えていない) なら
+ * 呼ばない (0)。④ も断られると OS32 の表で同期を書き換えることになり、
+ * 並びの誤判定と重なると 24kHz 機に 31kHz の同期を入れて画面を失う。
+ * ③ が 05h を返したか、途中で終わった (何を変えたか分からない) ときは呼ぶ (1)。 */
+int  v86g_need_restore(int set_ran, unsigned int set_ah);
+
+/* ④ の終わり方から戻し方 (V86G_RST_ROM / V86G_RST_FALLBACK)。
+ * 最後まで走って AH=05h のときだけ ROM で戻ったとみなす。 */
+unsigned int v86g_restore_kind(int rst_ran, unsigned int rst_ah);
+
 /* その並びで AL が 31kHz を表すか (ROM で戻れなかったときの OS32 側の戻し用)。 */
 int  v86g_mode_is_31k(int layout, unsigned int al);
 
