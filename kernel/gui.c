@@ -39,6 +39,10 @@ extern void appslot_gui_op_leave(void);
 extern void ring3_wm_enter(void);
 extern void ring3_wm_leave(void);
 
+/* 「いまの KAPI 呼び出しは CPL=3 のアプリ由来か」(exec/exec.c、実体は
+ * exec/ring3_str.c の ring3_guard_active)。gui_ime_set_render が引く。 */
+extern int ring3_call_from_user(void);
+
 /* GUI_SHELL_OWNER (= 1) は gui.h。K2 の syscall 境界ポンプも同じ値を使う。 */
 
 /* ======== WM 登録状態 ======== */
@@ -123,6 +127,35 @@ void gui_owner_exit(int owner)
          * 指したままにしない。 */
         ime_set_render((void *)0);
     }
+}
+
+/* ======================================================================== */
+/*  gui_ime_set_render — KAPI ime_set_render の入口 (常駐側だけ)             */
+/*                                                                          */
+/*  カーネルは控えた IME_Render 表の putc / putw / clear_row を**以後ずっと  */
+/*  CPL=0 で**呼ぶ (kernel/ime.c)。アプリが自分のメモリの表を渡せると、その   */
+/*  アプリのコードが CPL=0 で走り、別アプリの syscall や WM の top-level      */
+/*  (master CR3) でも呼ばれ、アプリが消えた後は解放済み / 他人の物理へ飛ぶ   */
+/*  (2026-09-26 代行レビュー P2)。正当な呼び手は gshell の top-level だけ    */
+/*  (起動時 / CUI 切替 / 停止、shell 帯 owner 1、CPL=0)。                    */
+/*                                                                          */
+/*  そこで gui_register / sys_switch_shell と同じ「owner 1 から」に加えて、  */
+/*  ring3_call_from_user() が真 (CPL=3 のアプリの syscall、WM の外) なら断る。*/
+/*  NULL (TVRAM 版へ戻す) も同じ規則 — アプリが WM の描画先を外すこともさせ */
+/*  ない。KAPI の戻りは void なので ([ABI2]、引数も戻りも変えない) 黙って    */
+/*  断り、回数だけ gui_ime_render_rejected に数える (kselftest / デバッグ)。 */
+/*  カーネル内の後始末 (gui_owner_exit(1) の NULL 戻し) はこの門を通らず      */
+/*  ime_set_render を直に呼ぶ。                                              */
+/* ======================================================================== */
+volatile u32 gui_ime_render_rejected = 0;
+
+void gui_ime_set_render(void *table)
+{
+    if (res_owner_get() != GUI_SHELL_OWNER || ring3_call_from_user()) {
+        gui_ime_render_rejected++;
+        return;
+    }
+    ime_set_render(table);
 }
 
 /* ======================================================================== */

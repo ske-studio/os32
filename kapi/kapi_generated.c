@@ -1783,7 +1783,7 @@ int __cdecl wrap_ime_feed_key(int keydata)
 void __cdecl wrap_ime_set_render(void *table)
 {
     KAPI_HIT(179);
-    ime_set_render(table);
+    gui_ime_set_render(table);
 }
 
 i32 __cdecl wrap_exec_start(const char *cmdline)

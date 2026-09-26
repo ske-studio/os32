@@ -1335,7 +1335,8 @@
       "name": "ime_set_render",
       "out": "none",
       "ret": "void",
-      "args": ["void *table"]
+      "args": ["void *table"],
+      "target": "gui_ime_set_render"
     },
     {
       "name": "exec_start",
