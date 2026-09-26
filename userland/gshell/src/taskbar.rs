@@ -6,9 +6,12 @@
 //!
 //! ```text
 //!   左   Start ボタン           → startmenu::toggle_start
-//!   中   現アプリの可視 top-level 窓のボタン (raise + focus。プロセス切替ではない)
-//!   右   時計 HH:MM (sys_time)
+//!   中   現アプリの可視 / 最小化した top-level 窓のボタン (raise + focus。プロセス切替ではない)
+//!   右   [M] (マウスキー中だけ) と時計 HH:MM (sys_time)
 //! ```
+//!
+//! 窓ボタンの押し込み表示は、ふだんは最前面の窓、GRPH+TAB の切り替え中は
+//! **選んでいる窓** (Win98 の Alt+TAB の一覧の代わり、票 KBD_NAV §1-2)。
 //!
 //! 作業領域 (`wm::work_area`) は「画面 − タスクバー」。新規配置とドラッグ確定は
 //! そこへクランプし、既に外へ出ている窓はそのままにする (契約 D1)。
@@ -28,7 +31,7 @@
 //! 幅が変わった周は帯も描き直す。
 
 use crate::wm::{GuiState, Rect};
-use crate::{chrome, lease, startmenu, visible};
+use crate::{chrome, lease, startmenu};
 use os32api::gfx;
 use os32api::gui::proto::{
     GUI_COLOR_FACE, GUI_COLOR_LIGHT, GUI_COLOR_SHADOW, GUI_COLOR_TEXT, GUI_COLOR_TITLE_ACTIVE,
@@ -56,6 +59,8 @@ const WBTN_W: i32 = 96;
 const WBTN_GAP: i32 = 4;
 /// 窓ボタンに出せる文字数 (8px/文字。左右 4px の余白を除く)。
 const WBTN_CHARS: usize = 11;
+/// マウスキーの表示 "[M]" の幅 (3 文字 + 余白)。
+const MK_W: i32 = 3 * 8 + 8;
 
 /// 時計を作り直す間隔 (tick = 10ms。契約 D3「1 秒より細かい更新は不要」)。
 const CLOCK_INTERVAL: u32 = 100;
@@ -116,10 +121,29 @@ pub fn invalidate_clock(st: &mut GuiState) {
     b.force = true;
 }
 
+/// マウスキーの表示 "[M]" (時計の左)。マウスキーがオフなら空矩形。
+pub fn mk_rect(st: &GuiState) -> Rect {
+    if !st.kn.mk_on {
+        return Rect::EMPTY;
+    }
+    let c = clock_rect(st);
+    Rect::new(c.x - WBTN_GAP - MK_W, c.y, MK_W, BTN_H)
+}
+
+/// 窓ボタンが使える右端 (時計、マウスキー中は [M] の左)。
+fn right_limit(st: &GuiState) -> i32 {
+    let m = mk_rect(st);
+    if m.is_empty() {
+        clock_rect(st).x
+    } else {
+        m.x
+    }
+}
+
 /// i 番目の窓ボタン。時計に掛かる位置なら空矩形。
 fn wbtn_rect(st: &GuiState, i: usize) -> Rect {
     let x = PAD + START_W + WBTN_GAP + (i as i32) * (WBTN_W + WBTN_GAP);
-    if x + WBTN_W > clock_rect(st).x - WBTN_GAP {
+    if x + WBTN_W > right_limit(st) - WBTN_GAP {
         return Rect::EMPTY;
     }
     Rect::new(x, st.screen_h - TASKBAR_H + PAD, WBTN_W, BTN_H)
@@ -128,7 +152,7 @@ fn wbtn_rect(st: &GuiState, i: usize) -> Rect {
 /// 窓ボタンの帯 (損傷を絞る用)。
 fn wbtn_band(st: &GuiState) -> Rect {
     let x = PAD + START_W + WBTN_GAP;
-    Rect::new(x, st.screen_h - TASKBAR_H, clock_rect(st).x - x, TASKBAR_H)
+    Rect::new(x, st.screen_h - TASKBAR_H, right_limit(st) - x, TASKBAR_H)
 }
 
 /// タスクバーの上か (契約 D1: この領域の入力はアプリへ配送しない)。
@@ -153,6 +177,8 @@ struct Bar {
     sig_n: usize,
     sig_front: u32,
     sig_ids: [u32; GUI_MAX_WINDOWS],
+    /// 押し込み表示の窓 (切り替え中は選択、ふだんは最前面)。
+    sig_pressed: u32,
     inited: bool,
 }
 
@@ -165,6 +191,7 @@ impl Bar {
         sig_n: 0,
         sig_front: 0,
         sig_ids: [0; GUI_MAX_WINDOWS],
+        sig_pressed: 0,
         inited: false,
     };
 }
@@ -277,24 +304,38 @@ fn tick_buttons(st: &mut GuiState) {
     let mut ids = [0u32; GUI_MAX_WINDOWS];
     let n = list_windows(st, &mut ids);
     let front = st.front_id();
+    let pressed = pressed_id(st);
     let b = bar();
-    if b.sig_n == n && b.sig_front == front && b.sig_ids[..n] == ids[..n] {
+    if b.sig_n == n
+        && b.sig_front == front
+        && b.sig_pressed == pressed
+        && b.sig_ids[..n] == ids[..n]
+    {
         return;
     }
     b.sig_n = n;
     b.sig_front = front;
+    b.sig_pressed = pressed;
     b.sig_ids = ids;
     let band = wbtn_band(st);
     st.dirty_screen(band);
 }
 
-/// タスクバーに並べる窓 (可視の top-level)。index 順で安定させる。
+/// 押し込みで描く窓ボタン: GRPH+TAB の切り替え中は選択、ふだんは最前面。
+pub fn pressed_id(st: &GuiState) -> u32 {
+    match crate::kbdnav::switch_selection(st) {
+        Some(id) => id,
+        None => st.front_id(),
+    }
+}
+
+/// タスクバーに並べる窓 (可視か最小化の top-level)。index 順で安定させる。
 /// 戻り値は件数、`out` には完全な WindowId。
 fn list_windows(st: &GuiState, out: &mut [u32; GUI_MAX_WINDOWS]) -> usize {
     let mut n = 0;
     let mut i = 0;
     while i < GUI_MAX_WINDOWS {
-        if st.windows[i].used && st.windows[i].visible {
+        if st.windows[i].used && (st.windows[i].visible || st.windows[i].minimized) {
             out[n] = st.windows[i].id(i);
             n += 1;
         }
@@ -327,6 +368,8 @@ pub fn on_button(st: &mut GuiState, mx: i32, my: i32) {
 }
 
 /// 窓ボタン = **raise + focus** (プロセス切替ではない。契約 S1)。
+/// 最小化した窓は元に戻す。未確定文字は元の窓へ確定してから移す
+/// (`wm::activate_index`、票 KBD_NAV §1-6)。
 fn activate(st: &mut GuiState, id: u32) {
     let index = match st.win_by_id(id) {
         Some(i) => i,
@@ -335,13 +378,7 @@ fn activate(st: &mut GuiState, id: u32) {
     if st.front_index() == Some(index) {
         return;
     }
-    let old_front = st.front_id();
-    st.bring_to_front(index);
-    visible::recompute_and_expose(st);
-    let outer = st.windows[index].outer();
-    st.dirty_screen(outer);
-    let new_front = st.windows[index].id(index);
-    crate::input::emit_focus_change(st, old_front, new_front);
+    crate::wm::activate_index(st, index);
     let band = wbtn_band(st);
     st.dirty_screen(band);
 }
@@ -375,7 +412,7 @@ pub fn draw(st: &GuiState, clip: Rect) {
     /* 窓ボタン */
     let mut ids = [0u32; GUI_MAX_WINDOWS];
     let n = list_windows(st, &mut ids);
-    let front = st.front_id();
+    let pressed = pressed_id(st);
     let mut i = 0;
     while i < n {
         let br = wbtn_rect(st, i);
@@ -386,8 +423,13 @@ pub fn draw(st: &GuiState, clip: Rect) {
             Some(k) => k,
             None => break,
         };
-        draw_wbtn(st, br, idx, mono, ids[i] == front);
+        draw_wbtn(st, br, idx, mono, ids[i] == pressed);
         i += 1;
+    }
+    /* マウスキー中の表示 (票 KBD_NAV §1-3)。 */
+    let mr = mk_rect(st);
+    if !mr.is_empty() {
+        draw_button(mr, mono, true, b"[M]\0", true);
     }
     /* 時計 */
     let cr = clock_rect(st);

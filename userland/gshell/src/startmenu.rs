@@ -12,7 +12,12 @@
 //!                         CUI mode / Shut Down
 //!   Start (programs)      /usr/bin/*.bin を最大 96 件 (超過は "..." 行)
 //!   Context (右クリック)  File Manager / Run... / Refresh Programs
+//!   Window (GRPH+SPACE)   Restore / Move / Size / Minimize / Maximize / Close
 //! ```
+//!
+//! 窓メニュー (票 KBD_NAV §1-2) は対象の窓の id を持ち、項目の実行は
+//! [`crate::kbdnav::winmenu_run`] に任せる。使えない項目は灰色で描き、選んでも
+//! 何もしない。
 //!
 //! **ディレクトリ走査は X3 でだけ行う** (契約 S8 / §9)。メニューを開いた
 //! ときに `scan_pending` を立て、[`x3_cycle`] が 1 回だけ `sys_ls` する。
@@ -44,6 +49,8 @@ const PROG_W: i32 = 200;
 const PROG_ROWS: usize = 12;
 /// 右クリックメニューの幅。
 const CTX_W: i32 = 160;
+/// 窓メニューの幅。
+const WIN_W: i32 = 120;
 
 /// `/usr/bin` から拾う最大件数 (契約 D2)。超過は "..." 行で示す。
 pub const MAX_PROGS: usize = 96;
@@ -77,6 +84,7 @@ const KIND_NONE: u8 = 0;
 const KIND_ROOT: u8 = 1;
 const KIND_PROGS: u8 = 2;
 const KIND_CTX: u8 = 3;
+const KIND_WIN: u8 = 4;
 
 /// File Manager (契約 D2 / F1)。
 static FILER_BIN: &[u8] = b"/usr/bin/filer.bin\0";
@@ -106,6 +114,8 @@ pub struct Menu {
     /// 押下でメニューが閉じた直後の**離しを捨てる**。閉じた後の up edge が
     /// そのままアプリへ届くと、押していないボタンの離しが飛ぶ。
     swallow_up: bool,
+    /// 窓メニューの対象 (完全な WindowId、KIND_WIN のときだけ)。
+    win: u32,
     /* ---- /usr/bin の cache ---- */
     progs: [[u8; NAME_LEN]; MAX_PROGS],
     nprogs: usize,
@@ -122,6 +132,7 @@ impl Menu {
         scroll: 0,
         scan_pending: false,
         swallow_up: false,
+        win: 0,
         progs: [[0; NAME_LEN]; MAX_PROGS],
         nprogs: 0,
         prog_overflow: false,
@@ -218,6 +229,39 @@ pub fn open_context(st: &mut GuiState, mx: i32, my: i32) {
         y = wa.y;
     }
     set_open(st, KIND_CTX, Rect::new(x, y, CTX_W, h), CTX_ITEMS);
+}
+
+/// 窓メニュー (GRPH+SPACE、票 KBD_NAV §1-2)。(x, y) は窓のクライアントの左上。
+pub fn open_winmenu(st: &mut GuiState, win: u32, x: i32, y: i32) {
+    let h = (crate::kbdnav::WM_ITEMS as i32) * ITEM_H + BORDER * 2;
+    let wa = crate::wm::work_area(st);
+    let mut x = x;
+    let mut y = y;
+    if x + WIN_W > wa.right() {
+        x = wa.right() - WIN_W;
+    }
+    if x < wa.x {
+        x = wa.x;
+    }
+    if y + h > wa.bottom() {
+        y = wa.bottom() - h;
+    }
+    if y < wa.y {
+        y = wa.y;
+    }
+    set_open(st, KIND_WIN, Rect::new(x, y, WIN_W, h), crate::kbdnav::WM_ITEMS);
+    m().win = win;
+}
+
+/// Shut Down の確認 (Start の Shut Down と、窓が無いときの GRPH+f･4)。
+/// 契約 S6: 確認 (Yes/No) を経てからでないと止めない。
+pub fn confirm_halt(st: &mut GuiState) {
+    modal::open_wm_message(
+        st,
+        GUI_MODAL_YES_NO,
+        "システムを停止します。保存していない内容は失われます\0".as_bytes(),
+        modal::WM_PURPOSE_CONFIRM_HALT,
+    );
 }
 
 fn set_open(st: &mut GuiState, kind: u8, r: Rect, nitems: usize) {
@@ -416,6 +460,7 @@ fn visible_rows(kind: u8) -> usize {
     match kind {
         KIND_PROGS => PROG_ROWS,
         KIND_CTX => CTX_ITEMS,
+        KIND_WIN => crate::kbdnav::WM_ITEMS,
         _ => ROOT_ITEMS,
     }
 }
@@ -534,12 +579,7 @@ fn activate(st: &mut GuiState) -> bool {
             }
             IT_HALT => {
                 close(st);
-                modal::open_wm_message(
-                    st,
-                    GUI_MODAL_YES_NO,
-                    "システムを停止します。保存していない内容は失われます\0".as_bytes(),
-                    modal::WM_PURPOSE_CONFIRM_HALT,
-                );
+                confirm_halt(st);
                 true
             }
             _ => false,
@@ -576,6 +616,15 @@ fn activate(st: &mut GuiState) -> bool {
             }
             _ => false,
         },
+        KIND_WIN => {
+            let win = m().win;
+            if !crate::kbdnav::winmenu_enabled(st, win, cursor) {
+                return false; /* 灰色の項目は何もしない (メニューも閉じない) */
+            }
+            close(st);
+            crate::kbdnav::winmenu_run(st, win, cursor);
+            true
+        }
         _ => false,
     }
 }
@@ -642,7 +691,11 @@ pub fn draw(st: &GuiState, clip: Rect) {
             GUI_COLOR_SEL_BG
         };
         let fg = if !sel {
-            GUI_COLOR_TEXT
+            if item_enabled(st, mm, idx) {
+                GUI_COLOR_TEXT
+            } else {
+                GUI_COLOR_SHADOW
+            }
         } else if mono {
             GUI_COLOR_WINDOW
         } else {
@@ -680,6 +733,38 @@ pub fn root_label(idx: usize) -> &'static [u8] {
     &p[..p.len() - 1]
 }
 
+/// 窓メニューの項目 idx のラベル (**NUL を含まない**)。
+pub fn win_label(idx: usize) -> &'static [u8] {
+    let p = match idx {
+        crate::kbdnav::WM_RESTORE => b"Restore\0".as_slice(),
+        crate::kbdnav::WM_MOVE => b"Move\0".as_slice(),
+        crate::kbdnav::WM_SIZE => b"Size\0".as_slice(),
+        crate::kbdnav::WM_MINIMIZE => b"Minimize\0".as_slice(),
+        crate::kbdnav::WM_MAXIMIZE => b"Maximize\0".as_slice(),
+        crate::kbdnav::WM_CLOSE => b"Close\0".as_slice(),
+        _ => b"\0".as_slice(),
+    };
+    &p[..p.len() - 1]
+}
+
+/// 項目が使えるか (窓メニューだけが灰色の項目を持つ)。
+fn item_enabled(st: &GuiState, mm: &Menu, idx: usize) -> bool {
+    if mm.kind != KIND_WIN {
+        return true;
+    }
+    crate::kbdnav::winmenu_enabled(st, mm.win, idx)
+}
+
+/// 窓メニューが開いていればその対象 (試験の観測点)。
+#[allow(dead_code)]
+pub fn winmenu_target() -> Option<u32> {
+    if m().kind == KIND_WIN {
+        Some(m().win)
+    } else {
+        None
+    }
+}
+
 /// 項目 idx のラベル (NUL 終端のポインタ)。Programs は cache から組む。
 fn item_label(mm: &Menu, idx: usize, buf: &mut [u8; NAME_LEN + 1]) -> *const u8 {
     match mm.kind {
@@ -690,6 +775,16 @@ fn item_label(mm: &Menu, idx: usize, buf: &mut [u8; NAME_LEN + 1]) -> *const u8 
             CT_RUN => b"Run...\0".as_ptr(),
             _ => b"Refresh Programs\0".as_ptr(),
         },
+        KIND_WIN => {
+            let l = win_label(idx);
+            let mut i = 0;
+            while i < l.len() && i < NAME_LEN {
+                buf[i] = l[i];
+                i += 1;
+            }
+            buf[i] = 0;
+            buf.as_ptr()
+        }
         _ => {
             if idx >= mm.nprogs {
                 return b"...\0".as_ptr();

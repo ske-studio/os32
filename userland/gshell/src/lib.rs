@@ -30,6 +30,7 @@
 //! | `settings.rs` | 設定レジストリ (`/etc/settings.db`) の読み書きと予約 (S4) |
 //! | `cursor.rs`  | マウスカーソル (損傷とは別経路の退避・再描画) |
 //! | `input.rs`   | 入力取り込み → Key / Text / Pointer / Button (T3 / U2a) |
+//! | `kbdnav.rs`  | キーボードだけの WM 操作とマウスキー (票 KBD_NAV) |
 //! | `fep.rs`     | 日本語入力 (U2a)。cooked 待ち行列 = FEP、未確定行と候補窓 |
 //! | `lease.rs`   | 14 色パレットのリースとフォーカス追従 (G8) |
 //! | `modal.rs`   | モーダルと標準ダイアログ (U4)。入れ子ループなし |
@@ -54,6 +55,7 @@ mod ffi;
 mod fullscreen;
 mod handler;
 mod input;
+mod kbdnav;
 mod lease;
 mod modal;
 mod multiapp;
@@ -150,8 +152,12 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
     }
     st.mouse_x = st.screen_w / 2;
     st.mouse_y = st.screen_h / 2;
+    st.real_x = st.mouse_x;
+    st.real_y = st.mouse_y;
     st.cursor.x = st.mouse_x;
     st.cursor.y = st.mouse_y;
+    /* カナをロックしたまま GUI に入った場合 (票 KBD_NAV §1-5)。 */
+    kbdnav::init(st);
     st.inited = true;
 
     /* WM を登録する (契約 T1)。以後アプリの gui_call がここへ来る。

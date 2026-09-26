@@ -204,8 +204,11 @@ check-tools-host:
 	python3 -B tools/tests/test_stat_cmd.py
 	python3 -B tools/tests/test_tar_cmd.py
 
+# gshell の入力部・WM をホスト ABI の代用 (host/mocks.rs) で走らせる。
+# --mutate は票 KBD_NAV の K1 の変異 (host/integration.py の MUTATIONS) を
+# 一時の写しに当てて RED を確かめる (ソースは書き換えない)。
 check-gshell-host:
-	python3 userland/gshell/host/integration.py
+	python3 userland/gshell/host/integration.py --mutate
 
 check-db-owned-host:
 	python3 -B -m unittest discover -s tools/tests -p 'test_kapi_db_owned.py'
