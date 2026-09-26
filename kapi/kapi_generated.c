@@ -55,7 +55,7 @@ extern int kapi_serial_diag(SerialDiag *out);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[238];
+volatile u32 kapi_hits[239];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -299,6 +299,7 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     0,  /* sfs_begin */
     4,  /* sfs_end */
     4,  /* serial_diag */
+    12,  /* kbd_diag_log */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -542,6 +543,7 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* sfs_begin */
     0x0000,  /* sfs_end */
     0x0001,  /* serial_diag: out */
+    0x0002,  /* kbd_diag_log: out */
 };
 
 /* ---- 出力ポインタの書き込み可検査 (票 TASK_KAPI_OUTPUT_GUARD) --------
@@ -2211,5 +2213,17 @@ int __cdecl wrap_serial_diag(SerialDiag *out)
         ring3_fault_kill();   /* 戻らない */
     }
     return kapi_serial_diag(out);
+}
+
+int __cdecl wrap_kbd_diag_log(u32 after_seq, KbdDiagLogEnt *out, int max)
+{
+    KAPI_HIT(238);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable(
+            (u32)out, kapi_out_mul(KAPI_OUT_LEN_S(out, max), (u32)(sizeof(KbdDiagLogEnt))),
+            (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
+    return kbd_diag_log(after_seq, out, max);
 }
 

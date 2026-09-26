@@ -35,7 +35,7 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 | `play` | `play MML` | MML文字列をFM音源で再生 |
 | `os32gui` | `os32gui [on\|off]` | GUI シェル (/bin/gshell.bin) へ切り替え / 起動時 GUI の既定を `/etc/system.cfg` に書く (GUI v1.1 K4) |
 | `gfxmode` | `gfxmode pc98\|pegc\|cirrus\|auto` | 次回起動のグラフィクスバックエンドを `/etc/system.cfg` の `GFX=` に書く (GUI v1.1 H2b) |
-| `kbdstat` | `kbdstat` | キーボード 8251 の診断カウンタ (IRQ1 回数・空 IRQ・エラー・オーバーラン・起動時の 0043h・書いたコマンド語・直近のステータスとスキャンコード・いまの 0043h) を 1 行で。KAPI v62 `kbd_diag`。rshell から読める。読み方は [POLICY_DEBUG.md](POLICY_DEBUG.md) §4-57 |
+| `kbdstat` | `kbdstat [-w]` | キーボード 8251 の診断カウンタ (IRQ1 回数・空 IRQ・エラー・オーバーラン・起動時の 0043h・書いたコマンド語・直近のステータスとスキャンコード・いまの 0043h) を 1 行で。KAPI v62 `kbd_diag`。**`-w`** は受信 1 バイトごとの行 (`seq` / 生の `code` と make・break / 処理後の修飾) を ESC か 30 秒まで出し続ける (KAPI v67 `kbd_diag_log`、seq が飛べば `LOST` 行)。rshell から読める。読み方は [POLICY_DEBUG.md](POLICY_DEBUG.md) §4-57 |
 
 **PCI コマンド** (cmd_pci.c):
 

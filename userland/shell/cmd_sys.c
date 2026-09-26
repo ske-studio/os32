@@ -1,5 +1,6 @@
 #include "shell.h"
 #include "config.h"   /* SYS_GSHELL_BIN, SYS_SYSTEM_CFG (K4: os32gui) */
+#include "kbd_watch.h" /* kbdstat -w の行 (票 TASK_KBD_NAV §3) */
 
 /* ======================================================================== */
 /*  システム操作モジュール (cmd_sys.c)                                      */
@@ -323,12 +324,96 @@ static int cmd_gfxmode(int argc, char **argv)
 /*    irq=0 かつ RxRDY = 0              → キーボードが送っていない           */
 /*    irq>0 なのに文字が出ない          → 配送側 (リング / GUI / rshell)      */
 /*    同じ code で irq が暴走            → 再送ストーム                       */
+/*                                                                          */
+/*  kbdstat -w — 受信 1 バイトごとの行 (KAPI v67 kbd_diag_log、票           */
+/*  docs/tasks/gui/TASK_KBD_NAV.md §3)。カナ / CAPS が「ロックで make、解除で */
+/*  break」か「押すたびに make だけ」かを見る。毎 tick リングの新しい分を読み、 */
+/*  seq が飛んだら LOST 行 (取りこぼし — その区間は判定不能) を出す。         */
+/*  ESC (本体でもシリアルでも) か KBDW_TIMEOUT_SEC 秒で終わる。本体の ESC は  */
+/*  それ自身も make の行として出る (観測の邪魔にならないよう、終える前に     */
+/*  リングをもう一度読む)。出力は kprintf なので rshell ではシリアルにも出る。 */
 /* ------------------------------------------------------------------------ */
+static int kbdstat_watch(void)
+{
+    KbdDiagLogEnt ents[KBD_DLOG_CAP];
+    KbdDiag d0, d1;
+    char line[KBDW_LINE_MAX];
+    u32 last = 0;
+    u32 shown = 0;
+    u32 lost = 0;
+    u32 lost_now;
+    u32 t_end;
+    int have_d0;
+    int esc = 0;
+    int n, i, k;
+
+    have_d0 = (g_api->kbd_diag(&d0) == 0);
+    /* 基準: 始める前に溜まっている分は出さず、最後の seq だけ覚える */
+    n = g_api->kbd_diag_log(0, ents, KBD_DLOG_CAP);
+    if (n < 0) {
+        g_api->kprintf(ATTR_RED, "kbdstat: kbd_diag_log failed (rc=%d)\n", n);
+        return SH_STATUS_ERROR;
+    }
+    if (n > 0) last = ents[n - 1].seq;
+    (void)kbdw_fmt_mods(line, (int)sizeof(line), g_api->kbd_get_modifiers());
+    g_api->kprintf(ATTR_CYAN, "kbdstat -w: ESC or %us to stop. start seq=%u mods=%s\n",
+                   (u32)KBDW_TIMEOUT_SEC, last, line);
+
+    t_end = g_api->get_tick() + (u32)(KBDW_TIMEOUT_SEC * KBDW_TICK_HZ);
+    for (;;) {
+        /* 先にキーを読む。IRQ1 は cooked リングへ積んだ同じ割り込みの中で
+         * 記録リングへも積むので、ここで見えた ESC は下の読みで必ず行になる。
+         * ESC 以外のキーは捨てる (終わった後のシェルに残さない)。 */
+        while ((k = g_api->kbd_trygetkey()) >= 0) {
+            if ((k & 0xFF) == KBDW_KEY_ESC) esc = 1;
+        }
+        n = g_api->kbd_diag_log(last, ents, KBD_DLOG_CAP);
+        if (n > 0) {
+            lost_now = kbdw_lost(last, ents[0].seq);
+            if (lost_now != 0) {
+                (void)kbdw_fmt_lost(line, (int)sizeof(line), last, ents[0].seq);
+                g_api->kprintf(ATTR_YELLOW, "%s\n", line);
+                lost += lost_now;
+            }
+            for (i = 0; i < n; i++) {
+                (void)kbdw_fmt_ent(line, (int)sizeof(line), &ents[i]);
+                g_api->kprintf(ATTR_WHITE, "%s\n", line);
+            }
+            last = ents[n - 1].seq;
+            shown += (u32)n;
+        }
+        if (esc) break;
+        if ((int)(g_api->get_tick() - t_end) >= 0) break;
+        {   /* 1 tick 待つ (rshell の待ちと同じ形) */
+            u32 w = g_api->get_tick() + 1;
+            while (g_api->get_tick() < w) g_api->sys_halt();
+        }
+    }
+
+    (void)kbdw_fmt_mods(line, (int)sizeof(line), g_api->kbd_get_modifiers());
+    g_api->kprintf(ATTR_CYAN, "kbdstat -w: end (%s) shown=%u lost=%u mods=%s",
+                   esc ? "ESC" : "timeout", shown, lost, line);
+    /* EMPTY / ERROR で捨てたバイトはリングに積まれないので、増えた数を添える */
+    if (have_d0 && g_api->kbd_diag(&d1) == 0) {
+        g_api->kprintf(ATTR_CYAN, " empty+%u err+%u ovr+%u",
+                       d1.empty_count - d0.empty_count, d1.err_count - d0.err_count,
+                       (u32)d1.overrun_count - (u32)d0.overrun_count);
+    }
+    g_api->kprintf(ATTR_CYAN, "%s", "\n");
+    return 0;
+}
+
 static int cmd_kbdstat(int argc, char **argv)
 {
     KbdDiag d;
     int rc;
-    (void)argc; (void)argv;
+    if (argc >= 2 && str_eq(argv[1], "-w")) {
+        return kbdstat_watch();
+    }
+    if (argc >= 2) {
+        shell_print_help(argv[0]);
+        return SH_STATUS_USAGE;
+    }
     rc = g_api->kbd_diag(&d);
     if (rc < 0) {
         g_api->kprintf(ATTR_RED, "kbdstat: kbd_diag failed (rc=%d)\n", rc);
@@ -356,7 +441,7 @@ static const ShellCmd sys_cmds[] = {
     { "play",   cmd_play,   "MML",           "Play MML via FM synth" },
     { "os32gui",cmd_os32gui,"[on|off]",      "Switch to GUI shell now, or set GUI at boot" },
     { "gfxmode",cmd_gfxmode,"pc98|pegc|cirrus|auto","Force the graphics backend at next boot" },
-    { "kbdstat",cmd_kbdstat,"",              "Show keyboard 8251 diagnostic counters" },
+    { "kbdstat",cmd_kbdstat,"[-w]",          "Show keyboard 8251 counters (-w: log each byte, ESC/30s)" },
     { (const char *)0, 0, 0, 0 }
 };
 

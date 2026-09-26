@@ -147,7 +147,9 @@ WM の共通経路 (`wm::set_focus` とその同類) に入れるので、**マ�
 
 ## 3. 実機で確かめること (次の実機の回)
 
-準備: **受信のたびに記録する診断リング**をドライバに足す (`drivers/kbd.c` の IRQ1 で、受け取った 1 バイトごとに
+準備 (**実装済み 2026-09-26、wt/kbd-diaglog、KAPI v67、手元ビルドとホスト試験のみ — NP21/W・実機は未確認**。
+使い方は [POLICY_DEBUG.md](../../POLICY_DEBUG.md) §4-57 の `kbdstat -w`、試験は `make check-kbd-dlog-host`
+([記録](../../../tools/tests/kbd_dlog_tdd.md))): **受信のたびに記録する診断リング**をドライバに足す (`drivers/kbd.c` の IRQ1 で、受け取った 1 バイトごとに
 `seq / code / make・break / 更新後の修飾` を 32 件の循環リングへ)。読むのは KAPI `kbd_diag_log` (追記、診断専用) と
 `kbdstat -w` (リングを読んで新しい分を 1 行ずつ出す。ESC か 30 秒で終わる)。**seq が飛んだら「取りこぼし — この区間は判定不能」と出す**。
 今の `kbdstat` では足りない: `last_code` は最後の 1 件だけ、`irq_count` は EMPTY / ERROR の判定より前に増えるので受信件数ではない、
