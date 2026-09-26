@@ -1254,6 +1254,7 @@ read-modify-write で保つ。
   用途は票 [`tasks/gui/TASK_KBD_NAV.md`](tasks/gui/TASK_KBD_NAV.md) §3 (カナ / CAPS が「ロックで make、解除で break」か
   「押すたびに make だけ」か): シリアルから `kbdstat -w` を始め、本体のキーだけを触って行を読む。
   ホスト試験は `make check-kbd-dlog-host`。
+  最長 30 秒 (+ 出力の分) 走るので、`/api/cmd` や `rshell_serial.py` の待ちは **60 秒以上**にする ([V3]) — 短いと写しが途中で切れ、LOST の判定を欠けた写しでしてしまう。
 
 ### 4-58. OS32 の ext2 が読めることは**正しい ext2 である証拠にならない** — cdinst の NHD に名前の無いディレクトリ (2026-09-23)
 

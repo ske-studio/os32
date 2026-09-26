@@ -4,8 +4,8 @@
 /*  I/O も割り込み禁止も持たない。drivers/kbd.c の IRQ1 ハンドラが           */
 /*  kbd_dlog_push を呼び (IF=0 のまま、再入しない)、kbd_diag_log が          */
 /*  irq_save の間に kbd_dlog_copy でローカルへ写す。ホスト試験               */
-/*  (tools/tests/test_kbd_status.py) が実物をそのまま #include して回す。    */
-/*  票: docs/tasks/gui/TASK_KBD_NAV.md §3、記録: tools/tests/kbd_status_tdd.md */
+/*  (tools/tests/test_kbd_dlog.py) が実物をそのまま #include して回す。      */
+/*  票: docs/tasks/gui/TASK_KBD_NAV.md §3、記録: tools/tests/kbd_dlog_tdd.md   */
 /* ======================================================================== */
 
 #ifndef __KBD_DLOG_H
@@ -21,7 +21,8 @@ typedef struct {
 /* 空にする (seq も 0 から) */
 void kbd_dlog_reset(KbdDlog *l);
 
-/* 1 件積む。seq は last_seq + 1。満杯なら最も古い 1 件を上書きする。 */
+/* 1 件積む。seq は last_seq + 1。満杯なら最も古い 1 件を上書きする。
+ * seq (u32) は折り返さない前提 (2^32 バイトの受信 = 押しっぱなしでも 4 年超)。 */
 void kbd_dlog_push(KbdDlog *l, u8 code, u8 mods, u8 flags);
 
 /* after_seq より新しいエントリを古い順に out へ最大 max 件写し、件数を返す。
