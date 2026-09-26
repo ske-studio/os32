@@ -489,6 +489,19 @@ check-irq-math-host:
 check-time-math-host:
 	python3 -B tools/tests/test_time_math.py --target $(MUT)
 
+# `v86 -g` の記録器と引数の判定 (kernel/v86_gcap_math.c、票 TASK_PEGC480_REALHW §3 段 1)。
+# 実機の ROM の INT 18h AH=31h/30h を V86 で呼び、その間の OUT を畳まずに積む。
+# 見るのは: 通すポートの表 (09A8h / 09A0h / 60h〜7Ah の偶数 / A0h〜A6h)、
+# 打ち切る命令 (INS/OUTS と 66h 付きの IN/OUT EAX、バイト形は 66h でも通す)、
+# 列の順序・seq (IN も数える)・幅での値の切り方・溢れ (513 件目で overflow、
+# 実機へは通し続ける)・IN の表、幅で ops の口 (8 / 16) を選ぶこと、
+# AH=31h の値から並び (NP21/W の bit2 / Bible の bit3) と 640x480 の AH=30h を
+# 決める表 (**両方・どちらでもない・印のまま**)。**NP21/W でも実機でも狙って
+# 踏めない分岐**。ゲストのバイト列が正本の asm と同じかも見る (nasm が要る)。
+# --target は i386-elf で kernel/v86_gcap.c ごと通す。
+check-v86-gcap-host:
+	python3 -B tools/tests/test_v86_gcap.py --target $(MUT)
+
 # ホスト道具 tools/rshell_serial.py の「応答の識別」。実機の rshell と
 # 話すときに **EOT の対応が 1 つずれる** 事故を止める (票 TASK_SERIAL_VFAST
 # の Codex レビュー往復 3 ⑤⑥)。見るのは 3 つ: エコー行を **行全体** で
@@ -1036,6 +1049,7 @@ CHECK_PAR_TARGETS := check-bootinfo-host check-hdd-stage1-host \
     check-install-recover-host check-install-fresh-host check-host-agent \
     check-net-link-host check-host-lib-host check-lan-bridge-host \
     check-pci-decode-host check-irq-math-host check-time-math-host \
+    check-v86-gcap-host \
     check-fdc-track-host check-cd-read-host check-map \
     check-check-select-host \
     check-kapi-layout-host check-edit-doc-host \
@@ -1061,4 +1075,4 @@ check-edit-doc-host:
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: check-fast check-changed check-map check-check-select-host check-par check-packages-host check-kapi-layout-host check-bootinfo-host check-hdd-stage1-host check-hdd-stage2-host check-vmkernel-lz4-host check-vk32-crc-host check-build-id-host check-kbd-status-host check-kbd-dlog-host check-pcm-cs4231-host check-kapi-out check-dma8237-host check-dma-pool-host check-pci-bind-host check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-np21w-ctl-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-serial-portc-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-serialfs-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-bootlog-host check-kbd-inject-host check-launch-host check-ring3-str-host check-ring3-guard-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host check-irq-math-host check-time-math-host check-fdc-track-host check-cd-read-host
+.PHONY: check-v86-gcap-host check-fast check-changed check-map check-check-select-host check-par check-packages-host check-kapi-layout-host check-bootinfo-host check-hdd-stage1-host check-hdd-stage2-host check-vmkernel-lz4-host check-vk32-crc-host check-build-id-host check-kbd-status-host check-kbd-dlog-host check-pcm-cs4231-host check-kapi-out check-dma8237-host check-dma-pool-host check-pci-bind-host check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-np21w-ctl-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-serial-portc-host check-cpu-calibrate-host check-pit-clock-host check-dma8237-host check-dma-pool-host check-pci-bind-host check-rshell-serial-host check-serialfs-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-bootlog-host check-kbd-inject-host check-launch-host check-ring3-str-host check-ring3-guard-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-ext2-empty-name-host check-vfs-fd-path-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host check-irq-math-host check-time-math-host check-fdc-track-host check-cd-read-host

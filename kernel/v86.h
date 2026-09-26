@@ -147,6 +147,15 @@ u32 v86_last_gp_eflags(void);
 /* 1 セッション実行して終了理由を返す */
 int v86_run(const struct v86_context *ctx);
 
+/* v86_run と同じだが、タイムアウトを tick_limit (100Hz の tick 数) にする。
+ * v86_run は V86_TICK_LIMIT (5 分) で呼ぶ。`v86 -g` は ROM の 1 呼び出しを
+ * 数秒で見切るためにこちらを使う。 */
+int v86_run_limit(const struct v86_context *ctx, u32 tick_limit);
+
+/* GUI 中なら V86 への入場を断り、呼び手のアプリを畳む要求を立てて 1 を返す
+ * (票 T8-2)。CUI 中は 0。v86_* の KAPI の入口が最初に呼ぶ。 */
+int v86_gui_refuse(void);
+
 /* V86 セッションが実行中か (IRQ スタブから参照する) */
 int v86_is_active(void);
 

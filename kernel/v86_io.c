@@ -12,6 +12,8 @@
 #include "palette.h"    /* palette_init() — セッション終了時の復帰 */
 #include "console.h"    /* console_hw_cursor_enable() — DOS が変えた CSRFORM を戻す */
 #include "snd_engine.h" /* snd_set_master() — FM をゲストに明け渡す */
+#include "v86_gcap.h"   /* `v86 -g` の採取 (票 TASK_PEGC480_REALHW §3 段 1) */
+#include "v86_gcap_math.h" /* v86g_port_passed */
 
 /* GDC はコマンドとパラメータの間に I/O ウェイトが要る (gfx_internal.h と同じ) */
 static void io_out(unsigned int port, unsigned int val)
@@ -341,14 +343,20 @@ static int io_is_observed(u16 port)
 void v86_io_apply_policy(void)
 {
     u32 i;
+    int capture = v86_gcap_active();
 
     io_trap_n = 0;
     io_last_port = 0;
     v86_iolog_w = 0;
     v86_pic_reset();
     v86_kbd_reset();
-    gfx_state_for_guest();
-    snd_state_for_guest();
+    /* `v86 -g` の採取は画面も音源も**触らずに**始める — 記録したいのは
+     * 「今のモードから ROM が何を出すか」で、ここで 200 ライン等へ変えると
+     * ROM が見る出発点が変わる。戻しも専用 (v86_io_reset_policy)。 */
+    if (!capture) {
+        gfx_state_for_guest();
+        snd_state_for_guest();
+    }
 
     tss_iomap_deny_all();
 
@@ -358,6 +366,18 @@ void v86_io_apply_policy(void)
         for (p = r->start; p <= (u32)r->end; p += r->step) {
             tss_iomap_allow((u16)p);
         }
+    }
+
+    /* 採取中は「実機へ通して記録する」ポートを落とす (捕まえるため)。
+     * 表の正本は v86g_port_passed (0x0A00 未満にしか無い)。観測モードは使わない。 */
+    if (capture) {
+        u32 p;
+        for (p = 0; p < 0x0A00U; p++) {
+            if (v86g_port_passed(p)) {
+                tss_iomap_deny((u16)p);
+            }
+        }
+        return;
     }
 
     /* 観測対象は許可リストの後で落とす (許可より観測が優先) */
@@ -376,6 +396,13 @@ void v86_io_apply_policy(void)
 void v86_io_reset_policy(void)
 {
     tss_iomap_deny_all();
+    /* 採取の戻しは v86_gcap.c が ROM の AH=30h と CUI の作り直しで行う。
+     * gfx_state_for_os32 は 400 ライン・16 色へ決め打ちで戻すだけで、
+     * 同期 (SYNC / 09A8h) を戻さない — ここで走らせると ROM の戻しを
+     * 上書きする。音源は明け渡していないので戻すものが無い。 */
+    if (v86_gcap_active()) {
+        return;
+    }
     gfx_state_for_os32();
     snd_state_for_os32();
 }
@@ -391,7 +418,9 @@ u32 v86_io_in(u16 port, int size)
 {
     u32 v;
 
-    if (io_is_observed(port)) {
+    if (v86_gcap_pass_in(port, size, &v)) {
+        /* `v86 -g`: 実機から幅どおりに読んで数えた */
+    } else if (io_is_observed(port)) {
         v = inp(port);                  /* 観測: 実ポートを読んで中継 */
     } else if (v86_pic_is_port(port)) {
         v = v86_pic_in(port);
@@ -400,6 +429,8 @@ u32 v86_io_in(u16 port, int size)
     } else {
         v = (size == 1) ? 0xFFU : 0xFFFFU;
     }
+    /* 採取中だけ・通さなかったポートだけ数える (通したものは上で数えた) */
+    v86_gcap_note_emul_in(port, size, v);
 
     io_trap_n++;
     io_last_port = port;
@@ -409,13 +440,17 @@ u32 v86_io_in(u16 port, int size)
 
 void v86_io_out(u16 port, int size, u32 value)
 {
-    if (io_is_observed(port)) {
+    if (v86_gcap_pass_out(port, size, value)) {
+        /* `v86 -g`: 記録してから実機へ幅どおりに書いた */
+    } else if (io_is_observed(port)) {
         outp(port, value);              /* 観測: ログを取ってから実ポートへ */
     } else if (v86_pic_is_port(port)) {
         v86_pic_out(port, value);
     } else if (v86_kbd_is_port(port)) {
         v86_kbd_out(port, value);
     }
+    /* 採取中だけ・通さなかったポートだけ積む (通したものは上で積んだ) */
+    v86_gcap_note_emul_out(port, size, value);
 
     io_trap_n++;
     io_last_port = port;

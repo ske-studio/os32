@@ -41,6 +41,7 @@
 #include "pcm_cs4231.h"
 #include "bootinfo.h"
 #include "serialfs.h"
+#include "v86_gcap.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -55,7 +56,7 @@ extern int kapi_serial_diag(SerialDiag *out);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[239];
+volatile u32 kapi_hits[240];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -300,6 +301,7 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     4,  /* sfs_end */
     4,  /* serial_diag */
     12,  /* kbd_diag_log */
+    8,  /* v86_gdc_capture */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -544,6 +546,7 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* sfs_end */
     0x0001,  /* serial_diag: out */
     0x0002,  /* kbd_diag_log: out */
+    0x0002,  /* v86_gdc_capture: out */
 };
 
 /* ---- 出力ポインタの書き込み可検査 (票 TASK_KAPI_OUTPUT_GUARD) --------
@@ -2225,5 +2228,16 @@ int __cdecl wrap_kbd_diag_log(u32 after_seq, KbdDiagLogEnt *out, int max)
         ring3_fault_kill();   /* 戻らない */
     }
     return kbd_diag_log(after_seq, out, max);
+}
+
+int __cdecl wrap_v86_gdc_capture(int mode, V86Gcap *out)
+{
+    KAPI_HIT(239);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)out, KAPI_OUT_LEN(out, sizeof(V86Gcap)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
+    return v86_gdc_capture(mode, out);
 }
 
