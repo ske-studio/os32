@@ -13,6 +13,7 @@
 #include "v86_io.h"
 #include "v86_pic.h"
 #include "v86_bios.h"
+#include "v86_gcap.h"
 #include "loop_dev.h"
 #include "idt.h"
 #include "kprintf.h"
@@ -46,7 +47,7 @@ volatile u32 v86_gui_reject_count = 0;
 /*  abort_req を立て syscall 出口の ring3_abort_check() に畳ませる。          */
 /*  CUI 中 (con_sink 無効) は 0 を返して従来どおり通す。                     */
 /* ======================================================================== */
-static int v86_gui_refuse(void)
+int v86_gui_refuse(void)
 {
     if (!con_sink_is_enabled()) return 0;
     v86_gui_reject_count++;
@@ -242,6 +243,14 @@ int v86_gp_handler(u32 *frame)
             continue;
         }
         break;
+    }
+
+    /* `v86 -g` の採取中だけ: 記録を嘘にする命令 (INS/OUTS、66h 付きの
+     * IN/OUT EAX) は扱わずに打ち切る。採取中でなければ常に 0
+     * (票 TASK_PEGC480_REALHW §3 段 1、kernel/v86_gcap.c)。 */
+    if (v86_gcap_insn_abort(opsize16, pc[len])) {
+        v86_exit_reason = V86_EXIT_UNKNOWN_OP;
+        return 1;
     }
 
     switch (pc[len]) {
@@ -495,6 +504,11 @@ void v86_longjmp_out(void)
 /* ======================================================================== */
 int v86_run(const struct v86_context *ctx)
 {
+    return v86_run_limit(ctx, V86_TICK_LIMIT);
+}
+
+int v86_run_limit(const struct v86_context *ctx, u32 tick_limit)
+{
     u32 saved_esp0;
     u32 saved_eflags;
 
@@ -521,7 +535,7 @@ int v86_run(const struct v86_context *ctx)
     v86_gp_since_tick = 0;
     v86_irq_n = 0;
     v86_ticks = 0;
-    v86_tick_limit = V86_TICK_LIMIT;
+    v86_tick_limit = tick_limit;
     saved_esp0 = tss_get_esp0();
 
     /* サウンドボードの IRQ をセッション中だけ開ける。

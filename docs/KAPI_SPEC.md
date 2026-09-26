@@ -1,4 +1,4 @@
-# KernelAPI v67 仕様書
+# KernelAPI v68 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -111,6 +111,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v65 | **実装済み (2026-09-24、手元ビルドのみ)** | 起動したイメージの識別 (票 TASK_SERIAL_HOSTFS 部品 A-4): `boot_image_info` 1 本 (slot 234 = 0x3B0)。`BootImageInfo` (40 バイト) に**ローダが検査して起動した** `vmkernel.lz4` のファイル全体の CRC32・長さ・記録の有無・どのローダか (FD / HDD) と、カーネルを組んだ git のコミット ID を写す。0 / `OS32_ERR_INVAL` (`out` が NULL)。同じ版で **VK32 を v2** (エントリごとの展開後 CRC32 + 完全長 + ファイル全体の CRC32、`boot/boot_defs.h`) に、**ブート情報域を v2** (0x30〜0x3F のイメージ欄、`include/bootinfo.h`) にした — v1 のイメージはどちらのローダも `VK32: unknown version` で止まる。**ローダ (FD イメージ / HDD の LBA 2〜17) と `vmkernel.lz4` を同時に入れ替える** (旧ローダと新イメージ・新ローダと旧イメージはどちらも起動しない)。`ver` と起動画面に `Commit:` / `Image CRC:` | [tasks/realhw/TASK_SERIAL_HOSTFS.md](tasks/realhw/TASK_SERIAL_HOSTFS.md) 部品 A-4 |
 | v66 | **実装済み (2026-09-25、手元ビルドとホスト試験のみ)** | シリアル越しの /host (票 TASK_SERIAL_HOSTFS 部品 B): `sfs_begin` / `sfs_end` / `serial_diag` の 3 本 (slot 235〜237 = 0x3B4〜0x3BC)。常駐シェルの `sfs run <コマンド行>` だけがセッションを開き (送受信のゲート → HELLO → `/host` に SerialFS)、子がどう終わっても BYE → アンマウント → 隔離 → 溜めた出力と終了コードを長さ付きのフレームで送る → ゲートを下ろす。`serial_diag` は受信の OE / FE / PE と受信リング溢れの数。同じ版で `vfs_mount` が同じ prefix の二重登録を断る | [tasks/realhw/TASK_SERIAL_HOSTFS.md](tasks/realhw/TASK_SERIAL_HOSTFS.md) 部品 B |
 | v67 | **実装済み (2026-09-26、手元ビルドとホスト試験のみ)** | キーボードの受信記録 `kbd_diag_log` 1 本 (slot 238 = 0x3C0)。IRQ1 が 0041h から**使うバイトを読むたびに** `KbdDiagLogEnt` (8 バイト: seq / 生の code / 処理後の修飾 / 印) を 32 件の循環リングへ積み、`after_seq` より新しい分を古い順に写す。EMPTY / ERROR で捨てたバイトは積まない。上書きで失われた分は写した先頭の seq の飛びで分かる。シェルの `kbdstat -w` が使う — 実機のカナ / CAPS が「ロックで make、解除で break」か「押すたびに make だけ」かを見る準備。実体は `drivers/kbd_dlog.c` / `drivers/kbd.c` | [tasks/gui/TASK_KBD_NAV.md](tasks/gui/TASK_KBD_NAV.md) §3 |
+| v68 | **実装済み (2026-09-26、手元ビルドとホスト試験のみ)** | 実機の ROM の INT 18h の I/O 記録 `v86_gdc_capture` 1 本 (slot 239 = 0x3C4)。`mode = V86G_MODE_ROM` は V86 で実機の ROM の AH=31h を呼んで今のモードを読み、その bit の並び (NP21/W の bit2 / Bible 3-2 の bit3) から 640x480 の AH=30h を決めて呼び、同じ AH=30h で元のモードへ戻して (戻れなければ OS32 の表 `pegc_restore_text_sync`) CUI を作り直す。その間に捕まえた OUT を**畳まずに**最大 512 件、IN をポートごとの回数で `V86Gcap` (8460 バイト) へ写す。`V86G_MODE_SELFTEST` は決まった I/O 列の試験ゲストで記録器を確かめる (実機へ通さない)。`v86 -g [-t]` が使う。実体は `kernel/v86_gcap.c` / `kernel/v86_gcap_math.c` | [tasks/realhw/TASK_PEGC480_REALHW.md](tasks/realhw/TASK_PEGC480_REALHW.md) §3 段 1 |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -179,7 +180,7 @@ v62 まではデータ欄 (`sbrk_heap_limit` / `shm_base`) を関数表の**直�
 |---|---|---|
 | 関数表の容量 R | **300** スロット (`KAPI_FUNC_CAPACITY`) | `sdk/kapi.json` の `func_capacity` |
 | データ欄の先頭 | **0x4B8** = 8 + 4 × R (`KAPI_DATA_FIELDS_OFF`) | `sdk/gen_kapi.py` が生成 |
-| 予約スロット | 239〜299 (`kapi_reserved[61]`、v67 時点。v66 は 238〜299、v65 は 235〜299、v64 は 234〜299、v63 は 230〜299)。カーネルの表は `kapi_reserved_nosys` (= `OS32_ERR_NOSYS`)、CPL=3 のトランポリンは int 0x80 のスタブ (ディスパッチャが `slot >= KAPI_FUNC_COUNT` で kill)。**NULL にしない** | `exec/exec.c` |
+| 予約スロット | 240〜299 (`kapi_reserved[60]`、v68 時点。v67 は 239〜299、v66 は 238〜299、v65 は 235〜299、v64 は 234〜299、v63 は 230〜299)。カーネルの表は `kapi_reserved_nosys` (= `OS32_ERR_NOSYS`)、CPL=3 のトランポリンは int 0x80 のスタブ (ディスパッチャが `slot >= KAPI_FUNC_COUNT` で kill)。**NULL にしない** | `exec/exec.c` |
 | R の上限 | トランポリン 1 ページ: `sizeof(KernelAPI)` + スタブ 8B × R + 写し場 256B ≤ 4096 → **R ≤ 318** (`STATIC_ASSERT`) | `exec/exec.c` |
 
 関数を足すときは `kapi_reserved[]` が 1 本減るだけで、データ欄は動かない。**関数数が R を
@@ -1163,6 +1164,45 @@ LBA28、無ければ word 53 bit0 の現在の CHS、それも無ければ既定
 | 6 | `u8` | `flags` | `KBD_DLOG_F_OVERRUN` 0x01 (0043h が OE だけ) / `KBD_DLOG_F_V86` 0x02 (V86 ゲストへ回した、`mods` は更新されない) / `KBD_DLOG_F_GUI` 0x04 (GUI モード中) |
 | 7 | `u8` | `reserved` | 0 |
 
+### 実機の ROM の INT 18h の I/O 記録 (v68)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x3C4 | v86_gdc_capture | `int(int mode, V86Gcap *out)` |
+
+票 [TASK_PEGC480_REALHW](tasks/realhw/TASK_PEGC480_REALHW.md) §3 段 1。実機 PC-9821Ra266 の PEGC 640x480 で
+桁がずれる件で、`include/pegc.h` の 480 ラインの SYNC (NP21/W 由来) が実機の ROM と同じかを**数値で**決めるための
+管理者用の診断 (`v86 -g`)。uPD7220 の SYNC は書き込み専用で読み戻せないので、ROM 自身に切り替えさせて OUT を記録する。
+
+- `mode = V86G_MODE_ROM` (0): ① AH=31h (AL / BH に印 FFh) で今のモードを読む → ② その値の bit の並びを
+  決める (bit2 並び = NP21/W `bios18.c`、bit3 並び = Bible 3-2。予約 bit が 0・30 行は 480 だけ・480 は 31kHz だけ、を
+  満たす並びが**ちょうど 1 つのときだけ**決め、両方の候補は試さない。解像度 400 は決め手にしない — NP21/W は 0597h が
+  未設定だと 200 LOWER を返す) → ③ AH=30h で 640x480 / 31kHz / 30 行
+  (bit2: `AL=0Ch BH=32h`、bit3: `AL=08h BH=16h`) → ④ AH=30h で ① のモードへ (③ がどう終わっても通る。
+  05h で戻らなければ `pegc_restore_text_sync` で ① の周波数の 400 ラインへ) → ⑤ CUI の作り直し
+  (グラフィック GDC 停止・表示可・テキスト GDC 開始・テキスト VRAM 30 行を採取前へ・カーソル形状)。
+  通常の V86 の開始・終了 (画面を 200 ライン・8 色へ / 400 ライン・16 色へ決め打ち) は通らない。
+- 採取中は 09A8h・09A0h・60h〜7Ah の偶数・A0h / A2h / A4h / A6h を**捕まえて記録してから実機へ幅どおりに**通す
+  (16 ビットの IN/OUT は 16 ビットで)。それ以外で捕まえたポートは通常の仮想化のまま記録だけする (`pass = emu`)。
+  INS/OUTS と 66h 付きの IN/OUT EAX は打ち切る (`V86G_ST_ABORT`)。ゲストの PIC は全部塞いで始める。
+- `mode = V86G_MODE_SELFTEST` (1): 決まった I/O 列を出す試験ゲスト (`kernel/v86_test16_gcap.asm`) で、
+  列・順序・幅・IN の表・溢れ・打ち切りをゲスト内から確かめる。捕まえたポートは実機へ通さない (模型の口)。
+- 戻り: `status` (`V86G_ST_*`、0 以上) / `OS32_ERR_INVAL` (GUI 中・`mode` 不正・`out` が NULL) /
+  `OS32_ERR_BUSY` (V86 使用中・480 ライン表示中) / `OS32_ERR_NOSPC` (記録の領域)。負のときは `out` を書かない。
+  ROM の採取が `V86G_ST_OK` 以外なら OUT 列と IN の表は出さない (`n_out = n_in = 0`、回数と理由は残す)。
+  出力は生成ラッパの `out` 検査 (8460 バイト)。
+
+`V86Gcap` (8460 バイト、`os32_kapi_shared.h`、並びは `kernel/v86_gcap.c` の STATIC_ASSERT):
+
+| フィールド | 内容 |
+|---|---|
+| `status` / `mode` / `layout` / `restore` | 結果 (`V86G_ST_*`)・呼んだ mode・判定した並び (`V86G_LAYOUT_*`)・戻し方 (`V86G_RST_NONE` / `ROM` / `FALLBACK`) |
+| `exit_reason` / `abort_kind` / `abort_cs:ip` | 最後の V86 の終了理由・打ち切りの種類 (`V86G_ABORT_*`) と場所 |
+| `r31_ax/bx`, `set_ax/bx`, `set_ret_ax/bx`, `rst_ax/bx`, `rst_ret_ax/bx` | AH=31h の後の AX / BX、AH=30h (480・戻し) に渡した値と戻り |
+| `n_out` / `overflow` / `in_total` / `in_other` / `n_in` / `seq_next` / `selftest_fail` | 件数・溢れ・IN の総数・表に入らなかった IN・表の件数・捕まえた I/O の総数・自己試験で落ちた項目 |
+| `in[16]` (`V86GcapIn` 12 バイト) | ポート・見た幅の OR・`V86G_F_PASSED`・回数・最初と最後の値 |
+| `out[512]` (`V86GcapOut` 16 バイト) | `seq` (IN も数えた通し番号 — 飛び = その間の IN の数)・ポート・値 (幅 1 は下位 8 ビット)・CS:IP・幅・`flags` (bit0 = 実機へ通した、bit7-4 = フェーズ `V86G_PH_*`) |
+
 ### 排他的作成 (v53)
 
 **スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
@@ -1297,7 +1337,7 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 ### 予約スロット (v63〜)
 
-0x3C4〜0x4B4 (slot 239〜299、61 本、v67 時点) は `kapi_reserved[]`。関数を足すと先頭から使う
+0x3C8〜0x4B4 (slot 240〜299、60 本、v68 時点) は `kapi_reserved[]`。関数を足すと先頭から使う
 (§4-0)。カーネルの表は `kapi_reserved_nosys` (`OS32_ERR_NOSYS`)、トランポリンは
 int 0x80 のスタブで、CPL=3 からの呼び出しはアプリを kill する。
 

@@ -111,6 +111,12 @@ extern const GfxBackend gfx_backend_pc98;
  * 置くとファイルを足すまでリンクが通らなくなるため。 */
 extern GfxBackend gfx_backend_pegc __attribute__((weak));
 
+/* ROM (INT 18h AH=30h) で 400 ラインへ戻れなかったときの OS32 側の戻し
+ * (gfx/backend_pegc.c、`v86 -g` だけが呼ぶ)。拡張モードを抜け、hsync31
+ * (1 = 31kHz / 0 = 24kHz) の 400 ラインの SYNC を入れてグラフィック GDC を
+ * 止める。backend_pegc.c を入れないビルドでは 0 (weak) — 呼ぶ側が確かめる。 */
+void pegc_restore_text_sync(int hsync31) __attribute__((weak));
+
 /* Cirrus GD54xx アクセラレータバックエンド (gfx/backend_cirrus.c, H3)。
  * PEGC と同じく **const ではない / weak 宣言**:
  *   - const でない: bb_base / bb_size を init() が実行時に埋める。

@@ -723,6 +723,22 @@ static void pegc_leave(void) { }
 /*  改めて START を出すし、テキストだけの状態では表示していてはいけない       */
 /*  (従来の挙動を維持)。テキスト GDC は START のままにしてコンソールを残す。  */
 /* ------------------------------------------------------------------------ */
+/* 09A8h を hs に → それに合う 400 ラインの SYNC・表示区間 → グラフィック GDC を
+ * 止める。pegc_shutdown と pegc_restore_text_sync が共有する後半。 */
+static void pegc_text_sync_400(u8 hs)
+{
+    _out(PEGC_HSYNC_PORT, hs);
+    gfx_counters.io_accesses++;
+    if (hs == PEGC_HSYNC_31KHZ) {
+        pegc_gdc_set_timing(s_msync_400_31k, s_ssync_400_31k, s_scroll_400);
+    } else {
+        pegc_gdc_set_timing(s_msync_400, s_ssync_400, s_scroll_400);
+    }
+
+    _out(GDC_GFX_CMD, GDC_CMD_STOP);
+    gfx_counters.io_accesses++;
+}
+
 static void pegc_shutdown(void)
 {
     u8 hs;
@@ -741,16 +757,34 @@ static void pegc_shutdown(void)
      * (24kHz 決め打ちをやめた。TASK_FDC_REALHW §9-1)。起動時の 09A8h が
      * 読めなかった機種は従来どおり 24kHz。 */
     hs = pegc_restore_hsync();
-    _out(PEGC_HSYNC_PORT, hs);
-    gfx_counters.io_accesses++;
-    if (hs == PEGC_HSYNC_31KHZ) {
-        pegc_gdc_set_timing(s_msync_400_31k, s_ssync_400_31k, s_scroll_400);
-    } else {
-        pegc_gdc_set_timing(s_msync_400, s_ssync_400, s_scroll_400);
-    }
+    pegc_text_sync_400(hs);
 
-    _out(GDC_GFX_CMD, GDC_CMD_STOP);
-    gfx_counters.io_accesses++;
+    gfx_current_height = GFX_HEIGHT;
+    s_active = 0;
+}
+
+/* ------------------------------------------------------------------------ */
+/*  pegc_restore_text_sync — ROM で戻れなかったときの OS32 側の戻し          */
+/*                                                                          */
+/*  `v86 -g` (kernel/v86_gcap.c、票 TASK_PEGC480_REALHW §3 段 1) は実機の    */
+/*  ROM の INT 18h AH=30h で 480 ラインへ入り、同じ AH=30h で元のモードへ     */
+/*  戻す。その戻しが失敗した (AH≠05h・打ち切り・暴走) ときだけここへ来る。    */
+/*  やることは pegc_shutdown の後半と同じ考え方 — 拡張モードを抜け、        */
+/*  **採取の前に AH=31h で読んだ周波数** (hsync31) の 400 ラインの SYNC を   */
+/*  入れ、グラフィック GDC を止める。24kHz 固定にはしない (CUI の桁ずれが     */
+/*  再発する、TASK_FDC_REALHW §9-1)。                                        */
+/*  リニア窓は拡張モードのときだけ閉じる (標準モードの E0000h はプレーン 3 で、*/
+/*  書くと画素を 1 つ壊すだけだが意味が無い)。09A0h は PEGC の probe が通った */
+/*  機種にしか無いので、読むのもそのときだけ。                              */
+/* ------------------------------------------------------------------------ */
+void pegc_restore_text_sync(int hsync31)
+{
+    if (s_probe_ok && pegc_stat(PEGC_STAT_SEL_GFXMODE)) {
+        mmio_w16(PEGC_MMIO_LINEAR, PEGC_LINEAR_OFF);
+    }
+    ff2_locked_write(PEGC_FF2_STD_GFX);
+    ff2_locked_write(PEGC_FF2_VRAM_400L);
+    pegc_text_sync_400(hsync31 ? PEGC_HSYNC_31KHZ : PEGC_HSYNC_24KHZ);
 
     gfx_current_height = GFX_HEIGHT;
     s_active = 0;
