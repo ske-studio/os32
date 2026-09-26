@@ -1841,25 +1841,37 @@ static void case_hostname(void)
 }
 #endif
 
+/* sel が "+first-fail" なら全段を回し、どこかの段で落ちたらそこで打ち切る
+ * (test_vfs_fd_path.py の変異。RED かどうかだけ分かればよい)。 */
+#define FDP_STEP(name, fn) \
+    if (all || kstrcmp(sel, name) == 0) { \
+        fn(); \
+        if (ff && g_failures) goto done; \
+    }
 static void run(const char *sel)
 {
-    int all = (sel == (const char *)0);
-    if (all || kstrcmp(sel, "fd") == 0) case_fd();
-    if (all || kstrcmp(sel, "busy") == 0) case_busy();
-    if (all || kstrcmp(sel, "dot") == 0) case_dot();
-    if (all || kstrcmp(sel, "path") == 0) case_path();
-    if (all || kstrcmp(sel, "pkg") == 0) case_pkg();
+    int ff = (sel != (const char *)0 && kstrcmp(sel, "+first-fail") == 0);
+    int all;
+    if (ff) sel = (const char *)0;
+    all = (sel == (const char *)0);
+    FDP_STEP("fd", case_fd)
+    FDP_STEP("busy", case_busy)
+    FDP_STEP("dot", case_dot)
+    FDP_STEP("path", case_path)
+    FDP_STEP("pkg", case_pkg)
 #ifndef FDP_RED
-    if (all || kstrcmp(sel, "nocase") == 0) case_nocase();
-    if (all || kstrcmp(sel, "cdinst") == 0) case_cdinst();
-    if (all || kstrcmp(sel, "namerule") == 0) case_namerule();
-    if (all || kstrcmp(sel, "utf8") == 0) case_utf8();
-    if (all || kstrcmp(sel, "fatname") == 0) case_fatname();
-    if (all || kstrcmp(sel, "hostname") == 0) case_hostname();
+    FDP_STEP("nocase", case_nocase)
+    FDP_STEP("cdinst", case_cdinst)
+    FDP_STEP("namerule", case_namerule)
+    FDP_STEP("utf8", case_utf8)
+    FDP_STEP("fatname", case_fatname)
+    FDP_STEP("hostname", case_hostname)
 #endif
+done:
     report("checks "); report_i(g_checks);
     report(" failures "); report_i(g_failures); report("\n");
 }
+#undef FDP_STEP
 
 /* argv: <dump_dir> <pkg_dir> [case] */
 void fdp_start_c(long *sp);

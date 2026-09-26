@@ -57,6 +57,8 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import mkpkg  # noqa: E402  (lzss_encode と定数を借りる)
+sys.path.insert(0, str(ROOT / "tools/tests"))
+import mutpar  # noqa: E402  (tools/tests/mutpar.py)
 
 HOST_FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
               "-fno-stack-protector", "-nostdlib", "-static", "-O1",
@@ -332,8 +334,10 @@ def build_ime(tmp, ime_c=None, exe_name="ime", overrides=None):
     overrides = {"lib/sqlite3/os32_sqlite_vfs.c" / "fs/vfs_fd.c": 写しのパス}"""
     shim = tmp / "ime_shim"
     shim.mkdir(exist_ok=True)
-    (shim / "memmap.h").write_text(
-        "extern unsigned char test_shm[];\n#define MEM_SHM_BASE test_shm\n")
+    memmap = "extern unsigned char test_shm[];\n#define MEM_SHM_BASE test_shm\n"
+    # 変異は並列に組む (mutpar) — 同じ中身なら書き直さない (読んでいる gcc と競らない)
+    if not (shim / "memmap.h").exists() or (shim / "memmap.h").read_text() != memmap:
+        (shim / "memmap.h").write_text(memmap)
     obj = tmp / "sqlite.o"
     if not obj.exists():
         subprocess.run(["gcc", "-std=gnu89", "-O0", "-w", "-include",
@@ -397,57 +401,65 @@ def run_ime(tmp, quiet=False):
     return r.returncode == 0
 
 
+def _run_ime_exe(exe):
+    try:
+        r = subprocess.run([str(exe)], stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=120)
+        return r.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _ime_mutant_one(item):
+    tmp, src, i, (name, before, after) = item
+    if src.count(before) != 1:
+        return name, f"IME MUTANT {i} ({name}): 置き換え元が {src.count(before)} 件"
+    mp = tmp / f"ime_dict_m{i}.c"
+    mp.write_text(src.replace(before, after), encoding="utf-8")
+    exe, err = build_ime(tmp, mp, f"ime_m{i}")
+    if exe is None:
+        return name, f"IME MUTANT {i} ({name}): build failed\n{err}"
+    ok = _run_ime_exe(exe)
+    return (name if ok else None), f"IME MUTANT {i} ({name}): {'SURVIVED' if ok else 'killed'}"
+
+
 def ime_mutants(tmp):
+    """並列に回し (mutpar)、結果は番号順に出す。sqlite.o と shim は run_ime が先に作る。"""
     surv = []
+    build_ime(tmp)
     src = (ROOT / "kernel/ime_dict.c").read_text(encoding="utf-8")
-    for i, (name, before, after) in enumerate(IME_MUTANTS):
-        if src.count(before) != 1:
-            print(f"IME MUTANT {i} ({name}): 置き換え元が {src.count(before)} 件")
-            surv.append(name)
-            continue
-        mp = tmp / f"ime_dict_m{i}.c"
-        mp.write_text(src.replace(before, after), encoding="utf-8")
-        exe, err = build_ime(tmp, mp, f"ime_m{i}")
-        if exe is None:
-            print(f"IME MUTANT {i} ({name}): build failed\n{err}")
-            surv.append(name)
-            continue
-        try:
-            r = subprocess.run([str(exe)], stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, timeout=120)
-            ok = r.returncode == 0
-        except subprocess.TimeoutExpired:
-            ok = False
-        print(f"IME MUTANT {i} ({name}): {'SURVIVED' if ok else 'killed'}")
-        if ok:
-            surv.append(name)
+    items = [(tmp, src, i, m) for i, m in enumerate(IME_MUTANTS)]
+    for s, line in mutpar.run_ordered(_ime_mutant_one, items):
+        print(line, flush=True)
+        if s:
+            surv.append(s)
     return surv
 
 
+def _sqlite_mutant_one(item):
+    tmp, i, (name, fname, before, after) = item
+    src = (ROOT / fname).read_text(encoding="utf-8")
+    if src.count(before) != 1:
+        return name, f"SQLITE MUTANT {i} ({name}): 置き換え元が {src.count(before)} 件"
+    mp = tmp / f"sqm{i}_{pathlib.Path(fname).name}"
+    mp.write_text(src.replace(before, after), encoding="utf-8")
+    exe, err = build_ime(tmp, None, f"ime_sqm{i}", {fname: mp})
+    if exe is None:
+        return name, f"SQLITE MUTANT {i} ({name}): build failed\n{err}"
+    ok = _run_ime_exe(exe)
+    return (name if ok else None), \
+        f"SQLITE MUTANT {i} ({name}): {'SURVIVED' if ok else 'killed'}"
+
+
 def sqlite_mutants(tmp):
+    """並列に回し (mutpar)、結果は番号順に出す。"""
     surv = []
-    for i, (name, fname, before, after) in enumerate(SQLITE_MUTANTS):
-        src = (ROOT / fname).read_text(encoding="utf-8")
-        if src.count(before) != 1:
-            print(f"SQLITE MUTANT {i} ({name}): 置き換え元が {src.count(before)} 件")
-            surv.append(name)
-            continue
-        mp = tmp / f"sqm{i}_{pathlib.Path(fname).name}"
-        mp.write_text(src.replace(before, after), encoding="utf-8")
-        exe, err = build_ime(tmp, None, f"ime_sqm{i}", {fname: mp})
-        if exe is None:
-            print(f"SQLITE MUTANT {i} ({name}): build failed\n{err}")
-            surv.append(name)
-            continue
-        try:
-            r = subprocess.run([str(exe)], stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, timeout=120)
-            ok = r.returncode == 0
-        except subprocess.TimeoutExpired:
-            ok = False
-        print(f"SQLITE MUTANT {i} ({name}): {'SURVIVED' if ok else 'killed'}")
-        if ok:
-            surv.append(name)
+    build_ime(tmp)
+    items = [(tmp, i, m) for i, m in enumerate(SQLITE_MUTANTS)]
+    for s, line in mutpar.run_ordered(_sqlite_mutant_one, items):
+        print(line, flush=True)
+        if s:
+            surv.append(s)
     return surv
 
 
@@ -654,7 +666,16 @@ def check_mkpkg(tmp):
 #  組み立てと実行
 # ---------------------------------------------------------------------------
 
-def build(tmp, fsdir, libdir, exe_name="fdpath", extra=()):
+def _ff_cmd(fsdir, ffo):
+    return ["gcc", "-std=gnu89", "-m32", "-march=i386", "-ffreestanding",
+            "-fno-pie", "-fno-stack-protector", "-O1", "-w",
+            "-I" + str(fsdir / "fatfs"), "-I" + str(ROOT / "lib"),
+            "-I" + str(ROOT / "include"), "-c",
+            str(fsdir / "fatfs/ff.c"), "-o", str(ffo)]
+
+
+def build(tmp, fsdir, libdir, exe_name="fdpath", extra=(), ffo=None):
+    """ffo を渡すとその ff.o を使い、FatFs を組み直さない (変異が FatFs に触らないとき)。"""
     inc = ["-I" + str(ROOT / "tools/tests/mtar_freestanding"), "-I" + str(fsdir),
            "-I" + str(libdir)]
     inc += ["-I" + str(ROOT / p) for p in
@@ -665,15 +686,12 @@ def build(tmp, fsdir, libdir, exe_name="fdpath", extra=()):
     # 段 fatname は実物の FatFs (fs/fatfs/ff.c) と組む。ff.c は別の翻訳単位で、
     # <string.h> を fs/fatfs/string.h (= kstring.h) に向ける (カーネルと同じ)。
     # FatFs 本体は第三者のソースなので警告では落とさない (-w)。
-    ffo = tmp / f"{exe_name}_ff.o"
-    res = subprocess.run(["gcc", "-std=gnu89", "-m32", "-march=i386", "-ffreestanding",
-                          "-fno-pie", "-fno-stack-protector", "-O1", "-w",
-                          "-I" + str(fsdir / "fatfs"), "-I" + str(ROOT / "lib"),
-                          "-I" + str(ROOT / "include"), "-c",
-                          str(fsdir / "fatfs/ff.c"), "-o", str(ffo)],
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    if res.returncode != 0:
-        return None, res.stdout.decode("utf-8", "replace")
+    if ffo is None:
+        ffo = tmp / f"{exe_name}_ff.o"
+        res = subprocess.run(_ff_cmd(fsdir, ffo),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if res.returncode != 0:
+            return None, res.stdout.decode("utf-8", "replace")
     res = subprocess.run(["gcc", *HOST_FLAGS, *extra, *inc, str(SRC), str(ffo),
                           "-o", str(exe)],
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -682,12 +700,16 @@ def build(tmp, fsdir, libdir, exe_name="fdpath", extra=()):
     return exe, ""
 
 
-def run_exe(exe, imgdir, pkgdir, case=None, quiet=False, e2fsck=None):
+def run_exe(exe, imgdir, pkgdir, case=None, quiet=False, e2fsck=None, first_fail=False):
+    """first_fail なら段の途中で落ちた時点で打ち切り (ハーネスの "+first-fail")、
+    e2fsck も最初に汚れた像で打ち切る (変異用、RED かどうかだけ分かればよい)。"""
     for p in imgdir.glob("*.img"):
         p.unlink()
     argv = [str(exe), str(imgdir), str(pkgdir)]
     if case:
         argv.append(case)
+    elif first_fail:
+        argv.append("+first-fail")
     res = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          timeout=120)
     out = res.stdout.decode("utf-8", "replace")
@@ -696,6 +718,8 @@ def run_exe(exe, imgdir, pkgdir, case=None, quiet=False, e2fsck=None):
     for line in out.splitlines():
         if line.startswith("@@IMG "):
             path = line[6:].strip()
+            if first_fail and not ok:
+                continue
             if e2fsck is None:
                 lines.append(f"  E2FSCK SKIP {os.path.basename(path)}")
                 continue
@@ -768,39 +792,77 @@ def target_compile(tmp):
     return True
 
 
-def mutants(tmp, pkgdir, e2fsck):
-    survivors = []
-    for i, (name, fname, before, after) in enumerate(MUTANTS):
-        mdir = tmp / f"mut{i}"
-        shutil.copytree(ROOT / "fs", mdir / "fs")
-        shutil.copytree(ROOT / "userland/lib/rt", mdir / "lib/rt")
-        (mdir / "system").mkdir()
-        shutil.copy(ROOT / "userland/system/cdinst.c", mdir / "system/cdinst.c")
-        for f in ("inst_hdd.c", "inst_hdd.h", "inst_disk.c", "inst_disk.h"):
-            shutil.copy(ROOT / "userland/system" / f, mdir / "system" / f)
-        # lib/kutf16.c (段 utf8 が #include する) は -I の順で写しが先に当たる
-        shutil.copy(ROOT / "lib/kutf16.c", mdir / "lib/kutf16.c")
+# 変異を当てたファイル (写しの中の名前) → 組み直すもの (票 TASK_CHECK_MUT_PARALLEL)。
+# "harness" だけのファイルは FatFs (ff.o) を組み直さず、実物で 1 回組んだ ff.o を使う。
+# 表に無いファイルは両方組む。表が gcc -MM の依存より狭ければ mutants() が落ちる。
+REBUILD = {
+    "fs/vfs.c": ("harness",),
+    "fs/vfs_fd.c": ("harness",),
+    "fs/vfs_name_rules.inc": ("harness",),
+    "fs/ext2_file.c": ("harness",),
+    "fs/fatfs_vfs.c": ("harness",),
+    "lib/kutf16.c": ("harness",),
+    "lib/rt/pkg.c": ("harness",),
+    "system/cdinst.c": ("harness",),
+}
+
+
+def _mutant_one(item):
+    """変異 1 本。tmp/mut<i> (自分専用の写し) で組み、最初に落ちた段で打ち切る。
+    並列に呼ばれる。(生き残りなら名前 / None, 行) を返す。"""
+    tmp, pkgdir, e2fsck, ffo, i, (name, fname, before, after) = item
+    mdir = tmp / f"mut{i}"
+    shutil.copytree(ROOT / "fs", mdir / "fs")
+    shutil.copytree(ROOT / "userland/lib/rt", mdir / "lib/rt")
+    (mdir / "system").mkdir()
+    shutil.copy(ROOT / "userland/system/cdinst.c", mdir / "system/cdinst.c")
+    for f in ("inst_hdd.c", "inst_hdd.h", "inst_disk.c", "inst_disk.h"):
+        shutil.copy(ROOT / "userland/system" / f, mdir / "system" / f)
+    # lib/kutf16.c (段 utf8 が #include する) は -I の順で写しが先に当たる
+    shutil.copy(ROOT / "lib/kutf16.c", mdir / "lib/kutf16.c")
+    try:
         path = mdir / fname
         text = path.read_text(encoding="utf-8")
         if text.count(before) != 1:
-            print(f"MUTANT {i} ({name}): 置き換え元が {text.count(before)} 件 — 変異表が古い")
-            survivors.append(name)
-            continue
+            return name, (f"MUTANT {i} ({name}): 置き換え元が {text.count(before)} 件"
+                          " — 変異表が古い")
         path.write_text(text.replace(before, after), encoding="utf-8")
-        exe, err = build(tmp, mdir / "fs", mdir / "lib", f"fdpath_m{i}")
+        keys = REBUILD.get(fname, ("ff", "harness"))
+        exe, err = build(tmp, mdir / "fs", mdir / "lib", f"fdpath_m{i}",
+                         ffo=None if "ff" in keys else ffo)
         if exe is None:
-            print(f"MUTANT {i} ({name}): build failed\n{err}")
-            survivors.append(name)
-            continue
+            return name, f"MUTANT {i} ({name}): build failed\n{err}"
         imgdir = tmp / f"img_m{i}"
         imgdir.mkdir()
         try:
-            ok, _ = run_exe(exe, imgdir, pkgdir, quiet=True, e2fsck=e2fsck)
+            ok, _ = run_exe(exe, imgdir, pkgdir, quiet=True, e2fsck=e2fsck,
+                            first_fail=True)
         except subprocess.TimeoutExpired:
             ok = False
-        print(f"MUTANT {i} ({name}): {'SURVIVED' if ok else 'killed'}")
-        if ok:
-            survivors.append(name)
+        return (name if ok else None), \
+            f"MUTANT {i} ({name}): {'SURVIVED' if ok else 'killed'}"
+    finally:
+        shutil.rmtree(mdir, ignore_errors=True)
+        shutil.rmtree(tmp / f"img_m{i}", ignore_errors=True)
+
+
+def mutants(tmp, pkgdir, e2fsck):
+    """並列に回し (mutpar、OS32_MUT_JOBS)、結果は変異の番号順に出す。"""
+    survivors = []
+    ffo = tmp / "mut_base_ff.o"
+    cmd = _ff_cmd(ROOT / "fs", ffo)
+    stale = mutpar.check_rebuild_table(
+        {f: k for f, k in REBUILD.items()},
+        {"ff": mutpar.gcc_deps(cmd, ROOT)}, [m[1] for m in MUTANTS])
+    for s in stale:
+        print("REBUILD TABLE STALE: " + s)
+        survivors.append("REBUILD TABLE STALE")
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    items = [(tmp, pkgdir, e2fsck, ffo, i, m) for i, m in enumerate(MUTANTS)]
+    for surv, line in mutpar.run_ordered(_mutant_one, items):
+        print(line, flush=True)
+        if surv:
+            survivors.append(surv)
     return survivors
 
 

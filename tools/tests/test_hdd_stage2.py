@@ -34,6 +34,8 @@ import subprocess
 import sys
 import tempfile
 
+import mutpar  # noqa: E402  (tools/tests/mutpar.py、同じディレクトリ)
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PURE = ROOT / "tools/tests/hdd_stage2_host.c"
 CDI = ROOT / "tools/tests/cdinst_host.c"
@@ -99,29 +101,54 @@ def _cc(cmd, quiet):
     return True
 
 
-def build_all(tmp, root=ROOT, quiet=False):
-    """4 本を組む。どれかが組めなければ None。"""
+HARNESS_KEYS = ("pure", "cdi", "ins", "mini")
+
+# 変異を当てたファイル → 組み直して回すハーネス (票 TASK_CHECK_MUT_PARALLEL)。
+# ほかのハーネスは実物で組んだもの (main の 1 回目、全部通ったもの) をそのまま使い、
+# ケースも回さない (同じ実行ファイル・同じ入力なので結果も同じ)。表に無いファイルは
+# 全部組む。表が gcc -MM の依存より狭ければ mutate() が落ちる (mutpar.check_rebuild_table)。
+REBUILD = {
+    "userland/system/inst_disk.c": ("pure", "cdi", "ins"),
+    "userland/system/inst_hdd.c": ("cdi", "ins"),
+    "userland/system/cdinst.c": ("cdi",),
+    "userland/system/install.c": ("ins",),
+    "boot/ext2_mini.c": ("mini",),
+}
+
+
+def _commands(tmp, root):
+    """ハーネスごとの gcc のコマンド。"""
     tmp = pathlib.Path(tmp)
-    exes = {k: tmp / k for k in ("pure", "cdi", "ins", "mini")}
     inc = ["-I" + str(root), "-I" + str(root / "include"), "-I" + str(ROOT / "include")]
-    ok = _cc([*HOST, *inc, str(_harness(PURE, tmp, root)),
-              *[str(root / f) for f in SHARED], "-o", str(exes["pure"])], quiet)
     cinc = ["-I" + str(root), "-I" + str(root / "userland/lib"),
             "-I" + str(ROOT / "include"), "-I" + str(ROOT / "sdk/include/os32"),
             "-I" + str(ROOT / "tools/tests/mtar_freestanding")]
-    ok = ok and _cc([*ILP32, *cinc, str(_harness(CDI, tmp, root)),
-                     "-o", str(exes["cdi"])], quiet)
     iinc = ["-I" + str(root / "userland/system"), "-I" + str(root)] + \
            ["-I" + str(ROOT / p) for p in ("include", "sdk/include", "sdk/include/os32",
                                           "userland/lib")]
-    ok = ok and _cc(["gcc", "-std=gnu89", "-Wall", "-Wextra", "-Werror",
-                     "-Wdeclaration-after-statement", "-Wno-unused-function",
-                     "-Wno-pointer-to-int-cast", "-D__cdecl=", "-D__OS32_USERLAND__", "-O0",
-                     *iinc, str(_harness(INS, tmp, root)),
-                     *[str(root / f) for f in INS_SHARED], "-o", str(exes["ins"])], quiet)
-    ok = ok and _cc([*ILP32, "-I" + str(root / "boot"), str(_harness(MINI, tmp, root)),
-                     "-o", str(exes["mini"])], quiet)
-    return exes if ok else None
+    return {
+        "pure": [*HOST, *inc, str(_harness(PURE, tmp, root)),
+                 *[str(root / f) for f in SHARED], "-o", str(tmp / "pure")],
+        "cdi": [*ILP32, *cinc, str(_harness(CDI, tmp, root)), "-o", str(tmp / "cdi")],
+        "ins": ["gcc", "-std=gnu89", "-Wall", "-Wextra", "-Werror",
+                "-Wdeclaration-after-statement", "-Wno-unused-function",
+                "-Wno-pointer-to-int-cast", "-D__cdecl=", "-D__OS32_USERLAND__", "-O0",
+                *iinc, str(_harness(INS, tmp, root)),
+                *[str(root / f) for f in INS_SHARED], "-o", str(tmp / "ins")],
+        "mini": [*ILP32, "-I" + str(root / "boot"), str(_harness(MINI, tmp, root)),
+                 "-o", str(tmp / "mini")],
+    }
+
+
+def build_all(tmp, root=ROOT, quiet=False, keys=HARNESS_KEYS):
+    """keys のハーネスを組む (既定は 4 本)。どれかが組めなければ None。"""
+    cmds = _commands(tmp, root)
+    exes = {}
+    for k in keys:
+        if not _cc(cmds[k], quiet):
+            return None
+        exes[k] = pathlib.Path(tmp) / k
+    return exes
 
 
 def make_mini_image(tmp):
@@ -144,13 +171,20 @@ def make_mini_image(tmp):
 ROOM_EXPECT = {}   # {大きさ: (空きブロック, 空き inode)} — room_cross_check が実物の像から埋める
 
 
-def run_cases(exes, img, quiet=False):
+def run_cases(exes, img, quiet=False, keys=HARNESS_KEYS, first_fail=False):
+    """keys のハーネスのケースを回し、落ちた数を返す。first_fail なら最初に
+    落ちたところで打ち切る (変異は RED かどうかだけ分かればよい)。"""
     failed = 0
-    for size, want in ROOM_EXPECT.items():
-        got = run([str(exes["pure"]), "room", str(size)], capture_output=True,
-                  text=True).stdout.split()
-        failed += len(got) != 2 or (int(got[0]), int(got[1])) != want
+    if "pure" in keys:
+        for size, want in ROOM_EXPECT.items():
+            got = run([str(exes["pure"]), "room", str(size)], capture_output=True,
+                      text=True).stdout.split()
+            failed += len(got) != 2 or (int(got[0]), int(got[1])) != want
+            if failed and first_fail:
+                return failed
     for key, cases in (("pure", PURE_CASES), ("cdi", CDI_CASES), ("ins", INS_CASES)):
+        if key not in keys:
+            continue
         for c in cases:
             r = run([str(exes[key]), c], capture_output=True, text=True, timeout=CASE_TIMEOUT)
             if not quiet:
@@ -158,12 +192,18 @@ def run_cases(exes, img, quiet=False):
                 if r.returncode != 0:
                     sys.stdout.write(r.stdout[-3000:] + r.stderr[-3000:])
             failed += r.returncode != 0
+            if failed and first_fail:
+                return failed
+    if "mini" not in keys:
+        return failed
     for name, _, want in MINI_FILES:
         r = run([str(exes["mini"]), str(img), f"/boot/{name}", str(want)],
                 capture_output=True, text=True)
         if not quiet:
             print(f"EXIT mini:{name}={r.returncode} {r.stderr.strip()}", flush=True)
         failed += r.returncode != 0
+        if failed and first_fail:
+            return failed
     return failed
 
 
@@ -689,45 +729,66 @@ def _tally(counts, status, why):
     print(f"MUTATION {status}: {why}", flush=True)
 
 
-def mutate(img, counts):
+def _mutate_one(item):
+    """変異 1 本 (または対照) を自分専用の一時ディレクトリの写しで組んで回す。
+    (状態, 説明, 対照か) を返す。並列に呼ばれる — 実物にも他の写しにも書かない。"""
+    rel, before, after, why, base, img = item
+    with tempfile.TemporaryDirectory(prefix="os32-hdd2-mut-") as tmp:
+        troot = pathlib.Path(tmp) / "root"
+        for m in MIRROR:
+            dst = troot / m
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / m, dst)
+        path = troot / rel
+        text = path.read_text(encoding="utf-8")
+        control = before is None
+        if control:
+            text += "\n/* identity mutation (control) */\n"
+        elif text.count(before) != 1:
+            return "NOT_APPLIED", why + f" (置き換え元 {text.count(before)} 件)", False
+        else:
+            text = text.replace(before, after, 1)
+        path.write_text(text, encoding="utf-8")
+        # 組み直すハーネスを 1 本ずつ組んでは回し、落ちたらそこで打ち切る (後のハーネスは
+        # 組まない)。組めなければ ERROR。全部通れば SURVIVED。
+        exes = dict(base)
+        for k in REBUILD.get(rel, HARNESS_KEYS):
+            built = build_all(tmp, troot, quiet=True, keys=(k,))
+            if built is None:
+                return "ERROR", why, control
+            exes.update(built)
+            try:
+                if run_cases(exes, img, quiet=True, keys=(k,), first_fail=True):
+                    return "RED", why, control
+            except subprocess.TimeoutExpired:
+                return "RED", why, control
+        return "SURVIVED", why, control
+
+
+def mutate(img, counts, base):
     """ビルドが通って試験が落ちたものだけ RED。ビルドが通らない変異は ERROR。
-    変異させるファイルごとに恒等変異 (対照) を当て、SURVIVED を確かめる。"""
+    変異させるファイルごとに恒等変異 (対照) を当て、SURVIVED を確かめる。
+    base は実物で組んだ 4 本 (作り直さないハーネスに使う)。変異は並列に回し
+    (mutpar、OS32_MUT_JOBS)、結果は変異の順に出す。"""
     files = []
     for m in MUTATIONS:
         if m[0] not in files:
             files.append(m[0])
+    with tempfile.TemporaryDirectory(prefix="os32-hdd2-deps-") as dtmp:
+        deps = {k: mutpar.gcc_deps(c, ROOT) for k, c in _commands(dtmp, ROOT).items()}
+    stale = mutpar.check_rebuild_table(REBUILD, deps, files)
+    for s in stale:
+        print("REBUILD TABLE STALE: " + s, flush=True)
     plan = [(f, None, None, "対照 (恒等): " + f) for f in files] + list(MUTATIONS)
-    for rel, before, after, why in plan:
-        with tempfile.TemporaryDirectory(prefix="os32-hdd2-mut-") as tmp:
-            troot = pathlib.Path(tmp) / "root"
-            for m in MIRROR:
-                dst = troot / m
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(ROOT / m, dst)
-            path = troot / rel
-            text = path.read_text(encoding="utf-8")
-            control = before is None
-            if control:
-                text += "\n/* identity mutation (control) */\n"
-            elif text.count(before) != 1:
-                _tally(counts, "NOT_APPLIED", why + f" (置き換え元 {text.count(before)} 件)")
-                continue
-            else:
-                text = text.replace(before, after, 1)
-            path.write_text(text, encoding="utf-8")
-            exes = build_all(tmp, troot, quiet=True)
-            if exes is None:
-                status = "ERROR"
-            else:
-                try:
-                    status = "RED" if run_cases(exes, img, quiet=True) else "SURVIVED"
-                except subprocess.TimeoutExpired:
-                    status = "RED"
-            if control:
-                _tally(counts, "CONTROL_OK" if status == "SURVIVED" else "CONTROL_BAD",
-                       why + " → " + status)
-            else:
-                _tally(counts, status, why + (" (ビルドが通らない)" if status == "ERROR" else ""))
+    for status, why, control in mutpar.run_ordered(
+            _mutate_one, [(*p, base, img) for p in plan]):
+        if control:
+            _tally(counts, "CONTROL_OK" if status == "SURVIVED" else "CONTROL_BAD",
+                   why + " → " + status)
+        else:
+            _tally(counts, status, why + (" (ビルドが通らない)" if status == "ERROR" else ""))
+    if stale:
+        counts["STALE"] = counts.get("STALE", 0) + 1
     return len(files)
 
 
@@ -755,7 +816,7 @@ def main(argv):
 
         if "--mutate" in argv and failed == 0:
             counts = {}
-            nctl = mutate(img, counts)
+            nctl = mutate(img, counts, exes)
             n = len(MUTATIONS)
             red = counts.get("RED", 0)
             print("MUTATIONS {}/{} RED (ERROR {}, SURVIVED {}, NOT_APPLIED {}); "
@@ -763,7 +824,7 @@ def main(argv):
                       red, n, counts.get("ERROR", 0), counts.get("SURVIVED", 0),
                       counts.get("NOT_APPLIED", 0), counts.get("CONTROL_OK", 0), nctl),
                   flush=True)
-            if red != n or counts.get("CONTROL_OK", 0) != nctl:
+            if red != n or counts.get("CONTROL_OK", 0) != nctl or counts.get("STALE", 0):
                 failed += 1
     return 1 if failed else 0
 

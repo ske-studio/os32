@@ -34,6 +34,8 @@ import zlib
 
 import lz4.block
 
+import mutpar  # noqa: E402  (tools/tests/mutpar.py、同じディレクトリ)
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HARNESS = ROOT / "tools/tests/vk32_host.c"
 SCRIPT = ROOT / "tools/mkvmkernel.py"
@@ -795,56 +797,59 @@ def with_old_lz4(text):
     return text[:na] + old[a:b] + text[nb:]
 
 
-def run_mutations(target):
+def _mutation_one(item):
+    """変異 1 本を自分専用の一時ディレクトリで組んで回す。run_all は最初の Fail で
+    止まる (= 最初に落ちたところで打ち切り)。並列に呼ばれる。(種別, 行) を返す。"""
+    target, (key, pat, rep, nth, desc) = item
     base = {"vk32": VK32_SRC, "mini": MINI_SRC, "asm": ASM_SRC, "script": SCRIPT}
-    red = green = error = 0
-    for key, pat, rep, nth, desc in MUTATIONS:
-        with tempfile.TemporaryDirectory(prefix="vk32_mut_") as mw:
-            srcs = dict(base)
-            script = SCRIPT
-            if key == "asm_old_lz4":
-                src = base["asm"]
-                new = with_old_lz4(src.read_text(encoding="utf-8"))
-                mpath = pathlib.Path(mw) / src.name
-                mpath.write_text(new, encoding="utf-8")
-                srcs["asm"] = mpath
-            elif key != "none":
-                src = base[key]
-                new = replace_nth(src.read_text(encoding="utf-8"), pat, rep, nth)
-                if new is None:
-                    print("MUTATION ERROR (当たらない): {}".format(desc))
-                    error += 1
-                    continue
-                mpath = pathlib.Path(mw) / src.name
-                mpath.write_text(new, encoding="utf-8")
-                srcs[key] = mpath
-                if key == "script":
-                    script = mpath
-            try:
-                run_all(srcs, script, target, False)
-            except Fail as e:
-                msg = str(e)
-                if " -> " in msg.splitlines()[0] and ("gcc" in msg or "nasm" in msg or "ld " in msg):
-                    print("MUTATION ERROR (組めない): {} -- {}".format(desc, msg.splitlines()[0][:100]))
-                    error += 1
-                    continue
-                if key == "none":
-                    print("CONTROL RED (対照が落ちた — 試験が壊れている): {}".format(msg.splitlines()[0][:120]))
-                    error += 1
-                    continue
-                print("MUTATION RED (期待どおり): {} -- {}".format(desc, msg.splitlines()[-1].strip()[:100]))
-                red += 1
-                continue
+    with tempfile.TemporaryDirectory(prefix="vk32_mut_") as mw:
+        srcs = dict(base)
+        script = SCRIPT
+        if key == "asm_old_lz4":
+            src = base["asm"]
+            new = with_old_lz4(src.read_text(encoding="utf-8"))
+            mpath = pathlib.Path(mw) / src.name
+            mpath.write_text(new, encoding="utf-8")
+            srcs["asm"] = mpath
+        elif key != "none":
+            src = base[key]
+            new = replace_nth(src.read_text(encoding="utf-8"), pat, rep, nth)
+            if new is None:
+                return "error", "MUTATION ERROR (当たらない): {}".format(desc)
+            mpath = pathlib.Path(mw) / src.name
+            mpath.write_text(new, encoding="utf-8")
+            srcs[key] = mpath
+            if key == "script":
+                script = mpath
+        try:
+            run_all(srcs, script, target, False)
+        except Fail as e:
+            msg = str(e)
+            if " -> " in msg.splitlines()[0] and ("gcc" in msg or "nasm" in msg or "ld " in msg):
+                return "error", "MUTATION ERROR (組めない): {} -- {}".format(
+                    desc, msg.splitlines()[0][:100])
             if key == "none":
-                print("CONTROL GREEN (期待どおり): {}".format(desc))
-                green += 1
-            else:
-                print("MUTATION 生き残り: {}".format(desc))
-                error += 1
+                return "error", "CONTROL RED (対照が落ちた — 試験が壊れている): {}".format(
+                    msg.splitlines()[0][:120])
+            return "red", "MUTATION RED (期待どおり): {} -- {}".format(
+                desc, msg.splitlines()[-1].strip()[:100])
+        if key == "none":
+            return "green", "CONTROL GREEN (期待どおり): {}".format(desc)
+        return "error", "MUTATION 生き残り: {}".format(desc)
+
+
+def run_mutations(target):
+    """並列に回し (mutpar、OS32_MUT_JOBS)、結果は変異の順に出す。"""
+    n = {"red": 0, "green": 0, "error": 0}
+    # 変異 1 本の中で像を組んで 43 通りに壊す Python の計算が重いので、プロセスで並べる
+    for kind, line in mutpar.run_ordered(_mutation_one, [(target, m) for m in MUTATIONS],
+                                         processes=True):
+        print(line, flush=True)
+        n[kind] += 1
     total = len(MUTATIONS)
     print("MUTATE 内訳: RED {} / 対照 GREEN {} / 生き残り・ERROR {} (全 {})".format(
-        red, green, error, total))
-    return error
+        n["red"], n["green"], n["error"], total))
+    return n["error"]
 
 
 def main(args):

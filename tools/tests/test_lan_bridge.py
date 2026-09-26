@@ -439,6 +439,9 @@ def run(cases):
     return failed
 
 
+RACE_RETRIES = 30
+
+
 def mutate(tmp):
     global BRIDGE
     original = BRIDGE_SRC.read_text(encoding="utf-8")
@@ -462,6 +465,16 @@ def mutate(tmp):
                 c()
             except Exception:                        # noqa: BLE001
                 hits += 1
+        # 再入 (sigusr1_while_busy_…) は競合を確率で踏む。CPU が埋まっていると 1 回では
+        # 踏まないことがある (make check の check-par が変異を並列に回すようになって
+        # 2 回続けて見逃した、2026-09-26 TASK_CHECK_MUT_PARALLEL)。どのケースも落ちなければ
+        # その 1 ケースだけ回し直す — 1 回でも落ちれば RED (実物の側は 1 回で通ること)。
+        for _ in range(RACE_RETRIES if not hits else 0):
+            try:
+                sigusr1_while_busy_keeps_the_bridge_alive()
+            except Exception:                        # noqa: BLE001
+                hits += 1
+                break
         status = "RED" if hits else "**GREEN (見逃し)**"
         print("MUTATION %d %s (%d 件): %s" % (i, status, hits, why), flush=True)
         bad += not hits

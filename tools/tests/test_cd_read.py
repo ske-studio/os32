@@ -30,6 +30,8 @@ import subprocess
 import sys
 import tempfile
 
+import mutpar  # noqa: E402  (tools/tests/mutpar.py、同じディレクトリ)
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 READ_HARNESS = "tools/tests/cd_read_host.c"
 PKG_HARNESS = "tools/tests/cd_pkg_host.c"
@@ -69,18 +71,39 @@ def pkg_includes(tree):
         "-I" + str(ROOT / p) for p in ("sdk/include", "sdk/include/os32", "userland/lib")]
 
 
-def build(tmp, tree):
-    """3 本の実行ファイルを組む。コンパイルできなければ CalledProcessError。"""
+EXE_KEYS = ("read", "wide", "pkg")
+
+# 変異を当てたファイル → 組み直す実行ファイル (票 TASK_CHECK_MUT_PARALLEL)。
+# ほかは実物で組んだもの (main の 1 回目、全部通ったもの) を使う。表に無いファイル
+# (ヘッダなど) は 3 本とも組む。表が gcc -MM の依存より狭ければ mutate() が落ちる。
+REBUILD = {
+    "drivers/atapi.c": ("read", "wide"),
+    "fs/iso9660.c": ("read", "wide"),
+    "userland/lib/rt/pkg.c": ("pkg",),
+}
+
+
+def _commands(tmp, tree):
     tmp = pathlib.Path(tmp)
-    exes = {"read": tmp / "cd-read", "wide": tmp / "cd-read-wide", "pkg": tmp / "cd-pkg"}
+    return {
+        "read": ["gcc", *COMMON, *SAN, *read_includes(tree),
+                 str(tree / READ_HARNESS), "-o", str(tmp / "cd-read")],
+        "wide": ["gcc", *COMMON, *SAN, "-DATAPI_READ_MAX_SECTORS=32",
+                 *read_includes(tree), str(tree / READ_HARNESS),
+                 "-o", str(tmp / "cd-read-wide")],
+        "pkg": ["gcc", *COMMON, *SAN, *pkg_includes(tree),
+                str(tree / PKG_HARNESS), "-o", str(tmp / "cd-pkg")],
+    }
+
+
+def build(tmp, tree, keys=EXE_KEYS):
+    """keys の実行ファイル (既定は 3 本) を組む。コンパイルできなければ CalledProcessError。"""
     common = dict(cwd=ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    subprocess.run(["gcc", *COMMON, *SAN, *read_includes(tree),
-                    str(tree / READ_HARNESS), "-o", str(exes["read"])], **common)
-    subprocess.run(["gcc", *COMMON, *SAN, "-DATAPI_READ_MAX_SECTORS=32",
-                    *read_includes(tree), str(tree / READ_HARNESS),
-                    "-o", str(exes["wide"])], **common)
-    subprocess.run(["gcc", *COMMON, *SAN, *pkg_includes(tree),
-                    str(tree / PKG_HARNESS), "-o", str(exes["pkg"])], **common)
+    cmds = _commands(tmp, tree)
+    exes = {}
+    for k in keys:
+        subprocess.run(cmds[k], **common)
+        exes[k] = pathlib.Path(cmds[k][-1])
     return exes
 
 
@@ -100,8 +123,15 @@ def run1(exe, case, env=None, quiet=False):
     return r.returncode, r.stdout
 
 
-def run_all(exes, tmp, quiet=False):
-    """全ケース。落ちた数を返す。"""
+class _FirstFail(Exception):
+    pass
+
+
+def run_all(exes, tmp, quiet=False, keys=EXE_KEYS, first_fail=False, replay=None):
+    """keys の実行ファイルに関わるケース (既定は全部)。落ちた数を返す。
+    first_fail なら最初に落ちたところで打ち切る (変異用、RED かどうかだけ分かればよい)。
+    replay (pkg のケースで記録を取り、read で再生する) は既定で read か pkg を
+    含むとき回す。"""
     failed = 0
     total = 0
 
@@ -112,31 +142,42 @@ def run_all(exes, tmp, quiet=False):
         if not quiet:
             print(f"EXIT {label}={rc}", flush=True)
         failed += rc != 0
+        if rc != 0 and first_fail:
+            raise _FirstFail()
         return rc, out
 
-    for c in READ_CASES:
-        one(c, exes["read"], c)
-    for c in WIDE_CASES:
-        one("wide:" + c, exes["wide"], c)
-    trace = pathlib.Path(tmp) / "pkg.trace"
-    pkg_len = None
-    for c in PKG_CASES:
-        rc, out = one("pkg:" + c, exes["pkg"], c, {"CD_PKG_TRACE": str(trace)})
-        m = re.search(r"pkg_len=(\d+)", out)
-        if m:
-            pkg_len = int(m.group(1))
-    # pkg.c の読み方をそのまま実物の iso9660 + atapi で再生する
-    if pkg_len is None or not trace.exists():
-        total += 1
-        failed += 1
-        if not quiet:
-            print("EXIT replay=FAIL (pkg の記録が無い)")
-    else:
-        secs = (pkg_len + 2047) // 2048
-        mx = -(-secs // 16) + 3
-        one("replay", exes["read"], "replay",
-            {"CD_READ_TRACE": str(trace), "CD_READ_BIGSIZE": str(pkg_len),
-             "CD_READ_TRACE_MAX": str(mx)})
+    # replay は pkg の記録 (pkg のケース) を read で再生する — どちらかを組み直したら回す
+    if replay is None:
+        replay = "read" in keys or "pkg" in keys
+    try:
+        if "read" in keys:
+            for c in READ_CASES:
+                one(c, exes["read"], c)
+        if "wide" in keys:
+            for c in WIDE_CASES:
+                one("wide:" + c, exes["wide"], c)
+        if replay:
+            trace = pathlib.Path(tmp) / "pkg.trace"
+            pkg_len = None
+            for c in PKG_CASES:
+                rc, out = one("pkg:" + c, exes["pkg"], c, {"CD_PKG_TRACE": str(trace)})
+                m = re.search(r"pkg_len=(\d+)", out)
+                if m:
+                    pkg_len = int(m.group(1))
+            # pkg.c の読み方をそのまま実物の iso9660 + atapi で再生する
+            if pkg_len is None or not trace.exists():
+                total += 1
+                failed += 1
+                if not quiet:
+                    print("EXIT replay=FAIL (pkg の記録が無い)")
+            else:
+                secs = (pkg_len + 2047) // 2048
+                mx = -(-secs // 16) + 3
+                one("replay", exes["read"], "replay",
+                    {"CD_READ_TRACE": str(trace), "CD_READ_BIGSIZE": str(pkg_len),
+                     "CD_READ_TRACE_MAX": str(mx)})
+    except _FirstFail:
+        return failed
     if not quiet:
         print(f"SUMMARY {total - failed}/{total} PASS", flush=True)
     return failed
@@ -416,42 +457,68 @@ def make_tree(tmp, rel=None, text=None):
     return tree
 
 
-def mutate(verbose_fail=False):
+def _mutate_one(item):
+    """変異 1 本を自分専用の一時ディレクトリの写しで組んで回す。並列に呼ばれる。
+    (種別, 行) を返す。種別は RED / SURVIVED / ERROR / CONTROL / CTRL-RED。"""
+    idx, (rel, pat, rep, desc), base = item
+    src = (ROOT / rel).read_text(encoding="utf-8")
+    new, n = re.subn(pat, rep, src, count=1)
+    if n != 1:
+        return "ERROR", f"MUT {idx:2d} NOMATCH  {desc}"
+    keys = REBUILD.get(rel, EXE_KEYS)
+    with tempfile.TemporaryDirectory(prefix="os32-cdmut-") as tmp:
+        tree = make_tree(tmp, rel, new)
+        # 組み直す実行ファイルを 1 本ずつ組んでは回し、落ちたらそこで打ち切る (後の
+        # 実行ファイルは組まない)。組めなければ ERROR。最後に replay (pkg の記録を
+        # read で再生) を、どちらかを組み直したときだけ回す。
+        exes = dict(base)
+        failed = 0
+        for k in keys:
+            try:
+                exes.update(build(tmp, tree, (k,)))
+            except subprocess.CalledProcessError:
+                return "ERROR", f"MUT {idx:2d} ERROR    {desc} (コンパイル不可、数えない)"
+            failed = run_all(exes, tmp, quiet=True, keys=(k,) if k != "pkg" else (),
+                             first_fail=True, replay=k == "pkg")
+            if failed:
+                break
+        if not failed and "read" in keys and "pkg" not in keys:
+            failed = run_all(exes, tmp, quiet=True, keys=(), first_fail=True, replay=True)
+    if idx == CONTROL:
+        return ("CTRL-RED", "CONTROL")[failed == 0], \
+            f"MUT {idx:2d} {'CONTROL' if failed == 0 else 'CTRL-RED'} {desc}"
+    if failed:
+        return "RED", f"MUT {idx:2d} RED      {desc}"
+    return "SURVIVED", f"MUT {idx:2d} SURVIVED {desc}"
+
+
+def mutate(base):
+    """base は実物で組んだ 3 本 (作り直さない実行ファイルに使う)。変異は並列に
+    回し (mutpar、OS32_MUT_JOBS)、結果は変異の番号順に出す。"""
     red = survived = error = 0
     control_ok = False
     only = {int(x) for x in os.environ.get("CD_MUT_ONLY", "").split(",") if x}
-    for idx, (rel, pat, rep, desc) in enumerate(MUTATIONS, 1):
-        if only and idx not in only:
-            continue
-        src = (ROOT / rel).read_text(encoding="utf-8")
-        new, n = re.subn(pat, rep, src, count=1)
-        if n != 1:
-            print(f"MUT {idx:2d} NOMATCH  {desc}", flush=True)
+    with tempfile.TemporaryDirectory(prefix="os32-cddeps-") as tmp:
+        deps = {k: mutpar.gcc_deps(c, ROOT) for k, c in _commands(tmp, ROOT).items()}
+    stale = mutpar.check_rebuild_table(REBUILD, deps, [m[0] for m in MUTATIONS])
+    for s in stale:
+        print("REBUILD TABLE STALE: " + s, flush=True)
+    items = [(idx, m, base) for idx, m in enumerate(MUTATIONS, 1)
+             if not only or idx in only]
+    for kind, line in mutpar.run_ordered(_mutate_one, items):
+        print(line, flush=True)
+        if kind == "ERROR":
             error += 1
-            continue
-        with tempfile.TemporaryDirectory(prefix="os32-cdmut-") as tmp:
-            tree = make_tree(tmp, rel, new)
-            try:
-                exes = build(tmp, tree)
-            except subprocess.CalledProcessError:
-                print(f"MUT {idx:2d} ERROR    {desc} (コンパイル不可、数えない)", flush=True)
-                error += 1
-                continue
-            failed = run_all(exes, tmp, quiet=True)
-        if idx == CONTROL:
-            control_ok = failed == 0
-            print(f"MUT {idx:2d} {'CONTROL' if control_ok else 'CTRL-RED'} {desc}", flush=True)
-            continue
-        if failed:
+        elif kind in ("CONTROL", "CTRL-RED"):
+            control_ok = kind == "CONTROL"
+        elif kind == "RED":
             red += 1
-            print(f"MUT {idx:2d} RED      {desc}", flush=True)
         else:
             survived += 1
-            print(f"MUT {idx:2d} SURVIVED {desc}", flush=True)
     real = CONTROL - 1
     print(f"MUTATION {red}/{real} RED, {survived} SURVIVED, {error} ERROR/NOMATCH, "
           f"control={'OK' if control_ok else 'BROKEN'}", flush=True)
-    return survived == 0 and error == 0 and control_ok
+    return survived == 0 and error == 0 and control_ok and not stale
 
 
 def build_target(tmp):
@@ -504,8 +571,8 @@ def main():
             ok = run_all(exes, tmp) == 0
         if do_target:
             build_target(tmp)
-    if do_mutate and not cases:
-        ok = mutate() and ok
+        if do_mutate and not cases:
+            ok = mutate(exes) and ok
     sys.exit(0 if ok else 1)
 
 
