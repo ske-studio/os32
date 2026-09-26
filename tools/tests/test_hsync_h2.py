@@ -82,8 +82,16 @@ def check_manifest():
     if '#define HS_TEMP_PREFIX     ".hs~"' not in src:
         raise SystemExit("hsync.c の予約接頭辞が \".hs~\" でない")
 
+    # --root の ext2 判定は fs/ext2.h の EXT2_ROOT_INO の写し ([C4])
+    m = re.search(r"^#define EXT2_ROOT_INO\s+(\d+)",
+                  (ROOT / "fs/ext2.h").read_text(encoding="utf-8"), re.M)
+    if not m or ("#define HS_EXT2_ROOT_INO %sUL" % m.group(1)) not in src:
+        raise SystemExit("hsync.c の HS_EXT2_ROOT_INO が fs/ext2.h の "
+                         "EXT2_ROOT_INO と合わない")
+
     man = (ROOT / "docs/manpages/hsync.1").read_text(encoding="utf-8")
-    for word in (".hs~", "--unsafe-overwrite", "replace_partial"):
+    for word in (".hs~", "--unsafe-overwrite", "replace_partial", "--root",
+                 "root_not_ext2", "root_not_mount", "root_is_source"):
         if word not in man:
             raise SystemExit("docs/manpages/hsync.1 に %s の記載が無い "
                              "(予約名の明記が決裁 D3 (a') の前提)" % word)
@@ -101,6 +109,58 @@ def build_host(tmp, name, src="tools/tests/hsync_h2_host.c"):
 
 
 MUTATIONS = [
+    # ---- --root (2026-09-26) の否定側 ----
+    # 変異: 根が ext2 かを見ない版 (/hd1 = FAT、/cd0 = ISO9660 へ書き出す)
+    ("root_ext2_unchecked",
+     "            if (rc != 0 || (st.st_mode & OS_S_IFMT) != OS_S_IFDIR ||\n"
+     "                st.st_ino != HS_EXT2_ROOT_INO)",
+     "            if (rc != 0 || (st.st_mode & OS_S_IFMT) != OS_S_IFDIR)"),
+    # 変異: 根がマウントの根かを見ない版 (/hd0/bin や HDD 起動の /hd0)
+    ("root_mount_unchecked",
+     "        if (!dev[0]) {\n            why = HR_ROOT_NOT_MOUNT;",
+     "        if (0) {\n            why = HR_ROOT_NOT_MOUNT;"),
+    # 変異: 根の FD 判定を外した版 (理由が dest_on_fd でなくなる)
+    ("root_fd_unchecked",
+     "        } else if (dev[0] == HS_FD_DEV_PREFIX0 && dev[1] == HS_FD_DEV_PREFIX1) {\n"
+     "            why = HR_DST_ON_FD;",
+     "        } else if (0) {\n"
+     "            why = HR_DST_ON_FD;"),
+    # 変異: 同期元 (/host) を根に受ける版
+    ("root_source_accepted",
+     "    if (str_cmp(root, \"/host\") == 0 || str_has_prefix(root, \"/host/\")) {",
+     "    if (0) {"),
+    # 変異: 名前規則を完全パスで見る版 (/hd0/etc/settings.db-wal を作る)
+    ("root_protect_by_full_path",
+     "    int cls = hsp_path_classify(hs_rel(dst_path));",
+     "    int cls = hsp_path_classify(dst_path);"),
+    # 変異: 実体規則の走査を / の /etc のままにする版 (/hd0 の別名を上書き)
+    ("root_protect_scan_slash_etc",
+     "    if (!str_ncpy(etc, g_root, (int)sizeof(etc)) ||",
+     "    if (!str_ncpy(etc, \"\", (int)sizeof(etc)) ||"),
+    # 変異: 名札の照合で根を除かない版 (manifest_extra が増える)
+    ("root_manifest_full_path",
+     "    const char *rel = hs_rel(dst_path);\n    int i;\n",
+     "    const char *rel = dst_path;\n    int i;\n"),
+    # 変異: vmkernel.old を / の /boot に作る版
+    ("root_old_on_slash",
+     "    if (!str_ncpy(old, g_root, (int)sizeof(old)) ||",
+     "    if (!str_ncpy(old, \"\", (int)sizeof(old)) ||"),
+    # 変異: vmkernel の判定を完全パスで見る版 (.old を作らずに置き換える)
+    ("root_kernel_by_full_path",
+     "    if (dst_exists && str_cmp(hs_rel(dst_path), HS_KERNEL_PATH) == 0) {",
+     "    if (dst_exists && str_cmp(dst_path, HS_KERNEL_PATH) == 0) {"),
+    # 変異: 再起動の案内を完全パスで見る版 (/boot を更新した が消える)
+    ("root_note_by_full_path",
+     "    const char *rel = hs_rel(dst);\n    if (str_has_prefix(rel, \"/sys/\"))  g_touched_sys = 1;\n"
+     "    if (str_has_prefix(rel, \"/boot/\")) g_touched_boot = 1;",
+     "    const char *rel = hs_rel(dst);\n    if (str_has_prefix(dst, \"/sys/\"))  g_touched_sys = 1;\n"
+     "    if (str_has_prefix(dst, \"/boot/\")) g_touched_boot = 1;\n    (void)rel;"),
+    # 変異: 絞り込みの宛先に根を前置しない版 (FD の /bin へ書く)
+    ("root_subdir_not_prefixed",
+     "            !str_ncpy(dst, g_root, (int)sizeof(dst)) ||\n"
+     "            !str_ncat(dst, norm, (int)sizeof(dst))) {",
+     "            !str_ncpy(dst, \"\", (int)sizeof(dst)) ||\n"
+     "            !str_ncat(dst, norm, (int)sizeof(dst))) {"),
     # 変異: 同期先がフロッピーでも断らない版 (Codex 2026-09-25 P2 の否定側)
     ("fd_dest_not_refused",
      "    return dev[0] == HS_FD_DEV_PREFIX0 && dev[1] == HS_FD_DEV_PREFIX1;",

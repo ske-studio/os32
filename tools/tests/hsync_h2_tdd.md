@@ -283,3 +283,33 @@ default_sys_exclusion (-v でしか出ない) で黙って飛ばされていた 
 `case_dst_fd` に「/sys = hd1 + 全体同期 → `/sys reason=other_mount` の行、/sys/k.bin 不変」
 を足し、変異 `sys_exclusion_hides_mount` (sys 除外を先に見る) が RED。
 
+
+### `--root <根>` — 同期先の根を替える (2026-09-26、ユーザー提案)
+
+FD の新しいカーネルで起動し、SerialFS 越しの /host から /hd0 (HDD) を更新するための口
+(docs/tasks/realhw/TASK_SERIAL_HOSTFS.md §5)。`case_root` (FD 起動 = ルート fd0、/hd0 = hd0
+で根の inode 2) で見るもの:
+
+- `--root /hd0` (全体)・`--root /hd0 bin`: /hd0 の下だけが変わり、FD の /bin/a.bin と / は無変更
+  (newdir も etc も作らない)。mtime も元の値
+- 保護: /hd0/etc/settings.db (名前規則 + 実体規則)、`-f --root /hd0 etc`、/hd0/etc に無い
+  settings.db-wal を作らない (名前規則を根からの相対で見る)、/hd0/etc/settings.db の hardlink
+  の別名 /hd0/bin/sdb (実体規則を <根>/etc の走査で集める)
+- マウントをまたがない: /hd0/mnt が別マウントなら `EXCLUDE /hd0/mnt reason=other_mount`
+- 名札: bin/a.bin と newdir/n.bin を載せた名札で `manifest_extra=0` (根を除いて照合)、名札の写しは
+  /hd0/.deploy へ
+- 断る門 (rc≠0・mkdir / write / rename 0 回・FD も /hd0 も不変): /fd1 (`dest_on_fd`)、
+  /hd0/../fd1、/host と /host/bin (`root_is_source`)、/hd0/bin (`root_not_mount`)、/hd1 = 根の
+  inode が 2 でない (`root_not_ext2`)、-n + /cd0 = ISO の LBA 20 (`root_not_ext2`)、相対パス・値
+  無し・2 回指定、HDD 起動の /hd0 (マウントされない、`root_not_mount`)、KAPI v52 のカーネル
+  (`kernel_too_old` — 走っているカーネルの門は --root でも同じ)
+- vmkernel.old: 起動記録と一致すれば /hd0/boot/vmkernel.old に作る (/boot には作らない)・
+  `/boot を更新した` の案内。FD の起動記録 (一致しない) では `not_booted_image` + `--root` の案内で
+  置き換えない、`--no-backup` で .old 無しに置き換える
+
+変異 11 本 (`root_ext2_unchecked` `root_mount_unchecked` `root_fd_unchecked`
+`root_source_accepted` `root_protect_by_full_path` `root_protect_scan_slash_etc`
+`root_manifest_full_path` `root_old_on_slash` `root_kernel_by_full_path`
+`root_note_by_full_path` `root_subdir_not_prefixed`) がすべて RED。既存 20 本も RED のまま。
+`check_manifest` に「HS_EXT2_ROOT_INO が fs/ext2.h の EXT2_ROOT_INO と同じ」と man ページの
+`--root` / `root_*` の記載を足した。

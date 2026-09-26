@@ -15,6 +15,7 @@
 /*    hsync --verify      — 日時を見ず、全件の内容を必ず比較する            */
 /*    hsync sys           — /sys を明示指定したときだけ同期する             */
 /*    hsync -f sys        — /host/sys/ を強制同期                          */
+/*    hsync --root /hd0 boot — /host/boot/ → /hd0/boot/ (同期先の根を替える) */
 /*                                                                          */
 /*  **同一判定は「サイズ + 内容のバイト比較」** (票 H1、設計書              */
 /*  docs/tasks/shell/HSYNC_IMPROVEMENT_PLAN.md §1 / §3.1)。                 */
@@ -70,6 +71,14 @@
 /*  (O_EXCL が黙って無視され、ext2 の置き換えも旧順序)。既定は 1 件も書かずに */
 /*  `kernel_too_old` で断る。`--unsafe-overwrite` を明示したときだけ、以前と  */
 /*  同じ直接上書きで進む (**失敗すると旧内容は残らない**)。                   */
+/*                                                                          */
+/*  **`--root <根>`** (2026-09-26、ユーザー提案): 同期先の根を / から <根>へ  */
+/*  替える。FD の新しいカーネルで起動し、シリアル (SerialFS) 越しの /host から */
+/*  /hd0 (HDD、FD 起動では自動マウント) を更新するための口。<根> は**マウント */
+/*  の根そのもの**で、FD でなく、ext2 であること (root_guard)。保護・予約名・ */
+/*  マウントをまたがない規則・名札の照合・/boot/vmkernel.old は <根> からの   */
+/*  相対パスで効く。KAPI の版の門 (v53 / 名札の kapi=) が見るのは**走っている*/
+/*  カーネル** — 書き込みを行うのはそのカーネルなので、宛先の根では変えない。 */
 /* ======================================================================== */
 
 #include "os32api.h"
@@ -161,6 +170,22 @@
 #define HR_PATH_REJECT  "path_rejected"     /* 正規化できず判定もできない */
 #define HR_DST_ON_FD    "dest_on_fd"        /* 同期先がフロッピーのマウント */
 #define HR_OTHER_MOUNT  "other_mount"       /* 宛先が別のマウントの根 (またがない) */
+/* ---- --root の門 (2026-09-26) ---- */
+#define HR_ROOT_NOT_MOUNT "root_not_mount"  /* --root がマウントの根でない */
+#define HR_ROOT_NOT_EXT2  "root_not_ext2"   /* --root の FS が ext2 と確かめられない */
+#define HR_ROOT_IS_SOURCE "root_is_source"  /* --root が同期元 (/host) 自身かその下 */
+
+/* ext2 のルート inode 番号。**fs/ext2.h の EXT2_ROOT_INO が正典**で、外部
+ * プログラムからは引けないので写しを置く (ずれは tools/tests/test_hsync_h2.py
+ * が両方を読んで突き合わせる、[C4])。
+ *
+ * --root の根が ext2 かを**KAPI を足さずに**確かめる印に使う: VFS はマウントの
+ * 根の stat を FS へ渡し、ext2 は根の inode (必ず 2) を返す。ほかの FS は
+ * 2 を返さない — FAT (fatfs_vfs_stat) と HostDrv / SerialFS は st_ino を 0 の
+ * まま、FS が根を stat できないときの VFS の合成 (vfs_synth_root_stat) も 0、
+ * ISO9660 は根ディレクトリの LBA (システム領域 16 セクタの後なので 16 以上)。
+ * カーネル内の vfs_fstype は KAPI に出ていない。 */
+#define HS_EXT2_ROOT_INO 2UL
 
 /* フロッピーのデバイス名の先頭 (drivers/dev.c の "fd0" / "fd1"、kernel.c の
  * FD 起動のルート root_dev = "fd0")。同期先のマウントがこれなら断る */
@@ -215,6 +240,11 @@ static int g_root_sync;
 static int g_touched_sys;
 static int g_touched_boot;
 static int g_no_backup;              /* --no-backup (vmkernel.old を作らない) */
+
+/* --root の根 (正規化済み、末尾 '/' 無し)。既定 (/) は空文字列 — 宛先のパスは
+ * 常に `g_root + ルートからの相対` で組むので、既定では今までと同じ文字列になる。 */
+static char g_root[OS32_MAX_PATH];
+static int  g_root_len;
 
 /* ======== 文字列ユーティリティ ======== */
 
@@ -274,6 +304,22 @@ static int str_has_prefix(const char *s, const char *pre)
 static int hs_is_temp_name(const char *name)
 {
     return str_has_prefix(name, HS_TEMP_PREFIX);
+}
+
+/* 宛先の完全パスから、同期先の根 (--root) を除いた**ルートからの相対**を返す。
+ * 保護 (/etc/settings.db*)・名札の照合・/sys と /boot の案内・vmkernel の判定は
+ * これで見る — `--root /hd0` の `/hd0/etc/settings.db` も `/etc/settings.db` と
+ * 同じに守る。宛先は必ず g_root から組むので前置は一致するが、一致しないものが
+ * 来たら**そのまま**返す (完全パスで判定する = 狭めない側)。根そのものは "/"。 */
+static const char *hs_rel(const char *dst)
+{
+    const char *r;
+
+    if (g_root_len == 0 || !str_has_prefix(dst, g_root)) return dst;
+    r = dst + g_root_len;
+    if (r[0] == '\0') return "/";
+    if (r[0] != '/') return dst;              /* /hd0x は /hd0 の下ではない */
+    return r;
 }
 
 /* ======== ファイルリスト ======== */
@@ -880,10 +926,11 @@ static int man_kapi_gate(const char *target)
     return 1;
 }
 
-/* 宛先のパス (`/bin/a.bin`) が名札にあるか。無ければ -1。 */
+/* 宛先のパス (`/bin/a.bin`) が名札にあるか。無ければ -1。
+ * --root のときも名札のパスは**根からの相対**なので、根を除いてから引く。 */
 static int man_find(const char *dst_path)
 {
-    const char *rel = dst_path;
+    const char *rel = hs_rel(dst_path);
     int i;
 
     if (rel[0] == '/') rel++;
@@ -905,7 +952,7 @@ static void man_note_copy(const char *dst_path)
     /* **名札は自分自身を載せられない** (中身が決まる前に自分の CRC は出せ
      * ない)。名札の写しを「名札に無いもの」と数えると、まっさらなゲストでは
      * 必ず manifest_extra=1 になり、本当の食い違いが埋もれる。 */
-    rel = dst_path;
+    rel = hs_rel(dst_path);
     if (rel[0] == '/') rel++;
     if (str_cmp(rel, HS_MANIFEST_REL) == 0) return;
 
@@ -1169,14 +1216,23 @@ static int scan_protected_entities(void)
     char buf[OS32_MAX_PATH];
     int i;
     int rc;
+    char etc[OS32_MAX_PATH];
 
     g_prot_count = 0;
     g_prot_name_count = 0;
     g_prot_overflow = 0;
 
-    rc = api->sys_ls("/etc", prot_scan_cb, 0);
+    /* 守るのは**同期先の根**の /etc (--root /hd0 なら /hd0/etc)。書くのは
+     * 根の下だけで、hardlink はデバイスをまたがないので、ほかの /etc は
+     * 実体規則に要らない。 */
+    if (!str_ncpy(etc, g_root, (int)sizeof(etc)) ||
+        !str_ncat(etc, "/etc", (int)sizeof(etc))) {
+        api->kprintf(ATTR_RED, "Error: path too long (%s/etc)。中止する\n", g_root);
+        return -1;
+    }
+    rc = api->sys_ls(etc, prot_scan_cb, 0);
     if (rc != 0 && rc != OS32_ERR_NOTFOUND) {
-        api->kprintf(ATTR_RED, "Error: /etc を読めない (%d)。中止する\n", rc);
+        api->kprintf(ATTR_RED, "Error: %s を読めない (%d)。中止する\n", etc, rc);
         return -1;
     }
     if (g_prot_overflow) {
@@ -1187,10 +1243,11 @@ static int scan_protected_entities(void)
     }
 
     for (i = 0; i < g_prot_name_count; i++) {
-        if (!str_ncpy(buf, "/etc/", (int)sizeof(buf)) ||
+        if (!str_ncpy(buf, etc, (int)sizeof(buf)) ||
+            !str_ncat(buf, "/", (int)sizeof(buf)) ||
             !str_ncat(buf, g_prot_name[i], (int)sizeof(buf))) {
-            api->kprintf(ATTR_RED, "Error: path too long (/etc/%s)。中止する\n",
-                         g_prot_name[i]);
+            api->kprintf(ATTR_RED, "Error: path too long (%s/%s)。中止する\n",
+                         etc, g_prot_name[i]);
             return -1;
         }
         rc = api->sys_stat(buf, &st);
@@ -1245,7 +1302,9 @@ static int is_same_as_protected(const char *dst_path)
  * (Codex 実装レビュー B2)。語を分けるためにここで 3 値にする。 */
 static int dst_protected(const char *dst_path)
 {
-    int cls = hsp_path_classify(dst_path);
+    /* 名前規則は**根からの相対**で見る (--root /hd0 の /hd0/etc/settings.db も
+     * /etc/settings.db として守る)。実体規則は完全パスで stat する。 */
+    int cls = hsp_path_classify(hs_rel(dst_path));
 
     if (cls != 0) return cls;                  /* 1 = 保護 / -1 = 判定不能 */
     return is_same_as_protected(dst_path);
@@ -1255,8 +1314,9 @@ static int dst_protected(const char *dst_path)
 
 static void note_target(const char *dst)
 {
-    if (str_has_prefix(dst, "/sys/"))  g_touched_sys = 1;
-    if (str_has_prefix(dst, "/boot/")) g_touched_boot = 1;
+    const char *rel = hs_rel(dst);
+    if (str_has_prefix(rel, "/sys/"))  g_touched_sys = 1;
+    if (str_has_prefix(rel, "/boot/")) g_touched_boot = 1;
 }
 
 /* 票 TASK_VFS_FD_PATH で増えたエラーの名前 (番号だけでは読めないもの) */
@@ -1666,9 +1726,20 @@ static int kernel_backup(const char *dst_path, const OS32_Stat *ds)
 {
     BootImageInfo bi;
     char tmp[OS32_MAX_PATH];
+    char old[OS32_MAX_PATH];          /* <根>/boot/vmkernel.old */
     const char *reason = HR_IO;
     u32 disk_crc = 0, stored = 0, crc = 0, total = 0;
     int have = 0, disk_ok, dec, fd, rc;
+
+    /* .old は置き換える vmkernel と**同じ根**に作る (--root /hd0 なら
+     * /hd0/boot/vmkernel.old)。起動した版との照合 (boot_image_info) は
+     * 走っているカーネルの記録なので、FD で起動して --root /hd0 を更新する
+     * ときは HDD の vmkernel と一致せず断る (not_booted_image) — 下の案内。 */
+    if (!str_ncpy(old, g_root, (int)sizeof(old)) ||
+        !str_ncat(old, HS_KERNEL_OLD, (int)sizeof(old))) {
+        fail_file(HS_KERNEL_OLD, HR_NAME_TOO_LONG, 0);
+        return -1;
+    }
 
     if (!g_no_backup && api->version >= 65 &&
         api->boot_image_info(&bi) == 0 && bi.crc_valid)
@@ -1680,7 +1751,7 @@ static int kernel_backup(const char *dst_path, const OS32_Stat *ds)
 
     if (dec == HBO_NO_BACKUP) {
         api->kprintf(ATTR_YELLOW, "  NOTE %s: --no-backup なので %s は作らない\n",
-                     dst_path, HS_KERNEL_OLD);
+                     dst_path, old);
         return 0;
     }
     if (dec != HBO_MAKE) {
@@ -1692,33 +1763,38 @@ static int kernel_backup(const char *dst_path, const OS32_Stat *ds)
                      "       起動した版と確かめられないので %s を作れず、置き換えない。\n"
                      "       (FD 起動・前回の更新の後に未起動など。承知の上なら --no-backup)\n",
                      dst_path, why, have ? bi.image_crc : 0, disk_crc,
-                     have ? "" : ", no boot record", HS_KERNEL_OLD);
+                     have ? "" : ", no boot record", old);
+        if (g_root_len > 0)
+            api->kprintf(ATTR_RED,
+                         "       --root %s: 起動したのは別の媒体なので、%s の今の版が\n"
+                         "       起動した版かは確かめられない。旧版を残さずに進むなら --no-backup\n",
+                         g_root, dst_path);
         g_errors++;
         return -1;
     }
     if (g_dry_run) {
         api->kprintf(ATTR_CYAN, "  PLAN %s reason=backup (booted crc=%08X)\n",
-                     HS_KERNEL_OLD, disk_crc);
+                     old, disk_crc);
         return 0;
     }
 
     /* 複製 → 検証 → rename。本名 (.old) が存在しない時間を作らない */
-    if (!build_temp_path(HS_KERNEL_OLD, tmp, (int)sizeof(tmp))) {
-        fail_file(HS_KERNEL_OLD, HR_NAME_TOO_LONG, 0);
+    if (!build_temp_path(old, tmp, (int)sizeof(tmp))) {
+        fail_file(old, HR_NAME_TOO_LONG, 0);
         return -1;
     }
     fd = api->sys_open(tmp, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_EXCL);
     if (fd == OS32_ERR_EXIST && remove_stale_temp(tmp) == 0)
         fd = api->sys_open(tmp, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_EXCL);
     if (fd < 0) {
-        fail_file(HS_KERNEL_OLD, HR_OLD_FAILED, fd);
+        fail_file(old, HR_OLD_FAILED, fd);
         return -1;
     }
     rc = copy_body(dst_path, fd, &crc, &total, &reason);
     api->sys_close(fd);
     if (rc != 0 || total != ds->st_size || api->vfs_sync() != 0 ||
         verify_readback(tmp, crc, total) != 0) {
-        fail_before_publish(HS_KERNEL_OLD, tmp, HR_OLD_FAILED, 0);
+        fail_before_publish(old, tmp, HR_OLD_FAILED, 0);
         return -1;
     }
     /* **公開する一時ファイル自身を**起動記録と突き合わせる (Codex 2)。
@@ -1728,17 +1804,17 @@ static int kernel_backup(const char *dst_path, const OS32_Stat *ds)
         u32 tcrc = 0, tstored = 0;
         int tok = (kernel_disk_crc(tmp, &tcrc, &tstored) == 0);
         if (hbo_decide(0, 1, bi.image_crc, tok, tcrc, tstored) != HBO_MAKE) {
-            fail_before_publish(HS_KERNEL_OLD, tmp, HR_OLD_FAILED, 0);
+            fail_before_publish(old, tmp, HR_OLD_FAILED, 0);
             return -1;
         }
     }
-    rc = api->sys_rename(tmp, HS_KERNEL_OLD);
+    rc = api->sys_rename(tmp, old);
     if (rc != 0 || api->vfs_sync() != 0) {
-        fail_before_publish(HS_KERNEL_OLD, tmp, HR_OLD_FAILED, rc);
+        fail_before_publish(old, tmp, HR_OLD_FAILED, rc);
         return -1;
     }
     api->kprintf(ATTR_GREEN, "  BACKUP %s -> %s size=%d crc=%08X\n",
-                 dst_path, HS_KERNEL_OLD, (int)total, disk_crc);
+                 dst_path, old, (int)total, disk_crc);
     return 0;
 }
 
@@ -1869,7 +1945,7 @@ static void sync_file(const char *src_path, const char *dst_path)
     /* 票 TASK_SERIAL_HOSTFS: カーネルを置き換える前に、起動した版なら
      * .old に残す。確かめられなければ**置き換えない** (--no-backup で進む)。
      * dry-run では判定だけ出す (書かない)。 */
-    if (dst_exists && str_cmp(dst_path, HS_KERNEL_PATH) == 0) {
+    if (dst_exists && str_cmp(hs_rel(dst_path), HS_KERNEL_PATH) == 0) {
         if (kernel_backup(dst_path, &ds) != 0) return;
     }
 
@@ -2328,12 +2404,59 @@ static int dst_on_floppy(const char *dst, const char **devout)
     return dev[0] == HS_FD_DEV_PREFIX0 && dev[1] == HS_FD_DEV_PREFIX1;
 }
 
+/* ======== --root の門 (2026-09-26) ========
+ * 同期先の根として受け入れるのは、**マウントの根そのもの**で、FD でなく、
+ * ext2 のものだけ。どれか 1 つでも確かめられなければ 1 件も書かずに断る
+ * (掃除・mkdir・名札の読みより前、dry-run でも同じ)。
+ *
+ *   - 同期元 (/host) 自身とその下                 → root_is_source
+ *   - vfs_devname(根) が空 = マウントの根でない    → root_not_mount
+ *     (HDD 起動の /hd0 は自動マウントされない = ここで断る。ルート / の下の
+ *      ただのディレクトリへ書き分ける用途は持たない)
+ *   - デバイス名が fd で始まる                     → dest_on_fd
+ *   - 根の stat がディレクトリ + inode 2 でない     → root_not_ext2
+ *     (/cd0 = ISO9660、FAT の区画、SerialFS など。HS_EXT2_ROOT_INO の注)
+ * 戻り値 0 = 受け入れる / 1 = 断った (表示は済み)。 */
+static int root_guard(const char *root)
+{
+    OS32_Stat st;
+    const char *dev;
+    const char *why = 0;
+    int rc;
+
+    if (str_cmp(root, "/host") == 0 || str_has_prefix(root, "/host/")) {
+        why = HR_ROOT_IS_SOURCE;
+        dev = "";
+    } else {
+        dev = api->vfs_devname(root);
+        if (!dev) dev = "";
+        if (!dev[0]) {
+            why = HR_ROOT_NOT_MOUNT;
+        } else if (dev[0] == HS_FD_DEV_PREFIX0 && dev[1] == HS_FD_DEV_PREFIX1) {
+            why = HR_DST_ON_FD;
+        } else {
+            rc = api->sys_stat(root, &st);
+            if (rc != 0 || (st.st_mode & OS_S_IFMT) != OS_S_IFDIR ||
+                st.st_ino != HS_EXT2_ROOT_INO)
+                why = HR_ROOT_NOT_EXT2;
+        }
+    }
+    if (!why) return 0;
+
+    api->kprintf(ATTR_RED, "Error: --root %s は同期先にできない reason=%s%s%s%s\n",
+                 root, why, dev[0] ? " (dev " : "", dev, dev[0] ? ")" : "");
+    api->kprintf(ATTR_RED,
+                 "  --root に渡せるのはマウントの根そのもので、FD でない ext2 だけ\n"
+                 "  (例: FD 起動のとき HDD は /hd0)。**1 件も書かない**\n");
+    return 1;
+}
+
 /* ======== メイン ======== */
 
 static void usage(void)
 {
-    api->kprintf(ATTR_WHITE, "hsync — HostDrv sync (/host -> /)\n");
-    api->kprintf(ATTR_WHITE, "Usage: hsync [-f] [-n] [-v] [--verify] [dir]\n");
+    api->kprintf(ATTR_WHITE, "hsync — HostDrv sync (/host -> / or --root)\n");
+    api->kprintf(ATTR_WHITE, "Usage: hsync [-f] [-n] [-v] [--verify] [--root <根>] [dir]\n");
     api->kprintf(ATTR_WHITE, "  -f, --force     同一判定を省いて上書き (保護・検証は省かない)\n");
     api->kprintf(ATTR_WHITE, "      --verify    日時を見ず、全件の内容を必ず比較する (遅い)\n");
     api->kprintf(ATTR_WHITE, "  -n, --dry-run   読んで比べるだけ。1 バイトも書かない (mtime も)\n");
@@ -2346,6 +2469,8 @@ static void usage(void)
     api->kprintf(ATTR_WHITE, "      --force-kapi 配備物の KAPI 配置・版を確かめられなくても続ける\n");
     api->kprintf(ATTR_WHITE, "                  (既定は名札の kapi= がカーネルと違う/新しい/無いなら断る)\n");
     api->kprintf(ATTR_WHITE, "      --no-backup /boot/vmkernel.lz4 を置き換える前に vmkernel.old を作らない\n");
+    api->kprintf(ATTR_WHITE, "      --root <根>  同期先の根を / から替える (マウントの根・FD でない ext2 だけ)\n");
+    api->kprintf(ATTR_WHITE, "                  例: FD 起動で hsync --root /hd0 boot = /host/boot -> /hd0/boot\n");
     api->kprintf(ATTR_WHITE, "  -h, --help      この表示\n");
     api->kprintf(ATTR_WHITE, "  dir             同期対象は 1 つだけ (例: bin, sys, usr/bin)\n");
     api->kprintf(ATTR_WHITE, "  既定: サイズか日時が違うものだけ内容を比較し、違えばコピーする\n");
@@ -2359,7 +2484,9 @@ static void usage(void)
 int __cdecl main(int argc, char **argv, KernelAPI *_api)
 {
     const char *subdir;
+    const char *root_arg;
     char norm[HSP_MAX_PATH];
+    char rnorm[HSP_MAX_PATH];
     char src[OS32_MAX_PATH];
     char dst[OS32_MAX_PATH];
     int i;
@@ -2367,6 +2494,9 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
 
     api = _api;
     subdir = NULL;
+    root_arg = NULL;
+    g_root[0] = '\0';
+    g_root_len = 0;
     g_copied = 0;
     g_unchanged = 0;
     g_excluded = 0;
@@ -2434,6 +2564,18 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
                     return 1;
                 }
                 g_expect_build = argv[++i];
+            } else if (str_cmp(a, "--root") == 0) {
+                /* 同期先の根 (2026-09-26)。値の検査は正規化の後 (root_guard) */
+                if (i + 1 >= argc || !argv[i + 1][0]) {
+                    api->kprintf(ATTR_RED,
+                                 "Error: --root には同期先の根 (例 /hd0) が要る\n");
+                    return 1;
+                }
+                if (root_arg) {
+                    api->kprintf(ATTR_RED, "Error: --root は 1 つだけ\n");
+                    return 1;
+                }
+                root_arg = argv[++i];
             } else if (str_cmp(a, "--no-backup") == 0) {
                 /* 票 TASK_SERIAL_HOSTFS: /boot/vmkernel.lz4 を置き換える前の
                  * .old を作らない (起動した版と確かめられないときに進む口) */
@@ -2526,17 +2668,45 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     }
     g_root_sync = (subdir == NULL);
 
-    /* 同期先がフロッピーなら 1 件も触らずに断る (dry-run でも同じ判定) */
+    /* ---- --root (2026-09-26): 同期先の根を替える ----
+     * 絶対パスだけ受ける (cwd に依らない)。正規化してから門を通す。
+     * `--root /` は既定と同じ (門は通す = ルートが ext2 でなければ断る)。 */
+    if (root_arg) {
+        if (root_arg[0] != '/' || !hsp_normalize(root_arg, rnorm, (int)sizeof(rnorm)) ||
+            str_len(rnorm) >= (int)sizeof(g_root)) {
+            api->kprintf(ATTR_RED,
+                         "Error: --root は / で始まる正規のパス (長すぎない、'\\' を含まない): %s\n",
+                         root_arg);
+            return 1;
+        }
+        if (root_guard(rnorm) != 0) return 1;
+        if (str_cmp(rnorm, "/") != 0) {
+            (void)str_ncpy(g_root, rnorm, (int)sizeof(g_root));
+            g_root_len = str_len(g_root);
+        }
+    }
+
+    /* 同期先がフロッピーなら 1 件も触らずに断る (dry-run でも同じ判定)。
+     * 見るのは**根を前置した**宛先 (--root /hd0 bin なら /hd0/bin のマウント) */
     {
         const char *dev;
-        if (dst_on_floppy(subdir ? norm : "/", &dev)) {
+        char where[OS32_MAX_PATH];
+        if (!str_ncpy(where, g_root, (int)sizeof(where)) ||
+            !str_ncat(where, subdir ? norm : (g_root_len ? "" : "/"),
+                      (int)sizeof(where))) {
+            api->kprintf(ATTR_RED, "Error: path too long: %s%s\n", g_root,
+                         subdir ? norm : "");
+            return 1;
+        }
+        if (dst_on_floppy(where, &dev)) {
             api->kprintf(ATTR_RED,
                          "Error: 同期先 %s はフロッピー (%s) の上 reason=%s\n",
-                         subdir ? norm : "/", dev, HR_DST_ON_FD);
+                         where, dev, HR_DST_ON_FD);
             api->kprintf(ATTR_RED,
                          "  hsync は HDD へ入れるもの。install / cdinst で HDD に入れ、"
                          "HDD から起動して実行すること\n"
-                         "  (残りを取るなら `hsync` の後に `hsync sys` + リセット)\n");
+                         "  (残りを取るなら `hsync` の後に `hsync sys` + リセット)\n"
+                         "  FD で起動して HDD を更新するなら --root /hd0\n");
             return 1;
         }
     }
@@ -2585,7 +2755,8 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     if (subdir) {
         if (!str_ncpy(src, "/host", (int)sizeof(src)) ||
             !str_ncat(src, norm, (int)sizeof(src)) ||
-            !str_ncpy(dst, norm, (int)sizeof(dst))) {
+            !str_ncpy(dst, g_root, (int)sizeof(dst)) ||
+            !str_ncat(dst, norm, (int)sizeof(dst))) {
             api->kprintf(ATTR_RED, "Error: path too long: %s\n", subdir);
             api->mem_free(file_buf);
             return 1;
@@ -2625,12 +2796,12 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
         api->kprintf(ATTR_CYAN, "hsync: %s -> %s\n", src, dst);
     } else {
         if (!str_ncpy(src, "/host", (int)sizeof(src)) ||
-            !str_ncpy(dst, "", (int)sizeof(dst))) {
+            !str_ncpy(dst, g_root, (int)sizeof(dst))) {
             api->kprintf(ATTR_RED, "Error: path too long\n");
             api->mem_free(file_buf);
             return 1;
         }
-        api->kprintf(ATTR_CYAN, "hsync: /host -> /\n");
+        api->kprintf(ATTR_CYAN, "hsync: /host -> %s\n", g_root_len ? g_root : "/");
         /* 既定の除外を**先頭で明示する** (設計書 §7.2) */
         api->kprintf(ATTR_YELLOW,
                      "  note: ルート直下の sys は既定で除外 "

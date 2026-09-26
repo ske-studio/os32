@@ -4,11 +4,14 @@ HostDrv同期コマンド
 
 ## SYNOPSIS
 
-`hsync [-f] [--verify] [-n] [-v] [--unsafe-overwrite] [--expect-build ID] [--force-kapi] [--no-backup] [dir]`
+`hsync [-f] [--verify] [-n] [-v] [--unsafe-overwrite] [--expect-build ID] [--force-kapi] [--no-backup] [--root 根] [dir]`
 
 ## DESCRIPTION
 
 /host (HostDrvマウントポイント) の内容を ext2 ルート (/) に**一方向**で同期する。
+`--root` を付けると同期先の根を / から替えられる (FD で起動して `/hd0` の HDD を
+更新する、下の「同期先の根 (--root)」)。`/host` は HostDrv のほか、`sfs run` の
+中ではシリアル越しの SerialFS になる。
 
 NP21/W HostDrv 機能を利用した開発デプロイ用コマンド。
 ホスト側で `hostdrv_deploy.py sync` (= `make deploy`) を実行した後、
@@ -16,7 +19,8 @@ NP21/W HostDrv 機能を利用した開発デプロイ用コマンド。
 
 **同期先がフロッピーなら断る** (`dest_on_fd`)。FD から起動した MINIMAL にも hsync は
 入っているが、宛先 `/` が FD 自身になるので、1 件も書かずに終わる。HDD に入れて
-(install / cdinst) HDD から起動して実行する。判定は宛先のマウント (最長一致) の
+(install / cdinst) HDD から起動して実行するか、FD 起動のまま **`--root /hd0`** で
+HDD を宛先にする。判定は宛先 (`--root` を前置したもの) のマウント (最長一致) の
 デバイス名が `fd` で始まるか。
 
 **マウントをまたがない** (rsync -x と同じ)。同期の途中で宛先の子が別のマウントの根
@@ -24,7 +28,64 @@ NP21/W HostDrv 機能を利用した開発デプロイ用コマンド。
 コピーもしない。`EXCLUDE <パス> reason=other_mount (dev <名前>)` を必ず 1 行出し、
 `excluded` に数える (失敗ではない)。全体同期で `/sys` が別マウントのときも、既定の
 `sys` 除外より先にこの行が出る。開始点そのもの (`hsync sys` の `/sys` が別マウントの
-場合など) は明示の指定なので対象にしない。
+場合など) は明示の指定なので対象にしない。`--root` のときは `<根>` の下で同じ規則が
+効く (開始点は `<根>` そのもの、`/hd0/mnt` が別マウントなら `EXCLUDE /hd0/mnt
+reason=other_mount`)。
+
+### 同期先の根 (--root)
+
+`--root <根>` は宛先の根を `/` から `<根>` へ替える。同期元は変わらず `/host`。
+
+| 打つもの | 同期 |
+|---|---|
+| `hsync --root /hd0` | `/host` → `/hd0` 全体 (ルート直下の `sys` は既定どおり除く) |
+| `hsync --root /hd0 boot` | `/host/boot` → `/hd0/boot` |
+| `hsync --root /hd0 sys` | `/host/sys` → `/hd0/sys` |
+
+用途は**実機の更新**: 新しいカーネルの FD で起動し (HDD は `/hd0` に自動でマウント
+される)、シリアル越しの `/host` (SerialFS、`sfs run`) から HDD を更新して、HDD から
+起動し直す。HDD にある古いカーネル (KAPI v65 以前) は SerialFS を持たないので、
+新しいカーネルは FD から運ぶ (docs/tasks/realhw/TASK_SERIAL_HOSTFS.md「FD 起動から
+HDD を更新する」)。NP21/W でも FD 起動 + HostDrv の `/host` で同じ形を試せる。
+
+**`<根>` の門** — どれか 1 つでも当たれば**1 件も書かずに**非ゼロ終了する
+(掃除・mkdir・名札の読みより前、`-n` でも同じ):
+
+| 条件 | reason |
+|---|---|
+| `/` で始まらない・正規化できない (`..` で根の外、`\` を含む、長すぎる)・値が無い・2 回指定 | (Error 行のみ) |
+| 同期元 `/host` 自身とその下 | `root_is_source` |
+| **マウントの根そのもの**でない (`vfs_devname` が空。`/hd0/bin`、HDD 起動のときの `/hd0` = 自動マウントされない) | `root_not_mount` |
+| デバイス名が `fd` で始まる | `dest_on_fd` |
+| FS が ext2 と確かめられない (`/cd0` の ISO9660、FAT の区画、SerialFS / HostDrv) | `root_not_ext2` |
+
+ext2 かどうかは KAPI を足さずに**根の `stat`** で見る: ext2 はマウントの根に
+ルート inode (`EXT2_ROOT_INO` = 2) を返し、ほかの FS は 2 を返さない
+(FAT・HostDrv・SerialFS は 0、根を stat できない FS の VFS の合成も 0、ISO9660 は
+根ディレクトリの LBA = 16 以上)。カーネル内の `vfs_fstype` は KAPI に出ていない。
+`--root /` は既定と同じ同期になる (門は通す)。
+
+**根からの相対で効くもの**:
+
+- 設定 DB の保護 — `<根>/etc/settings.db` の一族を `/etc/settings.db` と同じ名前規則で
+  守り、実体規則 (hardlink の別名) は `<根>/etc` を走査して集める。
+- 予約名 `.hs~` の掃除、マウントをまたがない規則 (開始点は `<根>`)、既定の `sys` 除外。
+- 名札 (`.deploy/manifest.txt`) の照合 — 名札は**同期元** (`/host`) で読むだけで、
+  パスは `bin/a.bin` のように根からの相対なので `<根>/bin/a.bin` と突き合わせる。
+  名札の写しは他のファイルと同じく `<根>/.deploy/manifest.txt` へ運ばれる。
+  `--expect-build` は同期元の名札だけを見るので変わらない。
+- `/boot/vmkernel.old` は `<根>/boot/vmkernel.old` に作る。ただし**起動した版の照合は
+  走っているカーネルの記録** (FD の版) と比べるので、FD 起動から `<根>` の
+  `vmkernel.lz4` を置き換えると、ほぼ必ず `not_booted_image` で断る。旧版を残さずに
+  進むなら `--no-backup` (下の「カーネルの .old」)。
+- `/sys` / `/boot` を更新したときの再起動の案内。
+
+**変わらないもの — 走っているカーネルを見る門**: 一時ファイル方式に要る
+KAPI v53 の門 (`kernel_too_old`) と、名札の `kapi=` / `kapi_version` の門は、
+**書き込みを行う走っているカーネル**と比べる。宛先の根のカーネルの版は見ない。
+FD の新しいカーネルから古い HDD を更新するときは、順番を `boot` → `sys` → 全体と
+1 回の FD 起動の中で揃えること (途中でやめて HDD から起動すると、HDD のカーネルと
+`/sys` の版が食い違い得る)。
 
 ### 同一判定
 
@@ -368,6 +429,9 @@ CRC** (ローダが検査して記録した値、`ver` の `Image CRC:`、KAPI v
 - 一致しない / 記録が無い / 読めない → **置き換えない** (`reason=not_booted_image` /
   `boot_image_unknown` / `boot_image_unreadable`)。FD で起動した・前回の更新の後に
   まだ再起動していない、のどれか。承知の上なら `--no-backup`
+- `--root` のときも照合するのは**走っているカーネルの起動記録**。FD で起動して
+  `--root /hd0` を更新すると FD の版と比べることになり、`not_booted_image` で断る
+  (案内に `--root` の行が付く)。`--no-backup` で `.old` を作らずに進む
 - 戻すのはカーネルだけ。起動しなくなったら FD で起動し、`/hd0/boot/vmkernel.old` を
   `/hd0/boot/vmkernel.lz4` へ戻す。**KAPI が上がる更新 (`hsync sys` を伴う) では
   カーネルだけを戻しても `/sys` と食い違うので、復旧は保証しない** (決裁 5)。
@@ -404,8 +468,11 @@ CRC** (ローダが検査して記録した値、`ver` の `Image CRC:`、KAPI v
   配置違いのユーザーランドを持ち込むと、アプリは exec で
   `rebuild required (KAPI data layout)` と断られ、`/sys` の常駐シェルなら
   次の起動で止まる。承知の上で使う
+- `--root 根` — 同期先の根を `/` から替える (上の「同期先の根 (--root)」)。
+  マウントの根そのもので、FD でない ext2 だけ。1 つだけ
 - `-h`, `--help` — 使い方を表示する
-- `dir` — 同期対象ディレクトリ (例: `bin`, `sys`, `usr/bin`)。**1 つだけ**
+- `dir` — 同期対象ディレクトリ (例: `bin`, `sys`, `usr/bin`)。**1 つだけ**。
+  `--root` のときは `<根>` からの相対
 
 ## LIMITATIONS
 
@@ -461,6 +528,15 @@ hsync sys       /sys を明示して同期 (シェル再起動が必要)
 hsync -f sys    /host/sys/ を比較せず強制同期
 hsync --verify  日時を無視して全件の内容を比較する (遅いが確実)
 hsync --unsafe-overwrite   KAPI v52 のカーネルで旧来の直接上書きを使う
+hsync --root /hd0 --no-backup boot   FD 起動から HDD の /hd0/boot を更新する
+hsync --root /hd0 sys      FD 起動から /hd0/sys を更新する
+hsync --root /hd0          FD 起動から /hd0 全体 (sys を除く) を更新する
+```
+
+SerialFS 越し (実機、ホストで `rshell_serial.py --serve-host <dir>`):
+
+```
+sfs run hsync --root /hd0 --no-backup boot
 ```
 
 ## SEE ALSO

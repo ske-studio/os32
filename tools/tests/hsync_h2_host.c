@@ -28,6 +28,8 @@
  *    (3) 公開の判定は **`st_ino`** で行う。サイズと CRC は証拠にしない。
  *    (4) `.hs~` は予約名。`st_nlink` を見ずに片づけるが、**保護対象は消さない**。
  *
+ *  `case_root` は `--root <根>` (FD 起動 → /hd0、2026-09-26) を見る。
+ *
  *  エミュレータ・実配備・make には一切触れない。
  *  [C1] C89 / GNU89。宣言はブロック先頭、`//` コメント無し。
  * ========================================================================= */
@@ -273,6 +275,9 @@ static int fk_sys_is_mounted(const char *prefix)
 static const char *fk_root_dev = "hd0";
 static const char *fk_sub_prefix = 0;
 static const char *fk_sub_dev = 0;
+/* 2 つ目のサブマウント (--root /hd0 の下の別マウント = other_mount の試験) */
+static const char *fk_sub2_prefix = 0;
+static const char *fk_sub2_dev = 0;
 static int fk_mkdir_calls;
 static int fk_mkdir_fd0_calls;   /* /fd0 とその下への mkdir */
 
@@ -281,6 +286,7 @@ static const char *fk_vfs_devname(const char *prefix)
     if (strcmp(prefix, "/") == 0) return fk_root_dev;
     if (strcmp(prefix, "/host") == 0) return "hostdrv";
     if (fk_sub_prefix && strcmp(prefix, fk_sub_prefix) == 0) return fk_sub_dev;
+    if (fk_sub2_prefix && strcmp(prefix, fk_sub2_prefix) == 0) return fk_sub2_dev;
     return "";
 }
 
@@ -1752,6 +1758,312 @@ static void case_dst_fd(void)
     fk_sub_dev = 0;
 }
 
+/* ========================================================================= */
+/*  --root — 同期先の根を替える (FD 起動 → /hd0 を更新、2026-09-26)          */
+/* ========================================================================= */
+
+/* 引数の並びで回す (最後は 0)。run_hsync が --force-kapi を足す */
+static int run_args(const char *const *args)
+{
+    char *av[14];
+    int n = 0;
+
+    av[n++] = (char *)"hsync";
+    while (args[n - 1] && n < 13) { av[n] = (char *)args[n - 1]; n++; }
+    av[n] = 0;
+    return run_hsync(n, av);
+}
+
+static u8 *g_root_src;        /* /host/bin/a.bin の中身 (3000 バイト) */
+static u8 *g_hd_old;          /* /hd0/bin/a.bin の旧内容 (2000 バイト) */
+static u8 *g_hd_sdb;          /* /hd0/etc/settings.db の中身 (100 バイト) */
+
+/* FD 起動 (ルート fd0)、/hd0 は hd0 の ext2 (根の inode 2)、/host は同期元。
+ * FD の /bin/a.bin は setup_pair の旧宛先 (dst_unchanged で見る)。 */
+static void setup_root_fd(void)
+{
+    int n;
+    u8 *b;
+
+    setup_pair(3000, 1, 111, 3000, 2, 222);
+    fk_root_dev = "fd0";
+    fk_sub_prefix = "/hd0";
+    fk_sub_dev = "hd0";
+    fk_sub2_prefix = 0;
+    fk_sub2_dev = 0;
+
+    if (g_root_src) free(g_root_src);
+    g_root_src = make_blob(3000, 1);           /* SRC_PATH と同じ中身 */
+
+    n = fs_add_dir("/hd0");
+    fs_nodes[n].ino = 2;                       /* ext2 の根 (EXT2_ROOT_INO) */
+    fs_add_dir("/hd0/bin");
+    fs_add_dir("/hd0/etc");
+    if (g_hd_old) free(g_hd_old);
+    g_hd_old = make_blob(2000, 3);
+    n = fs_add_file("/hd0/bin/a.bin", g_hd_old, 2000);
+    fs_nodes[n].mtime = 333;
+    if (g_hd_sdb) free(g_hd_sdb);
+    g_hd_sdb = make_blob(100, 4);
+    fs_add_file("/hd0/etc/settings.db", g_hd_sdb, 100);
+
+    fs_add_dir("/host/etc");
+    b = make_blob(120, 5);
+    fs_add_file("/host/etc/settings.db", b, 120);
+    free(b);
+    fs_add_dir("/host/newdir");
+    b = make_blob(50, 6);
+    n = fs_add_file("/host/newdir/n.bin", b, 50);
+    fs_nodes[n].mtime = 444;
+    free(b);
+}
+
+/* /hd0 の下が準備のまま (旧 a.bin・settings.db、newdir が無い) */
+static int hd_unchanged(void)
+{
+    return node_equal_bytes("/hd0/bin/a.bin", g_hd_old, 2000) &&
+           node_mtime("/hd0/bin/a.bin") == 333 &&
+           node_equal_bytes("/hd0/etc/settings.db", g_hd_sdb, 100) &&
+           node_of("/hd0/newdir") < 0;
+}
+
+/* 断る門: 非ゼロ・理由・mkdir / write / rename が 0 回・FD も /hd0 も不変 */
+static void root_refused(const char *const *args, const char *reason,
+                         const char *what)
+{
+    char m[200];
+    int rc;
+
+    fk_mkdir_calls = 0;
+    rc = run_args(args);
+    sprintf(m, "%s: 非ゼロ終了", what);
+    check(rc != 0, m);
+    if (reason) {
+        sprintf(m, "%s: reason=%s", what, reason);
+        check(log_has(reason), m);
+    }
+    sprintf(m, "%s: mkdir / write / rename を 1 回も呼ばない", what);
+    check(fk_mkdir_calls == 0 && fk_write_calls == 0 && fk_rename_calls == 0, m);
+    sprintf(m, "%s: FD (/bin/a.bin) も /hd0 も変わらない", what);
+    check(dst_unchanged() && hd_unchanged() && node_of("/newdir") < 0, m);
+}
+
+static void case_root(void)
+{
+    printf("== --root: 同期先の根を替える (FD 起動 -> /hd0) ==\n");
+
+    /* ---- 全体同期: /hd0 だけが変わり、FD (/) は無変更 ---- */
+    setup_root_fd();
+    {
+        const char *a[] = { "--root", "/hd0", 0 };
+        fk_mkdir_calls = 0;
+        fk_mkdir_fd0_calls = 0;
+        check(run_args(a) == 0, "--root /hd0 (全体): 成功");
+        check(log_has("hsync: /host -> /hd0"), "--root /hd0: 見出しは /host -> /hd0");
+        check(node_equal_bytes("/hd0/bin/a.bin", g_root_src, 3000) &&
+              node_mtime("/hd0/bin/a.bin") == 111,
+              "--root /hd0: /hd0/bin/a.bin が新しい内容と元の mtime になった");
+        check(node_of("/hd0/newdir/n.bin") >= 0, "--root /hd0: /hd0/newdir/n.bin を作った");
+        check(dst_unchanged(), "--root /hd0: FD の /bin/a.bin は無変更");
+        check(node_of("/newdir") < 0 && node_of("/etc") < 0,
+              "--root /hd0: FD (/) に newdir も etc も作らない");
+        check(node_equal_bytes("/hd0/etc/settings.db", g_hd_sdb, 100) &&
+              log_has("PROTECTED /hd0/etc/settings.db"),
+              "--root /hd0: 保護が /hd0/etc/settings.db に効く");
+    }
+    /* 名前規則 (実体がまだ無い一族): /hd0/etc に -wal が無くても作らない */
+    setup_root_fd();
+    {
+        const char *a[] = { "--root", "/hd0", 0 };
+        fs_add_file("/host/etc/settings.db-wal", (const u8 *)"WAL", 3);
+        check(run_args(a) == 0 && node_of("/hd0/etc/settings.db-wal") < 0 &&
+              log_has("PROTECTED /hd0/etc/settings.db-wal"),
+              "--root /hd0: 名前規則が根からの相対で効く (/hd0/etc/settings.db-wal を作らない)");
+    }
+
+    /* ---- 絞り込み: /host/bin -> /hd0/bin だけ ---- */
+    setup_root_fd();
+    {
+        const char *a[] = { "--root", "/hd0", "bin", 0 };
+        check(run_args(a) == 0, "--root /hd0 bin: 成功");
+        check(log_has("hsync: /host/bin -> /hd0/bin"), "--root /hd0 bin: /host/bin -> /hd0/bin");
+        check(node_equal_bytes("/hd0/bin/a.bin", g_root_src, 3000), "--root /hd0 bin: /hd0/bin/a.bin を更新");
+        check(dst_unchanged() && node_of("/hd0/newdir") < 0,
+              "--root /hd0 bin: FD と範囲外 (/hd0/newdir) は無変更");
+    }
+    setup_root_fd();
+    {
+        const char *a[] = { "-f", "--root", "/hd0", "etc", 0 };
+        check(run_args(a) == 0 && log_has("PROTECTED /hd0/etc/settings.db") &&
+              node_equal_bytes("/hd0/etc/settings.db", g_hd_sdb, 100),
+              "--root /hd0 -f etc: /hd0/etc/settings.db は -f でも書かない");
+    }
+
+    /* ---- 保護の実体規則: /hd0/etc/settings.db の hardlink の別名 ---- */
+    setup_root_fd();
+    {
+        const char *a[] = { "--root", "/hd0", "bin", 0 };
+        u8 *b = make_blob(90, 7);
+        int n = fs_add_file("/hd0/bin/sdb", g_hd_sdb, 100);
+        fs_nodes[n].ino = fs_nodes[node_of("/hd0/etc/settings.db")].ino;
+        fs_add_file("/host/bin/sdb", b, 90);
+        free(b);
+        check(run_args(a) == 0 && log_has("PROTECTED /hd0/bin/sdb") &&
+              node_equal_bytes("/hd0/bin/sdb", g_hd_sdb, 100),
+              "--root /hd0: /hd0/etc/settings.db の別名 (/hd0/bin/sdb) も守る");
+    }
+
+    /* ---- マウントをまたがない: /hd0 の下の別マウント ---- */
+    setup_root_fd();
+    {
+        const char *a[] = { "--root", "/hd0", 0 };
+        u8 *b = make_blob(40, 8);
+        fs_add_dir("/hd0/mnt");
+        fs_add_dir("/host/mnt");
+        fs_add_file("/host/mnt/f.bin", b, 40);
+        free(b);
+        fk_sub2_prefix = "/hd0/mnt";
+        fk_sub2_dev = "hd1";
+        check(run_args(a) == 0, "--root /hd0 + /hd0/mnt が別マウント: 成功");
+        check(log_has("EXCLUDE /hd0/mnt reason=other_mount"),
+              "/hd0/mnt を reason=other_mount で除外したと 1 行出す");
+        check(node_of("/hd0/mnt/f.bin") < 0, "/hd0/mnt の下に書かない");
+        check(node_equal_bytes("/hd0/bin/a.bin", g_root_src, 3000),
+              "/hd0 の残りは通常どおり同期");
+        fk_sub2_prefix = 0;
+    }
+
+    /* ---- 名札 (.deploy/manifest.txt) は根からの相対で照合する ---- */
+    setup_root_fd();
+    {
+        const char *a[] = { "--root", "/hd0", 0 };
+        char man[512];
+        sprintf(man,
+                "format=2\nbuild=test\ngenerated=now\nkapi=%lu\nkapi_version=1\n"
+                "count=2\n---\nbin/a.bin 3000 00000000 111\n"
+                "newdir/n.bin 50 00000000 444\n",
+                (unsigned long)KAPI_DATA_FIELDS_OFF);
+        fs_add_dir("/host/.deploy");
+        fs_add_file("/host/.deploy/manifest.txt", (const u8 *)man, (u32)strlen(man));
+        check(run_args(a) == 0 && log_has("DEPLOY build=test"), "名札つき --root /hd0: 成功");
+        check(log_has("manifest_extra=0"),
+              "名札の照合は根からの相対 (/hd0/bin/a.bin は bin/a.bin) = manifest_extra=0");
+        check(node_of("/hd0/.deploy/manifest.txt") >= 0 &&
+              node_of("/.deploy") < 0,
+              "名札の写しは /hd0/.deploy へ (FD には置かない)");
+    }
+
+    /* ---- 断る門: 1 件も書かない ---- */
+    setup_root_fd();
+    {
+        const char *a1[] = { "--root", "/fd1", 0 };
+        const char *a2[] = { "--root", "/host", 0 };
+        const char *a3[] = { "--root", "/host/bin", "bin", 0 };
+        const char *a4[] = { "--root", "/hd0/bin", 0 };
+        const char *a5[] = { "--root", "/hd1", 0 };
+        const char *a6[] = { "-n", "--root", "/cd0", "bin", 0 };
+        const char *a7[] = { "--root", "hd0", 0 };
+        const char *a8[] = { "--root", 0 };
+        const char *a9[] = { "--root", "/hd0", "--root", "/hd0", 0 };
+        const char *a10[] = { "--root", "/hd0/../fd1", 0 };
+        int n;
+
+        fk_sub2_prefix = "/fd1";
+        fk_sub2_dev = "fd1";
+        fs_add_dir("/fd1");
+        root_refused(a1, "dest_on_fd", "--root /fd1 (FD)");
+        root_refused(a10, "dest_on_fd", "--root /hd0/../fd1 (正規化して FD)");
+        root_refused(a2, "root_is_source", "--root /host (同期元)");
+        root_refused(a3, "root_is_source", "--root /host/bin (同期元の下)");
+        root_refused(a4, "root_not_mount", "--root /hd0/bin (マウントの根でない)");
+
+        fk_sub2_prefix = "/hd1";
+        fk_sub2_dev = "hd1";
+        fs_add_dir("/hd1");               /* 根の inode は 2 でない = FAT 等 */
+        root_refused(a5, "root_not_ext2", "--root /hd1 (ext2 でない)");
+
+        fk_sub2_prefix = "/cd0";
+        fk_sub2_dev = "cd0";
+        n = fs_add_dir("/cd0");
+        fs_nodes[n].ino = 20;             /* ISO9660: 根ディレクトリの LBA */
+        root_refused(a6, "root_not_ext2", "-n --root /cd0 (ISO9660、dry-run でも)");
+
+        root_refused(a7, 0, "--root hd0 (相対パス)");
+        root_refused(a8, 0, "--root の値が無い");
+        root_refused(a9, 0, "--root を 2 回");
+        fk_sub2_prefix = 0;
+
+        /* HDD 起動: /hd0 は自動マウントされない (ルートが hd0) */
+        fk_root_dev = "hd0";
+        fk_sub_prefix = 0;
+        {
+            const char *b1[] = { "--root", "/hd0", 0 };
+            fk_mkdir_calls = 0;
+            check(run_args(b1) != 0 && log_has("root_not_mount") &&
+                  fk_mkdir_calls == 0 && fk_write_calls == 0 && hd_unchanged(),
+                  "HDD 起動の --root /hd0 (マウントされていない) は断る");
+        }
+    }
+
+    /* ---- 走っているカーネルの版の門は --root でも同じ (v53 未満は断る) ---- */
+    setup_root_fd();
+    {
+        const char *a[] = { "--root", "/hd0", 0 };
+        fk_version = 52;
+        root_refused(a, "kernel_too_old", "KAPI v52 のカーネル + --root /hd0");
+        fk_version = 53;
+    }
+
+    /* ---- /boot/vmkernel.old は根の下に作る ---- */
+    {
+        const char *a[] = { "--root", "/hd0", "boot", 0 };
+        const char *anb[] = { "--no-backup", "--root", "/hd0", "boot", 0 };
+        static u8 oldk[200], newk[240];
+        u32 crc;
+
+        g_fake.boot_image_info = fk_boot_image_info;
+        setup_root_fd();
+        fk_version = 65;
+        crc = make_vk32(oldk, sizeof(oldk), 0x11);
+        (void)make_vk32(newk, sizeof(newk), 0x22);
+        fs_add_dir("/host/boot");
+        fs_add_file("/host/boot/vmkernel.lz4", newk, sizeof(newk));
+        fs_add_dir("/hd0/boot");
+        fs_add_file("/hd0/boot/vmkernel.lz4", oldk, sizeof(oldk));
+
+        /* 起動した版の記録が /hd0 の版と一致する形 (照合の経路を通す) */
+        fk_boot_valid = 1;
+        fk_boot_crc = crc;
+        check(run_args(a) == 0, "--root /hd0 boot (起動記録と一致): 成功");
+        check(node_size("/hd0/boot/vmkernel.old") == 200 &&
+              node_of("/boot/vmkernel.old") < 0 && node_of("/boot") < 0,
+              "--root /hd0 boot: .old は /hd0/boot に作る (FD には作らない)");
+        check(node_size("/hd0/boot/vmkernel.lz4") == 240, "--root /hd0 boot: 新版に置き換わった");
+        check(log_has("NOTE: /boot を更新した"), "--root /hd0 boot: /boot の再起動の案内を出す");
+
+        /* FD 起動の実際: 起動記録は FD の版 = /hd0 の版と一致しない → 断る */
+        fs_drop(node_of("/hd0/boot/vmkernel.lz4"));
+        fs_drop(node_of("/hd0/boot/vmkernel.old"));
+        fs_add_file("/hd0/boot/vmkernel.lz4", oldk, sizeof(oldk));
+        fk_boot_crc = crc ^ 1;
+        check(run_args(a) != 0 && log_has("reason=not_booted_image") &&
+              log_has("--root /hd0") && node_size("/hd0/boot/vmkernel.lz4") == 200,
+              "--root /hd0 boot (FD の起動記録): not_booted_image で置き換えない");
+        check(run_args(anb) == 0 && node_size("/hd0/boot/vmkernel.lz4") == 240 &&
+              node_of("/hd0/boot/vmkernel.old") < 0,
+              "--no-backup --root /hd0 boot: .old を作らずに置き換える");
+
+        fk_version = 53;
+        g_fake.boot_image_info = 0;
+    }
+
+    fk_root_dev = "hd0";
+    fk_sub_prefix = 0;
+    fk_sub_dev = 0;
+    fk_sub2_prefix = 0;
+    fk_sub2_dev = 0;
+}
+
 int main(void)
 {
     printf("=== 票 H2: hsync の置換安全化 (一時ファイル + 検証 + 置換) ===\n");
@@ -1772,6 +2084,7 @@ int main(void)
     case_review_nb();
     case_boot_old();
     case_dst_fd();
+    case_root();
 
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
