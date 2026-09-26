@@ -67,10 +67,15 @@ void console_write(const char *buf, u32 size, u8 color)
 #include "../../fs/fd_redirect.c"
 
 /* fs/fd_redirect.c の書き込み時の再検査 (票 TASK_KAPI_OUTPUT_GUARD) が引く exec/exec.c
- * の 3 本。ホストではユーザ帯の番地は無いので ring3_ptr_ok は常に 0 (= 再検査を通らない)。 */
+ * の 5 本。ホストではユーザ帯の番地は無いので ring3_ptr_ok は常に 0 (= 再検査を通らない)。 */
 int ring3_ptr_ok(u32 p) { (void)p; return 0; }
 int ring3_user_ranges_writable(u32 pa, u32 la, u32 pb, u32 lb)
 { (void)pa; (void)la; (void)pb; (void)lb; return 1; }
+/* 由来つきの門 (2026-09-26): ここの呼び手は CPL=0 扱い (由来はアプリでない)。
+ * アプリ由来の筋書きは tools/tests/ring3_guard_host.c が見る。 */
+int ring3_user_ranges_writable_always(u32 pa, u32 la, u32 pb, u32 lb)
+{ (void)pa; (void)la; (void)pb; (void)lb; return 1; }
+int ring3_call_from_user(void) { return 0; }
 void ring3_fault_kill(void) { for (;;) { } }
 
 /* ------------------------------------------------------------------------ */

@@ -73,3 +73,19 @@
 書くたびに再検査 (ユーザ帯のバッファだけ。`fs/fd_redirect.c`)。(5) `dev_blk_read` の 512 単位の先行検査が 128/256 バイトセクタの正常呼び出しを
 殺す → 先行検査を外して本体の実長検査だけに。非 blocker のうち `np2_recv_str` の `maxlen <= 0` の 1 バイト書きも直した。
 残る非 blocker: 生成器の const 判定は文字列一致 (`char *const p` などを見分けない。現行 45 本には無い)、`kout_test` は RO 拒否そのものを踏まない (アプリから安全に作れない)。
+
+## 6. 追補 — WM の文脈では検査を効かせない (2026-09-26)
+
+この検査が入って以後、**ポンプ / OP_WAIT を通る GUI アプリは起動直後に kill されていた** (filer が窓も出さずに消える、
+`fault_kill_count` +1、呼び手は `wrap_mouse_poll+0x35`)。WM (gshell、CPL=0) はアプリの syscall の中で走る (契約 T8) ので
+`ring3_in_syscall` だけでは「アプリ由来」と「常駐側の直呼び」を区別できず、gshell のスタックの `MouseInfo` が拒否された。
+直しは「カーネルが WM のコードへ入っている深さ」`ring3_wm_depth` (gui_call のハンドラ / ポンプ / owner_exit の前後) と
+`ring3_guard_active(in_syscall, wm_depth)` (`exec/ring3_str.c`)。3 つの門 (書き側 / 読み側 / `tramp_copy`) が同じ判定を使う。
+書き側の拒否も `RING3_RANGE_WR_*` (7〜10) で数えるようにした (それまで `ring3_range_reject_count` は書き側を数えていなかった)。
+安全性: 深さが 1 以上なのはカーネルが WM を同期的に実行しているあいだだけで、その間 CPL=3 は走らず、KAPI に渡るポインタは
+WM が選ぶ (gshell は `arg` をポインタとして解釈しない — 入力は SHM のスロット経由)。#PF/#GP の帰属は変えない。
+試験: `tools/tests/ring3_guard_tdd.md` (ホスト、変異 4/4 RED) + kselftest `test_ring3_wm_guard` (ゲスト)。
+教訓: `docs/POLICY_DEBUG.md` §4-61。
+追記 (同日、代行レビュー P2): 実装レビュー 4 の「最後の砦」(`fd_redirect_write`) はアプリが登録したバッファ
+(`user_origin`) なら深さに関係なく `ring3_user_ranges_writable_always` で歩き、登録時も同じ歩きで RW + USER を確かめる
+(試験 `ring3_guard_host.c` §4、変異 7/7 RED、kselftest `test_fd_redirect_origin_guard`)。

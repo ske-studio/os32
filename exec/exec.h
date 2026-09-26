@@ -169,6 +169,19 @@ int ring3_user_range_writable(u32 p, u32 len);
  * 2 本目が不要なら pb = 0, lb = 0。 */
 int ring3_user_ranges_writable(u32 pa, u32 la, u32 pb, u32 lb);
 
+/* 同じ表の歩きを**呼び手の文脈を見ずに必ず**行う変種 (2026-09-26、代行レビュー
+ * P2)。上の 3 つの門は「いまの呼び出しがアプリ由来か」(ring3_guard_active) で
+ * 素通しを決めるが、**アプリが登録しておいたポインタ** (fd_redirect_to_buffer
+ * のバッファ) を後でカーネルが書くときは、書く瞬間の文脈 (WM の中かどうか) は
+ * ポインタの由来と関係が無い。門は「ポインタの由来」で決める — その側だけが
+ * これを使う。PD はいまの CR3 (アプリの PD) を歩く。 */
+int ring3_user_ranges_writable_always(u32 pa, u32 la, u32 pb, u32 lb);
+
+/* いまの呼び出しが CPL=3 のアプリ由来か (= ring3_guard_active(ring3_in_syscall,
+ * ring3_wm_depth))。ポインタを**あとで使うために控える** KAPI が、控える時点で
+ * 由来を記録するのに使う (fs/fd_redirect.c の user_origin)。 */
+int ring3_call_from_user(void);
+
 /* CPL=3 アプリを fault として畳む (fault_kill_count++ → master CR3 復帰 →
  * AS 破棄 → longjmp)。**戻らない。** 実体は exec/exec.c。
  * 帯違反と同じ扱いにしたい KAPI ラッパだけが呼ぶ。 */
@@ -185,6 +198,13 @@ void ring3_fault_kill(void);
  * 実機のログと突き合わせるとき意味が変わると困る)。 */
 #define RING3_RANGE_NOPRESENT  5   /* (廃止) 帯の中だが非 present */
 #define RING3_RANGE_NOUSER     6   /* (廃止) present だが USER 無し */
+/* 7〜10 は書き側 (ring3_user_ranges_writable) の理由 (2026-09-26 に追加。それ
+ * までは書き側は数えておらず、wrap_mouse_poll で kill されても count が 0 の
+ * ままだった)。addr = 断ったポインタ、page = 見ていたページ (TRIVIAL は 0)。 */
+#define RING3_RANGE_WR_TRIVIAL 7   /* NULL か p + len の折り返し (長さ > 0) */
+#define RING3_RANGE_WR_TABLE   8   /* PD / PT の物理が読めない */
+#define RING3_RANGE_WR_PDE     9   /* PDE に present / RW / USER が無い (か PS) */
+#define RING3_RANGE_WR_PTE    10   /* PTE に present / RW / USER が無い */
 extern volatile u32 ring3_range_reject_count;
 extern volatile u32 ring3_range_reject_last;
 extern volatile u32 ring3_range_reject_addr;
@@ -193,5 +213,18 @@ extern volatile u32 ring3_range_reject_heap_top;
 
 /* 現在のネスト深度 (0=外部プログラム未実行) */
 extern volatile int exec_nest_level;
+
+/* カーネルが WM (gshell) のコードへ入っている深さ (exec/exec.c の定義の注記)。
+ * 入口 (gui_call のハンドラ / ポンプ / owner_exit) で enter、出口で leave。
+ * 3 つの門は ring3_guard_active(ring3_in_syscall, ring3_wm_depth) で判定する。 */
+extern volatile int ring3_wm_depth;
+void ring3_wm_enter(void);
+void ring3_wm_leave(void);
+/* 深さ 0 での leave (enter と対になっていない出口) の回数。0 のままが正常。
+ * 増えたら「WM のハンドラの中から exec_start / exec_resume を呼んだ」(契約 T1
+ * 違反 — 入れ子の syscall がディスパッチャの入口で深さを 0 に戻す) か、
+ * enter/leave の対が崩れた。KAPI にはせずカーネルシンボルとして読む
+ * (ring3_park_reject_count と同じ流儀)。 */
+extern volatile u32 ring3_wm_depth_underflow;
 
 #endif /* __EXEC_H */

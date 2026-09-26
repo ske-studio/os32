@@ -92,4 +92,43 @@ int ring3_pde_walkable_ok(u32 pde_flags);
  * 指すポインタが「帯に重ならない」と答えてしまう)。 */
 int ring3_range_overlaps(u32 p, u32 len, u32 base, u32 end);
 
+/* ======================================================================== */
+/*  ring3_guard_active — 「いまの KAPI 呼び出しは CPL=3 のアプリ由来か」     */
+/*                        (票 TASK_KAPI_OUTPUT_GUARD の追補、2026-09-26)      */
+/*                                                                          */
+/*  ring3_user_range_ok / ring3_user_ranges_writable / tramp_copy の 3 つの   */
+/*  門は、これまで `ring3_in_syscall` だけを見て「1 = アプリ由来」としていた。*/
+/*  ところが WM (gshell、CPL=0 の常駐シェル) は**アプリの syscall の中でしか  */
+/*  走らない** (契約 T8: X1 ハンドラ / X3 OP_WAIT / X4 ポンプ)。その間も      */
+/*  `ring3_in_syscall` は 1 のままなので、WM が自分のスタックの MouseInfo を   */
+/*  `mouse_poll` に渡すと「アプリの出力先」として PTE を見られ、シェル帯には  */
+/*  USER が無いので拒否 → **アプリが kill** された (filer が窓も出さずに消え  */
+/*  る、2026-09-26)。                                                        */
+/*                                                                          */
+/*  そこで「カーネルが WM のコードへ入っている深さ」(`ring3_wm_depth`、      */
+/*  gui_call / ポンプ / owner_exit の入口で +1、出口で -1) を渡し、          */
+/*  **深さが 0 のときだけ** ガードを効かせる。                                */
+/*                                                                          */
+/*  安全性 (**門はポインタの由来で決める**):                                 */
+/*   - **WM が選んだポインタは素通し** — 深さが 1 以上なのはカーネルが WM の  */
+/*     ハンドラ / ポンプを同期的に実行しているあいだで、gshell が契約 T1 を   */
+/*     守る限り (OWNER_EXIT ハンドラから exec_start / exec_resume を呼ばない) */
+/*     その間 CPL=3 は走らない。呼んでも入れ子の syscall はディスパッチャの   */
+/*     入口で深さ 0 に戻るので門の穴にはならない (戻った後の対の崩れは        */
+/*     ring3_wm_depth_underflow が数える)。KAPI に渡るポインタは WM が選ぶ    */
+/*     (gshell は `arg` をポインタとして解釈しない — 入力は SHM のスロット経由)。*/
+/*   - **アプリが登録したポインタは深さに関係なく歩く** — 前に控えたアプリの  */
+/*     ポインタ (fd_redirect_to_buffer のバッファ) を WM の文脈で書くときは、  */
+/*     この判定を通さず ring3_user_ranges_writable_always で表を歩く          */
+/*     (fs/fd_redirect.c の user_origin、2026-09-26 代行レビュー P2)。         */
+/*  longjmp で WM を抜けた (park / kill) ときの深さの立ち直しは exec/exec.c   */
+/*  (ディスパッチャの入口で 0 に戻す)。                                       */
+/*                                                                          */
+/*  `ring3_in_syscall` の意味 (#PF/#GP の帰属) は**変えない** — WM の中で     */
+/*  落ちたときの扱いは従来どおり。純関数なのでホストで表を固定する            */
+/*  (tools/tests/ring3_guard_host.c)。                                       */
+/*  戻り値: 1 = ガードを効かせる (CPL=3 由来) / 0 = 常駐側の直呼び扱い。       */
+/* ======================================================================== */
+int ring3_guard_active(int in_syscall, int wm_depth);
+
 #endif /* __RING3_STR_H */
