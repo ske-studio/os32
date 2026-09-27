@@ -1,6 +1,6 @@
 # OS32 v3 開発計画書
 
-> 作成・更新: 2026-09-19 / 状態: **計画・追記中（第6版、設計未凍結）**
+> 作成・更新: 2026-09-19 / 状態: **計画・追記中（第7版、設計未凍結）**
 > 現行リポジトリで準備する計画書。v3 の開発開始・フォーク作成・仕様変更の実施を意味しない。
 
 調査基点: `ske-studio/os32` の `main` = `76c69ddc7601b36e5fae4897ce8a9274e89ed33a`。
@@ -58,6 +58,7 @@ PC-98/x86版v3 は DX4・16MB を最低構成の目標とし、現行系との�
 | V3-17 | アプリケーション側の時間基準タスク管理を支援 | 採用方針。OS32自体のRTOS化とは分離し、ゲーム等が period／deadline／budget／priority を用いて重要処理を時間基準で管理できる構成を目指す。低速機では描画・演出等を間引き、高速機では余剰時間を品質向上・背景処理・idleへ回し、CPU速度とゲーム時間を分離する |
 | V3-18 | 将来の PC-98 Windows 98 アプリ互換レイヤーを阻害しない API 境界を準備 | 採用方針。v3 では Win98 互換レイヤー自体を実装しない。Win2000／NT 互換やプリエンプティブ・マルチタスク化は要求しない。将来、独立した Win32→OS32 ラッパーが PE32、仮想メモリ、モジュール、ファイル、時刻、GUI、音声等を既存 KAPI へ橋渡しできるよう、必要な原語的 API と責務境界を先に整える |
 | V3-19 | 外部OSSはOS32ネイティブ抽象APIのbackendとして取り込み、現代的通信はHost Servicesへ委譲 | 採用方針。FreeType等のローカル処理価値が高いOSSは固有ABIをKAPIやアプリ公開契約へ露出させずbackend化する。一方、TCP/IP・DNS・HTTP(S)・TLS・証明書・プロキシ等は既存Host Services方針を継承し、OS32側へOpenSSL等を導入しない。必要な外部通信はHost Agent側ラッパー／サービス追加で吸収する |
+| V3-20 | ヤドカリ型サービス継承をHost Servicesの発展原則にする | 採用方針。現代OS・クラウド・AI・文書処理・メディア処理・クラウドストレージ等をOS32へ再実装せず、Host Agent providerとして取り込み、OS32からは安定した要求／ストリーム／結果のサービス契約で利用する。ホスト実装は交換可能とし、Windows／Linux／Android／ローカルAI／クラウド等の違いをOS32へ漏らさない |
 
 V3-09〜V3-13の根拠・実現方法・受入案は [詳細方針](DEBUG_AND_MODULES.md) を参照。
 固定仮想アドレスや署名付き承認レコードは実現案で、具体的な番地・形式・方式は未凍結。
@@ -223,6 +224,37 @@ Host Agent内部のラッパー／providerとして実装する。OS32側のlink
 ローカルで完結すべき表示・入力・保存・基本codec等と、外部接続のためのHost Servicesを分ける。
 能力照会ではbackendの有無とHost Serviceの有無を別々に報告し、未接続を成功扱いしない。
 
+### ヤドカリ型サービス継承
+
+Host Servicesは単なる「ネットワーク代行」ではなく、旧世代機器が現代側の能力を利用し続けるための
+**交換可能な外部サービス境界**として発展させる。OS32自身へ巨大な現代ソフトウェアスタックを
+移植するのではなく、Host Agent側にprovider／wrapperを追加し、OS32は安定した要求・ストリーム・結果を扱う。
+
+候補となるサービス領域:
+
+| 領域 | ホスト側で利用する能力の例 | OS32へ返す形の例 |
+|---|---|---|
+| Web | 現代ブラウザ、HTTP(S)、JavaScript実行 | UTF-8 text／Markdown相当／link一覧／MGX・bitmap |
+| 文書 | PDF viewer/renderer、Office変換、印刷系 | page bitmap／text／PDF化結果／print status |
+| 画像 | WebP／AVIF／HEIF／SVG等の現代codec、色変換 | OS32向けbitmap／MGX／PNG／JPEG |
+| メディア | 現代audio/video codec、transcode | PCM stream／低負荷形式／縮小frame列 |
+| ストレージ | SMB／SFTP／WebDAV／各種cloud storage | file/list/read/write相当のservice結果 |
+| 言語 | 辞書、IME補助、翻訳、TTS／STT | UTF-8 text／PCM／候補列 |
+| AI | local LLM／cloud API／OCR等 | text／structured result／必要ならfile |
+| OS連携 | clipboard／printer／time等の既存Host Services | 現行service契約 |
+
+これは各サービスをv3初期リリースで実装する約束ではない。まずproviderを追加してもKAPIを毎回増やさず、
+サービス固有の現代APIや認証方式をOS32へ流入させない構造を優先する。
+
+Host Agentの実装先も固定しない。Windows、Linux、Android、将来のOS64等が同じservice contractを
+提供できれば、OS32側は接続先の実装を意識しない。現代側のAPI廃止、TLS更新、cloud provider変更、
+AI model変更等は原則としてホスト側providerで吸収する。
+
+一方、ローカル処理として価値があり、ホスト無しでも機器の用途を成立させるfont／image／codec等は
+OS32側backendとして残す。この二重構造により、**旧機器の能力を使う部分はローカル、時代変化を
+追う部分はホスト**という責務分担を維持する。
+
+
 ## 5. C11 移行案
 
 現行は `-std=gnu89`。v3 では GNU 拡張を使える `-std=gnu11` を第一候補とする。
@@ -312,10 +344,11 @@ USB着脱は機器とQ14の決定後に段階追加する。動的ロードを�
 | Q18 | 時間基準タスク管理にOSが提供する最小支援 | monotonic clockの分解能、`sleep_until`／`yield`／優先度指定の契約、タイマ精度とオーバーヘッドを実測して決める。period／deadline／budgetの全面的なカーネル管理やhard real-time保証は前提にしない |
 | Q19 | 将来のWin98互換層を阻害しないためv3で凍結するAPI原語の範囲 | PC-98 Windows 98ユーザーアプリを将来対象とし、PE32配置・VM・モジュール・VFS・時刻・GUI・音声のうち、どこまでをKAPI契約として先に保証するかを決める。Win2000/NT互換、VxD、プリエンプティブ化は前提にしない |
 | Q20 | 外部OSS backendとHost Services委譲の境界をどこまでv3で凍結するか | font/image/compress/audio等のOS32 native abstractionの最小契約、backend能力照会、依存ライセンス・RAM/性能予算を決める。TCP/IP・DNS・HTTP(S)・TLSは既存Host Services方針を継承し、OpenSSL等をOS32側へ入れない |
+| Q21 | Host Servicesを現代サービスprovider基盤へ拡張する際の共通契約 | service名／version／capability／request／stream／status／error／provider識別をどこまで共通化するかを決める。Web・文書・media・storage・language・AI等の個別APIをKAPIへ直接増殖させず、ホスト実装の交換を可能にする |
 
 ## 9. 更新方法と追加候補
 
-新しい要望は V3-20 以降、未決事項は Q21 以降を追記する。ID は再利用しない。
+新しい要望は V3-21 以降、未決事項は Q22 以降を追記する。ID は再利用しない。
 決定した項目には日付・判断主体・理由・影響する試験を書く。
 未決を決定に変える際は、検討経緯を消さず「置換された案」として残す。
 実装課題の進捗は [移行課題台帳](MIGRATION_AUDIT.md) の M 番号で更新する。
@@ -324,7 +357,7 @@ USB着脱は機器とQ14の決定後に段階追加する。動的ロードを�
 
 | ID | 追加日 | 要望／目的 | 状態 | 依存する課題 | 受入条件 |
 |---|---|---|---|---|---|
-| （次: V3-20） | — | — | 未決 | — | — |
+| （次: V3-21） | — | — | 未決 | — | — |
 
 ## 10. 変更履歴
 
@@ -336,3 +369,4 @@ USB着脱は機器とQ14の決定後に段階追加する。動的ロードを�
 | 4 | 2026-09-21 | V3-17としてアプリケーション側の時間基準タスク管理方針を追加。OS32のRTOS化とは分離し、CPU速度非依存のゲーム時間、低速機での負荷縮退、高速機での余剰時間活用、OS側の最小支援を整理。Q18を追加 |
 | 5 | 2026-09-28 | V3-18として将来のPC-98 Windows 98ユーザーアプリ互換レイヤーを阻害しないAPI設計を追加。互換レイヤー本体は後回し、Win2000/NT互換・VxD・プリエンプティブ化は非要件。GPL主体コードをMIT本体へ直接混入させず、独立ラッパーから利用できるVM／モジュール／VFS／時刻／GUI／音声等の境界を準備する。Q19とM26を追加 |
 | 6 | 2026-09-28 | V3-19として外部OSSのbackend化とHost Servicesへの委譲境界を追加。FreeType等のローカル処理はOS32固有ABIを保ったbackendとして取り込み、TCP/IP／DNS／HTTP(S)／TLSは既存Host Servicesの「ホスト=I/Oコプロセッサ」方針を継承。OpenSSL等はOS32へ導入せず、必要な現代通信はHost Agent側ラッパーで吸収する。Q20とM27を追加 |
+| 7 | 2026-09-28 | V3-20として「ヤドカリ型サービス継承」を明文化。Host Servicesをネットワーク代行から交換可能な現代サービスprovider基盤へ発展させ、Web／文書／画像／media／storage／language／AI等をHost Agent側で吸収する方針を追加。OS32側は安定したservice contractのみ保持し、Windows／Linux／Android／OS64／cloud等の実装差を漏らさない。Q21とM28を追加 |
