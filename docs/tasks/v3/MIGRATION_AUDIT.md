@@ -46,6 +46,7 @@ OS 全体のビルド・ゲスト実行・実機測定は今回行っていな�
 | M25 | **計測・受入計画**: 移植時に作り直す要素と保守負担を減らす | 次の実機移植の着手・評価前 | Q17の用途と対象仕様を固定。依存層追加量・共通コード変更と理由・RAM・時間・共通試験と実機結果を記録 |
 | M26 | **API設計課題**: 将来のPC-98 Windows 98ユーザーアプリ互換層を追加できる境界をv3で準備する | v3 KAPI／メモリ／ローダ／GUI／音声の公開契約を凍結する前 | Q19を決定。Win32固有型やNT Object Managerをカーネルへ持ち込まず、モック互換層からPE32配置に必要なVM原語、VFS、時刻、GUI、音声等を組み立てられることを確認。Win98互換実装そのもの、VxD、Win2000/NT互換、プリエンプティブ化は閉じる条件にしない。GPL主体コードはMIT本体へ直接取り込まない |
 | M27 | **API／配置設計課題**: 外部OSSのbackend化とHost Services委譲の境界をv3へ継承する | font/image/compress/audio等の公開APIを凍結する前、および現代通信ライブラリを追加する提案時 | Q20を決定。OSS固有型をKAPIへ露出させず、native／OSS backend差替えと能力照会を確認。既存HOST_SERVICES_PLAN §0との整合を保ち、TCP/IP・DNS・HTTP(S)・TLS・証明書処理はHost Agent側へ委譲する。OpenSSL等がOS32依存へ追加されないこと、ホスト未接続時は明示的未対応となることを受入条件にする |
+| M28 | **サービス境界設計課題**: Host Servicesをヤドカリ型の現代service provider基盤へ発展させる | 個別のWeb／文書／media／storage／language／AIサービスをKAPIへ追加する前 | Q21を決定。service/version/capability/request/stream/status/errorの共通契約を定め、provider変更でOS32アプリやKAPIを変更しない例をモックで確認。現行HOST_SERVICES_PLANの受入済みwire/KAPIを不用意に破らず、必要なら上位層の拡張として設計する |
 
 M05 は exec／AppSlot／ring3_entry の読取りから未定義範囲を挙げたもので、
 リポジトリ全域に FPU 実装が存在しないと証明したものではない。
@@ -86,7 +87,7 @@ copy2 の例外とは別経路。修正時は実モジュールを使う回帰�
 
 ## 5. 課題の更新様式
 
-新規項目は M28 以降を使う。既存 ID は再利用しない。
+新規項目は M29 以降を使う。既存 ID は再利用しない。
 解決時は「修正 SHA／試験条件／観測結果／残る制限／閉じた日」を追記する。
 コードが変わっただけ、文書の状態語が変わっただけでは解決としない。
 反例未確認の設計課題を、現行リリースを止める blocker として扱わない。
@@ -98,3 +99,4 @@ copy2 の例外とは別経路。修正時は実モジュールを使う回帰�
 | 2026-09-19 | M23〜M25 | 根本目的に基づく移植性・能力別構成・評価の課題を追加。新対象の実装確認ではない | [根本方針](PORTABILITY_PRINCIPLES.md) とユーザー提示方針 |
 | 2026-09-28 | M26 | 将来のPC-98 Windows 98ユーザーアプリ互換層を阻害しないAPI境界の監査を追加。互換層の実装着手を意味しない | [計画書](PLAN.md) V3-18／Q19 とユーザー提示方針 |
 | 2026-09-28 | M27 | OSS backendとHost Services委譲境界の監査を追加。既存Host ServicesのTCP/IP・DNS・HTTP・TLS非搭載方針をv3へ継承 | [計画書](PLAN.md) V3-19／Q20、[HOST_SERVICES_PLAN](../network/HOST_SERVICES_PLAN.md) §0 |
+| 2026-09-28 | M28 | Host Servicesを交換可能な現代service provider基盤へ発展させる設計課題を追加。個別サービスの実装着手を意味しない | [計画書](PLAN.md) V3-20／Q21、[根本方針](PORTABILITY_PRINCIPLES.md) §4.1 |
