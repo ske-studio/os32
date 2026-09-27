@@ -66,6 +66,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [DEVELOPMENT.md](DEVELOPMENT.md) | **開発案内** — 作業別の参照先 (読む / 触る / 検証) と、ファイル → 役割 → 仕様のファイル地図。仕様本文は持たない |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
 | [DESIGN_APP_FIRST.md](DESIGN_APP_FIRST.md) | **アプリケーション優先設計の草案** — マルチタスクを主目的とせず、前景1アプリへCPU・メモリ・GPU・PCM等の資源を集中する設計思想。640×480×16bitを高機能グラフィックスの境界とし、Video HAL / VESA2的互換層 / SDL等の判断基準を整理。ロードマップではない |
+| [DESIGN_VDM_DISPLAY.md](DESIGN_VDM_DISPLAY.md) | **VDM画面取得・GUI表示・遠隔操作の独立草案** — 16bit GVRAM、100 Mbit/s・差分RLE、共通画面エンジン、KAPIv65でのµs計測。経緯と未検証の予測を記録。本線の実装計画とは別 |
 | [archive/README.md](archive/README.md) | **アーカイブの運用** — 受入完了した票をどこへどう移すか (`tools/move_docs.py`)、移したあとも守ること。籠の一覧は「ログ」節 |
 | [NHD_FORMAT.md](NHD_FORMAT.md) | NHD r0形式ファイル構造仕様 |
 | [MGX_FORMAT.md](MGX_FORMAT.md) | MGX 漫画専用グレースケール画像形式 仕様 (48Bヘッダ + パレット表 + deflate、4bpp 16階調、ホスト側エンコード専用) |
