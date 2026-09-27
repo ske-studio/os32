@@ -1,6 +1,6 @@
 # OS32 v3 開発計画書
 
-> 作成・更新: 2026-09-19 / 状態: **計画・追記中（第7版、設計未凍結）**
+> 作成・更新: 2026-09-19 / 状態: **計画・追記中（第8版、設計未凍結）**
 > 現行リポジトリで準備する計画書。v3 の開発開始・フォーク作成・仕様変更の実施を意味しない。
 
 調査基点: `ske-studio/os32` の `main` = `76c69ddc7601b36e5fae4897ce8a9274e89ed33a`。
@@ -59,6 +59,7 @@ PC-98/x86版v3 は DX4・16MB を最低構成の目標とし、現行系との�
 | V3-18 | 将来の PC-98 Windows 98 アプリ互換レイヤーを阻害しない API 境界を準備 | 採用方針。v3 では Win98 互換レイヤー自体を実装しない。Win2000／NT 互換やプリエンプティブ・マルチタスク化は要求しない。将来、独立した Win32→OS32 ラッパーが PE32、仮想メモリ、モジュール、ファイル、時刻、GUI、音声等を既存 KAPI へ橋渡しできるよう、必要な原語的 API と責務境界を先に整える |
 | V3-19 | 外部OSSはOS32ネイティブ抽象APIのbackendとして取り込み、現代的通信はHost Servicesへ委譲 | 採用方針。FreeType等のローカル処理価値が高いOSSは固有ABIをKAPIやアプリ公開契約へ露出させずbackend化する。一方、TCP/IP・DNS・HTTP(S)・TLS・証明書・プロキシ等は既存Host Services方針を継承し、OS32側へOpenSSL等を導入しない。必要な外部通信はHost Agent側ラッパー／サービス追加で吸収する |
 | V3-20 | ヤドカリ型サービス継承をHost Servicesの発展原則にする | 採用方針。現代OS・クラウド・AI・文書処理・メディア処理・クラウドストレージ等をOS32へ再実装せず、Host Agent providerとして取り込み、OS32からは安定した要求／ストリーム／結果のサービス契約で利用する。ホスト実装は交換可能とし、Windows／Linux／Android／ローカルAI／クラウド等の違いをOS32へ漏らさない |
+| V3-21 | PE32/i386ローダをv3必須機能として実装 | 採用方針。将来のWin98互換層を待たず、OS32の正式な実行形式ローダの1つとしてPE32/i386を扱う。P4でABI/C11/旧互換を固定し、P5前半でVM・VFS・資源回収・配置契約を整えた後、P5後半で実装してP6 GUI発展前のゲートとする |
 
 V3-09〜V3-13の根拠・実現方法・受入案は [詳細方針](DEBUG_AND_MODULES.md) を参照。
 固定仮想アドレスや署名付き承認レコードは実現案で、具体的な番地・形式・方式は未凍結。
@@ -167,6 +168,54 @@ compat wrapper → Host Services → Host Agent の経路へ写像する。
 v3での受入は「Win98アプリが動くこと」ではなく、Q19で選んだ代表的な将来要求
 （PE32配置、固定位置メモリ、ファイル、時刻、GUI、音声等）をモック互換層から表現でき、
 Win32固有型やNT互換機構をカーネルへ持ち込まずに済むこととする。
+
+
+### 4.1.1 PE32ローダはv3必須
+
+PE32/i386ローダは将来互換層の研究項目ではなく、**v3の正式な実行基盤**として実装する。
+位置はP5カーネル基盤の後半とし、P6 GUI発展へ進む前に受入を完了する。
+
+順序:
+
+```text
+P4  C11 / ABI / 旧バイナリ互換の固定
+ |
+ v
+P5a VM / VFS / 資源回収 / モジュール配置契約
+ |
+ v
+P5b PE32/i386 loader   <- v3必須
+ |
+ v
+P6  GUI発展
+ |
+ v
+将来のWin98 compatibility layer
+```
+
+v3で必須とする最小範囲:
+
+- PE32 / i386
+- EXEのsection配置
+- image baseとbase relocation
+- import table解決
+- export lookup
+- DLLロードに使える基本module機構
+- entry point起動
+- zero-fillされる未初期化領域
+- section属性に応じた実行／書込保護の反映
+
+Win32 APIそのもの、`kernel32.dll`互換、NT loader完全互換、SEH完全互換、delay import、
+SxS、Win98互換DLL群はv3のPE32ローダ受入には含めない。
+
+ローダは「Win98専用」とせず、OS32Xと並ぶ実行形式frontendとして扱う。
+実装配置は最終設計で決めるが、概念上は `exec/os32x_loader` と `exec/pe32_loader` のように
+実行形式解析とOS32の共通実行基盤を分離する。
+
+受入用にはMicrosoft/ReactOS/WineのDLLを必要としない自己完結テストを用意する。
+最低でも、再配置が必要なPE32 EXE、importを持つPE32 EXE、複数sectionとzero-fillを持つEXEを用意し、
+OS32側のテストshim（例: print／exit相当）へimport解決して正常終了できることを確認する。
+これによりWin98互換層の実装前に、PE配置・relocation・import/export・保護属性の責務を検証する。
 
 ## 4.2 外部OSSとHost Servicesの配置原則
 
@@ -313,7 +362,8 @@ v3 の入口に置く原則:
 | P2 作業場所の分離 | フォーク・専用作業場所・文書選別・新セッション | コード変更前の基準動作と、v3 の入口が独立している |
 | P3 検証基盤 | 結果チャネルとゲスト一括試験、既存の未検証経路を補完。実機／エミュレータの環境とワークフローを整備 | 古い結果・欠落・異常終了・タイムアウトを合格にしない。物理実機でも起動版照合・障害記録・正常版への回復ができる |
 | P4 C11 と互換性 | 規約とコンパイル条件の移行、互換性試験 | 486 基本経路と対象旧バイナリが通る。生成・手書き ABI が一致 |
-| P5 カーネル基盤 | 採用した実行・資源管理・メモリ課題、認可台帳と段階的モジュールロードを実装。機種依存を局所化 | PC-98/x86版はDX4・16MB の受入条件と旧アプリ互換性を満たす。未認可・契約違反をロード前に拒否し、初期化失敗の資源を回収。手順は [詳細方針](DEBUG_AND_MODULES.md) |
+| P5a カーネル基盤 | 採用した実行・資源管理・メモリ課題、認可台帳と段階的モジュールロードを実装。機種依存を局所化。PE32が使うVM／VFS／資源回収／配置契約を先に固める | PC-98/x86版はDX4・16MB の受入条件と旧アプリ互換性を満たす。未認可・契約違反をロード前に拒否し、初期化失敗の資源を回収。PE32 frontendを後付けして共通基盤を作り直さなくて済む |
+| P5b PE32実行基盤 | PE32/i386 frontend、section配置、relocation、import/export、module基本機構、entry point起動、zero-fill、保護属性を実装 | 外部Win32 DLLなしの自己完結PE32試験で、再配置・import・複数section・zero-fill・保護属性・正常終了を確認。**P6へ進む前の必須ゲート** |
 | P6 GUI の発展 | GUI 条件・CPU 機能検出・状態管理・最適化 | 対応 CPU で正しく高速化し、非対応 CPU で未定義命令を実行しない |
 
 検証基盤の改善は現行系で先行してよい。C11・CPU 条件・v3 専用 ABI の変更は v3 側で行う。
@@ -345,10 +395,11 @@ USB着脱は機器とQ14の決定後に段階追加する。動的ロードを�
 | Q19 | 将来のWin98互換層を阻害しないためv3で凍結するAPI原語の範囲 | PC-98 Windows 98ユーザーアプリを将来対象とし、PE32配置・VM・モジュール・VFS・時刻・GUI・音声のうち、どこまでをKAPI契約として先に保証するかを決める。Win2000/NT互換、VxD、プリエンプティブ化は前提にしない |
 | Q20 | 外部OSS backendとHost Services委譲の境界をどこまでv3で凍結するか | font/image/compress/audio等のOS32 native abstractionの最小契約、backend能力照会、依存ライセンス・RAM/性能予算を決める。TCP/IP・DNS・HTTP(S)・TLSは既存Host Services方針を継承し、OpenSSL等をOS32側へ入れない |
 | Q21 | Host Servicesを現代サービスprovider基盤へ拡張する際の共通契約 | service名／version／capability／request／stream／status／error／provider識別をどこまで共通化するかを決める。Web・文書・media・storage・language・AI等の個別APIをKAPIへ直接増殖させず、ホスト実装の交換を可能にする |
+| Q22 | PE32ローダのv3凍結範囲とOS32Xとの共通実行基盤 | PE32/i386、section、relocation、import/export、module、entry、zero-fill、protectionを必須範囲とする。TLS callback／SEH／delay import／SxS等をどこまで後段へ送るか、loader frontendと共通exec責務の境界を決める |
 
 ## 9. 更新方法と追加候補
 
-新しい要望は V3-21 以降、未決事項は Q22 以降を追記する。ID は再利用しない。
+新しい要望は V3-22 以降、未決事項は Q23 以降を追記する。ID は再利用しない。
 決定した項目には日付・判断主体・理由・影響する試験を書く。
 未決を決定に変える際は、検討経緯を消さず「置換された案」として残す。
 実装課題の進捗は [移行課題台帳](MIGRATION_AUDIT.md) の M 番号で更新する。
@@ -357,7 +408,7 @@ USB着脱は機器とQ14の決定後に段階追加する。動的ロードを�
 
 | ID | 追加日 | 要望／目的 | 状態 | 依存する課題 | 受入条件 |
 |---|---|---|---|---|---|
-| （次: V3-21） | — | — | 未決 | — | — |
+| （次: V3-22） | — | — | 未決 | — | — |
 
 ## 10. 変更履歴
 
@@ -370,3 +421,4 @@ USB着脱は機器とQ14の決定後に段階追加する。動的ロードを�
 | 5 | 2026-09-28 | V3-18として将来のPC-98 Windows 98ユーザーアプリ互換レイヤーを阻害しないAPI設計を追加。互換レイヤー本体は後回し、Win2000/NT互換・VxD・プリエンプティブ化は非要件。GPL主体コードをMIT本体へ直接混入させず、独立ラッパーから利用できるVM／モジュール／VFS／時刻／GUI／音声等の境界を準備する。Q19とM26を追加 |
 | 6 | 2026-09-28 | V3-19として外部OSSのbackend化とHost Servicesへの委譲境界を追加。FreeType等のローカル処理はOS32固有ABIを保ったbackendとして取り込み、TCP/IP／DNS／HTTP(S)／TLSは既存Host Servicesの「ホスト=I/Oコプロセッサ」方針を継承。OpenSSL等はOS32へ導入せず、必要な現代通信はHost Agent側ラッパーで吸収する。Q20とM27を追加 |
 | 7 | 2026-09-28 | V3-20として「ヤドカリ型サービス継承」を明文化。Host Servicesをネットワーク代行から交換可能な現代サービスprovider基盤へ発展させ、Web／文書／画像／media／storage／language／AI等をHost Agent側で吸収する方針を追加。OS32側は安定したservice contractのみ保持し、Windows／Linux／Android／OS64／cloud等の実装差を漏らさない。Q21とM28を追加 |
+| 8 | 2026-09-28 | V3-21としてPE32/i386ローダをv3必須へ昇格。P5をP5a/P5bへ分け、VM／VFS／資源回収／配置契約の後、GUI発展前にPE32 frontendを受入する順序を固定。Win32 API互換層は後回しだが、section／relocation／import-export／module／entry／zero-fill／protectionはv3必須。Q22とM29を追加 |
