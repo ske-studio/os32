@@ -40,7 +40,7 @@ v3 の新しい判断は計画書の「提示方針／採用方針／計画案�
 | [S0_FOUNDATION](../settings/S0_FOUNDATION.md) F3／[F2_OWNERSHIP](../settings/F2_OWNERSHIP.md) | 既存実装と未接続・未着手部分を分けて再評価 |
 | [FEP_BOUNDARY](../settings/FEP_BOUNDARY.md)／[RAM統合](../settings/MEMORY_RAM_INTEGRATION.md)／[DEVICE_RESERVATION](../settings/DEVICE_RESERVATION.md) | 設計提案。全文を未修正不具合の一覧として扱わない |
 | [kstring 実測計画](../portability/TASK_KSTRING_BENCH.md) | asm／C の一本化は測定後に判断する。C11採用とは別の判断 |
-| [ネットワーク計画](../network/PLAN.md)／[Host Services](../network/HOST_SERVICES_PLAN.md) | エミュレータでの受入と、ハード待ちの実機項目を分ける |
+| [ネットワーク計画](../network/PLAN.md)／[Host Services](../network/HOST_SERVICES_PLAN.md) | 現行のリンク／KAPI／Host Agent契約と「OS32へTCP/IP・DNS・HTTP・TLSを載せない、ホスト=I/Oコプロセッサ」を継承する。エミュレータでの受入とハード待ちの実機項目を分ける。Web／文書／media／storage／language／AI等への拡張方針はv3 PLAN V3-20を正典とし、現行の受入済み計画本文を将来案で書き換えない |
 | [v4 草案](../../V4_GAME_PLATFORM_DRAFT.md) | 将来参考。Fabric／外部GPU等を v3 の必須要件へ自動昇格しない |
 | [arch_port 索引](../arch_port/00_INDEX.md) | 別リポジトリ pw-sh4-research の調査の写し。v3 ARM 実装計画そのものではない |
 
