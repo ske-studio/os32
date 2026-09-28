@@ -154,6 +154,8 @@ Hardware accelerator available
 
 ACSとHost Serviceは役割を分離する。
 
+処理配置の上位原則は [LEGACY_LIVING_PRESERVATION.md](LEGACY_LIVING_PRESERVATION.md) を参照する。ACSはHost Serviceの代替ではなく、実機内部で余っている計算資源を固定機能として活用するための仕組みである。AI、現代codec、TLS等、実機で実行する体験上の意味が薄い高負荷・時代依存処理はHost Serviceへ委譲する。
+
 - **ACS**: 同一マシン上の余剰CPUコアを固定機能アクセラレータとして利用する。
 - **Host Service**: OS32外部またはホスト環境が提供するサービスを利用する。
 
