@@ -199,6 +199,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [archive/kernel_v2/TASK_coder1_M0b_privileged.md](archive/kernel_v2/TASK_coder1_M0b_privileged.md) / [TASK_coder1_M1_ring3.md](archive/kernel_v2/TASK_coder1_M1_ring3.md) / [TASK_coder2_libos32gui.md](archive/kernel_v2/TASK_coder2_libos32gui.md) | 2.0 のコーダー票。完了記録 |
 | [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md) / [tasks/v4/README.md](tasks/v4/README.md) | ゲーム基盤 v4 の草案 (2026-09-07)。v3 (次期カーネル、未定義) の後 |
 | [AUXILIARY_CORE_SERVICE.md](AUXILIARY_CORE_SERVICE.md) | **Auxiliary Core Service 草案** — OS32の単一コア思想を維持し、x86/ARMの余剰コアをGPU・DSP等の固定機能アクセラレータとして利用する設計 |
+| [LEGACY_LIVING_PRESERVATION.md](LEGACY_LIVING_PRESERVATION.md) | **レガシー実機の動態保存と役割分離** — 実機体験に意味のある処理を残し、時代依存の高負荷処理をOS64/Host Serviceへ委譲する長期設計原則 |
 | [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2 ローダー) — 設計 (全 8 部) |
 
 ### FEP・V86・SQLite・ライブラリ
