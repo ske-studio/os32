@@ -48,6 +48,7 @@ OS 全体のビルド・ゲスト実行・実機測定は今回行っていな�
 | M27 | **API／配置設計課題**: 外部OSSのbackend化とHost Services委譲の境界をv3へ継承する | font/image/compress/audio等の公開APIを凍結する前、および現代通信ライブラリを追加する提案時 | Q20を決定。OSS固有型をKAPIへ露出させず、native／OSS backend差替えと能力照会を確認。既存HOST_SERVICES_PLAN §0との整合を保ち、TCP/IP・DNS・HTTP(S)・TLS・証明書処理はHost Agent側へ委譲する。OpenSSL等がOS32依存へ追加されないこと、ホスト未接続時は明示的未対応となることを受入条件にする |
 | M28 | **サービス境界設計課題**: Host Servicesをヤドカリ型の現代service provider基盤へ発展させる | 個別のWeb／文書／media／storage／language／AIサービスをKAPIへ追加する前 | Q21を決定。service/version/capability/request/stream/status/errorの共通契約を定め、provider変更でOS32アプリやKAPIを変更しない例をモックで確認。現行HOST_SERVICES_PLANの受入済みwire/KAPIを不用意に破らず、必要なら上位層の拡張として設計する |
 | M29 | **v3必須実装課題**: PE32/i386ローダをP5bで実装し、P6前の必須ゲートにする | P5aのVM／VFS／資源回収／配置契約が固まった後、GUI発展前 | Q22を決定。PE32 section配置、base relocation、import/export、module基本機構、entry point、zero-fill、section protectionを実装。外部Win32 DLLを使わない自己完結テストで再配置・import・複数section・zero-fill・保護属性・正常終了を受入。Win32 API互換、SEH完全互換、delay import、SxS等は閉じる条件にしない |
+| M30 | **後段受入計画**: VDM/V86互換試験にアリスソフトDOSタイトル群を基準として使う | PE32/Win95-98互換基盤の初期受入後 | Q23を決定。タイトルごとにDOSメモリ、ファイルI/O、キーボード、日本語表示、FM/PCM、マウス、タイマ、必要時DOS extender/プロテクトモード経路のチェックリストを作る。起動のみを合格にせず、同一メーカーのDOS→Win95世代比較も記録する |
 
 M05 は exec／AppSlot／ring3_entry の読取りから未定義範囲を挙げたもので、
 リポジトリ全域に FPU 実装が存在しないと証明したものではない。
@@ -88,7 +89,7 @@ copy2 の例外とは別経路。修正時は実モジュールを使う回帰�
 
 ## 5. 課題の更新様式
 
-新規項目は M30 以降を使う。既存 ID は再利用しない。
+新規項目は M31 以降を使う。既存 ID は再利用しない。
 解決時は「修正 SHA／試験条件／観測結果／残る制限／閉じた日」を追記する。
 コードが変わっただけ、文書の状態語が変わっただけでは解決としない。
 反例未確認の設計課題を、現行リリースを止める blocker として扱わない。
@@ -102,3 +103,4 @@ copy2 の例外とは別経路。修正時は実モジュールを使う回帰�
 | 2026-09-28 | M27 | OSS backendとHost Services委譲境界の監査を追加。既存Host ServicesのTCP/IP・DNS・HTTP・TLS非搭載方針をv3へ継承 | [計画書](PLAN.md) V3-19／Q20、[HOST_SERVICES_PLAN](../network/HOST_SERVICES_PLAN.md) §0 |
 | 2026-09-28 | M28 | Host Servicesを交換可能な現代service provider基盤へ発展させる設計課題を追加。個別サービスの実装着手を意味しない | [計画書](PLAN.md) V3-20／Q21、[根本方針](PORTABILITY_PRINCIPLES.md) §4.1 |
 | 2026-09-28 | M29 | PE32/i386ローダをv3必須のP5bゲートとして追加。Win98互換層とは分離し、OS32の正式な実行形式frontendとして受入する | [計画書](PLAN.md) V3-21／Q22 |
+| 2026-09-28 | M30 | VDM/V86互換の後段受入基準としてアリスソフトDOSタイトル群を採用する方針を追加 | [計画書](PLAN.md) V3-22／Q23 |
