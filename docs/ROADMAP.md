@@ -8,7 +8,7 @@
 
 | 線 | 現在 | 意味 | 記録 |
 |---|---|---|---|
-| **カーネル** | **2.0** (タグ `v2.0`、2026-09-03) | リング 3 (CPL=3) ネイティブ。`ver` が `OS32 v2.0` と名乗るのはこれ | [archive/kernel_v2/PLAN.md](archive/kernel_v2/PLAN.md) (M1〜M3 の**完了記録**)、[CHANGELOG.md](../CHANGELOG.md) |
+| **カーネル** | **2.0** (タグ `v2.0`、2026-09-03) → **2.1 保守計画** | 2.0 はリング 3 (CPL=3) ネイティブ。2.1 は現行系の実機互換・安定化修正を扱い、v3設計とは分離 | [archive/kernel_v2/PLAN.md](archive/kernel_v2/PLAN.md)、[v2.1 PEGC実機課題](tasks/gui/v21/TASK_PEGC_RA266_TIMING.md) |
 | **GUI シェル** | **1.3 完了 → 1.4 進行中** | 本書 §1 の各節。カーネル 2.0 の上で動く | §1 |
 | 次期カーネル | **v3 (未着手、未定義)** | 本書 §2 の長期項目 (プリエンプティブ寄りのマルチタスクなど)。**2026-09-15 のユーザー決裁で「v2」ではなく v3 と呼ぶ** (出荷済み 2.0 と衝突するため) | §2 |
 | ゲーム基盤 | v4 (草案) | [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md)。v3 の後 | — |
@@ -234,6 +234,32 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 先送り (v3 以降、[§2](#2-長期ロードマップ-次期カーネル-v3-以降) の「GUI アプリケーション群」): 設定アプリの拡張項目、
 image viewer (VBZ / VDP / BMP)、music player、`sed` / `awk`。
+
+---
+
+## 1.5 kernel v2.1 — 実機互換・安定化
+
+v2.1 は v3 の新API設計へ進む前に、現行系で判明した実機依存の不具合を修正する保守リリースとして扱う。
+機能拡張を無制限に積む版ではなく、既存契約を保ったまま実機での成立条件を固める。
+
+### PEGC / PC-9821Ra266 の31kHz 640x480表示
+
+PC-9821Ra266 実機では、OS32ブート直後に接続ディスプレイが入力を 31kHz / 720x350 相当として認識し、
+`os32gui` でPEG C backendへ移ると 31kHz / 640x480 の認識に変わる一方、表示内容が崩れることを確認した。
+
+現行PEGC backendは、640x480用SYNC/SCROLLの一部をNP21/W BIOS実装から採用し、
+GDC PITCHやclock状態の一部を起動時BIOS状態へ依存している。
+RA266実機ではこの前提が成立していない可能性がある。
+
+v2.1で以下を実施する。
+
+- RA266のBIOS起動直後とPEGC init直後のGDC/BIOS状態を採取
+- 09A8h、PITCH、GDC clock、master/slave SYNC/SCROLL、BIOS work areaを比較
+- 可能ならreal-mode BIOSによる正規640x480設定値を取得
+- 起動時の残存状態に依存しないPEGC mode setへ修正
+- RA266実機、NP21/W PEGC、9801 planar、Cirrusの回帰を確認
+
+詳細・受入条件: [TASK_PEGC_RA266_TIMING.md](tasks/gui/v21/TASK_PEGC_RA266_TIMING.md)。
 
 ---
 
