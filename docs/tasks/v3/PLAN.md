@@ -1,6 +1,6 @@
 # OS32 v3 開発計画書
 
-> 作成・更新: 2026-09-19 / 状態: **計画・追記中（第9版、設計未凍結）**
+> 作成・更新: 2026-09-19 / 状態: **計画・追記中（第10版、設計未凍結）**
 > 現行リポジトリで準備する計画書。v3 の開発開始・フォーク作成・仕様変更の実施を意味しない。
 
 調査基点: `ske-studio/os32` の `main` = `76c69ddc7601b36e5fae4897ce8a9274e89ed33a`。
@@ -61,6 +61,7 @@ PC-98/x86版v3 は DX4・16MB を最低構成の目標とし、現行系との�
 | V3-20 | ヤドカリ型サービス継承をHost Servicesの発展原則にする | 採用方針。現代OS・クラウド・AI・文書処理・メディア処理・クラウドストレージ等をOS32へ再実装せず、Host Agent providerとして取り込み、OS32からは安定した要求／ストリーム／結果のサービス契約で利用する。ホスト実装は交換可能とし、Windows／Linux／Android／ローカルAI／クラウド等の違いをOS32へ漏らさない |
 | V3-21 | PE32/i386ローダをv3必須機能として実装 | 採用方針。将来のWin98互換層を待たず、OS32の正式な実行形式ローダの1つとしてPE32/i386を扱う。P4でABI/C11/旧互換を固定し、P5前半でVM・VFS・資源回収・配置契約を整えた後、P5後半で実装してP6 GUI発展前のゲートとする |
 | V3-22 | VDM/V86互換試験は後段でアリスソフトDOSタイトル群を基準にする | 採用方針。PE32/Win95-98互換の初期ゲートとは分離し、後段のDOS互換評価として扱う。単なる起動確認ではなく、DOSメモリ、ファイルI/O、キーボード、日本語表示、FM/PCM、マウス、タイマ、必要に応じたプロテクトモード移行等をタイトルごとに検証する |
+| V3-23 | CD-DAデジタル再生と軽量ソフトウェアミキサーをOS32ネイティブ機能として早期実装 | 採用方針。ATAPIのデジタル音声抽出を既定、従来のアナログCD-DA再生を設定fallbackとして残す。ミキサーは外部OSSを持ち込まず、16bit PCM入力・32bit整数accumulator・Q1.15 gain・hard saturationを基本とする小規模スクラッチ実装にする |
 
 V3-09〜V3-13の根拠・実現方法・受入案は [詳細方針](DEBUG_AND_MODULES.md) を参照。
 固定仮想アドレスや署名付き承認レコードは実現案で、具体的な番地・形式・方式は未凍結。
@@ -297,6 +298,56 @@ Host Agent内部のラッパー／providerとして実装する。OS32側のlink
 ローカルで完結すべき表示・入力・保存・基本codec等と、外部接続のためのHost Servicesを分ける。
 能力照会ではbackendの有無とHost Serviceの有無を別々に報告し、未接続を成功扱いしない。
 
+### OS32ネイティブで持つ軽量機能の例: オーディオミキサー
+
+外部OSSをbackend化する原則は、外部実装を持ち込む価値がある場合に適用する。
+必要機能が十分小さく、CPU／メモリ／ABIをOS32向けに明確に最適化できる場合は、
+スクラッチ実装を優先してよい。
+
+最初の例として、CD-DAデジタル再生と共通PCMミキサーをOS32ネイティブ機能として早期実装する。
+
+```text
+ATAPI READ CD / PCM SFX / software FM / future WinMM
+                    |
+                    v
+                os32 mixer
+          16-bit source PCM
+          32-bit accumulator
+          Q1.15 gain / pan
+          master gain
+          hard saturation
+                    |
+                    v
+              16-bit PCM output
+                    |
+                    v
+               sound backend
+```
+
+基本方針:
+
+- ミキサー内部基準は44.1kHz / signed 16bit / stereoを第一候補とする。
+- 加算は32bit整数で行い、出力時に16bitへsaturateする。
+- source gain/panはQ1.15等、16×16→32bitで完結する固定小数点を使う。
+- 初期版ではsoft limiter/compressor/dither等を必須にしない。
+- resamplingはmixer本体へ抱え込まず、必要なsource側変換として分離する。
+- unity gainやmute等はfast pathを設け、CD-DA単独再生時の負荷を最小化する。
+- underrun/overrunを計数し、DX4/Pentium級で実測できるようにする。
+- channel数は固定上限から始め、CD-DA + PCM効果音 + software FM + 将来WinMM/DirectSoundを同じ経路へ収容できるようにする。
+
+CD-DAはATAPIから44.1kHz/16bit/stereo PCMを読み、mixerへ流すデジタル再生を既定とする。
+設定で従来のATAPI PLAY AUDIOによるアナログCD-DA再生も選べるようにし、
+低速構成やアナログケーブル利用時の低負荷fallbackとして残す。
+
+```text
+CD_AUDIO=digital   # default: READ CD -> mixer -> PCM
+CD_AUDIO=analog    # PLAY AUDIO -> analog cable
+```
+
+この実装は将来のWin98互換層にも再利用する。
+MCI CD AudioはCD-DA source、WinMM waveOutやDirectSoundの基本経路はmixer channelへ写像できるよう、
+Win32固有APIをmixer契約へ持ち込まない。
+
 ### ヤドカリ型サービス継承
 
 Host Servicesは単なる「ネットワーク代行」ではなく、旧世代機器が現代側の能力を利用し続けるための
@@ -421,10 +472,11 @@ USB着脱は機器とQ14の決定後に段階追加する。動的ロードを�
 | Q21 | Host Servicesを現代サービスprovider基盤へ拡張する際の共通契約 | service名／version／capability／request／stream／status／error／provider識別をどこまで共通化するかを決める。Web・文書・media・storage・language・AI等の個別APIをKAPIへ直接増殖させず、ホスト実装の交換を可能にする |
 | Q22 | PE32ローダのv3凍結範囲とOS32Xとの共通実行基盤 | PE32/i386、section、relocation、import/export、module、entry、zero-fill、protectionを必須範囲とする。TLS callback／SEH／delay import／SxS等をどこまで後段へ送るか、loader frontendと共通exec責務の境界を決める |
 | Q23 | VDM/V86のタイトル別受入範囲 | アリスソフトDOSタイトル群を基準に、メモリ、I/O、音源、入力、タイマ、DOS extender等のどこまでを各段階で保証するかを決める。PE32/Win95互換の初期必須ゲートには含めない |
+| Q24 | CD-DAデジタル再生とmixerの凍結仕様 | 44.1kHz/16bit/stereo基準、32bit accumulator、Q1.15 gain/pan、channel上限、buffer量、underrun処理、resample責務、PCM backend能力照会を実測して決める。CD_AUDIO=digitalを既定、analogをfallbackとする |
 
 ## 9. 更新方法と追加候補
 
-新しい要望は V3-23 以降、未決事項は Q24 以降を追記する。ID は再利用しない。
+新しい要望は V3-24 以降、未決事項は Q25 以降を追記する。ID は再利用しない。
 決定した項目には日付・判断主体・理由・影響する試験を書く。
 未決を決定に変える際は、検討経緯を消さず「置換された案」として残す。
 実装課題の進捗は [移行課題台帳](MIGRATION_AUDIT.md) の M 番号で更新する。
@@ -433,7 +485,7 @@ USB着脱は機器とQ14の決定後に段階追加する。動的ロードを�
 
 | ID | 追加日 | 要望／目的 | 状態 | 依存する課題 | 受入条件 |
 |---|---|---|---|---|---|
-| （次: V3-23） | — | — | 未決 | — | — |
+| （次: V3-24） | — | — | 未決 | — | — |
 
 ## 10. 変更履歴
 
@@ -448,3 +500,4 @@ USB着脱は機器とQ14の決定後に段階追加する。動的ロードを�
 | 7 | 2026-09-28 | V3-20として「ヤドカリ型サービス継承」を明文化。Host Servicesをネットワーク代行から交換可能な現代サービスprovider基盤へ発展させ、Web／文書／画像／media／storage／language／AI等をHost Agent側で吸収する方針を追加。OS32側は安定したservice contractのみ保持し、Windows／Linux／Android／OS64／cloud等の実装差を漏らさない。Q21とM28を追加 |
 | 8 | 2026-09-28 | V3-21としてPE32/i386ローダをv3必須へ昇格。P5をP5a/P5bへ分け、VM／VFS／資源回収／配置契約の後、GUI発展前にPE32 frontendを受入する順序を固定。Win32 API互換層は後回しだが、section／relocation／import-export／module／entry／zero-fill／protectionはv3必須。Q22とM29を追加 |
 | 9 | 2026-09-28 | V3-22としてVDM/V86互換試験方針を追加。PE32/Win95-98互換の初期ゲートから分離し、後段でアリスソフトDOSタイトル群を基準にメモリ／I/O／日本語／音源／入力／タイマ／必要時DOS extender経路を段階受入する。Q23とM30を追加 |
+| 10 | 2026-09-28 | V3-23としてCD-DAデジタル再生と軽量ソフトウェアミキサーをOS32ネイティブ機能に追加。デジタル再生を既定、アナログ再生を設定fallbackとし、mixerは外部OSSではなく16bit入力／32bit accumulator／Q1.15 gain／hard saturationのスクラッチ実装とする。Q24とM31を追加 |
