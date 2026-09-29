@@ -6,7 +6,7 @@ os32x_hdr.py — OS32X ヘッダの生成を 1 か所にまとめた共通モジ
 `tools/mkshlib.py` (共有ライブラリ) の両方がここを import する。
 ヘッダの並びは `sdk/include/os32/os32_kapi_shared.h` の OS32Header と一致させる。
 
-ヘッダ v3 (票 docs/tasks/memory/TASK_KAPI_DATA_FIELDS.md、KAPI v63):
+ヘッダ v3 (票 docs/archive/kernel_v21/TASK_KAPI_DATA_FIELDS.md、KAPI v63):
 
     0x00 magic          'OS32'
     0x04 header_size    48

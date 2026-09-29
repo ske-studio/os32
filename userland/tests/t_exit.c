@@ -1,7 +1,7 @@
 /* ========================================================================
  *  T_EXIT.C — 終了コードを返すだけの小さな試験バイナリ
  *
- *  票: docs/tasks/shell/TASK_EXIT_STATUS.md §4-2 (ゲスト受入)
+ *  票: docs/archive/shell/TASK_EXIT_STATUS.md §4-2 (ゲスト受入)
  *
  *  使い方:
  *    t_exit            0 で終わる

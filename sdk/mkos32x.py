@@ -19,7 +19,7 @@ mkos32x.py - フラットバイナリに OS32X ヘッダを付加する
     --launcher     起動要求 (launch_req) を出してよい宣言 (票 T9 D3)
     --load ADDR    リンク時のロードアドレス (--elf 指定時は ELF の .text から自動)
 
-ヘッダ v3 (48 バイト、票 docs/tasks/memory/TASK_KAPI_DATA_FIELDS.md):
+ヘッダ v3 (48 バイト、票 docs/archive/kernel_v21/TASK_KAPI_DATA_FIELDS.md):
     末尾に kapi_data_off (KernelAPI のデータ欄のオフセット) を焼く。値は ELF の
     非ロードのセクション .os32_kapi_layout (crt0 / os32api の刻印) から取る。
     **--elf は必須**で、刻印が無ければ失敗する。min_api_ver は 63 未満なら 63 に

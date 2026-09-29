@@ -14,7 +14,7 @@
 extern KernelAPI *kapi;
 #define api kapi
 
-/* 保存先は HostDrv (票 docs/tasks/test/TASK_TEST_RESULT.md §3)。**帯域は 1 か所**
+/* 保存先は HostDrv (票 docs/archive/test/TASK_TEST_RESULT.md §3)。**帯域は 1 か所**
  * — 以前は "/host/..." を 9 か所に直接書いていたので、HostDrv の無い構成では
  * 全項目が落ちて「不合格」に見えていた。今は SAVE_TEST_DIR が載っていなければ
  * 走らせずに SKIP (終了コード 2) を返す。 */

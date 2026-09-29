@@ -1,4 +1,4 @@
-//! edit_gui — テキストエディタの GUI 版 (票 `docs/tasks/gui/TASK_EDIT_GUI.md`)。
+//! edit_gui — テキストエディタの GUI 版 (票 `docs/archive/gui_v14/TASK_EDIT_GUI.md`)。
 //!
 //! **アプリを 1 本増やすのが目的ではない。** `libos32gui` / 設定レジストリ /
 //! Host Services を**通しで使う受入試験**で、API の穴を露見させるのが仕事 (票 §0)。

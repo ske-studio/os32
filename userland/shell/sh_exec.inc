@@ -8,7 +8,7 @@
  *  同じ理由)。**常駐 / sh.bin の両方**が取り込む。
  *
  *  中身は main.c から 1 行も変えずに移しただけ (2026-09-16、票
- *  docs/tasks/shell/TASK_SH_TRUNCATION.md §5 の段 1「足場」)。切り出しの
+ *  docs/archive/shell/TASK_SH_TRUNCATION.md §5 の段 1「足場」)。切り出しの
  *  目的はホスト試験 (tools/tests/sh_truncation_host.c) が
  *  try_exec / try_exec_from_path / run_cmd_internal を**実物のまま**
  *  #include できるようにすること — これらは main.c の static なので、

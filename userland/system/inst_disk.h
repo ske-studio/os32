@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  INST_DISK.H — インストーラ (cdinst / install) の判定 (純粋関数)          */
 /*                                                                          */
-/*  票 docs/tasks/realhw/TASK_HDD_INSTALL.md 段 2 (9〜11) / §1-v3 N4・N8。   */
+/*  票 docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 2 (9〜11) / §1-v3 N4・N8。   */
 /*  CD の cdinst と FD の install は**同じ規則**で hd0 (= DA 80h) を扱う:     */
 /*                                                                          */
 /*    幾何と区画   hdprep と同じ (userland/shell/hdprep_plan.c)。区画表と    */

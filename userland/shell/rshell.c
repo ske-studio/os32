@@ -527,7 +527,7 @@ rshell_exit:
 /* ------------------------------------------------------------------------ */
 /*  sfs run <コマンド行> — シリアル越しの /host で 1 コマンドを走らせる       */
 /*                                                                          */
-/*  票 docs/tasks/realhw/TASK_SERIAL_HOSTFS.md §1-v3 / ユーザー決裁          */
+/*  票 docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md §1-v3 / ユーザー決裁          */
 /*  (2026-09-24)。**常駐シェルだけ** (sh.bin には入れない) で、**ホストが    */
 /*  rshell へ送った 1 行が丸ごと `sfs run ...` のときだけ** 動く (決裁 3A)。 */
 /*  ホストは `rshell_serial.py --serve-host <dir> cmd "sfs run hsync boot"`。 */

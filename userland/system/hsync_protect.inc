@@ -1,7 +1,7 @@
 /* ========================================================================
  *  hsync_protect.inc — hsync が /etc/settings.db* を壊さないための字句判定
  *
- *  票: docs/tasks/settings/TASK_S0.md §2 (S0-D)、契約は S0_FOUNDATION.md §5 (D0)
+ *  票: docs/archive/settings/TASK_S0.md §2 (S0-D)、契約は S0_FOUNDATION.md §5 (D0)
  *  ホスト試験: tools/tests/hsync_protect_host.c / tools/tests/test_hsync_protect.py
  *
  *  hsync は HostDrv (/host = C:\os32) の中身を NHD の / へ O_CREAT|O_TRUNC で

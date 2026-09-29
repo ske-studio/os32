@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  INST_HDD.H — インストーラの hd0 の検査と書き込みの手順 (cdinst / install) */
 /*                                                                          */
-/*  票 docs/tasks/realhw/TASK_HDD_INSTALL.md 段 2 / §1-v3 N4・N6・R3-1。     */
+/*  票 docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 2 / §1-v3 N4・N6・R3-1。     */
 /*  順序 (R3-1、ユーザー決裁 B、ERASE の位置は 2026-09-25 の PM 決定):       */
 /*                                                                          */
 /*   検査 (1 セクタも書かない)                                               */

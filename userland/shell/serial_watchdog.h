@@ -31,7 +31,7 @@
 /*  #include して回す。                                                     */
 /*    試験: tools/tests/test_serial_vfast.py (ケース watchdog)              */
 /*    記録: tools/tests/serial_vfast_tdd.md                                 */
-/*    票  : docs/tasks/realhw/TASK_SERIAL_VFAST.md                          */
+/*    票  : docs/archive/realhw_v21/TASK_SERIAL_VFAST.md                          */
 /* ======================================================================== */
 
 #ifndef __SERIAL_WATCHDOG_H

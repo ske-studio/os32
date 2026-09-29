@@ -4,7 +4,7 @@
  * Vec, String, Box 等のヒープアロケーション機能が
  * OS32の mem_alloc/mem_free 上で正常に動作することを検証する。
  *
- * 合否の出し方は票 docs/tasks/test/TASK_TEST_RESULT.md §2 に従う。
+ * 合否の出し方は票 docs/archive/test/TASK_TEST_RESULT.md §2 に従う。
  * 2026-09-17 まではここは**何も検査していなかった** — 常に 0 を返し、
  * 最後に無条件で "All tests passed!" を印字し、`sum=285` も
  * 「expected 285」とコメントに書くだけで比較していなかった。

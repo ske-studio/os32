@@ -1,7 +1,7 @@
 /* ========================================================================= */
 /*  KSTR_BENCH.C — kstring のアセンブリ版と C 版を実機で測る                  */
 /*                                                                           */
-/*  票: docs/tasks/portability/TASK_KSTRING_BENCH.md                         */
+/*  票: docs/archive/portability/TASK_KSTRING_BENCH.md                         */
 /*                                                                           */
 /*  目的は「x86 で lib/kstring_asm.asm を lib/kstring_c.c に替えてよいか」の  */
 /*  **材料**を出すこと。判断はここではしない (票 §0)。                        */

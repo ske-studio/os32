@@ -2722,7 +2722,7 @@ fn the_entry_refuses_cpl0_programs_and_arms_full_screen_for_gfx() {
 /* ================================================================ */
 /*  票 T9-W — 起動要求表 (KAPI v49) を WM が top-level で仲介する    */
 /*                                                                  */
-/*  `docs/tasks/gui/v13/TASK_T9_sh.md` §1 D3 (3)(4) / D5 / D8、      */
+/*  `docs/archive/gui_v13/TASK_T9_sh.md` §1 D3 (3)(4) / D5 / D8、      */
 /*  §10 non-blocker 2 / 4。表そのものの遷移は実物のカーネルコードで  */
 /*  検査済み (`tools/tests/launch_host.c`) なので、ここで見るのは    */
 /*  **WM が「いつ・何を・どの順で」渡したか**だけ。                  */

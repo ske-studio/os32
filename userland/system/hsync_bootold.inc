@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  hsync_bootold.inc — `/boot/vmkernel.old` を作ってよいかの純規則          */
 /*                                                                          */
-/*  票 docs/tasks/realhw/TASK_SERIAL_HOSTFS.md §1-v3「`.old` の識別は        */
+/*  票 docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md §1-v3「`.old` の識別は        */
 /*  カーネルイメージの CRC」。hsync は `/boot/vmkernel.lz4` を置き換える前に、*/
 /*  **ディスク上の今の vmkernel.lz4 の CRC** と**起動したイメージの CRC**     */
 /*  (KAPI v65 boot_image_info、ローダが検査して記録した値) を比べ、一致した  */

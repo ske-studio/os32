@@ -25,7 +25,7 @@
 
 static KernelAPI *api;
 
-/* 合否の出し方は票 docs/tasks/test/TASK_TEST_RESULT.md §2。以前は結果を
+/* 合否の出し方は票 docs/archive/test/TASK_TEST_RESULT.md §2。以前は結果を
  * 画面に書くだけで、何が起きても終了コードは 0 だった。 */
 static int g_total;
 static int g_passed;

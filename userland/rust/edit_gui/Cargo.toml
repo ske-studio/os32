@@ -1,4 +1,4 @@
-# edit_gui — テキストエディタの GUI 版 (票 docs/tasks/gui/TASK_EDIT_GUI.md)
+# edit_gui — テキストエディタの GUI 版 (票 docs/archive/gui_v14/TASK_EDIT_GUI.md)
 #
 # filer と同じ構成: os32api の panic_handler / global_allocator を単一実体で
 # 取り込むため、このクレートだけが staticlib (最終リンク対象) になる。

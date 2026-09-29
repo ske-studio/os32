@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  KOUT_TEST.C — 出力ポインタの書き込み可検査の CPL=3 受入 (KAPI v60)       */
 /*                                                                          */
-/*  票: docs/tasks/memory/TASK_KAPI_OUTPUT_GUARD.md 受入 G2 / G4            */
+/*  票: docs/archive/kernel_v21/TASK_KAPI_OUTPUT_GUARD.md 受入 G2 / G4            */
 /*                                                                          */
 /*  生成される KAPI ラッパは、出力引数に渡された範囲が present + RW + USER   */
 /*  であることを `ring3_user_ranges_writable` で確かめてから target を呼ぶ。  */

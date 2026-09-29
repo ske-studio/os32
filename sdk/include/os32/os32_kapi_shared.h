@@ -346,7 +346,7 @@ typedef struct {
 } KbdDiagLogEnt;
 
 /* HDD の幾何 (hdd_geom_info() が埋める、KAPI v64、シェルの `hdprep`)。
- * 票 docs/tasks/realhw/TASK_HDD_INSTALL.md 段 1。幾何は 2 種類ある:
+ * 票 docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 1。幾何は 2 種類ある:
  *   BIOS 幾何 (INT 1Bh AH=84h、ローダが 0x7E00 に残した値) — 区画表と IPL の CHS
  *   ATA の申告 (IDENTIFY)                                  — I/O の指定の方式
  * bios_* はローダが問い合わせていれば**生の値**を入れる (bios_valid = 0 でも)。

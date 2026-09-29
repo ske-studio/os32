@@ -15,7 +15,7 @@
 /*       STALE → close → open が通る (運用者が Agent を落として使う)         */
 /*                                                                          */
 /*  使い方: `host_test [stale]`。合否は最後の集計行と終了コードで読む         */
-/*  (票 docs/tasks/test/TASK_TEST_RESULT.md §2)。Agent が居ない・カーネルが   */
+/*  (票 docs/archive/test/TASK_TEST_RESULT.md §2)。Agent が居ない・カーネルが   */
 /*  古いのは「不合格」ではなく「実行しなかった」なので SKIP (終了コード 2)。  */
 /*  WSL2 側で `python3 tools/host_agent.py` が動いていることが前提。          */
 /* ======================================================================== */

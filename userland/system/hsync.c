@@ -397,7 +397,7 @@ static void ls_cb(const DirEntry_Ext *entry, void *ctx)
 /* ======== 票 H4: 配備の名札 (manifest) ======== */
 
 /* 配備元に「この配備元がどの版か」を書いた名札を置き、`hsync` がそれを読む
- * (票 H4、docs/tasks/shell/TASK_H4.md §2-1〜§2-3、ユーザー決裁 D1)。
+ * (票 H4、docs/archive/shell/TASK_H4.md §2-1〜§2-3、ユーザー決裁 D1)。
  * 防ぎたい事故は **「古い配備元から新しい成果物へ戻してしまう」**:
  * `make deploy` を忘れたまま `hsync` を打つと、ゲストの新しいファイルが
  * ホストの古いもので上書きされ、しかも「同期が成功した」ように見える。
