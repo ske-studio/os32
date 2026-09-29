@@ -794,8 +794,7 @@ fn wm_button_down(st: &mut GuiState, mx: i32, my: i32) {
         st.drag_dy = my - w.y;
         st.drag_frame = w.outer();
         cursor::hide(st);
-        crate::chrome::draw_drag_outline(w.x, w.y, w.w, w.h, crate::lease::mono(st));
-        queue_frame_edges(st, w.outer());
+        draw_live_frame(st, &[]);
         cursor::show(st);
         let cr = cursor::rect(st);
         wm::queue_present(st, cr);
@@ -818,6 +817,16 @@ fn wm_button_up(st: &mut GuiState, mx: i32, my: i32) {
         st.windows[idx].y = cy;
         st.drag_index = -1;
         st.drag_frame = Rect::EMPTY;
+        /* 最後の枠が確定後の外形と違えば、枠の縁を消す (下地は損傷、クライアント
+         * 面は Paint)。普通は update_drag が同じクランプで枠を決めるので一致するが、
+         * ドラッグ中にアプリが resize_window し、マウスキーの離し (NP_DOT) が
+         * update_drag を通らずに確定すると大きさがずれる (Codex レビュー 2 回目 P2)。 */
+        if nf != st.windows[idx].outer() {
+            for e in frame_edges(nf).iter() {
+                st.dirty_screen(*e);
+            }
+            expose_frame_edges(st, nf);
+        }
 
         /* 露出計算 + 旧位置と新位置を画面損傷に。 */
         st.dirty_screen(old_outer);
@@ -915,18 +924,15 @@ pub fn redraw_frame(st: &mut GuiState, new_frame: Rect) {
     /* 旧枠を下地で消し、新枠を描いて、両者の縁とカーソルを 1 回で present。 */
     cursor::hide(st);
     erase_frame_edges(st, old_frame);
-    crate::chrome::draw_drag_outline(
-        new_frame.x,
-        new_frame.y,
-        new_frame.w,
-        new_frame.h,
-        crate::lease::mono(st),
-    );
+    expose_frame_edges(st, old_frame);
+    /* 旧枠の消去 (下地の再合成) は FEP の候補窓を描かないので、旧枠の縁も
+     * 最前面物の判定に入れる。 */
+    let old_edges = if old_frame.is_empty() { [Rect::EMPTY; 4] } else { frame_edges(old_frame) };
+    draw_live_frame(st, &old_edges);
     st.cursor.x = st.mouse_x;
     st.cursor.y = st.mouse_y;
     cursor::show(st);
     queue_frame_edges(st, old_frame);
-    queue_frame_edges(st, new_frame);
     wm::queue_present(st, old_cursor);
     let cr = cursor::rect(st);
     wm::queue_present(st, cr);
@@ -942,8 +948,7 @@ pub fn begin_frame(st: &mut GuiState, idx: usize) {
     st.drag_dy = 0;
     st.drag_frame = w.outer();
     cursor::hide(st);
-    crate::chrome::draw_drag_outline(w.x, w.y, w.w, w.h, crate::lease::mono(st));
-    queue_frame_edges(st, w.outer());
+    draw_live_frame(st, &[]);
     cursor::show(st);
     let cr = cursor::rect(st);
     wm::queue_present(st, cr);
@@ -1094,6 +1099,82 @@ fn erase_frame_edges(st: &mut GuiState, f: Rect) {
     for e in frame_edges(f).iter() {
         wm::composite_rect(st, *e);
     }
+}
+
+/// 枠の縁 4 本が横切った窓のクライアント面へ `Paint` を返す (損傷に足す)。
+///
+/// 枠はバックバッファへ**そのまま**描いている (XOR ではない)。消去の
+/// [`erase_frame_edges`] (= `composite_rect`) は下地とクロームしか描き直さず、
+/// クライアント面は WM が持っていないので、枠が窓の中を通った跡はアプリに
+/// 描き直させる以外に消せない。これが無かったので、途中位置の枠の線が背面の
+/// 窓 (gui_gate v11 の Help) に残っていた (2026-09-29、PEGC / Cirrus)。
+/// 足すのは縁の帯だけなので、アプリが描き直すのは細い帯で済む。
+fn expose_frame_edges(st: &mut GuiState, f: Rect) {
+    if f.is_empty() {
+        return;
+    }
+    for e in frame_edges(f).iter() {
+        let mut i = 0;
+        while i < st.windows.len() {
+            if st.windows[i].used && st.windows[i].visible {
+                let (ox, oy) = st.windows[i].client_origin();
+                crate::damage::add_dirty_band(&mut st.windows[i], e.translate(-ox, -oy));
+            }
+            i += 1;
+        }
+    }
+}
+
+/// 今のドラッグ枠の縁 4 本のうち `touched` に掛かるものがあれば、縁 4 本を返す
+/// (枠は全周を描き直すので 4 本とも)。ドラッグ中でなければ / 掛からなければ `None`。
+///
+/// 旧枠の帯は 32px に丸めて Paint にするので、今の枠にも掛かることがある。アプリは
+/// Paint の矩形を丸ごと塗るので、そのまま present すると今の枠の一部が消え、次の
+/// WM 周で戻る = ちらつく (Codex レビュー P2)。COMMIT (X2) はこれを見て枠を戻す。
+pub fn live_frame_edges_hit(st: &GuiState, touched: Rect) -> Option<[Rect; 4]> {
+    if st.drag_index < 0 || st.drag_frame.is_empty() {
+        return None;
+    }
+    let es = frame_edges(st.drag_frame);
+    if es.iter().any(|e| e.intersects(&touched)) {
+        Some(es)
+    } else {
+        None
+    }
+}
+
+/// 今のドラッグ枠を描いて縁を present に積む (最前面物・カーソルは呼ぶ側)。
+pub fn draw_live_outline(st: &GuiState) {
+    let f = st.drag_frame;
+    crate::chrome::draw_drag_outline(f.x, f.y, f.w, f.h, crate::lease::mono(st));
+    queue_frame_edges(st, f);
+}
+
+/// 今のドラッグ枠を描き、枠 (と `extra`) が掛かった最前面物 (モーダル /
+/// タスクバー / メニュー / FEP の候補窓) を上に描き直す。重なり順は
+/// 「アプリ < 枠 < 最前面物 < カーソル」で、X2 (COMMIT) と X3 で揃える
+/// (Codex レビュー 3 回目 P2: 枠の縁が FEP の候補窓に線を残していた)。
+/// カーソルは呼ぶ側が先に hide し、最後に show する。
+pub fn draw_live_frame(st: &mut GuiState, extra: &[Rect]) {
+    if st.drag_index < 0 || st.drag_frame.is_empty() {
+        return;
+    }
+    draw_live_outline(st);
+    let es = frame_edges(st.drag_frame);
+    let mut regions = [Rect::EMPTY; 12];
+    let mut n = 0;
+    for e in es.iter() {
+        regions[n] = *e;
+        n += 1;
+    }
+    for r in extra.iter() {
+        if n < regions.len() {
+            regions[n] = *r;
+            n += 1;
+        }
+    }
+    let ov = wm::overlays_to_refresh(st, &regions[..n]);
+    wm::refresh_overlays(st, &ov);
 }
 
 #[cfg(test)]

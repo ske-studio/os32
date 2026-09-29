@@ -1127,3 +1127,556 @@ fn menu_open_ctrl_esc_closes_and_grph_tab_closes_then_switches() {
         assert!(keys(&st, s).is_empty());
     }
 }
+
+/* ================================================================ */
+/*  ドラッグ枠の跡 (gui_gate v11、2026-09-29: PEGC / Cirrus で再現)   */
+/* ================================================================ */
+
+/// アプリが描いたことにするクライアント面の見張り色 (システム色と重ならない)。
+const CLIENT_SENTINEL: u8 = 201;
+
+/// 可視な窓のクライアント面を見張り色で塗り、損傷を空にする
+/// (「アプリが全部描き終えた」状態)。
+fn paint_clients_as_app(st: &mut GuiState) {
+    let mut i = 0;
+    while i < st.windows.len() {
+        if st.windows[i].used && st.windows[i].visible {
+            let r = st.windows[i].client_rect_screen();
+            unsafe { os32api::gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, CLIENT_SENTINEL) };
+            st.windows[i].dirty.clear();
+            st.windows[i].issued.clear();
+        }
+        i += 1;
+    }
+}
+
+/// 窓 `idx` の可視なクライアント面で、アプリが描いた画素 (見張り色) を WM が
+/// 書き替えたのに Paint (dirty / issued) が出ていない点を**全部**集める。WM は
+/// クライアント面を持たないので、書き替えた画素はアプリに描き直させる以外に消せない。
+/// `allowed(x, y)` が真の画素 (今の枠・カーソル) は走査の中で除く。
+fn stale_client_pixels(st: &GuiState, idx: usize, allowed: &dyn Fn(i32, i32) -> bool) -> Vec<(i32, i32, u8)> {
+    let px = mocks::pixels();
+    let w = &st.windows[idx];
+    let (ox, oy) = w.client_origin();
+    let covered = |lx: i32, ly: i32| {
+        (0..w.dirty.len).any(|k| w.dirty.rects[k].contains(lx, ly))
+            || (0..w.issued.len).any(|k| w.issued.rects[k].contains(lx, ly))
+    };
+    let mut out = Vec::new();
+    for v in 0..w.vis.len {
+        let r = w.vis.rects[v];
+        for ly in r.y..r.bottom() {
+            for lx in r.x..r.right() {
+                let (sx, sy) = (ox + lx, oy + ly);
+                let got = px[sy as usize * mocks::W + sx as usize];
+                if got != CLIENT_SENTINEL && !covered(lx, ly) && !allowed(sx, sy) {
+                    out.push((sx, sy, got));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn nothing_allowed(_x: i32, _y: i32) -> bool {
+    false
+}
+
+/// 枠 `f` の輪郭 (1px) の上か。
+fn on_outline(f: wm::Rect, x: i32, y: i32) -> bool {
+    f.contains(x, y) && (x == f.x || x == f.right() - 1 || y == f.y || y == f.bottom() - 1)
+}
+
+/// gui_gate v11 の台本: Widgets を掴んで Help の上を通し、Help と重ねて離す。
+/// 途中位置の枠 (x=459 の縦線・y=111 の横線) が Help のクライアント面に残っていた
+/// — 枠の消去 (`redraw_frame`) は下地とクロームしか描き直さず、枠が横切った窓へ
+/// Paint を返していなかった。
+#[test]
+fn drag_frame_trail_on_another_client_gets_a_paint() {
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    /* 添字 0 = Help (背面)、1 = Widgets (前面)。gui_gate v11 の配置。 */
+    let mut st = windows(&shm, &[(372, 80, 242, 180), (40, 40, 320, 240)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    park_pointer(&mut st, 20, 400);
+    paint_clients_as_app(&mut st);
+    let tb = st.windows[1].titlebar_rect();
+    let (tx, ty) = (tb.x + 20, tb.y + tb.h / 2);
+    park_pointer(&mut st, tx, ty);
+    /* 掴む → 途中 (枠が Help の中を横切る) → Help と重なる位置 → 離す */
+    for &(dx, dy, b) in &[(0, 0, 1u8), (100, 71, 1), (200, 160, 1), (200, 160, 0)] {
+        *mocks::MOUSE.lock().unwrap() = ((tx + dx) as i16, (ty + dy) as i16, b);
+        input::capture(&mut st, input::Ctx::Wait);
+        wm::flush_screen_dirty(&mut st);
+    }
+    assert_eq!(st.drag_index, -1, "離しでドラッグが終わらない");
+    assert_eq!((st.windows[1].x, st.windows[1].y), (240, 200), "窓が枠の位置へ移らない");
+    let stale = stale_client_pixels(&st, 0, &nothing_allowed);
+    assert!(stale.is_empty(), "Help のクライアント面に枠の跡が残り、Paint も出ていない: {} 点 (先頭 {:?})", stale.len(), stale.first());
+}
+
+/// ドラッグ中 (離す前) も、消した枠が横切ったクライアント面には Paint を返す
+/// (跡がドラッグの間ずっと画面に残らない)。自分自身の窓の旧位置も同じ。
+#[test]
+fn drag_frame_trail_is_repainted_while_dragging() {
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(372, 80, 242, 180), (40, 40, 320, 240)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    park_pointer(&mut st, 20, 400);
+    paint_clients_as_app(&mut st);
+    let tb = st.windows[1].titlebar_rect();
+    let (tx, ty) = (tb.x + 20, tb.y + tb.h / 2);
+    park_pointer(&mut st, tx, ty);
+    for &(dx, dy) in &[(0, 0), (30, 20), (100, 71), (200, 160)] {
+        *mocks::MOUSE.lock().unwrap() = ((tx + dx) as i16, (ty + dy) as i16, 1);
+        input::capture(&mut st, input::Ctx::Wait);
+        wm::flush_screen_dirty(&mut st);
+    }
+    assert_eq!(st.drag_index, 1, "ドラッグが続いていない");
+    /* いまの枠と、カーソルの下は描いてあって当然なので除く */
+    let f = st.drag_frame;
+    let cr = crate::cursor::rect(&st);
+    let allowed = move |x: i32, y: i32| on_outline(f, x, y) || cr.contains(x, y);
+    for idx in 0..2 {
+        let stale = stale_client_pixels(&st, idx, &allowed);
+        assert!(stale.is_empty(), "窓 {idx} に消した枠の跡が残り、Paint も無い: {} 点 (先頭 {:?})", stale.len(), stale.first());
+    }
+}
+
+/// 旧枠の帯は**帯のまま** Paint にする (Codex レビュー P2: 縦横の帯が外接矩形へ
+/// 畳まれて窓の内側まで丸ごと Paint になっていた)。Help の例で旧枠 1 回の
+/// 消去が出す Paint の面積を、帯 (32px 丸め) の面積の和で抑える。
+#[test]
+fn drag_frame_paint_stays_band_shaped() {
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(372, 80, 242, 180), (40, 40, 320, 240)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    park_pointer(&mut st, 20, 400);
+    paint_clients_as_app(&mut st);
+    let tb = st.windows[1].titlebar_rect();
+    let (tx, ty) = (tb.x + 20, tb.y + tb.h / 2);
+    park_pointer(&mut st, tx, ty);
+    for &(dx, dy) in &[(0, 0), (100, 71)] {
+        *mocks::MOUSE.lock().unwrap() = ((tx + dx) as i16, (ty + dy) as i16, 1);
+        input::capture(&mut st, input::Ctx::Wait);
+    }
+    st.windows[0].dirty.clear();
+    /* 枠 (140,111,320,240) を別の位置へ動かす = 旧枠の縁を Help へ返す */
+    *mocks::MOUSE.lock().unwrap() = ((tx + 200) as i16, (ty + 160) as i16, 1);
+    input::capture(&mut st, input::Ctx::Wait);
+    let d = st.windows[0].dirty;
+    assert!(d.len > 0, "旧枠が横切った Help に Paint が出ない");
+    let area: i32 = (0..d.len).map(|k| d.rects[k].w * d.rects[k].h).sum();
+    /* Help のクライアント内の旧枠: 縦 1 本 (x=459) と横 1 本 (y=111)。32px 丸めで
+     * 縦 = 32 × 高さ、横 = 幅 × 32 が上限 (角の重なりを含めても和を超えない)。 */
+    let (cw, ch) = st.windows[0].client_size();
+    let bound = 32 * ch + cw * 32;
+    assert!(area <= bound, "Paint が帯より広い: 面積 {area} > {bound} ({:?})", (0..d.len).map(|k| (d.rects[k].x, d.rects[k].y, d.rects[k].w, d.rects[k].h)).collect::<Vec<_>>());
+}
+
+/// アプリが Paint を受けて描き直し、COMMIT しても**今の枠は欠けない**
+/// (Codex レビュー P2: 帯の 32px 丸めが今の枠に掛かり、op_commit が枠を戻さずに
+/// present していた = 次の WM 周まで枠の上辺が消えてちらつく)。
+#[test]
+fn app_commit_during_drag_keeps_the_live_frame() {
+    use crate::handler;
+    use os32api::gui::proto::{GUI_COLOR_HIGHLIGHT, GUI_OP_COMMIT, GUI_OP_POLL};
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    let g = wm::g();
+    *g = windows(&shm, &[(372, 80, 242, 180), (40, 40, 320, 240)]);
+    g.inited = true;
+    g.screen_w = 640;
+    g.screen_h = 480;
+    crate::visible::recompute_and_expose(g);
+    wm::composite_full(g);
+    park_pointer(g, 20, 400);
+    paint_clients_as_app(g);
+    let tb = g.windows[1].titlebar_rect();
+    let (tx, ty) = (tb.x + 20, tb.y + tb.h / 2);
+    park_pointer(g, tx, ty);
+    for &(dx, dy) in &[(0, 0), (100, 71), (200, 160)] {
+        *mocks::MOUSE.lock().unwrap() = ((tx + dx) as i16, (ty + dy) as i16, 1);
+        input::capture(g, input::Ctx::Wait);
+        wm::flush_screen_dirty(g);
+    }
+    assert_eq!(g.drag_index, 1, "ドラッグが続いていない");
+    /* Help (owner 2) のアプリ: Paint を受けて、その矩形を丸ごと塗って COMMIT */
+    let n = handler::gshell_gui_handler(GUI_OP_POLL, 0, 2);
+    assert!(n > 0, "旧枠の帯が Help の Paint にならない");
+    let (ox, oy) = g.windows[0].client_origin();
+    let mut hit_live = false;
+    let f = g.drag_frame;
+    for k in 0..g.windows[0].issued.len {
+        let r = g.windows[0].issued.rects[k].translate(ox, oy);
+        if r.intersects(&wm::Rect::new(f.x, f.y, f.w, 1)) || r.intersects(&wm::Rect::new(f.x, f.y, 1, f.h)) {
+            hit_live = true;
+        }
+        unsafe { os32api::gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, CLIENT_SENTINEL) };
+    }
+    assert!(hit_live, "前提: Paint の矩形が今の枠に掛かる配置になっていない");
+    assert_eq!(handler::gshell_gui_handler(GUI_OP_COMMIT, 0, 2), 0);
+    /* 今の枠の輪郭 (カーソルの下を除く) が全部枠の色のまま */
+    let px = mocks::pixels();
+    let cr = crate::cursor::rect(g);
+    let mut broken = Vec::new();
+    for x in f.x..f.right() {
+        for &y in &[f.y, f.bottom() - 1] {
+            if !cr.contains(x, y) && px[y as usize * mocks::W + x as usize] != GUI_COLOR_HIGHLIGHT {
+                broken.push((x, y));
+            }
+        }
+    }
+    for y in f.y..f.bottom() {
+        for &x in &[f.x, f.right() - 1] {
+            if !cr.contains(x, y) && px[y as usize * mocks::W + x as usize] != GUI_COLOR_HIGHLIGHT {
+                broken.push((x, y));
+            }
+        }
+    }
+    assert!(broken.is_empty(), "COMMIT で今の枠が欠けた: {} 点 (先頭 {:?})", broken.len(), broken.first());
+    /* カーソルは COMMIT に掛かっていない (Help の Paint から離れている)。退避した
+     * 下地が本当の下地なら、消したあとにカーソルの形の画素は残らない (Codex レビュー
+     * 2 回目 P2: 枠の外接矩形で discard → show して、カーソル自身を下地に退避していた)。 */
+    let cr = crate::cursor::rect(g);
+    assert!(
+        (0..g.windows[0].issued.len).all(|k| !g.windows[0].issued.rects[k].translate(ox, oy).intersects(&cr)),
+        "前提: カーソルが COMMIT の矩形に掛かっている"
+    );
+    crate::cursor::hide(g);
+    let px = mocks::pixels();
+    use os32api::gui::proto::{GUI_COLOR_TEXT, GUI_COLOR_WINDOW};
+    let mut ghost = Vec::new();
+    for y in cr.y..cr.bottom() {
+        for x in cr.x..cr.right() {
+            let c = px[y as usize * mocks::W + x as usize];
+            if c == GUI_COLOR_TEXT || c == GUI_COLOR_WINDOW {
+                ghost.push((x, y, c));
+            }
+        }
+    }
+    assert!(ghost.is_empty(), "カーソルを消した跡にカーソルの画素が残る: {} 点 (先頭 {:?})", ghost.len(), ghost.first());
+    crate::cursor::show(g);
+    *mocks::MOUSE.lock().unwrap() = ((tx + 200) as i16, (ty + 160) as i16, 0);
+    input::capture(g, input::Ctx::Wait);
+}
+
+/// 前面が替わったら、**重なっていなくても**旧前面のタイトルを非アクティブ色へ
+/// 描き直す (束ねビルドの報告: GRPH+TAB / タスクバーで旧前面が青のまま)。
+#[test]
+fn focus_change_repaints_the_old_front_title_without_overlap() {
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    /* 重ならない 2 枚。添字 1 が前面。 */
+    let mut st = windows(&shm, &[(20, 20, 200, 120), (300, 200, 200, 120)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    park_pointer(&mut st, 600, 20);
+    wm::flush_screen_dirty(&mut st);
+    let px_at = |st: &GuiState, i: usize| {
+        let tb = st.windows[i].titlebar_rect();
+        mocks::pixels()[(tb.y + 1) as usize * mocks::W + (tb.x + tb.w / 2) as usize]
+    };
+    let inactive = px_at(&st, 0);
+    let active = px_at(&st, 1);
+    assert_ne!(inactive, active, "前提: アクティブと非アクティブのタイトル色が違う");
+    /* タスクバー / GRPH+TAB の共通経路で窓 0 を前面へ */
+    wm::activate_index(&mut st, 0);
+    wm::flush_screen_dirty(&mut st);
+    assert_eq!(px_at(&st, 0), active, "新しい前面のタイトルがアクティブ色にならない");
+    assert_eq!(px_at(&st, 1), inactive, "旧前面のタイトルがアクティブ色のまま残る");
+}
+
+/// ドラッグ中にアプリが窓を resize し、マウスキーの離し (NP_DOT) が枠の追従を
+/// 通らずに確定しても、最後の枠の跡を残さない (Codex レビュー 2 回目 P2)。
+#[test]
+fn drop_after_app_resize_erases_the_last_frame() {
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    /* 0 = 背面 (枠の右辺がクライアント面を通る)、1 = 動かす窓 (前面) */
+    let mut st = windows(&shm, &[(150, 40, 300, 300), (20, 20, 200, 150)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    let tb = st.windows[1].titlebar_rect();
+    park_pointer(&mut st, tb.x + 20, tb.y + tb.h / 2);
+    wm::flush_screen_dirty(&mut st);
+    paint_clients_as_app(&mut st);
+    let mut r = vec![SC_KANA | DOWN | KANA];
+    r.extend_from_slice(&tap(NP_0, KANA));
+    for _ in 0..10 {
+        r.push(NP_6 | DOWN | KANA);
+    }
+    run(&mut st, &r);
+    wm::flush_screen_dirty(&mut st);
+    assert_eq!(st.drag_index, 1, "ドラッグが始まらない");
+    let last = st.drag_frame;
+    assert_eq!((last.x, last.w), (39, 200), "前提: 枠が 19 ドット動いていない");
+    /* ドラッグ中にアプリが自分の窓を縮める */
+    let wid = id(&st, 1);
+    assert_eq!(wm::resize_window(&mut st, 3, wid, 80, 60), 0);
+    /* 背面のアプリが resize の露出分 (dirty) を描き直した状態にする。枠の跡は
+     * その外にあるので残っている。 */
+    {
+        let (ox, oy) = st.windows[0].client_origin();
+        let d = st.windows[0].dirty;
+        let mut touched = wm::Rect::EMPTY;
+        for k in 0..d.len {
+            let r = d.rects[k].translate(ox, oy);
+            unsafe { os32api::gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, CLIENT_SENTINEL) };
+            touched = touched.union(&r);
+        }
+        st.windows[0].dirty.clear();
+        st.windows[0].issued.clear();
+        /* その COMMIT は今の枠を描き直す (op_commit と同じ) */
+        if input::live_frame_edges_hit(&st, touched).is_some() {
+            input::draw_live_outline(&st);
+        }
+    }
+    let rx = last.right() - 1;
+    let px = mocks::pixels();
+    assert_ne!(px[(last.y + 60) as usize * mocks::W + rx as usize], CLIENT_SENTINEL, "前提: 枠の右辺の跡が背面のクライアント面に無い");
+    run(&mut st, &tap(NP_DOT, KANA));
+    wm::flush_screen_dirty(&mut st);
+    assert_eq!(st.drag_index, -1, "離しでドラッグが終わらない");
+    assert_eq!((st.windows[1].w, st.windows[1].h), (80, 60));
+    assert!(st.windows[1].outer() != last, "前提: 確定した外形が最後の枠と同じ");
+    let cr = crate::cursor::rect(&st);
+    let stale = stale_client_pixels(&st, 0, &|x, y| cr.contains(x, y));
+    assert!(stale.is_empty(), "背面のクライアント面に最後の枠の跡が残り、Paint も無い: {} 点 (先頭 {:?})", stale.len(), stale.first());
+}
+
+
+/* ---- COMMIT と最前面物 (Codex レビュー 3 回目 P2×2) ----
+ * モーダル (274,185,92,86) を開いたまま、枠 (330,100,200,300) をドラッグ中に
+ * 背面の Help (owner 2) が Paint → COMMIT する。重なり順は
+ * 「アプリ < 枠 < 最前面物 < カーソル」。 */
+
+/// 枠をドラッグ中の状態を組む。`cursor` の位置へカーソルを置き、`pieces`
+/// (画面座標) を Help の dirty にして返す (COMMIT の直前まで)。
+fn commit_over_modal_fixture(shm: &mocks::Shm, cursor: (i32, i32), pieces: &[wm::Rect]) -> &'static mut GuiState {
+    use crate::handler;
+    use os32api::gui::proto::{GUI_MODAL_OK, GUI_OP_POLL};
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let g = wm::g();
+    *g = windows(shm, &[(300, 40, 320, 400), (20, 20, 200, 150)]);
+    g.inited = true;
+    g.screen_w = 640;
+    g.screen_h = 480;
+    crate::visible::recompute_and_expose(g);
+    wm::composite_full(g);
+    paint_clients_as_app(g);
+    assert!(modal::open_wm_message(g, GUI_MODAL_OK, b"Modal\0", modal::WM_PURPOSE_NOTIFY));
+    crate::visible::recompute_and_expose(g);
+    wm::flush_screen_dirty(g);
+    let m = modal::rect();
+    assert_eq!((m.x, m.y, m.w, m.h), (274, 185, 92, 86), "前提: モーダルの位置が変わった");
+    park_pointer(g, cursor.0, cursor.1);
+    /* ドラッグ中 (マウスの状態は触らずに枠だけ置く): 枠 → 最前面物 → カーソル */
+    g.drag_index = 1;
+    g.drag_frame = wm::Rect::new(330, 100, 200, 300);
+    crate::cursor::hide(g);
+    input::draw_live_frame(g, &[]);
+    crate::cursor::show(g);
+    wm::flush_present();
+    /* 背面の Help: 与えた断片だけが汚れている */
+    let (ox, oy) = g.windows[0].client_origin();
+    g.windows[0].dirty.clear();
+    g.windows[0].issued.clear();
+    for r in pieces {
+        g.windows[0].dirty.push(r.translate(-ox, -oy));
+    }
+    let n = handler::gshell_gui_handler(GUI_OP_POLL, 0, 2);
+    assert!(n > 0, "前提: Help に Paint が出ない");
+    g
+}
+
+/// アプリが issued を塗って COMMIT する。塗った矩形の外接矩形を返す。
+fn app_paints_and_commits(g: &mut GuiState) -> wm::Rect {
+    use crate::handler;
+    use os32api::gui::proto::GUI_OP_COMMIT;
+    let (ox, oy) = g.windows[0].client_origin();
+    let mut touched = wm::Rect::EMPTY;
+    for k in 0..g.windows[0].issued.len {
+        let r = g.windows[0].issued.rects[k].translate(ox, oy);
+        unsafe { os32api::gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, CLIENT_SENTINEL) };
+        touched = touched.union(&r);
+    }
+    assert_eq!(handler::gshell_gui_handler(GUI_OP_COMMIT, 0, 2), 0);
+    touched
+}
+
+fn snapshot(r: wm::Rect) -> Vec<u8> {
+    let px = mocks::pixels();
+    let mut v = Vec::new();
+    for y in r.y..r.bottom() {
+        for x in r.x..r.right() {
+            v.push(px[y as usize * mocks::W + x as usize]);
+        }
+    }
+    v
+}
+
+fn first_diff(r: wm::Rect, before: &[u8]) -> Option<(i32, i32, u8, u8)> {
+    let now = snapshot(r);
+    let mut i = 0;
+    for y in r.y..r.bottom() {
+        for x in r.x..r.right() {
+            if now[i] != before[i] {
+                return Some((x, y, before[i], now[i]));
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+/// COMMIT が枠の右辺 (モーダルから離れた所) だけに掛かっても、全周を描き直した
+/// 枠の左辺がモーダルに線を残さない (Codex レビュー 3 回目 P2 の 2 件目)。
+#[test]
+fn commit_frame_redraw_keeps_the_modal_on_top() {
+    let shm = mocks::Shm::new();
+    /* カーソルはモーダルから離れた所。Help の断片は枠の右辺 (x=529) の周り。 */
+    let g = commit_over_modal_fixture(&shm, (600, 445), &[wm::Rect::new(512, 96, 32, 320)]);
+    let m = modal::rect();
+    let before = snapshot(m);
+    let touched = app_paints_and_commits(g);
+    assert!(!touched.intersects(&m), "前提: COMMIT がモーダルに掛かった");
+    assert_eq!(first_diff(m, &before), None, "モーダルの画素が変わった (枠の線が上に残った)");
+}
+
+/// COMMIT がモーダルの一部 (カーソルの無い所) に掛かってモーダルを描き直しても、
+/// カーソルは最後に描かれて欠けない (Codex レビュー 3 回目 P2 の 1 件目)。
+#[test]
+fn commit_overlay_redraw_keeps_the_cursor() {
+    let shm = mocks::Shm::new();
+    /* カーソルはモーダルの左端 (x=276..285)。Help の断片は枠の右辺の周りと
+     * モーダルの下 — 外接矩形 (x>=302) がモーダルに掛かり、カーソルは避ける。 */
+    let g = commit_over_modal_fixture(
+        &shm,
+        (276, 200),
+        &[wm::Rect::new(512, 96, 32, 320), wm::Rect::new(304, 280, 32, 20)],
+    );
+    let m = modal::rect();
+    let cr = crate::cursor::rect(g);
+    assert!(m.contains(cr.x, cr.y) && m.contains(cr.right() - 1, cr.bottom() - 1), "前提: カーソルがモーダルの上に無い");
+    let before_cursor = snapshot(cr);
+    let before_modal = snapshot(m);
+    let touched = app_paints_and_commits(g);
+    assert!(touched.intersects(&m) && !touched.intersects(&cr), "前提: COMMIT がモーダルに掛かり、カーソルは避ける配置でない");
+    assert_eq!(first_diff(cr, &before_cursor), None, "カーソルが欠けた (最前面物の描き直しに消された)");
+    assert_eq!(first_diff(m, &before_modal), None, "モーダルの画素が変わった");
+}
+
+/// カーソルが今の枠の縁に掛かり、COMMIT はカーソルを避けて同じ縁の別の所に
+/// 掛かる。枠を描き直してもカーソルの退避は本当の下地 (枠 + アプリの画) で、
+/// カーソルを消した跡にカーソルの画素が残らない (2 回目 P2 の守り: アプリに潰されて
+/// いないカーソルを `discard` すると、表示中のカーソル画素を下地として退避する)。
+#[test]
+fn commit_frame_redraw_under_the_cursor_saves_the_real_background() {
+    use os32api::gui::proto::{GUI_COLOR_TEXT, GUI_COLOR_WINDOW};
+    let shm = mocks::Shm::new();
+    let g = commit_over_modal_fixture(&shm, (524, 380), &[wm::Rect::new(512, 96, 32, 200)]);
+    let cr = crate::cursor::rect(g);
+    let f = g.drag_frame;
+    assert!(cr.contains(f.right() - 1, cr.y), "前提: カーソルが枠の右辺に掛かっていない");
+    let touched = app_paints_and_commits(g);
+    assert!(!touched.intersects(&cr), "前提: COMMIT がカーソルに掛かった");
+    crate::cursor::hide(g);
+    let px = mocks::pixels();
+    let mut ghost = Vec::new();
+    for y in cr.y..cr.bottom() {
+        for x in cr.x..cr.right() {
+            let c = px[y as usize * mocks::W + x as usize];
+            if c == GUI_COLOR_TEXT || c == GUI_COLOR_WINDOW {
+                ghost.push((x, y, c));
+            }
+        }
+    }
+    assert!(ghost.is_empty(), "カーソルの画素が下地として退避されていた: {} 点 (先頭 {:?})", ghost.len(), ghost.first());
+    crate::cursor::show(g);
+}
+
+/// 画面下端の FEP 候補窓がタスクバーに重なり、そこにドラッグ枠の縁が掛かる。
+/// 枠の周 (FEP を描かない) と候補の更新の周 (FEP だけを描く `post_cycle`) とで
+/// 重なりの画素が変わらない = 上下が入れ替わって点滅しない (Codex レビュー 4 回目 P2)。
+#[test]
+fn fep_over_taskbar_keeps_its_order_across_frame_and_fep_cycles() {
+    unsafe extern "C" fn on() -> i32 {
+        1
+    }
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(20, 20, 400, 420)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    park_pointer(&mut st, 600, 20);
+    /* テキストカーソルを画面の下端近くに置いて FEP を出す */
+    st.windows[0].tc_visible = true;
+    st.windows[0].tc_x = 60;
+    st.windows[0].tc_y = 410;
+    unsafe {
+        (*os32api::api_ptr()).ime_is_active = on;
+    }
+    fep::install();
+    fep::pre_cycle(&mut st);
+    wm::flush_screen_dirty(&mut st);
+    fep::post_cycle(&mut st);
+    let fr = fep::rect();
+    let tb = crate::taskbar::rect(&st);
+    assert!(!fr.is_empty() && fr.intersects(&tb), "前提: FEP がタスクバーに重なっていない ({},{},{},{})", fr.x, fr.y, fr.w, fr.h);
+    let r = fr.intersect(&tb);
+    /* ドラッグ中: 枠の左辺が FEP とタスクバーを縦に横切る */
+    st.drag_index = 0;
+    st.drag_frame = wm::Rect::new(fr.x + 5, 100, 100, fr.bottom() - 100);
+    let frame_cycle = |st: &mut GuiState| {
+        wm::flush_screen_dirty(st);
+        snapshot(r)
+    };
+    let fep_cycle = |st: &mut GuiState| {
+        fep::mark_redraw();
+        fep::pre_cycle(st);
+        wm::flush_screen_dirty(st);
+        fep::post_cycle(st);
+        snapshot(r)
+    };
+    let a = frame_cycle(&mut st);
+    let b = fep_cycle(&mut st);
+    let c = frame_cycle(&mut st);
+    assert!(a == b, "枠の周と FEP の周とで FEP / タスクバーの重なりの画素が違う (上下が入れ替わる)");
+    assert!(b == c, "FEP の周の次の枠の周で重なりの画素が戻る (点滅)");
+    st.drag_index = -1;
+    fep_off();
+}

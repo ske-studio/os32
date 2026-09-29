@@ -64,6 +64,56 @@ pub fn add_dirty(win: &mut Win, rect_local: Rect) {
     }
 }
 
+/// dirty へ**細い帯** (ドラッグ枠の縁) を 1 本足す。32px 丸めは [`add_dirty`] と
+/// 同じだが、**外接矩形が面積を増やす結合はしない**。
+///
+/// [`add_dirty`] は 32px 以内の矩形を外接矩形へ再帰的に畳むので、角で接する縦横の
+/// 帯 (枠の上辺と左辺) が 1 枚になり、窓の内側まで丸ごと Paint になる (Codex
+/// レビュー P2、Help の例で旧枠 1 回 = 96×158 px)。ドラッグは 1 回の移動ごとに
+/// これを出すので、386 では帯だけを描き直させる。結合するのは外接矩形の面積が
+/// 2 枚の面積の和を超えない (= 同じ線上で重なる / 接する) ときだけ。上限 8 枚に
+/// 達したら、面積の増えが最小の 1 枚へ畳む (過剰申告 = 安全側)。
+pub fn add_dirty_band(win: &mut Win, rect_local: Rect) {
+    let (cw, ch) = win.client_size();
+    let client = Rect::new(0, 0, cw, ch);
+    let clamped = rect_local.intersect(&client);
+    if clamped.is_empty() {
+        return;
+    }
+    let r = snap32(clamped).intersect(&client);
+    if r.is_empty() {
+        return;
+    }
+    let area = |a: &Rect| (a.w as i64) * (a.h as i64);
+    let mut i = 0;
+    while i < win.dirty.len {
+        let d = win.dirty.rects[i];
+        let u = d.union(&r);
+        if area(&u) <= area(&d) + area(&r) && (d.intersects(&r) || near(&d, &r)) {
+            win.dirty.rects[i] = u;
+            return;
+        }
+        i += 1;
+    }
+    if win.dirty.len < MAX_DMG {
+        win.dirty.push(r);
+        return;
+    }
+    let mut best = 0;
+    let mut best_grow = i64::MAX;
+    let mut k = 0;
+    while k < win.dirty.len {
+        let d = win.dirty.rects[k];
+        let grow = area(&d.union(&r)) - area(&d);
+        if grow < best_grow {
+            best_grow = grow;
+            best = k;
+        }
+        k += 1;
+    }
+    win.dirty.rects[best] = win.dirty.rects[best].union(&r);
+}
+
 /// dirty をクライアント全面 1 枚にする (露出計算の容量超過フォールバック等)。
 pub fn set_dirty_full(win: &mut Win) {
     let (cw, ch) = win.client_size();

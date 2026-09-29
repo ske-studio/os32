@@ -424,7 +424,10 @@ pub struct GuiState {
     pub drag_index: i32, /* ドラッグ中ウィンドウの index。-1=なし */
     pub drag_dx: i32,
     pub drag_dy: i32,
-    pub drag_frame: Rect,   /* 現在描いている XOR 枠 (空=未描画) */
+    pub drag_frame: Rect,   /* 現在描いているドラッグ枠 (空=未描画。XOR ではなく実線) */
+    /// 最後にアクティブ (前面) のクロームで描いた窓の id (0 = なし)。前面が
+    /// 替わったら旧・新の両方を描き直す ([`sync_active_chrome`])。
+    pub chrome_active: u32,
     pub mouse_x: i32,
     pub mouse_y: i32,
     pub prev_buttons: u8,
@@ -499,6 +502,7 @@ impl GuiState {
         drag_dx: 0,
         drag_dy: 0,
         drag_frame: Rect::EMPTY,
+        chrome_active: 0,
         mouse_x: 320,
         mouse_y: 200,
         prev_buttons: 0,
@@ -993,6 +997,85 @@ pub fn composite_full(st: &mut GuiState) {
     flush_present();
 }
 
+/// WM の最前面物 (モーダル / FEP の候補窓 / タスクバー / Start メニュー) のうち、
+/// `regions` のどれかに掛かって**描き直しが要るもの**の矩形 (下から順に modal,
+/// taskbar, startmenu, fep。要らないものは空)。描き直した物が後の物を上書きし得るので、
+/// 描き直す物の矩形も判定範囲に足していく。描かずに決めるので、呼ぶ側はこれを見て
+/// カーソルの退避を先に決められる (Codex レビュー 3 回目: カーソルは最後に 1 回)。
+///
+/// **重なり順は X3 の合成と同じ**: `composite_rect` がモーダル → タスクバー →
+/// メニューを描き、FEP (未確定行 / 候補窓) はその後に `redraw_now` / `post_cycle` が
+/// 単独で描く = FEP が最上位。ここで FEP をタスクバーより下にすると、画面下端で
+/// タスクバーに重なる候補窓が、FEP だけを描く周 (候補の更新) と枠の周 (ここ) とで
+/// 上下が入れ替わって点滅した (Codex レビュー 4 回目 P2)。FEP を最上位に置けば、
+/// FEP だけを描き直す経路は順序を崩さない。
+pub fn overlays_to_refresh(st: &GuiState, regions: &[Rect]) -> [Rect; 4] {
+    let cands = [modal::rect(), taskbar::rect(st), startmenu::rect(), fep::rect()];
+    let mut out = [Rect::EMPTY; 4];
+    let mut i = 0;
+    while i < 4 {
+        let r = cands[i];
+        if !r.is_empty() {
+            let mut hit = regions.iter().any(|g| !g.is_empty() && g.intersects(&r));
+            let mut j = 0;
+            while j < i {
+                if !out[j].is_empty() && out[j].intersects(&r) {
+                    hit = true;
+                }
+                j += 1;
+            }
+            if hit {
+                out[i] = r;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// [`overlays_to_refresh`] が返した物を描き直して present に積む (カーソルは呼ぶ側)。
+pub fn refresh_overlays(st: &mut GuiState, list: &[Rect; 4]) {
+    if !list[0].is_empty() && modal::refresh_if_hit(st, list[0]) {
+        queue_present(st, list[0]);
+    }
+    if !list[1].is_empty() && taskbar::refresh_if_hit(st, list[1]) {
+        queue_present(st, list[1]);
+    }
+    if !list[2].is_empty() && startmenu::refresh_if_hit(st, list[2]) {
+        queue_present(st, list[2]);
+    }
+    if !list[3].is_empty() && fep::refresh_if_hit(st, list[3]) {
+        queue_present(st, list[3]);
+    }
+}
+
+/// 前面 (= アクティブのクローム) が前回の合成から替わっていたら、旧前面と新前面の
+/// 外形を画面損傷に足す。
+///
+/// タイトルの色は z の最上位かどうかで決まるが、前面を替える経路 (マウス・
+/// タスクバー・GRPH+TAB・set_focus・raise・閉じる・最小化 …) は新しい前面の外形
+/// しか損傷にしていなかった。`composite_rect` は損傷に**掛かった**窓のクロームだけを
+/// 描き直すので、旧前面が新前面と重なっていないと旧前面のタイトルがアクティブ色の
+/// まま残った (2026-09-29 の束ねビルドの報告)。経路ごとに足すと漏れるので、合成の
+/// 入口で 1 か所にまとめて見る。
+fn sync_active_chrome(st: &mut GuiState) {
+    let front = st.front_id();
+    if front == st.chrome_active {
+        return;
+    }
+    if let Some(oi) = st.win_by_id(st.chrome_active) {
+        if st.windows[oi].used && st.windows[oi].visible {
+            let o = st.windows[oi].outer();
+            st.dirty_screen(o);
+        }
+    }
+    if let Some(ni) = st.front_index() {
+        let o = st.windows[ni].outer();
+        st.dirty_screen(o);
+    }
+    st.chrome_active = front;
+}
+
 /// WM が溜めた画面損傷 (デスクトップ + クローム) を合成して present し、クリアする。
 /// アプリのクライアント面 (COMMIT) とは独立。commit は 1 回にまとめる。
 pub fn flush_screen_dirty(st: &mut GuiState) {
@@ -1002,6 +1085,7 @@ pub fn flush_screen_dirty(st: &mut GuiState) {
     if crate::fullscreen::active() {
         return;
     }
+    sync_active_chrome(st);
     let dragging = st.drag_index >= 0;
     if st.screen_dirty.is_empty() && !dragging {
         return;
@@ -1029,10 +1113,11 @@ pub fn flush_screen_dirty(st: &mut GuiState) {
         queue_present(st, fr);
     }
 
-    /* ドラッグ中なら枠を再描画 (合成で消えているため)。 */
+    /* ドラッグ中なら枠を再描画 (合成で消えているため)。枠は最前面物の下
+     * (掛かった最前面物は描き直す。COMMIT の側と同じ重なり順)。 */
     if dragging {
         let f = st.drag_frame;
-        chrome::draw_drag_outline(f.x, f.y, f.w, f.h, lease::mono(st));
+        crate::input::draw_live_frame(st, &[]);
         queue_present(st, f);
     }
 
