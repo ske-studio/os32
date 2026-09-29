@@ -860,6 +860,8 @@ checks:
     - userland/rust/filer/host/model_tests.rs
     - userland/rust/filer/src/model.rs
     - userland/rust/libos32gui/src/app.rs
+    - userland/rust/libos32gui/src/layout.rs
+    - userland/rust/libos32gui/src/widget.rs
     - sdk/include/os32/os32_kapi_generated.h
     - drivers/kbd.h
     - drivers/kbd_status.h

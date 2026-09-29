@@ -32,12 +32,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mutpar                                                   # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-# 変異試験は写しをこの 2 つの環境変数で差し込む (既定は実物)。
+# 変異試験は写しを環境変数で差し込む (既定は実物)。
 INFO_RS = pathlib.Path(os.environ.get('OS32_ABOUT_INFO_RS',
                                       ROOT / 'userland/rust/about/src/info.rs'))
 CMD_BASE_C = pathlib.Path(os.environ.get('OS32_VER_CMD_BASE_C',
                                          ROOT / 'userland/shell/cmd_base.c'))
-LIB_RS = ROOT / 'userland/rust/about/src/lib.rs'
+LIB_RS = pathlib.Path(os.environ.get('OS32_ABOUT_LIB_RS',
+                                     ROOT / 'userland/rust/about/src/lib.rs'))
+GUI_WIDGET_RS = ROOT / 'userland/rust/libos32gui/src/widget.rs'
+GUI_LAYOUT_RS = ROOT / 'userland/rust/libos32gui/src/layout.rs'
+WM_RS = ROOT / 'userland/gshell/src/wm.rs'
 SHARED_H = ROOT / 'sdk/include/os32/os32_kapi_shared.h'
 CONFIG_H = ROOT / 'include/config.h'
 HARNESS = ROOT / 'tools/tests/ver_about_host.c'
@@ -142,6 +146,75 @@ def rust_int(text, name):
     if not m:
         raise AssertionError('%s not found in info.rs' % name)
     return int(m.group(1).replace('_', ''), 0)
+
+
+def lib_const(lib, name):
+    m = re.search(r'^const %s: \w+ = (\d+);' % re.escape(name), lib, re.M)
+    if not m:
+        raise AssertionError('%s not found in lib.rs' % name)
+    return int(m.group(1))
+
+
+def wm_const(name):
+    m = re.search(r'pub const %s: i32 = (\d+);' % re.escape(name), WM_RS.read_text())
+    if not m:
+        raise AssertionError('%s not found in wm.rs' % name)
+    return int(m.group(1))
+
+
+def widget_min_h():
+    """libos32gui の各コンストラクタが置く min_h (置かなければ 0)。"""
+    src = GUI_WIDGET_RS.read_text()
+    consts = {k: int(v) for k, v in
+              re.findall(r'^(?:pub )?const (\w+): i16 = (\d+);', src, re.M)}
+    out = {}
+    for name, body in re.findall(r'^pub fn (\w+)\([^)]*\) -> GuiResult<WidgetId> \{\n(.*?)^\}',
+                                 src, re.M | re.S):
+        m = re.search(r'\.min_h = (\w+)(?: \+ (\d+))?;', body)
+        if not m:
+            out[name] = 0
+            continue
+        v = m.group(1)
+        base = int(v) if v.isdigit() else consts[v]
+        out[name] = base + int(m.group(2) or 0)
+    return out
+
+
+def root_stack(lib, n):
+    """lib.rs が root (column) に足す子の主軸の長さの合計と子の数。
+    変数ごとの部品の種類は `let <var> = widget::<kind>(` から、大きさの指定は
+    `widget::add(root, <var>, SizeSpec::...)` から読む。繰り返しは lib.rs の
+    ループの形 (行は n 本、区切りは 2 本) に合わせる。"""
+    mins = widget_min_h()
+    kinds = dict(re.findall(r'let (\w+) = widget::(\w+)\(', lib))
+    adds = re.findall(r'widget::add\(root, (\w+), SizeSpec::(Fixed|Flex)\(((?:[^()]|\([^()]*\))*)\)\)', lib)
+    if not adds:
+        raise AssertionError('root への add が見つからない')
+    # 区切りは 2 本 (見出しの後と機器の 7 行の後) — ループの条件がその形であること。
+    if not re.search(r'if i == 1 \|\| i == 1 \+ VER_HW\.len\(\) \{', lib):
+        raise AssertionError('区切りの条件が想定と違う (試験の計算を直す)')
+    total = 0
+    items = 0
+    for var, spec, arg in adds:
+        mn = mins[kinds[var]]
+        if spec == 'Flex':
+            sizes = [None]
+        else:
+            m = re.fullmatch(r'if i == 0 \{ (\w+) \} else \{ (\w+) \}', arg.strip())
+            if m:                                # 行: 1 行目と残り n - 1 本
+                sizes = [m.group(1)] + [m.group(2)] * (n - 1)
+            elif var == 'sep':
+                sizes = [arg.strip()] * 2
+            else:
+                sizes = [arg.strip()]
+        for sz in sizes:
+            if sz is None:
+                total += mn
+            else:
+                px = int(sz) if sz.isdigit() else lib_const(lib, sz)
+                total += px if px > mn else mn
+            items += 1
+    return total, items
 
 
 def unindent(v):
@@ -268,34 +341,47 @@ class AboutMatchesVer(unittest.TestCase):
     # ---- 窓に収まる -------------------------------------------------------
 
     def test_line_fits_window_width(self):
-        # 窓の外形の上限 (lib.rs の clamp の hi) から枠 (gshell wm.rs BORDER_W) × 2 と
-        # column の余白 × 2 を引き、8px の半角で割った桁数を超える行は作らない。
+        # 窓の外形の上限 WIN_W_MAX から枠 (gshell wm.rs BORDER_W) × 2 と column の余白 × 2 を
+        # 引き、8px の半角で割った桁数を超える行は作らない。
         lib = LIB_RS.read_text()
-        ww = int(re.search(r'let ww = clamp\(sw - 16, \d+, (\d+)\);', lib).group(1))
-        pad = int(re.search(r'widget::column\((\d+), \d+\)', lib).group(1))
-        wm = (ROOT / 'userland/gshell/src/wm.rs').read_text()
-        border = int(re.search(r'pub const BORDER_W: i32 = (\d+);', wm).group(1))
-        cols = (ww - 2 * border - 2 * pad) // 8
+        border = wm_const('BORDER_W')
+        cols = (lib_const(lib, 'WIN_W_MAX') - 2 * border - 2 * lib_const(lib, 'PAD')) // 8
         self.assertLessEqual(rust_int(INFO_RS.read_text(), 'LINE_MAX'), cols)
+        self.assertRegex(lib, r'let ww = clamp\(sw - 16, \d+, WIN_W_MAX\);')
 
-    def test_lines_fit_window_height(self):
-        # 最大の行数 (NLINES_MAX) + 区切り 2 本 + 伸びる余白 (0) + OK の段が、
-        # 窓の高さの上限から枠 × 2・タイトルバー・column の余白 × 2 を引いた中に入る。
+    def test_ok_button_inside_window(self):
+        # OK ボタンの段まで窓のクライアント面に収まる。積み上げは libos32gui の実際の
+        # 規則で計算する: 部品ごとの下限 min_h (widget.rs の各コンストラクタ)、
+        # Fixed(px) は max(px, min_h)、Flex は下限だけ場所を取る (layout.rs)。
+        # 2026-09-29 のゲスト確認: 区切りを label (min_h 16) で作っていて Fixed(4) が
+        # 16px になり、OK ボタンが下端で切れた — それをここで捕まえる。
         lib = LIB_RS.read_text()
-        wh = int(re.search(r'let wh = clamp\(sh - 40, \d+, (\d+)\);', lib).group(1))
-        m = re.search(r'widget::column\((\d+), (\d+)\)', lib)
-        pad, gap = int(m.group(1)), int(m.group(2))
-        sep = int(re.search(r'widget::add\(root, gap, SizeSpec::Fixed\((\d+)\)\)', lib).group(1))
-        bar = int(re.search(r'widget::add\(root, bar, SizeSpec::Fixed\((\d+)\)\)', lib).group(1))
-        wm = (ROOT / 'userland/gshell/src/wm.rs').read_text()
-        border = int(re.search(r'pub const BORDER_W: i32 = (\d+);', wm).group(1))
-        title = int(re.search(r'pub const TITLEBAR_H: i32 = (\d+);', wm).group(1))
-        n = int(self.out[9])
-        items = n + 2 + 1 + 1                     # 行 + 区切り 2 + 余白 + OK の段
-        need = 20 + (n - 1) * 16 + 2 * sep + bar + (items - 1) * gap + 2 * pad
-        self.assertLessEqual(need + 2 * border + title, wh)
-        # 640x400 (最小の画面) でもタスクバー 24px を残して上限の高さが取れる。
-        self.assertLessEqual(wh, 400 - 40)
+        n = int(self.out[9])                     # 行の最大数 (NLINES_MAX)
+        stack, items = root_stack(lib, n)
+        pad = lib_const(lib, 'PAD')
+        gap = lib_const(lib, 'GAP')
+        need = stack + gap * (items - 1) + 2 * pad
+        client_h = lib_const(lib, 'WIN_H_MAX') - 2 * wm_const('BORDER_W') - wm_const('TITLEBAR_H')
+        self.assertLessEqual(need, client_h,
+                             '積み上げ %dpx > クライアント %dpx (OK ボタンが切れる)'
+                             % (need, client_h))
+        # OK の段 (row) の高さはボタンの下限以上 (交差軸も下限で押し広げられる)。
+        mins = widget_min_h()
+        self.assertLessEqual(mins['button'], lib_const(lib, 'BAR_H'))
+        # 上限の高さは 640x400 (最小の画面) の clamp(sh - 40) で取れる。
+        self.assertLessEqual(lib_const(lib, 'WIN_H_MAX'), 400 - 40)
+        self.assertRegex(lib, r'let wh = clamp\(sh - 40, \d+, WIN_H_MAX\);')
+
+    def test_layout_rules_modelled(self):
+        # 上の計算が写している libos32gui の規則が変わっていないこと。
+        lay = re.sub(r'\s+', ' ', GUI_LAYOUT_RS.read_text())
+        self.assertIn('SizeSpec::Fixed(px) => { let m = if (px as i32) < min_main '
+                      '{ min_main } else { px as i32 }; fixed_total += m;', lay)
+        self.assertIn('SizeSpec::Flex(w) => { fixed_total += min_main;', lay)
+        mins = widget_min_h()
+        self.assertEqual(mins['label'], 16)
+        self.assertEqual(mins['row'], 0)
+        self.assertEqual(mins['column'], 0)
 
     # ---- 正典との一致 -----------------------------------------------------
 
@@ -349,6 +435,9 @@ class AboutMatchesVer(unittest.TestCase):
 # ---------------------------------------------------------------------------
 INFO_REL = 'userland/rust/about/src/info.rs'
 CMD_REL = 'userland/shell/cmd_base.c'
+LIB_REL = 'userland/rust/about/src/lib.rs'
+ENV_OF = {INFO_REL: 'OS32_ABOUT_INFO_RS', CMD_REL: 'OS32_VER_CMD_BASE_C',
+          LIB_REL: 'OS32_ABOUT_LIB_RS'}
 
 MUTATIONS = [
     # About 側 (info.rs)
@@ -366,6 +455,12 @@ MUTATIONS = [
      'pub const KAPI_BOOT_IMAGE_INFO: u32 = 64;'),
     ('info-crc-no-size', INFO_REL, '.dec(b.size)', '.dec(0)'),
     ('info-sysver-anywhere', INFO_REL, "if i == 0 || cfg[i - 1] == b'\\n' {", 'if true {'),
+    # 窓の寸法 (lib.rs) — 2026-09-29 にゲストで OK ボタンが切れた形を含む
+    ('lib-sep-label', LIB_REL, 'let sep = widget::row(0, 0)?;', 'let sep = widget::label(b"")?;'),
+    ('lib-spacer-label', LIB_REL, 'let spacer = widget::row(0, 0)?;',
+     'let spacer = widget::label(b"")?;'),
+    ('lib-win-h-short', LIB_REL, 'const WIN_H_MAX: i32 = 312;', 'const WIN_H_MAX: i32 = 290;'),
+    ('lib-bar-thin', LIB_REL, 'const BAR_H: i16 = 24;', 'const BAR_H: i16 = 20;'),
     # ver 側 (cmd_base.c) — ver だけ変えて About を直し忘れた、を捕まえる
     ('ver-hw-text', CMD_REL, '"  PIT: 8254 @ 100Hz\\n"', '"  PIT: 8254 @ 123Hz\\n"'),
     ('ver-new-line', CMD_REL, '"  GFX: 640x400x16 CPU direct\\n");',
@@ -387,7 +482,7 @@ def one_mutation(item):
         copy = pathlib.Path(td) / pathlib.Path(rel).name
         copy.write_text(original.replace(old, new, 1), encoding='utf-8')
         env = dict(os.environ)
-        env['OS32_ABOUT_INFO_RS' if rel == INFO_REL else 'OS32_VER_CMD_BASE_C'] = str(copy)
+        env[ENV_OF[rel]] = str(copy)
         r = subprocess.run([sys.executable, '-B', str(pathlib.Path(__file__).resolve())],
                            env=env, capture_output=True, text=True, timeout=300)
     if r.returncode == 0:

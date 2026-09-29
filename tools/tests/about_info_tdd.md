@@ -37,8 +37,9 @@ Start → Programs (root メニューへの項目は足していない)。
 | `test_longest_lines_fit` | 最長の行 (Image CRC の 50 桁) が `LINE_MAX` に収まり、行数が `NLINES_MAX` に収まる |
 | `test_sys_version_from_config_h` / `test_sys_version_edges` | 版の切り出し (`SYS_VERSION_X` やコメントの中を拾わない、空・無し → `?`) |
 | `test_truncate_and_numbers` | `LINE_MAX` で打ち切る、`hex8` / `dec` の端 |
-| `test_line_fits_window_width` | `LINE_MAX` ≤ (窓の幅の上限 − 枠 × 2 − column の余白 × 2) / 8 |
-| `test_lines_fit_window_height` | 最大 12 行 + 区切り 2 本 + OK の段が窓の高さの上限 (312px) に入り、上限は 640x400 に収まる |
+| `test_line_fits_window_width` | `LINE_MAX` ≤ (`WIN_W_MAX` − 枠 × 2 − column の余白 × 2) / 8 |
+| `test_ok_button_inside_window` | **OK ボタンの段まで窓のクライアント面に入る**。lib.rs が root に足す部品の種類と `SizeSpec` を読み、libos32gui の実際の規則 — 部品ごとの下限 `min_h` (widget.rs のコンストラクタから読む。label = 16、row = 0、button = 22)、`Fixed(px)` は `max(px, min_h)`、`Flex` は下限だけ — で積み上げる (12 行で 278px ≤ クライアント 290px)。ボタンの下限 ≤ OK の段の高さ、上限は 640x400 に収まる |
+| `test_layout_rules_modelled` | 上の計算が写している layout.rs の規則と下限の値が変わっていない |
 | `test_constants_match_header` / `test_boot_image_info_mirror` / `test_kapi_gate_matches_header` | `BootImageInfo` の並びと source の値、v65 の判定が `os32_kapi_shared.h` と一致、`lib.rs` が判定と組み立てを `info.rs` から使う |
 | `test_deployed` | [V2] `deploy.yaml` に載っている |
 
@@ -52,13 +53,29 @@ Start → Programs (root メニューへの項目は足していない)。
   `"  Build: "` (末尾の空白つき) を出す — 試験側の字下げの落とし方を `strip()` から
   先頭 2 文字だけに直した (About 側は正しかった)。
 - 変異 (`--mutate`、写しを環境変数 `OS32_ABOUT_INFO_RS` / `OS32_VER_CMD_BASE_C` で差し込む。
-  実物は書き換えない。対照 = 変異なしの写しは GREEN)。14/14 が RED:
+  実物は書き換えない。対照 = 変異なしの写しは GREEN)。この時点で 14/14 が RED:
   - info.rs: 機器の行の文言 / 1 行目の " (Ring3 Native)" を落とす / `API:` を `KernelAPI:` に /
     ローダ名の取り違え / `none` の文言 / 空の commit を `unknown` に / v65 の判定が戻り値を見ない /
     v64 から出す / CRC 行の長さを落とす / `sys_version` が行頭以外も拾う
   - cmd_base.c (ver だけ変えて About を直し忘れた): 機器の行の文言 / 行を 1 本足す /
     v60 から出す / `none` の文言
 
+- **2026-09-29 (ゲスト確認で OK ボタンが切れた)**: テスターのゲスト確認で、中身は ver と
+  12 行一致・閉じ方 4 通り OK・`fault_kill_count` 0 だったが、**OK ボタンが窓の下端で切れて
+  上の 4〜5px しか見えなかった**。原因: 区切りを `widget::label(b"")` + `Fixed(4)` で作って
+  いたが、label は `min_h = CELL_H = 16` (libos32gui widget.rs) で、layout.rs は Fixed を
+  下限まで押し広げる — 区切り 2 本が 16px ずつ、伸びる余白の label も 16px 取り、積み上げは
+  318px (クライアントは 312 − 4 − 18 = 290px。OK の段は 6px しか入らない)。旧試験は区切りを
+  4px と数えていて見逃した。
+  **RED**: 試験を実際の規則で積み上げる形 (`test_ok_button_inside_window`) にし、区切りを
+  label に戻す変異で「積み上げ 318px > クライアント 290px」で落ちることを確かめた。
+  **GREEN**: 区切りと伸びる余白を空の `widget::row(0, 0)` (下限 0) にした (278px)。窓の寸法は
+  lib.rs の名前つき定数 (`WIN_W_MAX` / `WIN_H_MAX` / `PAD` / `GAP` / `TITLE_H` / `LINE_H` /
+  `SEP_H` / `BAR_H` / `OK_W`) にし、試験はそれを読む。
+- 変異の追加 (lib.rs、`OS32_ABOUT_LIB_RS` で差し込む。4/4 RED、合計 18/18 RED):
+  区切りを label に / 伸びる余白を label に / `WIN_H_MAX` を 290 に / OK の段を 20px に
+  (ボタンの下限 22 未満)。
+
 ## 未確認
 
-- ゲスト (NP21/W・実機) での窓の見た目は未確認 (ホスト試験は寸法の計算まで)。
+- 区切りを空の row にした後の窓の見た目はゲスト未確認 (ホスト試験は寸法の計算まで)。

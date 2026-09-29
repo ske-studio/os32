@@ -42,6 +42,17 @@ struct BootImageInfo {
 }
 const _: () = assert!(core::mem::size_of::<BootImageInfo>() == 40);
 
+/* 窓の寸法 (px)。ホスト試験が読んで、libos32gui の配置の規則で積み上げを計算する。 */
+const WIN_W_MAX: i32 = 440;
+const WIN_H_MAX: i32 = 312;
+const PAD: i16 = 10;
+const GAP: i16 = 2;
+const TITLE_H: i16 = 20;
+const LINE_H: i16 = 16;
+const SEP_H: i16 = 4;
+const BAR_H: i16 = 24;
+const OK_W: i16 = 72;
+
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI) -> i32 {
     if libos32gui::init(api).is_err() {
@@ -102,13 +113,14 @@ impl About {
         let n = collect(&mut lines);
 
         /* 画面能力を信じる (契約 G5: 640×400 を決め打ちしない)。
-         * 幅は ver の最長の行 (Image CRC の 50 桁) が入る 440px を上限に。
-         * 高さは 12 行 + 区切り 2 本 + OK の段が入る 312px を上限に。 */
+         * 幅は ver の最長の行 (Image CRC の 50 桁) が入る WIN_W_MAX を上限に。
+         * 高さの上限 WIN_H_MAX は 12 行 + 区切り 2 本 + OK の段が入る値
+         * (寸法はホスト試験 test_about_info.py が libos32gui の下限込みで計算する)。 */
         let si = libos32gui::gapi::screen_info();
         let sw = si.width as i32;
         let sh = si.height as i32;
-        let ww = clamp(sw - 16, 240, 440);
-        let wh = clamp(sh - 40, 200, 312);
+        let ww = clamp(sw - 16, 240, WIN_W_MAX);
+        let wh = clamp(sh - 40, 200, WIN_H_MAX);
         let wx = (sw - ww) / 2;
         let wy = clamp((sh - 24 - wh) / 2, 0, sh);
 
@@ -118,27 +130,30 @@ impl About {
         ))?;
 
         /* 見出し (版の行) / 機器の 7 行 / 識別の行 (API・Build・Commit・Image CRC) の
-         * 3 段に分け、段の間に 4px の区切りを置く。 */
-        let root = widget::column(10, 2)?;
+         * 3 段に分け、段の間に SEP_H の区切りを置く。
+         * 区切りと伸びる余白は**空の row** (下限 min_h = 0)。label は下限が 16px
+         * (libos32gui の CELL_H) なので、Fixed(4) を渡しても 16px になり、
+         * 2026-09-29 のゲスト確認で OK ボタンが窓の下端で切れた。 */
+        let root = widget::column(PAD, GAP)?;
         let mut i = 0;
         while i < n {
             if i == 1 || i == 1 + VER_HW.len() {
-                let gap = widget::label(b"")?;
-                widget::add(root, gap, SizeSpec::Fixed(4))?;
+                let sep = widget::row(0, 0)?;
+                widget::add(root, sep, SizeSpec::Fixed(SEP_H))?;
             }
             let l = widget::label(lines[i].as_bytes())?;
-            widget::add(root, l, SizeSpec::Fixed(if i == 0 { 20 } else { 16 }))?;
+            widget::add(root, l, SizeSpec::Fixed(if i == 0 { TITLE_H } else { LINE_H }))?;
             i += 1;
         }
-        let spacer = widget::label(b"")?;
+        let spacer = widget::row(0, 0)?;
         widget::add(root, spacer, SizeSpec::Flex(1))?;
 
         let bar = widget::row(0, 0)?;
         let pad = widget::label(b"")?;
         let ok = widget::button(b"OK")?;
         widget::add(bar, pad, SizeSpec::Flex(1))?;
-        widget::add(bar, ok, SizeSpec::Fixed(72))?;
-        widget::add(root, bar, SizeSpec::Fixed(24))?;
+        widget::add(bar, ok, SizeSpec::Fixed(OK_W))?;
+        widget::add(root, bar, SizeSpec::Fixed(BAR_H))?;
 
         win.set_root(root)?;
         win.set_focus()?;
