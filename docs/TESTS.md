@@ -96,9 +96,9 @@ make check-tests-inventory                      # 表が古くないか検査す
 | 12 | `check-gui-gate-host` | `python3 -B tools/tests/test_gui_gate.py --mutate` | `tools/gui_gate.py` | [`tools/tests/gui_gate_tdd.md`](../tools/tests/gui_gate_tdd.md) | — | × |
 | 13 | `check-kapi-version` | `python3 tools/check_kapi_version.py` | — | — | — | ○ |
 | 14 | `check-kapi-out` | `python3 -B tools/tests/test_kapi_out.py` | `sdk/gen_kapi.py` | [`tools/tests/kapi_out_tdd.md`](../tools/tests/kapi_out_tdd.md) | [`docs/tasks/memory/TASK_KAPI_OUTPUT_GUARD.md`](tasks/memory/TASK_KAPI_OUTPUT_GUARD.md) | × |
-| 15 | `check-docs-links` | `python3 tools/check_docs_links.py` | — | — | — | × |
-| 16 | `check-docs-orphans` | `python3 tools/check_docs_orphans.py` | — | [`tools/tests/s0_tdd.md`](../tools/tests/s0_tdd.md) | [`docs/tasks/settings/TASK_S0.md`](tasks/settings/TASK_S0.md) | × |
-| 17 | `check-tests-inventory` | `python3 tools/gen_tests_inventory.py --check` | — | — | — | × |
+| 15 | `check-docs-links` | `python3 tools/check_docs_links.py` | — | — | — | ○ |
+| 16 | `check-docs-orphans` | `python3 tools/check_docs_orphans.py` | — | [`tools/tests/s0_tdd.md`](../tools/tests/s0_tdd.md) | [`docs/tasks/settings/TASK_S0.md`](tasks/settings/TASK_S0.md) | ○ |
+| 17 | `check-tests-inventory` | `python3 tools/gen_tests_inventory.py --check` | — | — | — | ○ |
 | 18 | `check-manifests` | `python3 tools/check_manifests.py` | — | — | — | × |
 | 19 | `check-packages-host` | `python3 -B tools/tests/test_packages.py` | — | — | — | × |
 | 20 | `check-constraints` | `python3 tools/check_constraints.py` | — | — | — | ○ |

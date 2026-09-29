@@ -199,6 +199,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | `archive/gui_v12/` | v1.2 の票 5 本 (受入完了 2026-09-07 `d739494`)。索引は [tasks/gui/v12/TASKS.md](tasks/gui/v12/TASKS.md) |
 | [tasks/gui/v13/PLAN.md](tasks/gui/v13/PLAN.md) | **v1.3 計画と票の索引** (受入完了 2026-09-14) — K5b / K6 / K7 / T7〜T9、監査 (`AUDIT_2026-09-10.md`)、レビュー記録 (`archive/gui_v13_reviews/REVIEW_*.md`、完了記録) |
 | [tasks/gui/v13/TASK_K6C_A_terminal.md](tasks/gui/v13/TASK_K6C_A_terminal.md) / [TASK_T7_terminal_cmd.md](tasks/gui/v13/TASK_T7_terminal_cmd.md) / [REVIEW_T5A_APP.md](archive/gui_v13_reviews/REVIEW_T5A_APP.md) | v1.3 の票のうち `PLAN.md` から直接辿れない 3 本 (端末アプリ、端末からの CUI 起動、T5a アプリのレビュー記録) |
+| [tasks/gui/v21/TASK_PEGC_RA266_TIMING.md](tasks/gui/v21/TASK_PEGC_RA266_TIMING.md) | **v2.1 実機修正課題** — PC-9821Ra266でPEGC 31kHz/640x480が崩れる問題。NP21/W由来のSYNC/PITCH前提を実機BIOS値と比較し、完全なmode setへ修正する |
 | [../tools/tests/gui_review_20260910_tdd.md](../tools/tests/gui_review_20260910_tdd.md) / [gui_review3_20260910_tdd.md](../tools/tests/gui_review3_20260910_tdd.md) | v1.3 レビュー往復 (2026-09-10) の試験記録 (完了記録) |
 | [tasks/agents/HANDOVER_2026-09-16.md](tasks/agents/HANDOVER_2026-09-16.md) | **残件の引き継ぎ (2026-09-16、計画)** — 別モデルが PM として進めるための文書。現在地、残件 (H2 / H4 / arch 移設 / kstring 判断 / ゲスト試験ランナー / ARM / LAN 実機 / 小物) の推奨順・決裁点・手順・受入、踏むと痛い所 |
 | [tasks/agents/HANDOVER_v14.md](tasks/agents/HANDOVER_v14.md) | v1.4 の引き継ぎ — **撤回 (2026-09-14)**。アプリ層を別エージェントへ渡す案は取りやめ、実装は基盤・アプリ層とも Opus 5 コーダー |
@@ -214,6 +215,8 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [archive/kernel_v2/M1_RING3.md](archive/kernel_v2/M1_RING3.md) / [M2_KAPI_TRAMPOLINE.md](archive/kernel_v2/M2_KAPI_TRAMPOLINE.md) / [M3_VERIFY.md](archive/kernel_v2/M3_VERIFY.md) / [CONTRACTS.md](archive/kernel_v2/CONTRACTS.md) | 2.0 の設計 (リング 3 土台、KAPI トランポリン、検証、凍結契約)。完了記録 |
 | [archive/kernel_v2/TASK_coder1_M0b_privileged.md](archive/kernel_v2/TASK_coder1_M0b_privileged.md) / [TASK_coder1_M1_ring3.md](archive/kernel_v2/TASK_coder1_M1_ring3.md) / [TASK_coder2_libos32gui.md](archive/kernel_v2/TASK_coder2_libos32gui.md) | 2.0 のコーダー票。完了記録 |
 | [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md) / [tasks/v4/README.md](tasks/v4/README.md) | ゲーム基盤 v4 の草案 (2026-09-07)。v3 (次期カーネル、未定義) の後 |
+| [AUXILIARY_CORE_SERVICE.md](AUXILIARY_CORE_SERVICE.md) | **Auxiliary Core Service 草案** — OS32の単一コア思想を維持し、x86/ARMの余剰コアをGPU・DSP等の固定機能アクセラレータとして利用する設計 |
+| [LEGACY_LIVING_PRESERVATION.md](LEGACY_LIVING_PRESERVATION.md) | **レガシー実機の動態保存と役割分離** — 実機体験に意味のある処理を残し、時代依存の高負荷処理をOS64/Host Serviceへ委譲する長期設計原則 |
 | [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2 ローダー) — 設計 (全 8 部) |
 
 ### FEP・V86・SQLite・ライブラリ
