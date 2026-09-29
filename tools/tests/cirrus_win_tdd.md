@@ -34,7 +34,9 @@ PEGC で直した §4-34 と同じ形。
 - `kernel/paging.c`: 帯の先頭 4MB の PT を静的に 1 枚 (+4KB BSS)。PDE は paging_init で present。
 - `gfx/backend_cirrus.c`: 窓の上限を旧 PAGING_MAP_SIZE (32MB) から 32bit 空間の末尾へ。
   **段 2 の門**: auto では `np2_detect()` が真のときだけボードの ID を読む。`GFX=cirrus` の明示時は読む。
-  np2_detect はマウスの初期化 (`drivers/mouse.c`) が毎回の起動で既に呼んでいるので、実機に新しい I/O は増えない。
+  auto の probe は 1 回ごとに np2_detect の検出通信 (07EFh へ `"NP2"` の OUT 3 回 + 応答の IN 最大 7 回) を 1 組**追加で**行う。
+  叩くポートはマウスの初期化 (`drivers/mouse.c`) が毎回の起動で既に使っている 07EFh だけで新しいポートは無いが、
+  実機でもこの回数ぶん I/O は増える (ボードの ID 0FAAh/0FABh を読まなくなる代わり)。
 
 ## 見ること
 

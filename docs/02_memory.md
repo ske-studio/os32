@@ -207,7 +207,10 @@ pgalloc_stage_online() が paging_map_phys() で張り、PT はブート workspa
 **OS が番地を決めるデバイス窓は v3 のデバイス窓の帯 `[0xFE000000, 0xFF000000)`** (`MEM_DEVICE_APERTURE_*`、
 2026-09-29) に置く。RAM の量に関係なく RAM と重ならないよう物理地図で MMIO にし (RAM として登録できる上端 =
 `MEM_PHYS_RAM_CEILING`)、帯の先頭 4MB の PT を paging_init が**静的に 1 枚** (+4KB BSS) 持つ —
-新しい PDE は live AS が 0 の間しか足せないが、gfx の init は exec の後にも走るため:
+新しい PDE は live AS が 0 の間しか足せないが、gfx の init は exec の後にも走るため。
+帯を物理地図で MMIO に登録するのは 16MB 超の RAM を登録する経路 (`memory_boot_add_high`) だけで、高位 RAM の無い
+構成 (legacy 経路) では帯は明示の MMIO 登録でなく UNKNOWN のまま — RAM にはならないので現状の RAM 判定・窓のマップには
+支障は無く、明示の登録は v3 の資源割当で引き継ぐ:
 
 ```
 0x00F00000 - 0x00F4AFFF          PEGC のリニア窓 (H2、9821 で PEGC 有効時のみ)  supervisor + PCD
