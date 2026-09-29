@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  APPSLOT.C — アプリ ID の表と状態遷移 (K5b-K)                             */
 /*                                                                          */
-/*  票 docs/tasks/gui/v13/TASK_K5_multiapp.md の §設計 D0〜D4 をそのまま      */
+/*  票 docs/archive/gui_v13/TASK_K5_multiapp.md の §設計 D0〜D4 をそのまま      */
 /*  写したもの。K5a のホスト模型 (tools/tests/multiapp_model_host.c) の       */
 /*  遷移表が仕様で、この .c がその実装。同じ検査を                            */
 /*  tools/tests/multiapp_impl_host.c が **この .c を直接コンパイルして** 回す。*/

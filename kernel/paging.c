@@ -1173,7 +1173,7 @@ int paging_app_band_selftest(void)
 
 /* ======================================================================== */
 /*  paging_memmap_selftest — 地図 (memmap.h) と実物 (PDE 0 の PTE) の照合     */
-/*  (票 docs/tasks/memory/TASK_KSTACK_USER.md §4 の 3)                       */
+/*  (票 docs/archive/kernel_v21/TASK_KSTACK_USER.md §4 の 3)                       */
 /*                                                                          */
 /*  静的検査 (STATIC_ASSERT / tools/gen_memmap.py) が見るのは「設計が矛盾    */
 /*  していないか」で、ここが見るのは「実装が設計どおりか」。**別のこと**を   */

@@ -1,7 +1,7 @@
 /* ========================================================================
  *  vfs_name_rules.inc — 下の FS が「別の綴りを同じ実体」と読む名前を断る純規則
  *
- *  票: docs/tasks/memory/TASK_VFS_FD_PATH.md (実装レビュー ラリー 2 の blocker)
+ *  票: docs/archive/kernel_v21/TASK_VFS_FD_PATH.md (実装レビュー ラリー 2 の blocker)
  *  ホスト試験: tools/tests/vfs_fd_path_host.c の段 fatname / hostname
  *
  *  VFS の BUSY / pinned (使用中の SQLite DB・loop イメージ) は、FD を開いた

@@ -90,7 +90,7 @@ SECTIONS
 
     /* ==================================================================== */
     /*  カーネル本体の予算 (2026-09-17 決裁 D2、票                            */
-    /*  docs/tasks/memory/TASK_KSTACK_USER.md)                               */
+    /*  docs/archive/kernel_v21/TASK_KSTACK_USER.md)                               */
     /*                                                                       */
     /*  KHEAP_BASE は __bss_end を 4KB に切り上げた位置で、そこから           */
     /*  ヒープ → KAPI → SHM が芋づるで動く。カーネルが予算を超えると SHM の   */
@@ -100,7 +100,7 @@ SECTIONS
     /*  それを **ここで、リンク時に** 止める。                                */
     /* ==================================================================== */
     ASSERT(__bss_end <= KERNEL_LOAD_ADDR + MEM_KERNEL_IMAGE_MAX,
-        "kernel image exceeds MEM_KERNEL_IMAGE_MAX (include/memmap.h): the floating KHEAP_BASE/KAPI/SHM chain would run past the kernel band and silently unmap someone else's pages. Fix: shrink the kernel, or reduce MEM_SHM_SIZE in 16KB steps (keep SHM_BLOCK_COUNT in kernel/shm.h in sync), or reduce KHEAP_SIZE. Run 'python3 tools/gen_memmap.py --check' for the exact numbers; background is docs/tasks/memory/TASK_KSTACK_USER.md")
+        "kernel image exceeds MEM_KERNEL_IMAGE_MAX (include/memmap.h): the floating KHEAP_BASE/KAPI/SHM chain would run past the kernel band and silently unmap someone else's pages. Fix: shrink the kernel, or reduce MEM_SHM_SIZE in 16KB steps (keep SHM_BLOCK_COUNT in kernel/shm.h in sync), or reduce KHEAP_SIZE. Run 'python3 tools/gen_memmap.py --check' for the exact numbers; background is docs/archive/kernel_v21/TASK_KSTACK_USER.md")
 
     /* ==================================================================== */
     /*  SQLite の伸び代 (票 docs/tasks/v3/TASK_HAL_WIRING.md §1-3)            */

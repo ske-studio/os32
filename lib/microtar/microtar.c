@@ -113,7 +113,7 @@ static int twrite(mtar_t *tar, const void *data, unsigned size) {
  * (パス解決 + inode の read-modify-write + データブロックの read-modify-write)、
  * 15 バイトのファイル 1 本を束ねるだけでも padding と終端で 1521 回の
  * sys_write = 15000 セクタ以上になり、`tar c` が 15 秒を超えていた (票 S6-P、
- * 診断は docs/tasks/settings/TASK_S6P.md)。ブロック単位で書けば呼び出しは
+ * 診断は docs/archive/settings/TASK_S6P.md)。ブロック単位で書けば呼び出しは
  * 数回で済む。書く中身 (ゼロ) も位置の勘定 (twrite が tar->pos を進める) も
  * 変わらない。
  * nul[] は static — 外部プログラムのスタックは細いので自動変数にしない。 */

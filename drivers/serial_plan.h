@@ -9,7 +9,7 @@
 /*    試験: tools/tests/test_serial_vfast.py                                */
 /*    記録: tools/tests/serial_vfast_tdd.md                                 */
 /*    資料: docs/hw/undocumented/io_rs.md (0130h〜013Ah)                    */
-/*    票  : docs/tasks/realhw/TASK_SERIAL_VFAST.md                          */
+/*    票  : docs/archive/realhw_v21/TASK_SERIAL_VFAST.md                          */
 /* ======================================================================== */
 
 #ifndef __SERIAL_PLAN_H

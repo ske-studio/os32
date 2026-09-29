@@ -4,7 +4,7 @@
 /*  I/O も低位メモリも触らない。kernel/bootinfo.c が 0x7E00 の写しを渡す。  */
 /*    試験: tools/tests/test_bootinfo.py (+ bootinfo_host.c)                */
 /*    記録: tools/tests/bootinfo_tdd.md                                     */
-/*    票  : docs/tasks/realhw/TASK_HDD_INSTALL.md 段 0                      */
+/*    票  : docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 0                      */
 /*                                                                          */
 /*  バイト列は**オフセットで**読む。ホストの u32 は 64bit なので構造体を     */
 /*  重ねて読むと試験が i386 と違う並びを見る。                              */

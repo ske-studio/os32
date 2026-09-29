@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  VK32_BOOT.C — vmkernel.lz4 (VK32 v2) の検査と展開 (HDD ローダ)          */
 /*                                                                          */
-/*  票: docs/tasks/realhw/TASK_SERIAL_HOSTFS.md 部品 A-4                    */
+/*  票: docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md 部品 A-4                    */
 /*  形式: boot/boot_defs.h の「VK32 ヘッダ (v2)」                          */
 /*  試験: tools/tests/test_vk32_crc.py (この C と FD の ASM に同じ壊れた    */
 /*        イメージを渡し、同じ VK32_ERR_* で断ることを見る)                  */

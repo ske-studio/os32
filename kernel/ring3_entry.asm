@@ -88,7 +88,7 @@ ring3_iret_to_user:
 ;; ============================================================
 ;; void __cdecl ring3_resume(const u32 *frame, u32 pd_phys, void *tss)
 ;;
-;; 票 docs/tasks/gui/v13/TASK_K5_multiapp.md の D2 (b) / P4。
+;; 票 docs/archive/gui_v13/TASK_K5_multiapp.md の D2 (b) / P4。
 ;; exec_park が AppSlot へ写した 13 語 (pushad + iret 分) をカーネルスタックへ
 ;; 積み直し、CR3 をそのアプリの PD に載せて CPL=3 の続きへ戻る。**戻らない**。
 ;;

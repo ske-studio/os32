@@ -78,7 +78,7 @@ int  snd_bgm_get_persist(void);
 void snd_cleanup(void);
 
 /* ======================================================================== */
-/*  音の所有権 (票 docs/tasks/gui/v13/TASK_K5_multiapp.md 決裁 D9-4、受入 G10)*/
+/*  音の所有権 (票 docs/archive/gui_v13/TASK_K5_multiapp.md 決裁 D9-4、受入 G10)*/
 /*                                                                          */
 /*  音は **フォーカスに追従して排他**。同時には鳴らさない。カーネルは         */
 /*  「音の所有者」を 1 つだけ持ち、フォーカスが移ったら                       */

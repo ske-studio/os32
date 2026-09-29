@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  KBD_INJECT.H — 打鍵の注入リング (GUI モード中の kbd_getchar を満たす)   */
 /*                                                                          */
-/*  票: docs/tasks/gui/v13/TASK_K7_input.md §1 D2 / §5 (K7-K = カーネル +    */
+/*  票: docs/archive/gui_v13/TASK_K7_input.md §1 D2 / §5 (K7-K = カーネル +    */
 /*      KAPI v47)                                                           */
 /*                                                                          */
 /*  GUI モード中 IRQ1 は raw リングにしか積まない (drivers/kbd.c の          */

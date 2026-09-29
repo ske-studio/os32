@@ -7,7 +7,7 @@
 /*  **地図はここに書かない。** 同じ表を 2 か所に書いた時点で片方が必ず古くなる  */
 /*  — 2026-09-17 まで、ここも docs/02_memory.md も CLAUDE.md も「カーネル本体   */
 /*  ~220KB」と書いていた (実測 432KB)。相対表記が共有メモリとカーネルスタックの */
-/*  重なりを隠していた (票 docs/tasks/memory/TASK_KSTACK_USER.md)。             */
+/*  重なりを隠していた (票 docs/archive/kernel_v21/TASK_KSTACK_USER.md)。             */
 /*                                                                          */
 /*  実値の地図 (絶対番地) の正典は **docs/02_memory.md §2-1** で、             */
 /*  tools/gen_memmap.py がこのファイルの #define と build/out/kernel.map の    */
@@ -60,7 +60,7 @@ extern u32 __bss_end;
 /* ====================================================================== */
 /*  カーネルスタック (SQLite 帯域の末尾, 下向き成長)                         */
 /*                                                                          */
-/*  2026-09-17 (決裁 D1、票 docs/tasks/memory/TASK_KSTACK_USER.md §4 の 4):  */
+/*  2026-09-17 (決裁 D1、票 docs/archive/kernel_v21/TASK_KSTACK_USER.md §4 の 4):  */
 /*  **カーネル帯域の末尾 0x1FC000 から SQLite 帯域の末尾 0x2FC000 へ移した。**  */
 /*  理由は「浮いた番地と固定番地を同じ帯で隣り合わせにしない」こと。         */
 /*  カーネル帯域は KHEAP_BASE 以降が __bss_end 由来で浮くので、カーネルが    */
@@ -241,7 +241,7 @@ extern u32 __bss_end;
 /*                                                                          */
 /*  予算を超えたら: (1) カーネルを削る、(2) MEM_SHM_SIZE を 16KB 単位で      */
 /*  減らす (kernel/shm.h の SHM_BLOCK_COUNT も同時)、(3) KHEAP_SIZE を       */
-/*  減らす。どれも票 docs/tasks/memory/TASK_KSTACK_USER.md §4 の 4 の続き。  */
+/*  減らす。どれも票 docs/archive/kernel_v21/TASK_KSTACK_USER.md §4 の 4 の続き。  */
 /* ====================================================================== */
 #define MEM_KERNEL_IMAGE_MAX  (MEM_KERNEL_BAND_END + 1 - KERNEL_LOAD_ADDR - \
                                KHEAP_SIZE - MEM_KAPI_SIZE - \

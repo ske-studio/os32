@@ -14,7 +14,7 @@
 ;;
 ;; FAT チェーンは「ファイル長から決まるクラスタ数」だけ読み、その先が EOC で
 ;; あることを確かめる (早期終端・範囲外・循環 = 長すぎる を止める)。
-;; 票: docs/tasks/realhw/TASK_SERIAL_HOSTFS.md 部品 A-4 / §1-v3「FD ローダ」
+;; 票: docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md 部品 A-4 / §1-v3「FD ローダ」
 ;;
 ;; VMKRNL.LZ4のメモリ配置 (リアルモード読み込み):
 ;;   1000:0000h〜 (物理 0x10000〜0x8EFFF、MAX_IMAGE_SIZE まで) へ直接読む。

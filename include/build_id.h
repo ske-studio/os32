@@ -5,7 +5,7 @@
 /*  `git rev-parse --short HEAD`、作業ツリーに追跡中の変更があれば "-dirty"、 */
 /*  git が無ければ "unknown"。生成器は中身が変わったときだけ書き直すので、    */
 /*  コミット ID が変わっても作り直すのは build_id.o 1 つとリンクだけ。        */
-/*  票: docs/tasks/realhw/TASK_SERIAL_HOSTFS.md 部品 A-4 (ユーザー指示)       */
+/*  票: docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md 部品 A-4 (ユーザー指示)       */
 /* ======================================================================== */
 
 #ifndef BUILD_ID_H

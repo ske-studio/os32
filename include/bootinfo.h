@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  BOOTINFO.H — ブート情報域 (ローダ → kernel_main) の形式                  */
 /*                                                                          */
-/*  票: docs/tasks/realhw/TASK_HDD_INSTALL.md 段 0 / §1-v3 N1・N2            */
+/*  票: docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 0 / §1-v3 N1・N2            */
 /*                                                                          */
 /*  ローダ (FD: boot/loader_fat_new.asm、HDD: boot/loader_hdd.asm) が        */
 /*  実モードで INT 1Bh AH=84h (新センス) を呼び、BIOS が見せる HDD の幾何を   */

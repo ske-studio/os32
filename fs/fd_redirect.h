@@ -105,7 +105,7 @@ void fd_redirect_reset_owned(int owner);
  * 2026-09-17 まで `vfs_isatty` は fd_is_redirected() を見て、`vfs_fstat` は
  * fd 0/1/2 を**無条件で S_IFCHR** と答えていた。対話で叩く限りどちらも
  * 正しく見えるが、`stat_t > file` のように出力を向け直すと**同じ fd に
- * ついて 2 つの API が食い違う** (票 docs/tasks/test/TASK_FSTAT_REDIR.md)。
+ * ついて 2 つの API が食い違う** (票 docs/archive/test/TASK_FSTAT_REDIR.md)。
  * 判定が 2 か所にあると必ずまた割れるので、引ける場所を 1 つにする。
  *
  *   戻り値      OS_S_IFCHR  コンソール (端末)

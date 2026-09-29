@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  SERIALFS_SESSION.C — `sfs run` のセッション (KAPI sfs_begin / sfs_end)  */
 /*                                                                          */
-/*  票 docs/tasks/realhw/TASK_SERIAL_HOSTFS.md §1-v3 と ユーザー決裁        */
+/*  票 docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md §1-v3 と ユーザー決裁        */
 /*  (2026-09-24)。流れ (常駐シェルの `sfs run` が begin → 子 → end と呼ぶ): */
 /*                                                                          */
 /*   begin: (1) /host が空いているか → (2) ゲートを上げる → (3) HELLO       */

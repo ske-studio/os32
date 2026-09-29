@@ -6,7 +6,7 @@
 ;;   番地の一致        tools/gen_memmap.py --check (MIRRORS)
 ;;   名前ごとの値の一致 tools/tests/test_bootinfo.py (make check-bootinfo-host)
 ;; 片方だけ直すと、ローダとカーネルが別の場所を読んで静かにずれる。
-;; 票: docs/tasks/realhw/TASK_HDD_INSTALL.md 段 0
+;; 票: docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 0
 ;; ============================================================
 
 MEM_BOOTINFO_BASE EQU 0x7E00

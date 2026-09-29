@@ -1,5 +1,5 @@
 /* ======================================================================== */
-/*  LAUNCH.C — 起動要求表 (票 docs/tasks/gui/v13/TASK_T9_sh.md D3 / §1a)     */
+/*  LAUNCH.C — 起動要求表 (票 docs/archive/gui_v13/TASK_T9_sh.md D3 / §1a)     */
 /*                                                                          */
 /*  設計の全文は include/launch.h の冒頭。ここに置かないもの:                */
 /*    - exec_start / exec_kill そのもの → exec/exec.c (この表は「誰が何を    */

@@ -9,7 +9,7 @@
 /*  は 1 周が 0.1 tick 未満でもっと深く 0 に落ち、1/7〜1/13 の桁になる。      */
 /*    試験: tools/tests/test_cpu_calibrate.py                               */
 /*    記録: tools/tests/cpu_calibrate_tdd.md                                */
-/*    票  : docs/tasks/realhw/TASK_SERIAL_VFAST.md (往復 3)                 */
+/*    票  : docs/archive/realhw_v21/TASK_SERIAL_VFAST.md (往復 3)                 */
 /*                                                                          */
 /*  直す前は `nop_loop(CALIBRATE_LOOPS)` を **1 回だけ** 回して tick で     */
 /*  割っていた。コメントの想定は 8MHz (12.5 tick) / 33MHz (3 tick) だが、   */

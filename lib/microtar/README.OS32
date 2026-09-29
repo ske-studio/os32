@@ -55,7 +55,7 @@ I/O は `mtar_t` の関数ポインタ (read/write/seek/close) なので、OS32 
    書く。呼び出しは 1523 回 → **5 回**、セクタ I/O は 15258 → **78**。
    書く中身 (ゼロ) も位置の勘定 (`twrite` が `tar->pos` を進める) も
    上流と同じ。実測は `tools/tests/s6p_tdd.md`、診断は
-   `docs/tasks/settings/TASK_S6P.md`。
+   `docs/archive/settings/TASK_S6P.md`。
    `nul[]` を自動変数にしないこと — 外部プログラムのスタックは細い。
 
 
