@@ -383,3 +383,16 @@ uPD7220 のステータス (60h / A0h の READ) の FIFO FULL が落ちるのを
 
 - ~~Trident (TGUI9682) のドライバは作らない (PLAN §7 のまま)。~~ → 2026-09-29 のユーザー決定で着手 (調査・設計は [TASK_TRIDENT_DRIVER.md](TASK_TRIDENT_DRIVER.md))。この票 (PEGC の直し) は続けるかどうかを同票 §7 T1 で決める。
 - 液晶の型番ごとの対処はしない。PC-98 の信号を BIOS と同じにするところまで。
+
+## 実機での受け入れ (C) の記録 (2026-09-29 22:21、実機エージェント、672f849)
+
+`gfxmode pegc` → 再起動 → `pegcchk 5`:
+```
+[pegc] enter 09a8=81 msk=0 dsp=1 lcd=1 clk=3 ext=1 800l=1 fifo_to=0 vs_to=0
+[pegc] exit  09a8=81 msk=0 dsp=1 lcd=1 clk=0 ext=0 800l=0 fifo_to=0 vs_to=0
+R mode     : 640x480 while in (expect 640x480), pattern drawn
+R back     : CUI after 532 ticks
+pegcchk done
+```
+期待値と完全一致。続く `v86 -g` は `R 31h : AX=310d BX=0100`・`R 30h back … AX=0500 (ROM)` で、OUT 200 行の port・value・cs:ip は d5cd3a5 の記録と同じ。
+`[selftest] 225/225 passed`。後片付けで `/etc/system.cfg` を元どおり無しに戻し、再起動して 672f849 で応答。**GUI は起動していない (目視は未実施)**。

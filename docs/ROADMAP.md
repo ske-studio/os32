@@ -10,7 +10,7 @@
 |---|---|---|---|
 | **カーネル** | **2.0** (タグ `v2.0`、2026-09-03) → **2.1 保守計画** | 2.0 はリング 3 (CPL=3) ネイティブ。2.1 は現行系の実機互換・安定化修正を扱い、v3設計とは分離 | [archive/kernel_v2/PLAN.md](archive/kernel_v2/PLAN.md)、[v2.1 PEGC実機課題](tasks/gui/v21/TASK_PEGC_RA266_TIMING.md) |
 | **GUI シェル** | **1.3 完了 → 1.4 進行中** | 本書 §1 の各節。カーネル 2.0 の上で動く | §1 |
-| **v2.1 (予定)** | **未タグ** (KernelAPI v68、2026-09-29 に feat/gui → main 合流) | **実機 Ra266 で CHECKLIST_2026-09-26 の手順 1〜7 は合格 (「v2.1 の判定の記録」)。タグは §1.5 の Ra266 PEGC 修正 ([TASK_PEGC_RA266_TIMING](tasks/gui/v21/TASK_PEGC_RA266_TIMING.md)) の後** (ユーザー決定 2026-09-29、9/28 の §1.5 の定義に従う)。**v3 へ分岐する前の区切り** (ユーザー決定 2026-09-24): カーネル層の既知の欠陥 (TASK_VFS_FD_PATH、TASK_KAPI_DATA_FIELDS = KAPI v63)、実機の HDD 運用 (TASK_HDD_INSTALL 段 1/2 + TASK_SERIAL_HOSTFS 部品 A)、実機の確認 (キーボード・段 0 の計測・桁ズレ) が済んだら、feat/gui を main へ合流してタグ `v2.1`。**2026-09-25: 条件はすべて到達** (実機 Ra266 で HDD インストール・HDD 起動)。タグは進行中の 4 件 (ERASE、lspci -v、起動ログ、CD 高速化) を入れた版を実機で確かめてから付ける (案 A)。**GUI 1.4 の残り (About、R2 計測) は v2.1 に含めず、他にすることが無いときに実装** (ユーザー決定 2026-09-25)。**インストール後の HDD のホスト e2fsck は行わない** (同) [RELEASE_v2.1.md](RELEASE_v2.1.md)、tasks/agents/HANDOVER_2026-09-22.md |
+| **v2.1** | **2026-09-29 タグ** (KernelAPI v68) | **実機 Ra266 で CHECKLIST_2026-09-26 の手順 1〜7 合格、§1.5 の Ra266 PEGC 修正を画面を見ない条件 (ROM の OUT 列との一致・NP21/W 回帰・実機 `pegcchk`) で受け入れ** (ユーザー決定 2026-09-29)。GUI の目視は v3 と並行。**v3 へ分岐する前の区切り** (ユーザー決定 2026-09-24): カーネル層の既知の欠陥 (TASK_VFS_FD_PATH、TASK_KAPI_DATA_FIELDS = KAPI v63)、実機の HDD 運用 (TASK_HDD_INSTALL 段 1/2 + TASK_SERIAL_HOSTFS 部品 A)、実機の確認 (キーボード・段 0 の計測・桁ズレ) が済んだら、feat/gui を main へ合流してタグ `v2.1`。**2026-09-25: 条件はすべて到達** (実機 Ra266 で HDD インストール・HDD 起動)。タグは進行中の 4 件 (ERASE、lspci -v、起動ログ、CD 高速化) を入れた版を実機で確かめてから付ける (案 A)。**GUI 1.4 の残り (About、R2 計測) は v2.1 に含めず、他にすることが無いときに実装** (ユーザー決定 2026-09-25)。**インストール後の HDD のホスト e2fsck は行わない** (同) [RELEASE_v2.1.md](RELEASE_v2.1.md)、tasks/agents/HANDOVER_2026-09-22.md |
 | 次期カーネル | **v3 (未着手、未定義)** | 本書 §2 の長期項目 (プリエンプティブ寄りのマルチタスクなど)。**2026-09-15 のユーザー決裁で「v2」ではなく v3 と呼ぶ** (出荷済み 2.0 と衝突するため) | §2 |
 | ゲーム基盤 | v4 (草案) | [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md)。v3 の後 | — |
 
@@ -251,6 +251,8 @@ image viewer (VBZ / VDP / BMP)、music player、`sed` / `awk`。
 ---
 
 ## 1.5 kernel v2.1 — 実機互換・安定化
+
+> **2026-09-29 完了 (タグ `v2.1`)**: 下の PEGC 課題は実機 ROM の記録に合わせて直し、画面を見ない条件で受け入れた ([RELEASE_v2.1.md](RELEASE_v2.1.md) §2-1)。GUI の目視確認だけが残る。
 
 v2.1 は v3 の新API設計へ進む前に、現行系で判明した実機依存の不具合を修正する保守リリースとして扱う。
 機能拡張を無制限に積む版ではなく、既存契約を保ったまま実機での成立条件を固める。

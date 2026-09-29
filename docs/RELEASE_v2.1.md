@@ -1,7 +1,7 @@
-# OS32 v2.1 リリースノート (下書き)
+# OS32 v2.1 リリースノート
 
-> 状態: **下書き**。実機の手順 1〜7 ([CHECKLIST_2026-09-26](tasks/realhw/CHECKLIST_2026-09-26.md) の「v2.1 の判定の記録」) は 2026-09-29 に満たし、feat/gui を main へ合流した。
-> **タグ `v2.1` は Ra266 の PEGC 640x480 の修正 ([TASK_PEGC_RA266_TIMING](tasks/gui/v21/TASK_PEGC_RA266_TIMING.md)、[ROADMAP](ROADMAP.md) §1.5) の後に付ける** (ユーザー決定 2026-09-29)。発行: PM (Claude Code `claude-opus-5-5`)、2026-09-26 起草・2026-09-29 更新。
+> 状態: **確定** (2026-09-29、タグ `v2.1`)。実機 PC-9821Ra266 で CHECKLIST_2026-09-26 の手順 1〜7 ([判定の記録](tasks/realhw/CHECKLIST_2026-09-26.md)) を満たし、
+> Ra266 の PEGC 640x480 の修正 ([TASK_PEGC_RA266_TIMING](tasks/gui/v21/TASK_PEGC_RA266_TIMING.md)、[ROADMAP](ROADMAP.md) §1.5) を**実機の画面を見ずに確かめられる条件**で受け入れた (ユーザー決定 2026-09-29、v3 を遅らせないため)。
 > 前の版: `v2.0` (2026-09-03、KernelAPI v39)。この版: KernelAPI **v68**。
 
 v2.1 は **v3 へ分岐する前の区切り**。v2.0 (リング 3 ネイティブ) の上に GUI シェルを載せ、**実機 PC-9821Ra266 で FD 起動・CD からの
@@ -25,6 +25,17 @@ gshell (WM)、libos32gui.shlib、PEGC / Cirrus のバックエンド、ファイ
 v2.1 で足したもの: **キーボードだけで GUI を操作する** (Windows 98 と同じ割り当て — CTRL+ESC、GRPH+TAB、GRPH+f･4、GRPH+SPACE の窓メニュー、
 SHIFT+f･10、カナ ON のマウスキー。PC-98 の GRPH = Alt)。GUI 1.4 の残りのうち **About** (`ver` と同じ内容を表示、Start → Programs の `about.bin`) と **R2 計測** (PEGC 640x480・NP21/W の Cirrus 640x480 で gui_gate v11/v12g1/v12g4 が通る) は 2026-09-29 に入った。
 ドラッグ枠の線が他の窓に残る件・前面を替えたとき旧前面のタイトルがアクティブ色のまま残る件も直した (gshell が損傷を申告していなかった。重なり順はアプリ → 枠 → モーダル → タスクバー → メニュー → FEP → カーソルに統一、Codex 5 回で Approve)。
+
+## 2-1. PEGC 640x480 (Ra266 実機)
+
+実機の ROM (INT 18h AH=30h) が 480 ラインへ入るとき・戻るときの OUT 列を `v86 -g` で全部記録し (2026-09-29)、`pegc_apply_timing` をその順序と値に合わせた。
+NP21/W では出なかった違い: GDC の RESET と表示の停止をしていない、グラフィック GDC の CSRFORM・SCROLL の長さ (3FFh)、テキスト GDC の 480 ライン設定 (SYNC・PITCH 80・CSRFORM・SCROLL)、6Eh とテキスト CRTC、09A8h を毎回書いて bit7 を落としていた。GDC クロック 5MHz は 6Ah 83h・85h の両方、`gdc_send` は FIFO を有界に待つ。
+
+**受け入れ (実機の画面は目で見ていない)**:
+- (A) 実物の `backend_pegc.c` の OUT 列が実機 ROM の記録 (入り・戻り各 94 行) と一致する (ホスト試験、変異 76 本 RED)。意図的な違いは理由付きの除外表。**A0h DFh / A2h 28h の組 (4 行) は未解明の差分として除外** — 実機で崩れが残るなら最初に疑う。
+- (B) NP21/W の回帰: PEGC・9801・Cirrus で gui_gate が通る。
+- (C) 実機 Ra266 で `pegcchk 5` (シリアル): `enter 09a8=81 … clk=3 ext=1 800l=1 fifo_to=0 vs_to=0` / `exit 09a8=81 … clk=0 ext=0 800l=0 fifo_to=0 vs_to=0`、640x480 でテスト画を描いて CUI へ戻る。続く `v86 -g` で ROM のモード取得が元の AX=310d BX=0100 のまま。
+- **残る確認**: 実機で GUI (gshell) を PEGC 640x480 で**目で見る**こと (v3 と並行、実機の前に居るとき)。
 
 ## 3. カーネル層で直した不具合 (主なもの)
 
@@ -50,9 +61,9 @@ SHIFT+f･10、カナ ON のマウスキー。PC-98 の GRPH = Alt)。GUI 1.4 �
 
 ## 6. 分かっている制限 (v3 以降)
 
+- 実機 Ra266 の PEGC 640x480 の GUI は目視未確認 (§2-1 の受け入れは画面を見ない条件)。
+
 - 実機 Ra266 の内蔵アクセラレータ (PCI の Trident 1023:9660) のドライバは設計票だけ ([TASK_TRIDENT_DRIVER](tasks/realhw/TASK_TRIDENT_DRIVER.md)、Codex Approve)。
 
-- (v2.1 のタグまでに直す) 実機の PEGC 640x480 で桁がずれる (GUI を `gfxmode pc98` で使えば正しい)。`v86 -g` の NP21/W での記録では、BIOS が 480 ラインで
-  PITCH 80・GDC 5MHz にするのに OS32 はしていない — 実機の記録で直し方を決める ([TASK_PEGC480_REALHW](tasks/realhw/TASK_PEGC480_REALHW.md))。
 - `libos32ui` (microUI) のアプリにはマウスキーが届かない。
 - CPL=3 のアプリのコールバック (`sys_ls`) は CPL=0 で同期的に呼ばれる (障害隔離のモデルで、敵対アプリの封じ込めは目標にしていない)。
