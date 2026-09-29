@@ -161,10 +161,13 @@ static const u8 x_msync_480[] = PEGC_GDC_MSYNC_480;
 static const u8 x_ssync_480[] = PEGC_GDC_SSYNC_480;
 static const u8 x_scroll_480[] = PEGC_GDC_SCROLL_480;
 static const u8 x_msync_400[] = PEGC_GDC_MSYNC_400;
-static const u8 x_ssync_400[] = PEGC_GDC_SSYNC_400;
+static const u8 x_ssync_400_2m5[] = PEGC_GDC_SSYNC_400_2M5;
+static const u8 x_ssync_400_5m[] = PEGC_GDC_SSYNC_400_5M;
 static const u8 x_msync_400_31k[] = PEGC_GDC_MSYNC_400_31K;
-static const u8 x_ssync_400_31k[] = PEGC_GDC_SSYNC_400_31K;
-static const u8 x_scroll_400[] = PEGC_GDC_SCROLL_400;
+static const u8 x_ssync_400_31k_2m5[] = PEGC_GDC_SSYNC_400_31K_2M5;
+static const u8 x_ssync_400_31k_5m[] = PEGC_GDC_SSYNC_400_31K_5M;
+static const u8 x_scroll_400_2m5[] = PEGC_GDC_SCROLL_400_2M5;
+static const u8 x_scroll_400_5m[] = PEGC_GDC_SCROLL_400_5M;
 
 static u16 xp[512];
 static u8  xv[512];
@@ -332,8 +335,8 @@ static void case_restore_31k(void)
     x_ff2(PEGC_FF2_STD_GFX);
     x_ff2(PEGC_FF2_VRAM_400L);
     x_timing(PEGC_HSYNC_31KHZ, 1, PEGC_FF2_GDC_CLK1_2M5, PEGC_FF2_GDC_CLK2_2M5,
-             x_msync_400_31k, x_ssync_400_31k, PEGC_GDC_PITCH_400_2M5,
-             x_scroll_400);
+             x_msync_400_31k, x_ssync_400_31k_2m5, PEGC_GDC_PITCH_400_2M5,
+             x_scroll_400_2m5);
     x_out(GDC_GFX_CMD, GDC_CMD_STOP);
     /* 先頭に 09A0h の読み (拡張モードか) が入るので OUT だけ見る */
     {
@@ -361,7 +364,7 @@ static void case_restore_24k_5m(void)
 
     x_reset();
     x_timing(PEGC_HSYNC_24KHZ, 1, PEGC_FF2_GDC_CLK1_5M, PEGC_FF2_GDC_CLK2_5M,
-             x_msync_400, x_ssync_400, PEGC_GDC_PITCH_400_5M, x_scroll_400);
+             x_msync_400, x_ssync_400_5m, PEGC_GDC_PITCH_400_5M, x_scroll_400_5m);
     x_out(GDC_GFX_CMD, GDC_CMD_STOP);
     check_outs();
     check_fifo_gate(1);
@@ -378,7 +381,7 @@ static void case_boot_clock(void)
     pegc_text_sync_400(PEGC_HSYNC_24KHZ);
     x_reset();
     x_timing(PEGC_HSYNC_24KHZ, 1, PEGC_FF2_GDC_CLK1_5M, PEGC_FF2_GDC_CLK2_2M5,
-             x_msync_400, x_ssync_400, PEGC_GDC_PITCH_400_2M5, x_scroll_400);
+             x_msync_400, x_ssync_400_2m5, PEGC_GDC_PITCH_400_2M5, x_scroll_400_2m5);
     x_out(GDC_GFX_CMD, GDC_CMD_STOP);
     check_outs();
 
@@ -419,8 +422,9 @@ static void case_restore_unrecorded(void)
     s_probe_ok = 0;
     pegc_restore_text_sync(0);
     x_reset();
-    x_timing(PEGC_HSYNC_24KHZ, 0, 0, 0, x_msync_400, x_ssync_400, 0,
-             x_scroll_400);
+    /* 従来の組: 5MHz 用 SYNC + IM=0 (起動時のクロックが分からない) */
+    x_timing(PEGC_HSYNC_24KHZ, 0, 0, 0, x_msync_400, x_ssync_400_5m, 0,
+             x_scroll_400_2m5);
     x_out(GDC_GFX_CMD, GDC_CMD_STOP);
     check_outs();
     check_fifo_gate(1);
@@ -523,6 +527,102 @@ static void case_fifo_stuck(void)
     check_outs();
 }
 
+/* ---- 資料の規則で、実際に出た OUT を**独立に**検査する (Codex レビュー P2) ----
+ * 期待列はヘッダの定数から組むので、ヘッダの選び方 (どの組を使うか) が
+ * 誤っていても列の比較では見えない。そこで出た OUT から グラフィック GDC の
+ * SYNC・SCROLL・PITCH と 6Ah のクロックを拾い、資料の数値と照らす:
+ *   [B] 2-6 表2-27: グラフィック 2.5MHz = C/R 26h・HS 03h・HFP 04h・HBP 03h、
+ *                   5MHz = C/R 4Eh・HS 07h・HFP 09h・HBP 07h、
+ *                   共通 VS 08h・VFP 07h・VBP 19h・L/F 190h (24kHz 400 ライン)。
+ *   [B] 2-7: SCROLL 第 4 バイト bit6 (IM) は 2.5MHz で 0、5MHz で 1。
+ *            PITCH は 2.5MHz で 40、5MHz で 80。
+ * 数値はここに直に書く (include/pegc.h を見ない)。 */
+#define R_CR_2M5   0x26
+#define R_CR_5M    0x4E
+#define R_IM       0x40
+typedef struct {
+    int n_sync, n_scroll, n_pitch;
+    u8 sync[8], scroll[4], pitch;
+    int clk1, clk2;          /* 最後に書いた 6Ah 82h〜85h (-1 = 無し) */
+    int hs;                  /* 最後に書いた 09A8h (-1 = 無し) */
+} Seen;
+
+static void collect_gfx(Seen *z)
+{
+    int i, want = 0, which = 0;
+    kmemset(z, 0, sizeof(*z));
+    z->clk1 = z->clk2 = z->hs = -1;
+    for (i = 0; i < ev_n; i++) {
+        if (!ev_out[i]) continue;
+        if (ev_port[i] == MODE_FF2_PORT) {
+            if (ev_val[i] == 0x82 || ev_val[i] == 0x83) z->clk1 = ev_val[i] & 1;
+            if (ev_val[i] == 0x84 || ev_val[i] == 0x85) z->clk2 = ev_val[i] & 1;
+        } else if (ev_port[i] == PEGC_HSYNC_PORT) {
+            z->hs = ev_val[i];
+        } else if (ev_port[i] == GDC_GFX_CMD) {
+            want = 0;
+            if (ev_val[i] == 0x0E) { which = 1; want = 8; z->n_sync = 0; }
+            if (ev_val[i] == 0x70) { which = 2; want = 4; z->n_scroll = 0; }
+            if (ev_val[i] == 0x47) { which = 3; want = 1; z->n_pitch = 0; }
+        } else if (ev_port[i] == GDC_GFX_PARAM && want > 0) {
+            if (which == 1) z->sync[z->n_sync++] = ev_val[i];
+            if (which == 2) z->scroll[z->n_scroll++] = ev_val[i];
+            if (which == 3) { z->pitch = ev_val[i]; z->n_pitch++; }
+            want--;
+        }
+    }
+}
+
+/* 出たグラフィック GDC の設定が、出た (または起動時の) クロックと矛盾しない */
+static void check_gfx_by_rule(int is5m)
+{
+    Seen z;
+    collect_gfx(&z);
+    CHECK(z.n_sync == 8 && z.n_scroll == 4);
+    CHECK(z.sync[1] == (is5m ? R_CR_5M : R_CR_2M5));
+    CHECK((z.scroll[3] & R_IM) == (is5m ? R_IM : 0));
+    if (z.n_pitch) CHECK(z.pitch == (is5m ? 80 : 40));
+    if (z.clk1 >= 0) CHECK((z.clk1 && z.clk2) == is5m);
+    if (z.hs == 0) {
+        /* 24kHz / 400 ラインは表2-27 の全項目 */
+        u8 *p = z.sync;
+        CHECK((p[2] & 0x1F) == (is5m ? 0x07 : 0x03));          /* HS */
+        CHECK((p[3] >> 2) == (is5m ? 0x09 : 0x04));            /* HFP */
+        CHECK((p[4] & 0x3F) == (is5m ? 0x07 : 0x03));          /* HBP */
+        CHECK((((p[3] & 3) << 3) | (p[2] >> 5)) == 0x08);      /* VS */
+        CHECK((p[5] & 0x3F) == 0x07);                          /* VFP */
+        CHECK((p[7] >> 2) == 0x19);                            /* VBP */
+        CHECK((p[6] | ((p[7] & 3) << 8)) == 0x190);            /* L/F */
+    }
+}
+
+/* 10. 戻りの組: 起動時の周波数 2 通り × クロック 2 通り (+ 片方だけ 5MHz) */
+static void case_restore_matrix(void)
+{
+    static const u8 hs_raw[2] = { 0x00, 0x81 };
+    static const u8 clk[3] = { 0x00, 0x03, 0x01 };
+    int h, c;
+    s_case = "restore_matrix";
+    for (h = 0; h < 2; h++) {
+        for (c = 0; c < 3; c++) {
+            int is5m = (clk[c] == 0x03);
+            world_reset();
+            boot_with(hs_raw[h], clk[c]);
+            pegc_restore_text_sync(h);      /* v86 -g の FALLBACK の口 */
+            check_gfx_by_rule(is5m);
+            world_reset();
+            boot_with(hs_raw[h], clk[c]);
+            pegc_text_sync_400(pegc_restore_hsync());   /* pegc_shutdown の口 */
+            check_gfx_by_rule(is5m);
+        }
+    }
+    /* 480 ラインへ入る側は 5MHz の組 (C/R 4Eh・IM 1・PITCH 80) */
+    world_reset();
+    boot_with(0x00, 0x00);
+    pegc_enter_480_ports();
+    check_gfx_by_rule(1);
+}
+
 /* 9. 既定値 = NP21/W の記録 (票 §3「段 1 の NP21/W での記録」) と資料。
  *    **実機の `v86 -g` の記録で pegc.h §10 を差し替えたら、ここを直す。** */
 static void case_defaults(void)
@@ -539,10 +639,26 @@ static void case_defaults(void)
     /* 1 バイトあたりの待ちの上限が 1 フレームを大きく超えない (100ms 未満) */
     CHECK((u32)PEGC_GDC_FIFO_POLLS * PEGC_GDC_FIFO_POLL_US < 100000UL);
     CHECK(x_scroll_480[3] == 0x40);               /* IM=1 (5MHz) */
+    /* 戻りの SYNC / SCROLL の組の数値 (NP21/W bios18.c gdcslavesync) */
+    {
+        static const u8 l24[8] = { 0x02, 0x26, 0x03, 0x11, 0x83, 0x07, 0x90, 0x65 };
+        static const u8 m24[8] = { 0x02, 0x4E, 0x07, 0x25, 0x87, 0x07, 0x90, 0x65 };
+        static const u8 l31[8] = { 0x02, 0x26, 0x41, 0x0C, 0x83, 0x0D, 0x90, 0x89 };
+        static const u8 m31[8] = { 0x02, 0x4E, 0x47, 0x0C, 0x87, 0x0D, 0x90, 0x89 };
+        int i;
+        for (i = 0; i < 8; i++) {
+            CHECK(x_ssync_400_2m5[i] == l24[i] && x_ssync_400_5m[i] == m24[i]);
+            CHECK(x_ssync_400_31k_2m5[i] == l31[i] && x_ssync_400_31k_5m[i] == m31[i]);
+        }
+        CHECK(x_scroll_400_2m5[3] == 0x00 && x_scroll_400_5m[3] == 0x40);
+    }
 }
 
 void _start(void)
 {
+    /* 資料の規則での検査を先に回す (変異がヘッダ由来の期待列ではなくこちらで
+     * 落ちることを --mutate の行で見られるように) */
+    case_restore_matrix();
     case_defaults();
     case_enter_480();
     case_restore_31k();
@@ -552,6 +668,6 @@ void _start(void)
     case_hsync_bits();
     case_fifo_busy();
     case_fifo_stuck();
-    output("PASS pegc_mode_host (9 cases)\n");
+    output("PASS pegc_mode_host (10 cases)\n");
     finish(0);
 }

@@ -162,8 +162,8 @@ NP21/W の ROM は SYNC を内部状態へ直接書くので、エミュレー�
 [TASK_PEGC480_REALHW](tasks/realhw/TASK_PEGC480_REALHW.md) §2 H2・H3・H5):
 `pegc_apply_timing` が 1 か所で 09A8h → 6Ah GDC クロック (83h・85h = 5MHz) → 両 GDC の SYNC → グラフィック GDC の
 PITCH (80) → SCROLL → 表示開始の順に書く (クロックは SYNC の前 — Bible 3-2 表3-2)。戻りは起動時に 09A0h
-(sel 09h の bit0 = CLOCK-1、読み値 bit1 = CLOCK-2) で読んだクロックへ戻し、PITCH は両方 5MHz なら 80・それ以外 40
-(PITCH は書き込み専用)。値は `include/pegc.h` §10 に集めてあり、**実機の `v86 -g` の記録で差し替える箇所はそこだけ**
+(sel 09h の bit0 = CLOCK-1、読み値 bit1 = CLOCK-2) で読んだクロックへ戻し、PITCH (書き込み専用)・グラフィック GDC の SYNC・
+SCROLL の IM もそのクロックとの組で選ぶ (両方 5MHz なら PITCH 80・C/R 4Eh・IM 1、それ以外は 40・26h・0 — Bible 2-6 表2-27、2-7)。値は `include/pegc.h` §10 に集めてあり、**実機の `v86 -g` の記録で差し替える箇所はそこだけ**
 (今は NP21/W 由来)。GDC へは 1 バイトずつステータスの FIFO を見てから書く (コマンドの前は EMPTY、パラメータの前は FULL でない。
 上限 2µs × 5000 回で打ち切って数える — `pegc_gdc_fifo_timeouts`、kernel.map から読める)。09A8h へは bit1,0 だけを書く
 (実機の読みは 81h だが bit7〜2 は「常に 0」、PLL を持つ機種がある)。ホスト試験は `make check-pegc-mode-host`。

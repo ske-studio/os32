@@ -298,7 +298,8 @@
 /*    O s480 の A2h 47h の後の A0h                   → PEGC_GDC_PITCH_480    */
 /*    O s480 の 6Ah 82h〜85h                         → PEGC_GDC_CLK*_480     */
 /*    O s480 の A2h 70h の後の 4 バイト              → PEGC_GDC_SCROLL_480   */
-/*    O back の同じ行                                → *_400 / *_400_31K と  */
+/*    O back の同じ行                                → *_400_* / *_400_31K_* */
+/*                                                     (起動時クロック別) と  */
 /*                                                     PEGC_GDC_PITCH_400_*  */
 /*  書く**順序**は backend_pegc.c の pegc_apply_timing() 1 か所 (§10 の値を  */
 /*  そこが 1 回だけ読む)。値を差し替えたら tools/tests/test_pegc_mode.py の   */
@@ -330,26 +331,47 @@
 #define PEGC_GDC_CLK1_480      PEGC_FF2_GDC_CLK1_5M
 #define PEGC_GDC_CLK2_480      PEGC_FF2_GDC_CLK2_5M
 
-/* --- 400 ラインへ戻る — 24.83kHz (NP21/W の CUI、資料の標準) --- */
-#define PEGC_GDC_MSYNC_400     { 0x10, 0x4E, 0x07, 0x25, 0x07, 0x07, 0x90, 0x65 }
-#define PEGC_GDC_SSYNC_400     { 0x02, 0x4E, 0x07, 0x25, 0x87, 0x07, 0x90, 0x65 }
+/* --- 400 ラインへ戻る ---
+ * テキスト (マスタ) GDC は周波数だけで決まり (テキスト GDC は 2.5MHz 固定)、
+ * グラフィック (スレーブ) GDC の SYNC と SCROLL は**起動時の GDC クロックとの組**
+ * で選ぶ (Codex レビュー P2、2026-09-29)。クロックと PITCH だけ起動時へ戻して
+ * SYNC を 5MHz 用のままにすると、2.5MHz の機械で「PITCH 40 + 5MHz の SYNC
+ * (C/R 4Eh)」という組になる。
+ *   [B] 2-6 表2-27「SYNC 命令パラメータの標準的設定値」: グラフィック 2.5MHz は
+ *     C/R 26h・HS 03h・HFP 04h・HBP 03h、5MHz は C/R 4Eh・HS 07h・HFP 09h・HBP 07h
+ *     (VS 08h・VFP 07h・VBP 19h・L/F 190h は共通)。24kHz の 2 組はこの表どおり。
+ *   [B] 2-7 SCROLL「IM: 2.5MHz 時は 0、5MHz 時は 1」(第 4 バイト bit6)。
+ *   NP21/W bios/bios18.c bios0x18_30 も gdcslavesync の "-L" (2.5MHz) / "-M"
+ *   (5MHz) を選び分け、5MHz のときだけ SCROLL 第 4 バイトを 40h にする。
+ * 起動時のクロックが分からない (PEGC の probe が通っていない) ときは従来の組
+ * (5MHz 用 SYNC + IM=0) のまま — その経路はクロックと PITCH にも触らない。 */
 
-/* --- 400 ラインへ戻る — 31.47kHz。**起動時の 09A8h が 31kHz だった機種だけ**。
+/* 24.83kHz (NP21/W の CUI、資料の標準) */
+#define PEGC_GDC_MSYNC_400         { 0x10, 0x4E, 0x07, 0x25, 0x07, 0x07, 0x90, 0x65 }
+/* NP21/W gdcslavesync "24-L" = [B] 表2-27 グラフィック 2.5MHz */
+#define PEGC_GDC_SSYNC_400_2M5     { 0x02, 0x26, 0x03, 0x11, 0x83, 0x07, 0x90, 0x65 }
+/* NP21/W gdcslavesync "24-M" = [B] 表2-27 グラフィック 5MHz */
+#define PEGC_GDC_SSYNC_400_5M      { 0x02, 0x4E, 0x07, 0x25, 0x87, 0x07, 0x90, 0x65 }
+
+/* 31.47kHz。**起動時の 09A8h が 31kHz だった機種だけ**。
  * 実機 Ra266 の CUI はこちら (boot.log `[pegc] hsync=31k 09a8=81`、液晶 OSD
  * H31.5kHz V70.2Hz、2026-09-29)。
- * 出典は NP21/W bios/bios18.c gdcmastersync[2] "31" / gdcslavesync[5] "31-M"
- * (INT 18h AH=30h/42h が 31kHz の 400 ラインで流す値)。
- * ⚠ ミラー [B]/[U] にこの表は無い。uPD7220 の SYNC は書き込み専用で
- * (I/O 0062h の READ 系は READ/LPEN/CSRR だけ、[U] io_disp.md)、BIOS ワーク
- * エリアにも写しが無いので、実機の BIOS が入れた値を読み戻す手段が無い。
- * 実機の ROM と一致するかは未確認 (エミュレータの再現値)。 */
-#define PEGC_GDC_MSYNC_400_31K { 0x10, 0x4E, 0x47, 0x0C, 0x07, 0x0D, 0x90, 0x89 }
-#define PEGC_GDC_SSYNC_400_31K { 0x02, 0x4E, 0x47, 0x0C, 0x87, 0x0D, 0x90, 0x89 }
+ * 出典は NP21/W bios/bios18.c gdcmastersync[2] "31" / gdcslavesync[4] "31-L"・
+ * [5] "31-M" (INT 18h AH=30h/42h が 31kHz の 400 ラインで流す値)。
+ * ⚠ ミラー [B]/[U] にこの表は無い (表2-27 は 24kHz だけ)。uPD7220 の SYNC は
+ * 書き込み専用で (I/O 0062h の READ 系は READ/LPEN/CSRR だけ、[U] io_disp.md)、
+ * BIOS ワークエリアにも写しが無いので、実機の BIOS が入れた値を読み戻す手段が
+ * 無い。実機の ROM と一致するかは未確認 (エミュレータの再現値)。C/R が 26h /
+ * 4Eh で分かれるのは表2-27 と同じ。 */
+#define PEGC_GDC_MSYNC_400_31K     { 0x10, 0x4E, 0x47, 0x0C, 0x07, 0x0D, 0x90, 0x89 }
+#define PEGC_GDC_SSYNC_400_31K_2M5 { 0x02, 0x26, 0x41, 0x0C, 0x83, 0x0D, 0x90, 0x89 }
+#define PEGC_GDC_SSYNC_400_31K_5M  { 0x02, 0x4E, 0x47, 0x0C, 0x87, 0x0D, 0x90, 0x89 }
 
-/* 400 ライン側の SCROLL は BIOS と同じ全 0 (NP21/W では LEN=0 = 無制限扱い)。
- * ⚠ IM (P4 bit6) も 0 = 2.5MHz の値。起動時に 5MHz だった機種 (DIP SW 2-8 ON、
- * [US] 054Dh bit5) で BIOS が IM=1 を入れているかは未確認 — 実機の O back で見る。 */
-#define PEGC_GDC_SCROLL_400    { 0x00, 0x00, 0x00, 0x00 }
+/* 400 ライン側の SCROLL。SAD=0。第 4 バイト bit6 = IM ([B] 2-7)。2.5MHz は
+ * BIOS と同じ全 0 (NP21/W では LEN=0 = 無制限扱い)、5MHz は IM=1 (NP21/W の
+ * bios0x18_30 が 5MHz で入れる 40h と同じ — NP21/W では LEN=1024)。 */
+#define PEGC_GDC_SCROLL_400_2M5    { 0x00, 0x00, 0x00, 0x00 }
+#define PEGC_GDC_SCROLL_400_5M     { 0x00, 0x00, 0x00, 0x40 }
 
 /* 400 ラインへ戻るときの PITCH。**PITCH は書き込み専用で読み戻せない**
  * (uPD7220 の読み出しは READ/LPEN/CSRR だけ) ので、起動時に**読める** GDC

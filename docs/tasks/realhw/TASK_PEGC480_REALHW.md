@@ -165,7 +165,7 @@ v86 -g    : R result : AH=31h value not recognized (status=2)
     (`tools/tests/v86_gcap_tdd.md`)。KAPI は変えていない。**次の実機の回で `v86 -g` をやり直す**。
 - **実機の CUI は起動時から 31kHz** — boot.log `[pegc] hsync=31k 09a8=81`、液晶の OSD は 720x400 H31.5kHz V70.2Hz、
   31h の AL bit2 = 1。NP21/W の CUI は 24kHz。`pegc_shutdown` / `pegc_restore_text_sync` は 2026-09-24 から起動時の
-  09A8h (D0) へ戻す作りで、31kHz の 400 ラインの SYNC (`PEGC_GDC_MSYNC_400_31K` — これも NP21/W 由来) を使う。
+  09A8h (D0) へ戻す作りで、31kHz の 400 ラインの SYNC (`PEGC_GDC_MSYNC_400_31K` と起動時クロック別の `PEGC_GDC_SSYNC_400_31K_*` — これも NP21/W 由来) を使う。
   「CUI = 24kHz」を前提にしているのは起動時の 09A8h が読めなかったときの既定だけ (PEGC の probe が通った機種では来ない)。
 - **09A8h の読みは 81h (bit7 = 1)**。[U] io_disp.md I/O 09A8h (1870〜1895 行): bit1,0 = 周波数 (01b = 31.47kHz、
   00b = 24.83kHz、10b/11b 設定禁止)、**bit7〜2 は「未使用 (常に 0 にする)」**、解説に「PC-9821Bp･Bs･Be･Bf･Xt･Xa･Xn･Xp･
@@ -191,16 +191,20 @@ v86 -g    : R result : AH=31h value not recognized (status=2)
 - **値は `include/pegc.h` §10 に集めた = 実機の記録で差し替える箇所はそこだけ** (SYNC 480 / 400 / 400_31K、SCROLL、
   `PEGC_GDC_PITCH_480` = 80、`PEGC_GDC_CLK1_480` / `CLK2_480` = 83h / 85h、戻りの `PEGC_GDC_PITCH_400_2M5` / `_5M`)。
   今の値はすべて NP21/W 由来。差し替えたらホスト試験の `defaults` ケースだけ直す。
+- 戻りは**グラフィック GDC の SYNC と SCROLL (IM) もクロックとの組**で選ぶ (Codex レビュー P2、2026-09-29): 起動時が
+  両方 5MHz なら 5MHz 用 (C/R 4Eh・SCROLL 第 4 バイト 40h)、それ以外は 2.5MHz 用 (C/R 26h・IM=0)。24kHz の組は [B] 2-6
+  表2-27 と一致 (NP21/W gdcslavesync 24-L / 24-M)、31kHz の組は NP21/W の 31-L / 31-M (資料に表なし)。それまでは SYNC が
+  常に 5MHz 用・IM が常に 0 で、2.5MHz の機械では PITCH 40 と食い違っていた。ホスト試験は資料の数値を試験側に直に書いて照らす。
 - 戻りのクロックは**起動時に読んだ値**: `pegc_boot_sync_record` が 09A0h に 09h を書いて読み、bit0 = CLOCK-1、
   bit1 = CLOCK-2 ([U] io_disp.md I/O 09A0h)。boot.log に `[pegc] gdcclk=… clk1= clk2= bios054d.b2= pitch400=` を出す
   (054Dh bit2 = BIOS の記録する現在のクロック、突き合わせ用)。PITCH は書き込み専用なので、戻す PITCH は起動時の
   クロックから [B] 2-7 の「通常」(両方 5MHz なら 80、それ以外 40) を選ぶ。probe が通っていない (記録が無い) ときは
   クロックと PITCH に触らない。
 - **§4 の FIFO 待ちも実装** (下)。
-- ホスト試験 `make check-pegc-mode-host` (`tools/tests/pegc_mode_tdd.md`): OUT 列 (ポート・値・順序)、FIFO 待ち、上限、変異 25 本。
+- ホスト試験 `make check-pegc-mode-host` (`tools/tests/pegc_mode_tdd.md`): OUT 列 (ポート・値・順序)、資料の数値での独立の検査 (戻り 6 通り)、FIFO 待ち、上限、変異 34 本。
 - 未確定のまま残したもの: テキスト GDC の PITCH (NP21/W の BIOS は 80 のまま内部で入れる、OS32 は触らない)、6Ah 40h
   (NP21/W の BIOS が s480 / back の両方で出す CRT / プラズマ表示モード — テキストの 1 ドットずれの制御で、今回は出さない)、
-  テキスト GDC の STOP (NP21/W の BIOS が 30h の最後に出す — OS32 は直後に START するので出さない)、400 ラインの SCROLL の IM。
+  テキスト GDC の STOP (NP21/W の BIOS が 30h の最後に出す — OS32 は直後に START するので出さない)。
   どれも実機の `v86 -g` の O 行で決める。
 
 ### 段 2 — 直す (段 1 の結果で分岐)

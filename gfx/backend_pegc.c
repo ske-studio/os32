@@ -54,11 +54,14 @@ STATIC_ASSERT(MEM_APP_BAND_DEVICE_FLOOR == PEGC_LINEAR_BASE,
 static const u8 s_msync_480[PEGC_GDC_SYNC_LEN]   = PEGC_GDC_MSYNC_480;
 static const u8 s_ssync_480[PEGC_GDC_SYNC_LEN]   = PEGC_GDC_SSYNC_480;
 static const u8 s_msync_400[PEGC_GDC_SYNC_LEN]   = PEGC_GDC_MSYNC_400;
-static const u8 s_ssync_400[PEGC_GDC_SYNC_LEN]   = PEGC_GDC_SSYNC_400;
+static const u8 s_ssync_400_2m5[PEGC_GDC_SYNC_LEN] = PEGC_GDC_SSYNC_400_2M5;
+static const u8 s_ssync_400_5m[PEGC_GDC_SYNC_LEN]  = PEGC_GDC_SSYNC_400_5M;
 static const u8 s_scroll_480[PEGC_GDC_SCROLL_LEN] = PEGC_GDC_SCROLL_480;
-static const u8 s_scroll_400[PEGC_GDC_SCROLL_LEN] = PEGC_GDC_SCROLL_400;
+static const u8 s_scroll_400_2m5[PEGC_GDC_SCROLL_LEN] = PEGC_GDC_SCROLL_400_2M5;
+static const u8 s_scroll_400_5m[PEGC_GDC_SCROLL_LEN]  = PEGC_GDC_SCROLL_400_5M;
 static const u8 s_msync_400_31k[PEGC_GDC_SYNC_LEN] = PEGC_GDC_MSYNC_400_31K;
-static const u8 s_ssync_400_31k[PEGC_GDC_SYNC_LEN] = PEGC_GDC_SSYNC_400_31K;
+static const u8 s_ssync_400_31k_2m5[PEGC_GDC_SYNC_LEN] = PEGC_GDC_SSYNC_400_31K_2M5;
+static const u8 s_ssync_400_31k_5m[PEGC_GDC_SYNC_LEN]  = PEGC_GDC_SSYNC_400_31K_5M;
 
 /* ------------------------------------------------------------------------ */
 /*  内部状態                                                                */
@@ -839,23 +842,29 @@ static void pegc_leave(void) { }
 /* クロックと PITCH は**起動時に記録したクロック**へ戻す (480 ラインへ入る側と
  * 対称。pegc_boot_sync_record)。記録が無い (PEGC の probe が通っていない =
  * 09A0h を読んでいない) ときは触らない — 従来どおり。 */
+/* グラフィック GDC の SYNC と SCROLL (IM) もクロックとの組で選ぶ (pegc.h §10、
+ * Codex レビュー P2): 起動時が 5MHz (両方) なら 5MHz 用、2.5MHz なら 2.5MHz 用。
+ * 記録が無いときは従来の組 (5MHz 用 SYNC + IM=0) で、クロックと PITCH は触らない。 */
 static void pegc_text_sync_400(u8 hs)
 {
     PegcTiming t;
+    int known = (s_boot_clk1 >= 0 && s_boot_clk2 >= 0) ? 1 : 0;
+    int is5m = (s_boot_clk1 == 1 && s_boot_clk2 == 1) ? 1 : 0;
+    int ss5m = known ? is5m : 1;     /* 記録なし = 従来の 5MHz 用 SYNC */
 
     t.hsync = hs;
-    t.set_clock = (s_boot_clk1 >= 0 && s_boot_clk2 >= 0) ? 1 : 0;
+    t.set_clock = known;
     t.clk1 = (s_boot_clk1 == 1) ? PEGC_FF2_GDC_CLK1_5M : PEGC_FF2_GDC_CLK1_2M5;
     t.clk2 = (s_boot_clk2 == 1) ? PEGC_FF2_GDC_CLK2_5M : PEGC_FF2_GDC_CLK2_2M5;
     if (hs == PEGC_HSYNC_31KHZ) {
         t.msync = s_msync_400_31k;
-        t.ssync = s_ssync_400_31k;
+        t.ssync = ss5m ? s_ssync_400_31k_5m : s_ssync_400_31k_2m5;
     } else {
         t.msync = s_msync_400;
-        t.ssync = s_ssync_400;
+        t.ssync = ss5m ? s_ssync_400_5m : s_ssync_400_2m5;
     }
     t.pitch = pegc_restore_pitch();
-    t.scroll = s_scroll_400;
+    t.scroll = (known && is5m) ? s_scroll_400_5m : s_scroll_400_2m5;
     pegc_apply_timing(&t);
 
     gdc_send(&s_gdc_gfx, GDC_CMD_STOP, (const u8 *)0, 0);
