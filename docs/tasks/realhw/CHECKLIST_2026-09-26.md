@@ -120,4 +120,4 @@ S="python3 tools/rshell_serial.py --port /dev/ttyUSB0 --fast 115200 --timeout 60
 | 6 boot.log の selftest | **合格** | 2026-09-29 18:47 読み取り: `# OS32 boot log … Commit 44bd0fe`、`[selftest] 225/225 passed`。手前の `bad magic … (double free?)`・`invalid free 1`・`invalid free 169c29` は kselftest.c の「不正な解放を弾く」試験がわざと出す行、`%%z`/`Z` は kprintf の書式末尾 `%` の試験の出力 (想定内)。`[atapi]` 行が無いのは失敗時だけ出す作りのため (CD は読めている、手順 7)。FD 2 台の read fail は FD 未挿入、`[lgy98] … NIC disabled` は LGY-98 未装着 |
 | 7 CD の中身 | **合格** | `/cd0` は起動時にマウント済み、5 本 (BOOT 6470 / DEBUG 1274263 / GUI 417610 / MINIMAL 886097 / NORMAL 10264052 B) が見える。大きさは CI 135b6b5 の packages と一致 = 入っているのは 135b6b5 の CD |
 
-**判定: 手順 1〜7 の条件を満たした → v2.1 を feat/gui → main へ取り込みタグを打つ (PM)。** 実機の selftest の数 (225) は NP21/W (242) より少ない — 機種で走らない項目がある (差の内訳は未確認、fail は 0)。
+**判定: 手順 1〜7 の条件を満たした → feat/gui → main へ合流 (2026-09-29)。タグ `v2.1` は ROADMAP §1.5 の Ra266 PEGC 修正の後 (ユーザー決定 2026-09-29)。** 実機の selftest の数 (225) は NP21/W (242) より少ない — 機種で走らない項目がある (差の内訳は未確認、fail は 0)。
