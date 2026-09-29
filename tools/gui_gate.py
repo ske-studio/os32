@@ -253,7 +253,8 @@ def begin_gui(h, settle=10.0, poll=1.0):
     """台本の入口: rshell を閉じる → `os32gui` → `/api/status` で GUI に居ることを確かめる。
 
     False なら台本はそこで NG で終わる (CUI に Run... のパスなどを打ち込まない)。
-    GUI に入れなかったときは rshell を戻しておく (次の台本・/api/cmd が使えるように)。"""
+    NG のときは CUI + rshell へ戻しておく (次の台本・/api/cmd が使えるように)。
+    高さ違いで GUI に入ってしまった場合は GUI から抜けてから戻す (`back_to_cui`)。"""
     if not close_rshell():
         return False
     enter_gshell()
@@ -268,8 +269,23 @@ def begin_gui(h, settle=10.0, poll=1.0):
         time.sleep(poll)
     print("  status %s" % st)
     print("  NG: GUI に入っていない (期待 scrn_ymax=%d grph_disp=1)" % h)
-    restore_rshell()
+    back_to_cui(st, h)
     return False
+
+
+def back_to_cui(st, h):
+    """入口の NG の後始末: CUI + rshell へ戻す。
+
+    `grph_disp == 1` なら GUI には入っている (高さが --h と違うだけ)。そこで CUI の前提の
+    `restore_rshell` を打つと `rshell` が gshell に打ち込まれ、ゲストが GUI に残る
+    (2026-09-29 の Cirrus 試験で発生)。その場合は**実際の高さ** (`scrn_ymax`) の座標で
+    `leave_gshell` を通して CUI へ戻す (rshell の復旧も leave_gshell がする)。
+    GUI に入っていなければ従来どおり `restore_rshell`。"""
+    if st.get("grph_disp") == 1:
+        real_h = st.get("scrn_ymax") or h
+        print("  GUI には入っている (scrn_ymax=%s) -> その高さで CUI へ戻す" % real_h)
+        return leave_gshell(Mouse(real_h))
+    return restore_rshell()
 
 
 class Mouse:

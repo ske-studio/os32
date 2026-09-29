@@ -522,6 +522,9 @@ rshell が立つ前の kprintf はシリアルにも出ない。カーネルは�
   ESC → tvram の末尾に `[Remote shell closed]` が新しく出たのを確認 (出る限り ESC を最大 2 回足して
   重なりも閉じる) → `os32gui` → `/api/status` が `scrn_ymax == --h` かつ `grph_disp == 1` でなければ
   NG (rshell を戻して終わる)。ホスト試験は `make check-gui-gate-host`。
+  NG でも `grph_disp == 1` (高さだけ違う) なら GUI に入っているので、CUI の前提で `rshell` を打つと
+  gshell に入ってゲストが GUI に残る (2026-09-29 Cirrus 試験)。`back_to_cui` が実際の高さ
+  (`scrn_ymax`) の座標で `leave_gshell` を通してから戻す。
 
 ### 4-32. `ext2_read_file` は端数ブロックでも 1KB 書いていた — 小さな static バッファへ読むと隣を潰す (2026-09-11、修正済み)
 
