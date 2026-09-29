@@ -997,6 +997,51 @@ pub fn composite_full(st: &mut GuiState) {
     flush_present();
 }
 
+/// WM の最前面物 (モーダル / FEP の候補窓 / タスクバー / Start メニュー) のうち、
+/// `regions` のどれかに掛かって**描き直しが要るもの**の矩形 (順に modal, fep,
+/// taskbar, startmenu。要らないものは空)。描き直した物が後の物を上書きし得るので、
+/// 描き直す物の矩形も判定範囲に足していく。描かずに決めるので、呼ぶ側はこれを見て
+/// カーソルの退避を先に決められる (Codex レビュー 3 回目: カーソルは最後に 1 回)。
+pub fn overlays_to_refresh(st: &GuiState, regions: &[Rect]) -> [Rect; 4] {
+    let cands = [modal::rect(), fep::rect(), taskbar::rect(st), startmenu::rect()];
+    let mut out = [Rect::EMPTY; 4];
+    let mut i = 0;
+    while i < 4 {
+        let r = cands[i];
+        if !r.is_empty() {
+            let mut hit = regions.iter().any(|g| !g.is_empty() && g.intersects(&r));
+            let mut j = 0;
+            while j < i {
+                if !out[j].is_empty() && out[j].intersects(&r) {
+                    hit = true;
+                }
+                j += 1;
+            }
+            if hit {
+                out[i] = r;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// [`overlays_to_refresh`] が返した物を描き直して present に積む (カーソルは呼ぶ側)。
+pub fn refresh_overlays(st: &mut GuiState, list: &[Rect; 4]) {
+    if !list[0].is_empty() && modal::refresh_if_hit(st, list[0]) {
+        queue_present(st, list[0]);
+    }
+    if !list[1].is_empty() && fep::refresh_if_hit(st, list[1]) {
+        queue_present(st, list[1]);
+    }
+    if !list[2].is_empty() && taskbar::refresh_if_hit(st, list[2]) {
+        queue_present(st, list[2]);
+    }
+    if !list[3].is_empty() && startmenu::refresh_if_hit(st, list[3]) {
+        queue_present(st, list[3]);
+    }
+}
+
 /// 前面 (= アクティブのクローム) が前回の合成から替わっていたら、旧前面と新前面の
 /// 外形を画面損傷に足す。
 ///
@@ -1061,10 +1106,11 @@ pub fn flush_screen_dirty(st: &mut GuiState) {
         queue_present(st, fr);
     }
 
-    /* ドラッグ中なら枠を再描画 (合成で消えているため)。 */
+    /* ドラッグ中なら枠を再描画 (合成で消えているため)。枠は最前面物の下
+     * (掛かった最前面物は描き直す。COMMIT の側と同じ重なり順)。 */
     if dragging {
         let f = st.drag_frame;
-        chrome::draw_drag_outline(f.x, f.y, f.w, f.h, lease::mono(st));
+        crate::input::draw_live_frame(st, &[]);
         queue_present(st, f);
     }
 

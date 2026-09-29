@@ -794,8 +794,7 @@ fn wm_button_down(st: &mut GuiState, mx: i32, my: i32) {
         st.drag_dy = my - w.y;
         st.drag_frame = w.outer();
         cursor::hide(st);
-        crate::chrome::draw_drag_outline(w.x, w.y, w.w, w.h, crate::lease::mono(st));
-        queue_frame_edges(st, w.outer());
+        draw_live_frame(st, &[]);
         cursor::show(st);
         let cr = cursor::rect(st);
         wm::queue_present(st, cr);
@@ -926,18 +925,14 @@ pub fn redraw_frame(st: &mut GuiState, new_frame: Rect) {
     cursor::hide(st);
     erase_frame_edges(st, old_frame);
     expose_frame_edges(st, old_frame);
-    crate::chrome::draw_drag_outline(
-        new_frame.x,
-        new_frame.y,
-        new_frame.w,
-        new_frame.h,
-        crate::lease::mono(st),
-    );
+    /* 旧枠の消去 (下地の再合成) は FEP の候補窓を描かないので、旧枠の縁も
+     * 最前面物の判定に入れる。 */
+    let old_edges = if old_frame.is_empty() { [Rect::EMPTY; 4] } else { frame_edges(old_frame) };
+    draw_live_frame(st, &old_edges);
     st.cursor.x = st.mouse_x;
     st.cursor.y = st.mouse_y;
     cursor::show(st);
     queue_frame_edges(st, old_frame);
-    queue_frame_edges(st, new_frame);
     wm::queue_present(st, old_cursor);
     let cr = cursor::rect(st);
     wm::queue_present(st, cr);
@@ -953,8 +948,7 @@ pub fn begin_frame(st: &mut GuiState, idx: usize) {
     st.drag_dy = 0;
     st.drag_frame = w.outer();
     cursor::hide(st);
-    crate::chrome::draw_drag_outline(w.x, w.y, w.w, w.h, crate::lease::mono(st));
-    queue_frame_edges(st, w.outer());
+    draw_live_frame(st, &[]);
     cursor::show(st);
     let cr = cursor::rect(st);
     wm::queue_present(st, cr);
@@ -1131,44 +1125,56 @@ fn expose_frame_edges(st: &mut GuiState, f: Rect) {
     }
 }
 
-/// アプリの COMMIT (X2) が present する矩形 `touched` がドラッグ枠の縁に掛かって
-/// いたら、枠を描き直して縁を同じ commit に積む。描き直したら真。
+/// 今のドラッグ枠の縁 4 本のうち `touched` に掛かるものがあれば、縁 4 本を返す
+/// (枠は全周を描き直すので 4 本とも)。ドラッグ中でなければ / 掛からなければ `None`。
 ///
 /// 旧枠の帯は 32px に丸めて Paint にするので、今の枠にも掛かることがある。アプリは
 /// Paint の矩形を丸ごと塗るので、そのまま present すると今の枠の一部が消え、次の
-/// WM 周で戻る = ちらつく (Codex レビュー P2)。モーダル / FEP / カーソルの
-/// `refresh_if_hit` と同じ扱い。
-pub fn refresh_frame_if_hit(st: &mut GuiState, touched: Rect) -> bool {
+/// WM 周で戻る = ちらつく (Codex レビュー P2)。COMMIT (X2) はこれを見て枠を戻す。
+pub fn live_frame_edges_hit(st: &GuiState, touched: Rect) -> Option<[Rect; 4]> {
     if st.drag_index < 0 || st.drag_frame.is_empty() {
-        return false;
+        return None;
     }
+    let es = frame_edges(st.drag_frame);
+    if es.iter().any(|e| e.intersects(&touched)) {
+        Some(es)
+    } else {
+        None
+    }
+}
+
+/// 今のドラッグ枠を描いて縁を present に積む (最前面物・カーソルは呼ぶ側)。
+pub fn draw_live_outline(st: &GuiState) {
     let f = st.drag_frame;
-    let mut hit = false;
-    for e in frame_edges(f).iter() {
-        if e.intersects(&touched) {
-            hit = true;
-        }
-    }
-    if !hit {
-        return false;
-    }
-    /* カーソルは枠より前面。アプリが潰していない (touched に掛からない) カーソルは
-     * 下地を戻してから枠を描き、退避し直す — 枠の外接矩形を touched に足して
-     * `discard → show` させると、表示中のカーソル画素を下地として退避し、次の移動で
-     * 旧位置に残像が出る (Codex レビュー 2 回目 P2)。touched に掛かるカーソルは
-     * 呼ぶ側の `cursor::refresh_if_hit` が従来どおり退避し直す。 */
-    let cursor_clean = !cursor::rect(st).intersects(&touched);
-    if cursor_clean {
-        cursor::hide(st);
-    }
     crate::chrome::draw_drag_outline(f.x, f.y, f.w, f.h, crate::lease::mono(st));
     queue_frame_edges(st, f);
-    if cursor_clean {
-        cursor::show(st);
-        let cr = cursor::rect(st);
-        wm::queue_present(st, cr);
+}
+
+/// 今のドラッグ枠を描き、枠 (と `extra`) が掛かった最前面物 (モーダル / FEP の
+/// 候補窓 / タスクバー / メニュー) を上に描き直す。重なり順は
+/// 「アプリ < 枠 < 最前面物 < カーソル」で、X2 (COMMIT) と X3 で揃える
+/// (Codex レビュー 3 回目 P2: 枠の縁が FEP の候補窓に線を残していた)。
+/// カーソルは呼ぶ側が先に hide し、最後に show する。
+pub fn draw_live_frame(st: &mut GuiState, extra: &[Rect]) {
+    if st.drag_index < 0 || st.drag_frame.is_empty() {
+        return;
     }
-    true
+    draw_live_outline(st);
+    let es = frame_edges(st.drag_frame);
+    let mut regions = [Rect::EMPTY; 12];
+    let mut n = 0;
+    for e in es.iter() {
+        regions[n] = *e;
+        n += 1;
+    }
+    for r in extra.iter() {
+        if n < regions.len() {
+            regions[n] = *r;
+            n += 1;
+        }
+    }
+    let ov = wm::overlays_to_refresh(st, &regions[..n]);
+    wm::refresh_overlays(st, &ov);
 }
 
 #[cfg(test)]

@@ -19,8 +19,7 @@
 
 use crate::wm::{self, GuiState, Rect, RectSet, MAX_DMG, MAX_VIS};
 use crate::{
-    cursor, damage, fep, input, lease, modal, multiapp, reqs, ring, session, slot, startmenu,
-    taskbar, timer, visible,
+    cursor, damage, input, lease, modal, multiapp, reqs, ring, session, slot, timer, visible,
 };
 use os32api::gui::proto::{
     GuiRect16, GuiReqModalResult, GuiReqSession, GuiRespModalResult, GuiString, GuiWinSpec,
@@ -490,27 +489,39 @@ fn op_commit(st: &mut GuiState, owner: i32, _slot_no: usize, arg: u32) -> i32 {
     if !any {
         return 0;
     }
-    /* ドラッグ枠 (マウス / キーボードの移動・サイズ) はアプリの描画より前面。
-     * 潰されていたら描き直す (カーソルの扱いは関数の注記)。 */
-    crate::input::refresh_frame_if_hit(st, touched);
-    /* アプリが描いた領域にカーソルが掛かっていれば、下地は既に潰れている。
-     * 退避を捨てて退避し直し、同じ commit で一緒に出す (X2 の許される描画)。 */
-    /* WM 自身の最前面物 (モーダル / FEP の候補窓) が潰されていたら描き直す。 */
-    if modal::refresh_if_hit(st, touched) {
-        wm::queue_present(st, modal::rect());
+    /* アプリの描画の上に WM が描き直す物: ドラッグ枠 → 最前面物 (モーダル /
+     * FEP の候補窓 / タスクバー / メニュー) → カーソル の順 (X3 と同じ重なり順)。
+     *
+     * 判定範囲は touched ∪ 実際に描き直す枠の縁 ∪ 描き直す最前面物。枠は全周を
+     * 描くので、touched に掛からない縁が最前面物を上書きすることがある (Codex
+     * レビュー 3 回目 P2)。カーソルは**最後に 1 回だけ**描く — 途中で出すと後の
+     * 最前面物の描き直しに消される。アプリに潰されたカーソルは退避を捨て、
+     * 潰されていないカーソルは下地を戻してから描き直す (表示中のカーソル画素を
+     * 下地として退避しない。2 回目 P2)。 */
+    let edges = input::live_frame_edges_hit(st, touched);
+    let mut regions = [Rect::EMPTY; 5];
+    regions[0] = touched;
+    if let Some(es) = edges {
+        regions[1..5].copy_from_slice(&es);
     }
-    if fep::refresh_if_hit(st, touched) {
-        wm::queue_present(st, fep::rect());
+    let overlays = wm::overlays_to_refresh(st, &regions);
+    let cr = cursor::rect(st);
+    let cursor_hit = st.cursor.shown
+        && (regions.iter().any(|r| !r.is_empty() && r.intersects(&cr))
+            || overlays.iter().any(|r| !r.is_empty() && r.intersects(&cr)));
+    if cursor_hit {
+        if cr.intersects(&touched) {
+            cursor::discard(st);
+        } else {
+            cursor::hide(st);
+        }
     }
-    /* タスクバー / メニューは可視領域から引いてあるので普通は掛からないが、
-     * 掛かったら描き直す (モーダルと同じ保険。契約 D1 / D2)。 */
-    if taskbar::refresh_if_hit(st, touched) {
-        wm::queue_present(st, taskbar::rect(st));
+    if edges.is_some() {
+        input::draw_live_outline(st);
     }
-    if startmenu::refresh_if_hit(st, touched) {
-        wm::queue_present(st, startmenu::rect());
-    }
-    if cursor::refresh_if_hit(st, touched) {
+    wm::refresh_overlays(st, &overlays);
+    if cursor_hit {
+        cursor::show(st);
         let cr = cursor::rect(st);
         wm::queue_present(st, cr);
     }

@@ -176,18 +176,27 @@ MUTATIONS = [
      'if d.intersects(&r) || near(&d, &r) {',
      'drag_frame_paint_stays_band_shaped'),
     ('app commit does not restore the live frame', 'src/handler.rs',
-     '    crate::input::refresh_frame_if_hit(st, touched);\n',
-     '    let _ = touched;\n',
+     '    if edges.is_some() {\n        input::draw_live_outline(st);\n    }\n',
+     '',
      'app_commit_during_drag_keeps_the_live_frame'),
     # Codex レビュー 2 回目 (2026-09-29) P2×2。
-    ('commit re-saves the cursor over the frame bounding box', 'src/handler.rs',
-     '    crate::input::refresh_frame_if_hit(st, touched);\n',
-     '    if crate::input::refresh_frame_if_hit(st, touched) {\n        touched = touched.union(&st.drag_frame);\n    }\n',
-     'app_commit_during_drag_keeps_the_live_frame'),
+    ('commit discards a cursor the app did not touch', 'src/handler.rs',
+     '        if cr.intersects(&touched) {\n            cursor::discard(st);',
+     '        if true {\n            cursor::discard(st);',
+     'commit_frame_redraw_under_the_cursor_saves_the_real_background'),
     ('drop leaves the last frame when it differs from the outer', 'src/input.rs',
      '        if nf != st.windows[idx].outer() {',
      '        if false && nf != st.windows[idx].outer() {',
      'drop_after_app_resize_erases_the_last_frame'),
+    # Codex レビュー 3 回目 (2026-09-29) P2×2: 重なり順 アプリ < 枠 < 最前面物 < カーソル。
+    ('overlays are judged by the app rects only', 'src/handler.rs',
+     '    let overlays = wm::overlays_to_refresh(st, &regions);',
+     '    let overlays = wm::overlays_to_refresh(st, &regions[..1]);',
+     'commit_frame_redraw_keeps_the_modal_on_top'),
+    ('the cursor is drawn before the overlays', 'src/handler.rs',
+     '    wm::refresh_overlays(st, &overlays);\n    if cursor_hit {\n        cursor::show(st);\n        let cr = cursor::rect(st);\n        wm::queue_present(st, cr);\n    }\n',
+     '    if cursor_hit {\n        cursor::show(st);\n        let cr = cursor::rect(st);\n        wm::queue_present(st, cr);\n    }\n    wm::refresh_overlays(st, &overlays);\n',
+     'commit_overlay_redraw_keeps_the_cursor'),
 ]
 
 

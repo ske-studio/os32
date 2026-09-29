@@ -1455,7 +1455,9 @@ fn drop_after_app_resize_erases_the_last_frame() {
         st.windows[0].dirty.clear();
         st.windows[0].issued.clear();
         /* その COMMIT は今の枠を描き直す (op_commit と同じ) */
-        input::refresh_frame_if_hit(&mut st, touched);
+        if input::live_frame_edges_hit(&st, touched).is_some() {
+            input::draw_live_outline(&st);
+        }
     }
     let rx = last.right() - 1;
     let px = mocks::pixels();
@@ -1468,4 +1470,157 @@ fn drop_after_app_resize_erases_the_last_frame() {
     let cr = crate::cursor::rect(&st);
     let stale = stale_client_pixels(&st, 0, &|x, y| cr.contains(x, y));
     assert!(stale.is_empty(), "背面のクライアント面に最後の枠の跡が残り、Paint も無い: {} 点 (先頭 {:?})", stale.len(), stale.first());
+}
+
+
+/* ---- COMMIT と最前面物 (Codex レビュー 3 回目 P2×2) ----
+ * モーダル (274,185,92,86) を開いたまま、枠 (330,100,200,300) をドラッグ中に
+ * 背面の Help (owner 2) が Paint → COMMIT する。重なり順は
+ * 「アプリ < 枠 < 最前面物 < カーソル」。 */
+
+/// 枠をドラッグ中の状態を組む。`cursor` の位置へカーソルを置き、`pieces`
+/// (画面座標) を Help の dirty にして返す (COMMIT の直前まで)。
+fn commit_over_modal_fixture(shm: &mocks::Shm, cursor: (i32, i32), pieces: &[wm::Rect]) -> &'static mut GuiState {
+    use crate::handler;
+    use os32api::gui::proto::{GUI_MODAL_OK, GUI_OP_POLL};
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let g = wm::g();
+    *g = windows(shm, &[(300, 40, 320, 400), (20, 20, 200, 150)]);
+    g.inited = true;
+    g.screen_w = 640;
+    g.screen_h = 480;
+    crate::visible::recompute_and_expose(g);
+    wm::composite_full(g);
+    paint_clients_as_app(g);
+    assert!(modal::open_wm_message(g, GUI_MODAL_OK, b"Modal\0", modal::WM_PURPOSE_NOTIFY));
+    crate::visible::recompute_and_expose(g);
+    wm::flush_screen_dirty(g);
+    let m = modal::rect();
+    assert_eq!((m.x, m.y, m.w, m.h), (274, 185, 92, 86), "前提: モーダルの位置が変わった");
+    park_pointer(g, cursor.0, cursor.1);
+    /* ドラッグ中 (マウスの状態は触らずに枠だけ置く): 枠 → 最前面物 → カーソル */
+    g.drag_index = 1;
+    g.drag_frame = wm::Rect::new(330, 100, 200, 300);
+    crate::cursor::hide(g);
+    input::draw_live_frame(g, &[]);
+    crate::cursor::show(g);
+    wm::flush_present();
+    /* 背面の Help: 与えた断片だけが汚れている */
+    let (ox, oy) = g.windows[0].client_origin();
+    g.windows[0].dirty.clear();
+    g.windows[0].issued.clear();
+    for r in pieces {
+        g.windows[0].dirty.push(r.translate(-ox, -oy));
+    }
+    let n = handler::gshell_gui_handler(GUI_OP_POLL, 0, 2);
+    assert!(n > 0, "前提: Help に Paint が出ない");
+    g
+}
+
+/// アプリが issued を塗って COMMIT する。塗った矩形の外接矩形を返す。
+fn app_paints_and_commits(g: &mut GuiState) -> wm::Rect {
+    use crate::handler;
+    use os32api::gui::proto::GUI_OP_COMMIT;
+    let (ox, oy) = g.windows[0].client_origin();
+    let mut touched = wm::Rect::EMPTY;
+    for k in 0..g.windows[0].issued.len {
+        let r = g.windows[0].issued.rects[k].translate(ox, oy);
+        unsafe { os32api::gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, CLIENT_SENTINEL) };
+        touched = touched.union(&r);
+    }
+    assert_eq!(handler::gshell_gui_handler(GUI_OP_COMMIT, 0, 2), 0);
+    touched
+}
+
+fn snapshot(r: wm::Rect) -> Vec<u8> {
+    let px = mocks::pixels();
+    let mut v = Vec::new();
+    for y in r.y..r.bottom() {
+        for x in r.x..r.right() {
+            v.push(px[y as usize * mocks::W + x as usize]);
+        }
+    }
+    v
+}
+
+fn first_diff(r: wm::Rect, before: &[u8]) -> Option<(i32, i32, u8, u8)> {
+    let now = snapshot(r);
+    let mut i = 0;
+    for y in r.y..r.bottom() {
+        for x in r.x..r.right() {
+            if now[i] != before[i] {
+                return Some((x, y, before[i], now[i]));
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+/// COMMIT が枠の右辺 (モーダルから離れた所) だけに掛かっても、全周を描き直した
+/// 枠の左辺がモーダルに線を残さない (Codex レビュー 3 回目 P2 の 2 件目)。
+#[test]
+fn commit_frame_redraw_keeps_the_modal_on_top() {
+    let shm = mocks::Shm::new();
+    /* カーソルはモーダルから離れた所。Help の断片は枠の右辺 (x=529) の周り。 */
+    let g = commit_over_modal_fixture(&shm, (600, 445), &[wm::Rect::new(512, 96, 32, 320)]);
+    let m = modal::rect();
+    let before = snapshot(m);
+    let touched = app_paints_and_commits(g);
+    assert!(!touched.intersects(&m), "前提: COMMIT がモーダルに掛かった");
+    assert_eq!(first_diff(m, &before), None, "モーダルの画素が変わった (枠の線が上に残った)");
+}
+
+/// COMMIT がモーダルの一部 (カーソルの無い所) に掛かってモーダルを描き直しても、
+/// カーソルは最後に描かれて欠けない (Codex レビュー 3 回目 P2 の 1 件目)。
+#[test]
+fn commit_overlay_redraw_keeps_the_cursor() {
+    let shm = mocks::Shm::new();
+    /* カーソルはモーダルの左端 (x=276..285)。Help の断片は枠の右辺の周りと
+     * モーダルの下 — 外接矩形 (x>=302) がモーダルに掛かり、カーソルは避ける。 */
+    let g = commit_over_modal_fixture(
+        &shm,
+        (276, 200),
+        &[wm::Rect::new(512, 96, 32, 320), wm::Rect::new(304, 280, 32, 20)],
+    );
+    let m = modal::rect();
+    let cr = crate::cursor::rect(g);
+    assert!(m.contains(cr.x, cr.y) && m.contains(cr.right() - 1, cr.bottom() - 1), "前提: カーソルがモーダルの上に無い");
+    let before_cursor = snapshot(cr);
+    let before_modal = snapshot(m);
+    let touched = app_paints_and_commits(g);
+    assert!(touched.intersects(&m) && !touched.intersects(&cr), "前提: COMMIT がモーダルに掛かり、カーソルは避ける配置でない");
+    assert_eq!(first_diff(cr, &before_cursor), None, "カーソルが欠けた (最前面物の描き直しに消された)");
+    assert_eq!(first_diff(m, &before_modal), None, "モーダルの画素が変わった");
+}
+
+/// カーソルが今の枠の縁に掛かり、COMMIT はカーソルを避けて同じ縁の別の所に
+/// 掛かる。枠を描き直してもカーソルの退避は本当の下地 (枠 + アプリの画) で、
+/// カーソルを消した跡にカーソルの画素が残らない (2 回目 P2 の守り: アプリに潰されて
+/// いないカーソルを `discard` すると、表示中のカーソル画素を下地として退避する)。
+#[test]
+fn commit_frame_redraw_under_the_cursor_saves_the_real_background() {
+    use os32api::gui::proto::{GUI_COLOR_TEXT, GUI_COLOR_WINDOW};
+    let shm = mocks::Shm::new();
+    let g = commit_over_modal_fixture(&shm, (524, 380), &[wm::Rect::new(512, 96, 32, 200)]);
+    let cr = crate::cursor::rect(g);
+    let f = g.drag_frame;
+    assert!(cr.contains(f.right() - 1, cr.y), "前提: カーソルが枠の右辺に掛かっていない");
+    let touched = app_paints_and_commits(g);
+    assert!(!touched.intersects(&cr), "前提: COMMIT がカーソルに掛かった");
+    crate::cursor::hide(g);
+    let px = mocks::pixels();
+    let mut ghost = Vec::new();
+    for y in cr.y..cr.bottom() {
+        for x in cr.x..cr.right() {
+            let c = px[y as usize * mocks::W + x as usize];
+            if c == GUI_COLOR_TEXT || c == GUI_COLOR_WINDOW {
+                ghost.push((x, y, c));
+            }
+        }
+    }
+    assert!(ghost.is_empty(), "カーソルの画素が下地として退避されていた: {} 点 (先頭 {:?})", ghost.len(), ghost.first());
+    crate::cursor::show(g);
 }
