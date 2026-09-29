@@ -47,6 +47,8 @@ broad:
   - check-le-access
   - check-docs-links
   - check-docs-orphans
+  - check-docs-status
+  - check-docs-status-host
   - check-tests-inventory
   - check-manifests
   - check-packages-host
@@ -61,6 +63,8 @@ docs_always:
   - check-tests-inventory
   - check-docs-links
   - check-docs-orphans
+  - check-docs-status
+  - check-docs-status-host
   - check-memmap
 
 # どのホスト試験の入力にもならない場所 (2026-09-26)。ここだけに当たる変更は
@@ -421,6 +425,15 @@ checks:
     - arch/README.md
     - platform/README.md
     - tools/check_docs_links.py
+  check-docs-status:
+    - docs/tasks/**/*.md
+    - docs/POLICY_DEV.md
+    - tools/check_docs_status.py
+  check-docs-status-host:
+    - docs/tasks/**/*.md
+    - docs/POLICY_DEV.md
+    - tools/check_docs_status.py
+    - tools/tests/test_docs_status.py
   check-docs-orphans:
     - docs/**/*.md
     - tools/**/*.md
