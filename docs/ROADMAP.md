@@ -1,29 +1,39 @@
 # OS32 リリースロードマップ
 
-*策定: 2026-04-17 / v1.x GUIシェル計画 / 2026-09-15 更新 (v1.3 完了、Host Services N1〜N4 受入完了、移植準備 1〜4 着地)*
+*策定: 2026-04-17 / v1.x GUIシェル計画 / 2026-09-29 更新 (タグ `v2.1`、GUI の版は 1.4 で閉じる、v3 は別リポジトリ os32-v3 へ fork する段取り)*
 
 ## 0. 版数の対応表 (正典はここだけ)
 
-版数の線は **2 本**あり、番号が重なるので混同しない。
-
 | 線 | 現在 | 意味 | 記録 |
 |---|---|---|---|
-| **カーネル** | **2.0** (タグ `v2.0`、2026-09-03) → **2.1 保守計画** | 2.0 はリング 3 (CPL=3) ネイティブ。2.1 は現行系の実機互換・安定化修正を扱い、v3設計とは分離 | [archive/kernel_v2/PLAN.md](archive/kernel_v2/PLAN.md)、[v2.1 PEGC実機課題](archive/realhw_v21/TASK_PEGC_RA266_TIMING.md) |
-| **GUI シェル** | **1.3 完了 → 1.4 進行中** | 本書 §1 の各節。カーネル 2.0 の上で動く | §1 |
-| **v2.1** | **2026-09-29 タグ** (KernelAPI v68) | **実機 Ra266 で CHECKLIST_2026-09-26 の手順 1〜7 合格、§1.5 の Ra266 PEGC 修正を画面を見ない条件 (ROM の OUT 列との一致・NP21/W 回帰・実機 `pegcchk`) で受け入れ** (ユーザー決定 2026-09-29)。GUI の目視は v3 と並行。**v3 へ分岐する前の区切り** (ユーザー決定 2026-09-24): カーネル層の既知の欠陥 (TASK_VFS_FD_PATH、TASK_KAPI_DATA_FIELDS = KAPI v63)、実機の HDD 運用 (TASK_HDD_INSTALL 段 1/2 + TASK_SERIAL_HOSTFS 部品 A)、実機の確認 (キーボード・段 0 の計測・桁ズレ) が済んだら、feat/gui を main へ合流してタグ `v2.1`。**2026-09-25: 条件はすべて到達** (実機 Ra266 で HDD インストール・HDD 起動)。タグは進行中の 4 件 (ERASE、lspci -v、起動ログ、CD 高速化) を入れた版を実機で確かめてから付ける (案 A)。**GUI 1.4 の残り (About、R2 計測) は v2.1 に含めず、他にすることが無いときに実装** (ユーザー決定 2026-09-25)。**インストール後の HDD のホスト e2fsck は行わない** (同) [RELEASE_v2.1.md](RELEASE_v2.1.md)、tasks/agents/HANDOVER_2026-09-22.md |
-| 次期カーネル | **v3 (未着手、未定義)** | 本書 §2 の長期項目 (プリエンプティブ寄りのマルチタスクなど)。**2026-09-15 のユーザー決裁で「v2」ではなく v3 と呼ぶ** (出荷済み 2.0 と衝突するため) | §2 |
+| **カーネル** | **2.1** (タグ `v2.1`、2026-09-29、KernelAPI v68) | 2.0 (2026-09-03) はリング 3 (CPL=3) ネイティブ。2.1 は **v3 へ進む前の区切り** — 実機 PC-9821Ra266 で FD 起動・CD からの HDD インストール・HDD 起動まで通し、Ra266 の PEGC 640x480 を画面を見ない条件で受け入れた (ユーザー決定 2026-09-29) | [RELEASE_v2.1.md](RELEASE_v2.1.md)、[CHANGELOG.md](../CHANGELOG.md)、[archive/kernel_v2/PLAN.md](archive/kernel_v2/PLAN.md) |
+| **GUI シェル** | **1.4 で閉じた** (2026-09-29) | 1.1〜1.4 は本書 §1。1.4 の範囲 (Host Services N1〜N4、エディタ GUI 版、About、R2 計測) はすべて v2.1 に入った。N5 (実機 LAN) は実機の内蔵 82557 の票 (L-B) に吸収。**GUI の版はここで閉じ、以後の GUI の作業は v3 の線で扱う** (ユーザー決定 2026-09-29) | §1 |
+| **v3** | **現行の開発** (本案をまとめる段) | 機能を足す前に入れ物を作り直す版。草案は [tasks/v3/PLAN.md](tasks/v3/PLAN.md) ほか (INDEX の「v3」節)。一部の票 (HAL_WIRING・PCM・KHEAP の切り直し・デバイス窓の帯) は v2.1 に先行して着地した。**2026-09-15 のユーザー決裁で「v2」ではなく v3 と呼ぶ** (出荷済み 2.0 と衝突するため) | §2 |
 | ゲーム基盤 | v4 (草案) | [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md)。v3 の後 | — |
 
-**KernelAPI の版と関数表の容量** (v63〜、票 [TASK_KAPI_DATA_FIELDS](archive/kernel_v21/TASK_KAPI_DATA_FIELDS.md)):
-データ欄は 0x4B8 に固定で、関数表の容量は **R = 300** (v65 時点で 235 本、残り 65)。
-**残りが 16 本を切ったら次の R を決める票を起こす** — R を変えるとデータ欄が動き、
-全バイナリの作り直し (v63 と同じ移行) になるので、足りなくなる前に計画する。
-トランポリン 1 ページの上限は R ≤ 318 (これを超えるにはスタブか写し場を別ページへ)。
-配備順は v63 の初回だけ「NHD 一式か FD / CD の入れ直し」、**v64 以降は「カーネルを先、
-ユーザーランドを後」**。HostDrv 経由なら `make deploy` → ゲストで `hsync boot` →
-再起動 → `ver` の `API: vNN` を確かめる → `hsync` と `hsync sys`
-(`/boot` だけの同期は「版が新しい」の拒否から外してある。`make deploy-kernel` は
-カーネル単独ではなく一式を NHD へ書く、[D1])。手順の正典は
+**OS64** (草案 [LEGACY_LIVING_PRESERVATION.md](LEGACY_LIVING_PRESERVATION.md)・[AUXILIARY_CORE_SERVICE.md](AUXILIARY_CORE_SERVICE.md) に出る語) は**版数表に載せない** — 位置は v3 本案の段で判断する (ユーザー決定 2026-09-29)。
+
+### 0-1. 現行の開発 (v3) と、このリポジトリ (os32 v2.x) の扱い (ユーザー決定 2026-09-29)
+
+- **現行の開発は v3**。本案が確定したら、**別リポジトリ `os32-v3` へ fork して進める** (ブランチを切るのではない)。
+  本案がまとまるまでの草案は、このリポジトリの `docs/tasks/v3/` ほか (INDEX の「v3」節) に置く。
+- **このリポジトリ (os32) の v2.x — タグ `v2.1`、`main` — は「戻り先」として保つ**。新機能は入れない。
+  手を入れるのは、**戻る必要が生じたとき**と**致命的な不具合のとき**だけ。
+- fork の段取りで**決まっていること** (未決は無い):
+
+| 項目 | 決定 |
+|---|---|
+| リポジトリ名 | **`os32-v3`** |
+| 公開範囲 | **パブリック** |
+| submodule (`apps/` `game/`) | os32-v3 も同じ submodule を参照して引き継ぐ。**当面の保守は os32 側で続ける** (一旦) |
+| CI | **os32-v3 で作り直す** (os32 の `.github/workflows/build.yml` をそのまま移さない) |
+| 文書の正典 | **os32-v3 に置く**。fork 後、このリポジトリの docs は v2.1 時点の記録になる (INDEX 冒頭の注記) |
+| 共有の道具 (`tools/`、NP21/W のフォーク `~/np21w-src`) | 共有するが、**動作保証は v3 側だけ** — v2.x 側で動かなくなっても直す義務は無い |
+
+**KernelAPI の版と関数表の容量**: 本数・残り・オフセットの正典は [KAPI_SPEC.md](KAPI_SPEC.md) (v63 からデータ欄は 0x4B8 に固定、
+関数表の容量 R = 300、票 [TASK_KAPI_DATA_FIELDS](archive/kernel_v21/TASK_KAPI_DATA_FIELDS.md))。ここに置く規則は 1 つ:
+**残りが 16 本を切ったら次の R を決める票を起こす** — R を変えるとデータ欄が動き、全バイナリの作り直し (v63 と同じ移行) になる。
+トランポリン 1 ページの上限は R ≤ 318。配備順 (v64 以降は「カーネルを先、ユーザーランドを後」) の手順の正典は
 [08_build.md](08_build.md#kapi-v63-移行)。
 
 *v1.0 到達までの開発履歴は [archive/ROADMAP_v1.0.md](archive/ROADMAP_v1.0.md) を参照*
@@ -188,7 +198,7 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 ### v1.3 — 「ターミナル統合とCUI抽象化」 ✅ 完了 (2026-09-14)
 
-全項目受入済み・main にマージ済み (`fac0d89`)。残件の小物 4 件 (タスクバー経路の試験、`stat`、S6 `tar`、試験の棚卸し文書) も 2026-09-14 に feat/gui へ着地。持ち越し: S6-P (ext2 の小書き込み性能、[archive/settings/TASK_S6.md](archive/settings/TASK_S6.md))、F3a〜c 等の保留 5 件 (ユーザーの再考待ち、[archive/agents/HANDOVER_v14.md](archive/agents/HANDOVER_v14.md) §3)。
+全項目受入済み・main にマージ済み (`fac0d89`)。残件の小物 4 件 (タスクバー経路の試験、`stat`、S6 `tar`、試験の棚卸し文書) も 2026-09-14 に feat/gui へ着地。持ち越し: S6-P (ext2 の小書き込み性能、[archive/settings/TASK_S6.md](archive/settings/TASK_S6.md))、F3a〜c 等の保留 5 件 (ユーザーの再考待ち、[archive/agents/HANDOVER_v14.md](archive/agents/HANDOVER_v14.md) §3 — v3 本案の段で拾うかを決める)。
 
 着手計画: [tasks/gui/v13/PLAN.md](tasks/gui/v13/PLAN.md)、監査と決裁: [AUDIT_2026-09-10](archive/gui_v13/AUDIT_2026-09-10.md)。
 2026-09-10 決裁: **GUI アプリ 4 本の同時実行 (契約 T2a) を v1.3 の最初に置く** ([K5](archive/gui_v13/TASK_K5_multiapp.md))。
@@ -225,7 +235,7 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 ---
 
-### v1.4 — 「ホストサービスと最小のアプリ」
+### v1.4 — 「ホストサービスと最小のアプリ」 ✅ 完了 (2026-09-29、v2.1 に同梱。GUI の版はここで閉じた)
 
 **ゴール**: Host Services (LGY-98 経由の GET / 印刷 / クリップボード、[tasks/network/HOST_SERVICES_PLAN.md](tasks/network/HOST_SERVICES_PLAN.md)) を
 コマンドと GUI から使えるようにし、GUI アプリは **About とテキストエディタの 2 本だけ**に絞る
@@ -237,12 +247,12 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 | 作業 | カテゴリ | 担当 (ROLES §0) | 備考 |
 |------|---------|------|------|
 | Host Services N1〜N4 (**受入完了 2026-09-15**) | kernel / host / command / shlib | Claude Code PM + Opus 5 コーダー | ワイヤ v2、KAPI v51、`host_agent.py` v2、`wget` / `lpr` / `hclip` / `date -sync`、`host_*` ラッパー |
-| PEGC / Cirrus の 8bpp バックエンド (R2) | GUI | 基盤 | S5 から先送り |
+| PEGC / Cirrus の 8bpp バックエンド (R2) (**受入完了 2026-09-29**) | GUI | 基盤 | S5 から先送り。PEGC 640x480・NP21/W の Cirrus 640x480 で gui_gate v11/v12g1/v12g4 が通る ([RELEASE_v2.1.md](RELEASE_v2.1.md) §2) |
 | N4 のアプリ側 (ファイラの印刷、端末のコピー / 貼り付け) (**受入完了 2026-09-15**) | app | Claude Code PM + Opus 5 コーダー (別エージェント案は 2026-09-14 に撤回) | libos32gui の `host_*` ラッパー経由 |
-| About dialog | app | アプリ層 | OS32 About |
-| text editor GUI | app | Claude Code PM + Opus 5 コーダー | edit.bin GUI版。**API の退行検出を兼ねる** (N3 の後に着手) |
-| Host Services N5 (実機 LAN、Npcap + scapy) | host / driver | — | **保留** (エミュレータで N1〜N4 完了、実機は未着手) |
-| hsync H1 / H3 (同サイズ差し替えの検出、日時前置判定、KAPI v52) | system / fs | Claude Code PM + Opus 5 コーダー | **受入完了 2026-09-15**。H2 (置換の安全化) / H4 (配備マニフェスト) は未着手 |
+| About dialog (**受入完了 2026-09-29**) | app | アプリ層 | OS32 About (`about.bin`、`ver` と同じ内容) |
+| text editor GUI (**受入完了 2026-09-18**) | app | Claude Code PM + Opus 5 コーダー | edit.bin GUI版。**API の退行検出を兼ねる** ([archive/gui_v14/TASK_EDIT_GUI.md](archive/gui_v14/TASK_EDIT_GUI.md)) |
+| Host Services N5 (実機 LAN、Npcap + scapy) | host / driver | — | **実機の内蔵 82557 の票に吸収** ([tasks/realhw/TASK_LAN_82557.md](tasks/realhw/TASK_LAN_82557.md) の L-B、v3 の線) |
+| hsync H1 / H3 (同サイズ差し替えの検出、日時前置判定、KAPI v52) | system / fs | Claude Code PM + Opus 5 コーダー | **受入完了 2026-09-15**。H2 (置換の安全化) / H4 (配備マニフェスト) も **受入完了 2026-09-16** ([archive/shell/](archive/shell/TASK_H2.md)) |
 | ext2 の B8 (読み取り失敗の読み替えを塞ぐ、remount-ro 相当) | fs / vfs | 同上 | **受入完了 2026-09-15** ([archive/shell/TASK_FS_TYPE.md](archive/shell/TASK_FS_TYPE.md)) |
 
 先送り (v3 以降、[§2](#2-長期ロードマップ-次期カーネル-v3-以降) の「GUI アプリケーション群」): 設定アプリの拡張項目、
@@ -250,31 +260,17 @@ image viewer (VBZ / VDP / BMP)、music player、`sed` / `awk`。
 
 ---
 
-## 1.5 kernel v2.1 — 実機互換・安定化
+## 1.5 kernel v2.1 — 実機互換・安定化 ✅ 完了 (2026-09-29、タグ `v2.1`)
 
-> **2026-09-29 完了 (タグ `v2.1`)**: 下の PEGC 課題は実機 ROM の記録に合わせて直し、画面を見ない条件で受け入れた ([RELEASE_v2.1.md](RELEASE_v2.1.md) §2-1)。GUI の目視確認だけが残る。
+v3 の新しい設計へ進む前に、現行系で判明した実機依存の不具合を既存契約のまま直した区切りの版。
+到達点・受け入れの条件・分かっている制限は [RELEASE_v2.1.md](RELEASE_v2.1.md) が正典 (ここには持たない)。
 
-v2.1 は v3 の新API設計へ進む前に、現行系で判明した実機依存の不具合を修正する保守リリースとして扱う。
-機能拡張を無制限に積む版ではなく、既存契約を保ったまま実機での成立条件を固める。
-
-### PEGC / PC-9821Ra266 の31kHz 640x480表示
-
-PC-9821Ra266 実機では、OS32ブート直後に接続ディスプレイが入力を 31kHz / 720x350 相当として認識し、
-`os32gui` でPEG C backendへ移ると 31kHz / 640x480 の認識に変わる一方、表示内容が崩れることを確認した。
-
-現行PEGC backendは、640x480用SYNC/SCROLLの一部をNP21/W BIOS実装から採用し、
-GDC PITCHやclock状態の一部を起動時BIOS状態へ依存している。
-RA266実機ではこの前提が成立していない可能性がある。
-
-v2.1で以下を実施する。
-
-- RA266のBIOS起動直後とPEGC init直後のGDC/BIOS状態を採取
-- 09A8h、PITCH、GDC clock、master/slave SYNC/SCROLL、BIOS work areaを比較
-- 可能ならreal-mode BIOSによる正規640x480設定値を取得
-- 起動時の残存状態に依存しないPEGC mode setへ修正
-- RA266実機、NP21/W PEGC、9801 planar、Cirrusの回帰を確認
-
-詳細・受入条件: [TASK_PEGC_RA266_TIMING.md](archive/realhw_v21/TASK_PEGC_RA266_TIMING.md)。
+- **実機 Ra266 の PEGC 640x480**: 実機の ROM (INT 18h AH=30h) が 480 ラインへ入る・戻るときの OUT 列を `v86 -g` で記録し、
+  `pegc_apply_timing` をその順序と値に合わせた。画面を見ない条件 (ROM の OUT 列との一致・NP21/W 回帰・実機 `pegcchk`) で受け入れ
+  ([RELEASE_v2.1.md](RELEASE_v2.1.md) §2-1、正典の票は [tasks/realhw/TASK_PEGC480_REALHW.md](tasks/realhw/TASK_PEGC480_REALHW.md)、起票は
+  [archive/realhw_v21/TASK_PEGC_RA266_TIMING.md](archive/realhw_v21/TASK_PEGC_RA266_TIMING.md))。
+- **v2.1 の後に残った確認** (新機能ではない。v3 と並行、実機の前に居るときなど): PEGC の GUI の目視、KBD_NAV の K3、FD144 の実機、
+  HAL_WIRING の W7、PCM の E4〜E6、APP_BAND_PDE の §5 のゲスト受入。一覧は最新の引き継ぎ (INDEX 正典表の「引き継ぎ」) の残件表。
 
 ---
 
@@ -292,14 +288,11 @@ v3 では timer interrupt を利用したプリエンプティブ寄りの multi
 
 ### 実機 (PC-9821Ra266) への展開 (ユーザー決裁 2026-09-17)
 
-計画は [tasks/realhw/PLAN.md](tasks/realhw/PLAN.md)。**v1.x のあいだは着手しない。**
-検証は当面エミュレータで十分というユーザー判断で、実機は**エミュレータが嘘をついている
-箇所を暴くため**に使う (役割が違うので両方を取る)。
-
-段取りの鍵は**段 3 (ホスト側のシリアル実装)**。今の道具はすべて NP21/W の HTTP
-デバッグ API を叩いており、**実際のシリアルポートを話す実装が無い**。ここを越えないと
-実機での自動回帰ができない。試験ランナーは「叩く側」と「集計する側」を意図的に
-分けてあるので、差し替えは 1 本で済む。
+計画は [tasks/realhw/PLAN.md](tasks/realhw/PLAN.md) (実装中)。策定時 (2026-09-17) は「v1.x のあいだは着手しない」としたが、
+**v2.1 で FD 起動・CD からの HDD インストール・HDD 起動・シリアル 115200・SerialFS (シリアル越しの `/host`)・PCI 列挙まで到達した**
+([RELEASE_v2.1.md](RELEASE_v2.1.md) §1)。実機は**エミュレータが嘘をついている箇所を暴くため**に使う (役割が違うので両方を取る)。
+残り (v3 の線): 82557 の L-B、PCM の E6、Trident、PEGC の目視。当時の鍵だった「ホスト側のシリアル実装」は
+`tools/rshell_serial.py` と SerialFS で埋まった。
 
 **実機 LAN はオンボードの Intel 82557 を狙う** (ユーザー決裁 2026-09-17)。
 当初の「C バスに LGY-98」は取り下げ — **高価で品薄**なのに対し 82557 は機体に載っていて
@@ -318,10 +311,11 @@ Trident のバックエンドは**保留** — NP21/W の `tgui9680.c` が結線
 
 ### v3 の全体計画 → [tasks/v3/PLAN.md](tasks/v3/PLAN.md)
 
-**機能を足す前に入れ物を作り直す。** 順序は
-**C11 → メモリマップ再配置 → ドライバの動的読み込み → PCI → Intel 82557**。
-カーネル本体は 433.6KB で残りは 34.4KB しかなく、ドライバ群だけで約 89KB ある。
-**静的リンクのままでは積めない** (ユーザー指摘 2026-09-17)。
+**機能を足す前に入れ物を作り直す。** 策定時 (2026-09-17) の順序は
+**C11 → メモリマップ再配置 → ドライバの動的読み込み → PCI → Intel 82557** (PCI と 82557 は 2026-09-22 の決裁で静的に先行し、
+v2.1 に入った — 本案で順序を引き直す)。カーネル本体の大きさと残りは [02_memory.md](02_memory.md) §2-1 の生成ブロックが正典
+(v2.1 の時点で予算 596KB 中 583.0KB、残り 13.0KB)。ドライバ群だけで約 89KB ある (2026-09-17 の計測)。
+**静的リンクのままでは積めない** (ユーザー指摘 2026-09-17)。本案は fork 先 os32-v3 で確定させる (§0-1)。
 アプリへのメモリの払い出しの見直しも同じ計画に入れた (帯を切る前に決める)。
 
 ### メモリマップの全体再配置と C11 への移行 (ユーザー決裁 2026-09-17)
@@ -336,8 +330,8 @@ v3 で行う。**この 2 つは同時に動かさない** — どちらも全�
 
 **着手の前に決めること**:
 
-- **カーネル本体をどこまで大きくしてよいか。** 現在 433KB、余裕 34KB、`KHEAP_BASE` が
-  動くまで 2.4KB。上限を決めないと、削ってもまた同じ場所に戻る。
+- **カーネル本体をどこまで大きくしてよいか。** 数字は [02_memory.md](02_memory.md) §2-1 (v2.1 時点で 583.0KB / 596KB、
+  残り 13.0KB。2026-09-17 は 433KB / 余裕 34KB)。上限を決めないと、削ってもまた同じ場所に戻る。
 - **ARM 実装との順序。** KAPI 生成器の arch 対応が v3 まで保留なので、再配置してから
   ARM に手を付けると**配置の前提が 2 回動く**。
 - **`u32` を続けるか `<stdint.h>` に寄せるか。** 固定長の維持は 32 ビット限定の前提
@@ -383,7 +377,7 @@ image viewer (MGX は `mgxview` が既にある。VBZ / VDP / BMP を足す)、m
 
 ### その他の長期テーマ
 
-- PC-98 NIC (C-bus LAN) / network: [tasks/network/PLAN.md](tasks/network/PLAN.md)
+- PC-98 NIC (C-bus LAN) / network: [tasks/network/PLAN.md](tasks/network/PLAN.md) — LGY-98 は**エミュレータで回帰を取る経路**として残る (実機は内蔵 82557)
 
 ---
 

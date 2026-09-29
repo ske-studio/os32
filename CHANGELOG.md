@@ -1,6 +1,18 @@
 # Changelog
 
-OS32 の変更履歴。版数は 2 本の線 (カーネル / GUI シェル) があり、対応表は [docs/ROADMAP.md §0](docs/ROADMAP.md)。
+OS32 の変更履歴。版数の対応表は [docs/ROADMAP.md §0](docs/ROADMAP.md) (GUI シェルの版は 1.4 で閉じた)。各版は 3〜5 行の要約とリリースノート (`docs/RELEASE_vX.md`) へのリンク。
+
+## v2.1 — 実機 PC-9821Ra266 で動く区切りの版 (2026-09-29、タグ `v2.1`)
+
+v2.0 から KernelAPI **v39 → v68**。**v3 へ進む前の区切り**で、以後このリポジトリの v2.x は戻り先として保つ ([docs/ROADMAP.md §0](docs/ROADMAP.md))。
+
+- **実機 Ra266**: FD 起動 (2HD / 1.44MB)、CD からの HDD インストール (`cdinst`、ERASE) と HDD 起動、シリアル 115200 と SerialFS による HDD 起動のままの更新、PCI 列挙、PIT のクロック判定、キーボード 8251 の修正。
+- **GUI シェル 1.1〜1.4** (GUI の版は 1.4 で閉じた): キーボードだけの GUI 操作、エディタ GUI 版、About、R2 計測、Host Services。
+- **Ra266 の PEGC 640x480**: 実機 ROM の OUT 列に合わせたモード設定を、画面を見ない条件で受け入れ (GUI の目視は残る)。
+- **カーネル層の修正**: KAPI の出力ポインタ検査 (WM の文脈)、KAPI のデータ欄の固定 (v63)、VFS の FD の失効、SHM 帯とカーネルスタックの重なり、Cirrus のリニア窓をデバイス窓の帯へ。
+- **開発の道具**: `make check` の 3 段 (`check-fast` / `check-changed` / `check`)、CI (GitHub Actions) の本体ビルド、NP21/W ai-debug フォークの `np21w_ctl.py`。
+
+詳細: [docs/RELEASE_v2.1.md](docs/RELEASE_v2.1.md)。
 
 ## v2.0 — カーネル: リング 3 (CPL=3) ネイティブ (2026-09-03、タグ `v2.0`)
 
