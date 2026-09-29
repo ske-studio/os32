@@ -1,6 +1,6 @@
 # TASK_PEGC480_REALHW — 実機の PEGC 640x480 で桁がずれる (v3)
 
-> 状態: **§3 段 1 (`v86 -g`) 実装済み。実機の 1 回目 (2026-09-29) は AH=31h の並びが決まらず 30h へ進まなかった → AL bit0 を許す修正済み (§3「段 1 の実機での記録」)。段 2 の下準備 (PITCH・GDC クロックの明示、順序の 1 か所化、値の差し替え口) と §4 (FIFO 待ち) を実装 — ホスト試験と NP21/W の回帰まで、実機は未実施 (2026-09-29、wt/pegc480-prep)**。段 0 は未着手。設計は Codex 設計レビュー 2 回で P1 なし、2 回目の P2×1・P3×1 は文面で反映 (2026-09-25)。発行: PM (Claude Code `claude-opus-5-5`)、2026-09-25。
+> 状態: **§3 段 1 実機 2 回目 (2026-09-29 20:51) で ROM の OUT 列が全部取れた → §3-3 の比較で原因を特定、段 2 (値と順序を実機の ROM に合わせる) を実装 — ホスト試験 (受け入れ A) と NP21/W の回帰まで。実機の GUI 表示は未確認 (§5 の (C) `pegcchk` を実機で走らせる段)** (wt/pegc480-real)。段 0 は未着手。設計は Codex 設計レビュー 2 回で P1 なし、2 回目の P2×1・P3×1 は文面で反映 (2026-09-25)。発行: PM (Claude Code `claude-opus-5-5`)、2026-09-25。
 > 対象: 実機 PC-9821Ra266 + 液晶モニター。v2.1 には入れない (ユーザー決定: v3 で良い)。
 > 関係: [PLAN.md](PLAN.md) §7、[TASK_FDC_REALHW.md](TASK_FDC_REALHW.md) §9-1 (CUI のずれ、prepare で直した件)、
 > `gfx/backend_pegc.c` / `include/pegc.h`。
@@ -207,6 +207,104 @@ v86 -g    : R result : AH=31h value not recognized (status=2)
   テキスト GDC の STOP (NP21/W の BIOS が 30h の最後に出す — OS32 は直後に START するので出さない)。
   どれも実機の `v86 -g` の O 行で決める。
 
+### 段 1 の実機での記録 (2 回目、2026-09-29 20:51、d5cd3a5、PC-9821Ra266)
+
+全記録 (228 行、未加工) は PM の手元 `scratchpad/realhw/v86g_ra266_2026-09-29_d5cd3a5.txt`。要点:
+
+```
+R 31h      : AX=310d BX=0100  layout=bit2
+R 30h 480  : AX=300d BX=3200 -> AX=0500 BX=0000
+R 30h back : AX=300d BX=0100 -> AX=0500 BX=0000 (ROM)
+R count    : out=200 in=36580
+I 09a8 3 回 0081 (hw) / 09a0 2 回 0001 (hw) / 0060 36438 回 first 04 last 45 / 00a0 128 回
+I 063c・a46e・a660 は emu (実機へ通していない、読みは FFh)
+```
+
+O 行 (hw) は s480・back とも **94 行**。全行はホスト試験 `tools/tests/pegc_mode_host.c` の `ROM_S480` / `ROM_BACK` に
+数値のまま写した (試験が突き合わせる期待値)。**出典はどれも「実機 Ra266 の ROM を V86 で記録」** — 資料に無い値。
+
+### 3-3. 比較表 — 実機 ROM / NP21/W の BIOS / OS32 (d5cd3a5) (2026-09-29)
+
+行の意味は資料で当てた: [U] = docs/hw/undocumented/io_disp.md、[B] = PC9800Bible、[UG] = io_gs.md、[UM] = io_mem.md。
+「OS32 旧」は d5cd3a5 の `pegc_apply_timing` + `pegc_enter_480_ports` (480 へ入る) / `pegc_shutdown` (戻る)。
+
+| # | 実機 ROM (s480) | 意味 (出典) | NP21/W の BIOS (§3「NP21/W での記録」) | OS32 旧 | OS32 新 |
+|---|---|---|---|---|---|
+| 1 | 6Ah 07h・21h・06h | 拡張グラフィックモード ([B] 3-2 表3-2) | 内部で直接 | **最後** (6Ah 69h の後) | **最初** (ROM と同じ) |
+| 2 | 6Ah 41h | プラズマ/LCD モード ([B] 表3-2 41H、[U] 006Ah 0100000nb「拡張グラフィックスモードでは必ずプラズマディスプレイモード」) | **40h** (CRT) | 出さない | 41h |
+| 3 | 09A0h←03h + 読み (01h) | 表示 ON/OFF の読み出し ([U] 09A0h 03h) | — | — | 出さない (意図、下) |
+| 4 | 68h 0Eh | 全画面表示を止める ([U] 0068h 0000111nb) | — | **出さない** (表示したまま切り替え) | 出す |
+| 5 | (09A8h は書かない、読み 3 回 = 81h) | 起動時から 31kHz | 内部フラグ | **09A8h←01h を毎回書く** (bit7 が 1→0 に変わる) | 今の D0 と違うときだけ書く |
+| 6 | A46Eh←1Fh (emu) | [UG] PC-98GS の「各種ステータス取得」(WRITE 不明) | — | — | 出さない (意図) |
+| 7 | 6Ah 83h・85h | GDC 5MHz は両方 ([B] 表3-2、[U] 006Ah 82h〜85h) | 83h だけ (CLOCK-2 は内部) | 83h・85h | 同じ |
+| 8 | 6Ah 07h・A0h DFh・A2h 28h・6Ah 06h | A0h/A2h はグラフィック GDC のパラメータ/コマンド ([U] 00A0h/00A2h)。28h は WRITE (描画)。組の意味は資料に無い | — | — | 出さない (意図、下) |
+| 9 | A2h 00h (RESET1)・6Eh (SLAVE)、VSYNC 待ち | [U] 0062h/00A2h コマンド表 | — | **RESET も SLAVE も出さない** | 出す |
+| 10 | 62h 00h・6Fh (MASTER)・0Eh + **10 4E 4B 0C 03 06 E0 95** | テキスト GDC の SYNC ([B] 2-6 表2-26) | 同じ値 (bios18.c "31-480:30") | 同じ値 | 同じ値 |
+| 11 | 62h 4Bh + 0F 00 7B | テキスト CSRFORM: 16 ラスタ、カーソル非表示 ([B] 表2-26) | 内部で同じ値 | **出さない** | 出す (戻りの後でコンソールがカーソルを戻す) |
+| 12 | A2h 0Eh + **02 4E 4B 0C 83 06 E0 95** | グラフィック SYNC | 同じ値 | 同じ値 | 同じ値 |
+| 13 | A2h 4Bh + 00 00 01 | グラフィック CSRFORM **L/R = 0** ([B] 2-7「L/R: ライン数-1」、[U] 0068h 08h/09h の注 = 200 ラインの縦 2 倍は CSRFORM) | — | **出さない** (起動時の BIOS の L/R のまま) | 出す |
+| 14 | A2h 00h・62h 00h (RESET1)、VSYNC 待ち ×2 | | — | — | 出す |
+| 15 | A2h 05h・62h 05h (STOP2) | [U] コマンド表 | — | — | 出す |
+| 16 | A2h 47h + **50h** (PITCH 80)・46h + 00 (ZOOM)・70h + **00 00 F0 7F** | SCROLL: SAD 0・**LEN 3FFh**・IM 1 ([B] 2-7) | PITCH 80、SCROLL 00 00 00 40 (内部) | PITCH 80、SCROLL **00 00 00 40 (LEN 0)** | ROM の値 |
+| 17 | 62h 47h + **50h**・46h + 00・70h + 00 00 F0 3F | テキスト GDC の PITCH / ZOOM / SCROLL | 内部 (PITCH 80) | **出さない** | 出す |
+| 18 | A2h 20h・78h + 00 00 | WRITE・TEXTW (描画パターン) | — | — | 出さない ([HW1]) |
+| 19 | VSYNC 待ち、6Bh ×2、待ち、05h ×2、6Bh ×2、05h ×2 | START / STOP2。**ROM は両 GDC を止めたまま返す** (表示開始は呼び手の AH=40h / 0Ch) | 62h 0Ch (テキスト STOP) で返す | 0Dh ×2 (START) | ROM の列 + 最後に 6Bh ×2 (OS32 が呼び手を兼ねる) |
+| 20 | 68h 08h | グラフィック奇数ラスタを表示 ([U] 0068h 0000100nb) | — | — | 出す |
+| 21 | 6Ah 07h・69h・06h | 800 ライン構成 ([U] 006Ah 0110100nb) | — | 同じ (最後) | ROM の位置 |
+| 22 | 6Eh 03h・21h・02h | 拡張アトリビュート: 03h/02h = 変更許可/禁止、21h =「不明 (31kHz の時)」、OUT 5Fh の待ちが要る ([U] 2 つ目の I/O 006Eh) | — | **出さない** | 出す (5Fh の待ち付き) |
+| 23 | 70h〜7Ah ← 00 0F 10 00 01 00 | テキスト CRTC: PL/BL/CL/SSL/SUR/SDR ([B] 2-6-4 表2-28、[U] 0070h〜007Ah) | 内部で同じ値 (crtdata "480-30") | **出さない** | 出す |
+| 24 | A660h←FFh (emu)・A46Eh←3Fh (emu)、VSYNC 待ち | [UG] PC-98GS の同期モード設定 / ステータス | — | — | 出さない (意図) |
+| 25 | 68h 0Fh | 表示 | — | 68h 0Fh (START の前) | 出す |
+| 26 | 063Ch←03h (emu)、6Eh 03h・68h 07h・68h 00h・6Eh 02h | 063Ch = D8000h の ROM バンク ([UM])。68h 07h = 7x13 フォント、00h = バーチカルライン ([U] 0068h) | — | — | 063Ch 以外を出す |
+
+**back** (戻り) は s480 と同じ形で、値だけが違う: 6Ah **20h**、GDC **82h・84h** (起動時 2.5MHz、boot.log `gdcclk=2.5M`)、テキスト SYNC
+**10 4E 47 0C 07 0D 90 89**、グラフィック SYNC **02 26 41 0C 83 0D 90 89**、グラフィック PITCH **28h (40)**、グラフィック SCROLL
+**00 00 F0 3F** (IM 0)、**68h 09h** (奇数ラスタを表示しない)、6Ah **68h**。テキストの PITCH・SCROLL・CSRFORM・6Eh 21h・CRTC は s480 と同じ。
+SYNC の 2 組は OS32 旧の `PEGC_GDC_MSYNC_400_31K` / `PEGC_GDC_SSYNC_400_31K_2M5` (NP21/W "31" / "31-L") と一致。
+
+#### 原因の結論 (事実として言えること)
+
+- **H1 (SYNC の値) は否定**。480 の 2 組・31kHz 400 (2.5MHz) の 2 組の計 32 バイトが NP21/W 由来の OS32 の値と完全に一致した (表の 10・12・back)。
+- **H5 のうち PITCH・GDC クロックは否定** (d5cd3a5 で既に 80 / 83h・85h を出していて、実機の値と同じ)。
+- 残った違いは **順序 (H2) と、OS32 が出していなかったコマンド・値** — 実機の液晶で崩れた原因はこのどれか (どれかは実機でしか分からない):
+  1. **グラフィック CSRFORM L/R** (表 13): OS32 は書かず、起動時の BIOS の値に頼っていた。ROM は 480 へ入るとき必ず L/R = 0 を入れる。
+     back で ROM が 68h 09h (200 ライン扱い) を戻すことから、Ra266 の BIOS は起動時にグラフィックを 200 ライン扱いにしている —
+     そのとき L/R = 1 なら 1 ライン目ごとに 2 ラスタ = 行が崩れる。**NP21/W の 256 色表示は L/R を見ない**
+     (vram/makegrex.c) ので、エミュレータでは出ない。
+  2. **SCROLL の LEN** (表 16): OS32 は LEN = 0、ROM は 3FFh。NP21/W は LEN = 0 を「無制限」に読むので出ない。uPD7220 の実機が
+     LEN = 0 をどう扱うかは資料に無い。
+  3. **RESET / MASTER・SLAVE を出さずに SYNC だけを書き換えていた** (表 9・14)、**表示を止めずに切り替えていた** (表 4)、
+     **テキスト GDC の PITCH・SCROLL・CRTC・6Eh を 480 用に入れ直していなかった** (表 11・17・22・23)。
+  4. **09A8h を毎回書いていた** (表 5): 起動時の読み 81h の bit7 を 0 にする。bit7 の意味は資料に無い
+     ([U] 09A8h「bit7〜2 未使用 (常に 0)」、PLL を持つ機種の注記に Ra266 は無い)。ROM は 31kHz のままなら書かない。
+     以前の CUI の桁ずれ (TASK_FDC_REALHW §9-1) も 09A8h を書いていた経路で出て、書かなくして消えた。
+- 6Ah 41h (表 2) は [U] が「拡張グラフィックスモードでは必ずプラズマディスプレイモード」と書くので、出さなくても同じはず。
+  ROM に合わせて出す。
+
+#### 意図的に違える点 (OS32 新 ≠ 実機 ROM)
+
+| 行 | 理由 |
+|---|---|
+| 09A0h 03h + 読み | ROM が表示状態を読む選択。OS32 は最後に必ず 68h 0Fh を出す |
+| 6Ah 07h・A0h DFh・A2h 28h・6Ah 06h | A2h 28h は GDC の WRITE = 描画コマンド ([HW1])。DFh/28h の組の意味は資料に無く、直後の RESET1 が FIFO を捨てる |
+| A2h 20h・78h + 00 00 | WRITE・TEXTW (描画パターン) — [HW1]。表示に関係しない |
+| emu 行 (063Ch・A46Eh・A660h) | 記録器が実機へ通していない = ROM が読んだ値は偽の FFh で、書いた値も当てにならない。063Ch は D8000h の ROM バンク ([UM])、A46Eh・A660h は PC-98GS 用 ([UG]) |
+| back の 68h 09h → 08h | ROM は BIOS ワークエリアの「グラフィック 200 ライン」を戻す。OS32 のグラフィックは 400 ライン (gfx_core.c の 68h 08h) |
+| 09A8h | ROM は起動時 31kHz なので書いていない。OS32 は今の読み (D0) が目標と違うときだけ書く (24kHz で起動する機種 = NP21/W で必要)。書くのは bit1,0 だけ |
+| 最後の START | ROM は STOP2 のまま返す (呼び手が AH=40h / 0Ch)。OS32 は 480 で両 GDC、戻りでテキストだけ 6Bh |
+| 5Fh | 6Eh の後ごとに 1 つ ([U]「OUT 5Fh,AL によるウェイトが必要」)。記録器は 5Fh を捕まえないので ROM が挟んだかは分からない |
+| VSYNC 待ち | ROM は群の間で 60h を 1500〜5800 回 (約 1 フレーム) 読み、最後の読みは VSYNC が落ちた値 (45h) → 「VSYNC が来て明けるまで」と読んだ (ROM は逆アセンブルしていない — 推定)。OS32 は同じ 7 か所で待ち、1 辺 50ms で打ち切って `pegc_vsync_timeouts` を数える |
+| 記録の無い組 | 起動時 24kHz (資料 [B] 表2-27)・起動時 5MHz の戻り (NP21/W 31-M、IM は [B] 2-7)・PEGC の probe が通らない機種 (6Ah・6Eh・クロックに触らない — 6Eh は古い 9801 では周波数切換) |
+
+#### 実装 (wt/pegc480-real)
+
+- `include/pegc.h` §10 を実機の値に (SCROLL 3 組・テキスト SCROLL・CSRFORM 2 組・ZOOM・テキスト PITCH・CRTC)、§13 (6Ah 41h・6Eh・
+  STOP2 05h・START 6Bh・VSYNC 待ちの上限)、§2 に診断用の 09A0h 選択 (02h・03h・05h)。
+- `gfx/backend_pegc.c` `pegc_apply_timing` を ROM の列の順 (1〜13 の注記) に。入る (`pegc_enter_480_ports`) と戻る
+  (`pegc_text_sync_400`) が同じ関数を値だけ替えて通る。戻りは CUI ならコンソールのカーソルを戻す (ROM の CSRFORM が非表示のため)。
+- 診断: 480 へ入った直後と戻った後の 09A8h・09A0h (02h/03h/05h/09h/0Ah/0Dh) の読みと FIFO / VSYNC の打ち切り数を、戻ったときに
+  `[pegc] enter …` / `[pegc] exit  …` の 2 行で出す (§5 (C))。
+
 ### 段 2 — 直す (段 1 の結果で分岐)
 
 | 段 1 の結果 | 直し方 |
@@ -232,6 +330,36 @@ uPD7220 のステータス (60h / A0h の READ) の FIFO FULL が落ちるのを
 これ単独で直るかは実機でしか分からないが、害は無い。**段 0 と同じ実機の回に入れる**候補。
 
 ## 5. 受け入れ
+
+> **2026-09-29 のユーザー決定: v2.1 は「実機の画面を見ずに確かめられること」で締める**。下の P1 (実機の写真) は v2.1 の条件にしない。
+> v2.1 の受け入れは次の 3 つ:
+>
+> - **(A) OS32 の OUT 列 = 実機 ROM の記録**: `make check-pegc-mode-host` の `rom_s480` / `rom_back` が、実物の backend_pegc.c の
+>   OUT 列を記録の hw 行 94 行ずつと突き合わせる。一致しない行は試験の `EDIT_COMMON` / `EDIT_BACK` / `ADD_*` に理由付きで
+>   列挙したもの (§3-3「意図的に違える点」) だけ。**2026-09-29 合格** (変異 74 本すべて RED)。
+> - **(B) NP21/W の回帰** (PEGC / pc98 / Cirrus の gui_gate)。**2026-09-29 合格** (画像は報告)。
+> - **(C) 実機で画面を見ずにできる確認**: `pegcchk` (`/usr/bin/pegcchk.bin`、下)。NP21/W では下の期待どおり。**実機は未実施**。
+>
+> `pegcchk [秒数]` — rshell から: PEGC で 640x480 へ入り、テスト画 (枠・縦線 x=0/1/320/638/639・16 ラインごとの横線・対角線) を描いて
+> 指定秒数 (既定 3) 待ち、CUI へ戻って `[pegc] enter` / `[pegc] exit` (カーネル — 入った直後と戻った後の 09A8h・09A0h の読み、FIFO /
+> VSYNC の打ち切り数) と `R mode` / `R back` を出し、最後に `pegcchk done`。戻った後の INT 18h AH=31h は**続けて `v86 -g`** を走らせ、その
+> `R 31h` の行で見る (v86_* を呼ぶと app.conf の宣言が `cui` になり、gfx_init を呼ぶ pegcchk の `gfx` と両立しない — check-manifests)。
+> 実機 Ra266 で期待する行 (`gfxmode pegc` → リセット後、`pegcchk 5` → `v86 -g`):
+>
+> ```
+> [pegc] enter 09a8=81 msk=0 dsp=1 lcd=1 clk=3 ext=1 800l=1 fifo_to=0 vs_to=0
+> [pegc] exit  09a8=81 msk=0 dsp=1 lcd=1 clk=0 ext=0 800l=0 fifo_to=0 vs_to=0
+> R mode     : 640x480 while in (expect 640x480), pattern drawn
+> R back     : CUI after 5xx ticks
+> pegcchk done
+> (v86 -g) R 31h      : AX=310d BX=0100  layout=bit2   ← 2026-09-29 20:51 の記録と同じ
+> (v86 -g) R 30h back : AX=300d BX=0100 -> AX=0500 BX=0000 (ROM)
+> ```
+>
+> 09a8 が 81 のまま (bit7 を落としていない)、clk が 3 (入) → 0 (起動時の 2.5MHz へ戻った)、fifo_to / vs_to が 0。
+> NP21/W (起動時 24kHz) の実測 (2026-09-29): `enter 09a8=01 msk=0 dsp=1 lcd=1 clk=3 ext=1 800l=1 fifo_to=0 vs_to=0` /
+> `exit 09a8=00 msk=0 dsp=1 lcd=1 clk=0 ext=0 800l=0 fifo_to=0 vs_to=0`、`R mode 640x480 … drawn`。戻った後の AH=31h は
+> `AX=3108 BX=0100`、ROM の 30h back は `AX=0500 (ROM)` (pegcchk から v86_gdc_capture を呼んでいた版で確認 — 今の版は `v86 -g` で見る)。
 
 - P1: 実機で `gfxmode pegc` の GUI が正しい位置に出る (写真)。GUI を抜けて CUI に戻っても正しい。
 - P2: NP21/W の PEGC で GUI が今どおり映る (`/api/screenshot`)。`[pegc] hsync=` の行が変わらない。

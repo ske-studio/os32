@@ -2659,6 +2659,8 @@ checks:
     - gfx/gfx.h
     - gfx/gfx_internal.h
     - gfx/palette.h
+    - include/con_sink.h
+    - include/console.h
     - include/gfx_hal.h
     - include/io.h
     - include/kprintf.h

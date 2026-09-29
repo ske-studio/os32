@@ -87,3 +87,52 @@ IM=1 が失われる。最後にグラフィック GDC を STOP するので、C
   見ないので、ヘッダの値の誤りも選び方の誤りも落ちる (変異 9 本を足し、どれも `restore_matrix` で RED)。
 - RED: 直す前の選び方 (常に 5MHz 用 SYNC / 常に IM=0) は変異 `restore_ssync_always_5m`・`restore_scroll_always_im0` として
   残し、`restore_matrix` の C/R・IM の行で落ちることを確かめた。
+
+## 2026-09-29 — 実機 ROM の列に合わせる (受け入れ A、wt/pegc480-real)
+
+票 §3-3 の比較で、SYNC の値は実機の ROM と一致、違いは順序と出していなかったコマンド (RESET・MASTER/SLAVE・CSRFORM・ZOOM・
+テキスト GDC の PITCH/SCROLL・表示停止・6Ah 41h・6Eh・CRTC・START/STOP2) と SCROLL の LEN だった。`pegc_apply_timing` を ROM の列の順に
+書き直し、試験を作り直した。**上の節 (10 ケース・34 本) は旧版の記録**。
+
+### 様式の変更
+
+- 実機の `v86 -g` の記録 (hw の O 行、s480・back 各 94 行) を試験の `ROM_S480` / `ROM_BACK` に**数値で直に**書き、実物の
+  backend_pegc.c の OUT 列と 1 行ずつ突き合わせる。違えてよい行は `EDIT_COMMON` (DROP 9 行: 09A0h 03h、6Ah 07h/A0h DFh/A2h 28h/6Ah 06h、
+  A2h 20h/78h + 2)、`EDIT_BACK` (SET: 68h 09h → 08h)、`ADD_S480` / `ADD_BACK` (最後の START) に理由付きで置く。5Fh (io_wait) は比べない
+  (記録器が捕まえない) が、6Eh の直後に 5Fh があることは別に見る。
+- 独立の書き下し `x_mode` (順序を試験側でもう一度書く) が Ra266 の値で ROM の列と一致することを確かめ、その上で記録の無い組
+  (起動時 24kHz・起動時 5MHz・probe なし) の期待列に使う。
+- 偽の I/O に待ち (cpu_delay_us) とカーソル (console_hw_cursor_enable) の事象を足し、FIFO の待ち (2us) と VSYNC の待ち (10us) を数え分ける。
+  テキスト GDC のステータスの VSYNC は 2 回ごとに反転し、OUT と OUT の間で VSYNC が落ちた回数で**待ちの位置** (7 か所、ROM が 60h を
+  読み続けた所) を見る。
+
+### ケース (12 本)
+
+| ケース | 見るもの |
+|---|---|
+| `restore_matrix` | 戻り 6 通り × 2 口 + 入る側: グラフィック SYNC の C/R・SCROLL の IM と **LEN = 3FFh**・PITCH・クロックを資料と記録の数値で |
+| `defaults` | ヘッダ §10・§13 の値 = 記録 / 資料の数値 (試験側に直書き) |
+| `rom_s480` | **受け入れ A**: 起動時 81h・2.5MHz で 480 へ入る列 = ROM s480 (EDIT 適用)。09A8h・emu 行のポートに書かない。VSYNC 待ちの位置 7 か所 |
+| `rom_back` | **受け入れ A**: 戻る列 = ROM back (EDIT 適用)、`pegc_shutdown` の口と v86 -g FALLBACK の口の両方。CUI ならカーソルを戻し、GUI (シンク有効) なら戻さない |
+| `enter_24k` | 起動時 24kHz: ROM s480 + 「68h 0Eh の後に 09A8h 01h」。戻りは 24kHz の組・6Eh 20h・09A8h 00h |
+| `restore_24k_5m` / `boot_clock` | 起動時のクロックで戻りの組 (83h/85h・24-M・PITCH 80・IM 1、片方だけ 5MHz は 2.5MHz 扱い) |
+| `restore_unrecorded` | probe が通らない機種: 6Ah・6Eh・09A0h に書かない、クロック・PITCH に触らない |
+| `hsync_bits` | 09A8h は bit1,0 だけ、今の読みと同じなら書かない |
+| `fifo_busy` / `fifo_stuck` | FIFO 待ち (旧と同じ規則。上限で打ち切って数え、列は変わらない) |
+| `vsync_stuck` | VSYNC が来ない / 明けない: 待ちごとに 1 辺だけ上限まで読んで数え (7)、列は変わらない |
+
+RED → GREEN: 新しい試験は新しい記号 (`pegc_vsync_timeouts`・`PEGC_XATTR_*` など) を使うので、旧実装 (d5cd3a5) ではコンパイルが
+通らない (旧の列そのものを新しい試験で回したことは無い)。旧の振る舞いの断片 (09A8h を毎回書く・RESET を出さない・CSRFORM を出さない・
+LEN 0 など) は変異 `hsync_always_written`・`no_gfx_reset`・`no_text_csrform`・`no_gfx_csrform`・`hdr_scroll_480_len0` 等として残し、
+どれも RED。GREEN: `PASS pegc_mode_host (12 cases)`。
+
+### 変異 (74 本、全部 RED、2026-09-29)
+
+FIFO 9 / VSYNC 7 / 順序と ROM の列 26 / 値 11 / 戻りの組 6 / ヘッダの値 15。どの変異がどのケースで落ちるかは
+`python3 -B tools/tests/test_pegc_mode.py --mutate` の出力 (受け入れ A の `rom_s480` / `rom_back` で落ちるのが 35 本)。CONTROL は GREEN。
+
+### ホストで見られないもの
+
+- 実機で表示が正しくなるか (受け入れ A は「ROM と同じ列を出す」まで)。実機では `pegcchk` (票 §5 (C)) の行で、09A8h の bit7 が残るか・
+  クロックが戻るか・FIFO / VSYNC の打ち切りが 0 かを見る。
+- ROM の VSYNC 待ちの正確な条件 (ROM を逆アセンブルしていない)。

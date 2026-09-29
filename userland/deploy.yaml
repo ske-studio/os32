@@ -137,6 +137,10 @@ filesystem:
     - host: userland/tests/hal_test.bin
       guest: /usr/bin/
       tags: [test]
+    # --- pegcchk (PEGC 640x480 の出入りを画面を見ずに確かめる、票 TASK_PEGC480_REALHW §5) ---
+    - host: userland/tests/pegcchk.bin
+      guest: /usr/bin/
+      tags: [test]
     # --- hello_r3 (M2 KAPI トランポリン検証, ソース無変更 hello の CPL=3 版) ---
     - host: userland/tests/hello_r3.bin
       guest: /usr/bin/

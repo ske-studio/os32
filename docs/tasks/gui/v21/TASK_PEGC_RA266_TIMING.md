@@ -113,6 +113,11 @@ NP21/W の固定値より **実機 BIOS の設定を優先する**。
 > `gdc_send` は FIFO を待つ。詳細と実機の 1 回目の `v86 -g` の結果は
 > [TASK_PEGC480_REALHW](../../realhw/TASK_PEGC480_REALHW.md) §3「段 1 の実機での記録」「段 2 の下準備」・§4。
 
+> **実機 ROM の記録と段 2 (2026-09-29、wt/pegc480-real)**: 実機の `v86 -g` で ROM の INT 18h AH=30h の OUT 列が全部取れた。
+> SYNC の値は NP21/W 由来の値と一致 (PITCH・クロックも一致)、違いは順序と OS32 が出していなかったコマンド (RESET・CSRFORM・
+> テキスト GDC の PITCH/SCROLL・CRTC・6Eh・表示停止) と SCROLL の LEN。`pegc_apply_timing` を ROM の列に合わせた。比較表と原因は
+> [TASK_PEGC480_REALHW](../../realhw/TASK_PEGC480_REALHW.md) §3-3、v2.1 の受け入れ (画面を見ずに確かめる A/B/C) は同 §5。
+
 ## 5. 受入条件
 
 v2.1 の修正完了条件:

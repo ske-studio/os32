@@ -24,6 +24,8 @@ static inline unsigned int inpw(unsigned int port)
 static inline void outpw(unsigned int port, unsigned int value)
 { (void)port; (void)value; }
 
-static inline void io_wait(void) { }
+/* 実物は I/O 5Fh への書き込み (約 0.6us の待ち)。6Eh の後の待ちを列で確かめる
+ * ために、偽の I/O へ 5Fh の OUT として記録する。 */
+static inline void io_wait(void) { pegc_shim_outp(0x5FU, 0U); }
 
 #endif /* IO_H */

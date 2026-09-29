@@ -40,6 +40,8 @@
 #include "palette.h"   /* palette_get_all / palette_shadow_set */
 #include "os32_kapi_shared.h"
 #include "cpu_calibrate.h"   /* cpu_delay_us (GDC の FIFO 待ち) */
+#include "console.h"         /* console_hw_cursor_enable (CUI へ戻った後のカーソル) */
+#include "con_sink.h"        /* con_sink_is_enabled (GUI 中はカーソルを出さない) */
 
 /* アプリ帯 (kernel/paging.c) がリニア窓を踏まないための照合 ([C4] 三層定数)。
  * memmap.h 側は pegc.h を読まない (9821 の文字を core に持ち込まない) ので、
@@ -62,6 +64,14 @@ static const u8 s_scroll_400_5m[PEGC_GDC_SCROLL_LEN]  = PEGC_GDC_SCROLL_400_5M;
 static const u8 s_msync_400_31k[PEGC_GDC_SYNC_LEN] = PEGC_GDC_MSYNC_400_31K;
 static const u8 s_ssync_400_31k_2m5[PEGC_GDC_SYNC_LEN] = PEGC_GDC_SSYNC_400_31K_2M5;
 static const u8 s_ssync_400_31k_5m[PEGC_GDC_SYNC_LEN]  = PEGC_GDC_SSYNC_400_31K_5M;
+static const u8 s_tscroll[PEGC_GDC_SCROLL_LEN]    = PEGC_GDC_TSCROLL;
+static const u8 s_tcsrform[PEGC_GDC_CSRFORM_LEN] = PEGC_GDC_TCSRFORM;
+static const u8 s_gcsrform[PEGC_GDC_CSRFORM_LEN] = PEGC_GDC_GCSRFORM;
+static const u8 s_crtc_val[PEGC_CRTC_COUNT]      = PEGC_CRTC_VALUES;
+static const u16 s_crtc_port[PEGC_CRTC_COUNT] = {
+    CRTC_CHRLINE, CRTC_BODYLINE, CRTC_CHARLINE,
+    CRTC_SCROLL, CRTC_SCROLL_TOP, CRTC_SCROLL_LINES
+};
 
 /* ------------------------------------------------------------------------ */
 /*  内部状態                                                                */
@@ -84,6 +94,8 @@ static int s_boot_clk2     = -1;  /* 起動時の GDC CLOCK-2 (1 = 5MHz) / -1 = 
  * 読めるよう意図的にグローバル** — 実機で H3 (FIFO の取りこぼし) が起きて
  * いたかを後から確かめる手段。0 のままなら待ちは全部間に合っている。 */
 u32 pegc_gdc_fifo_timeouts = 0;
+/* VSYNC 待ち (pegc.h §13) が上限で打ち切られた辺の数。同じくグローバル。 */
+u32 pegc_vsync_timeouts = 0;
 
 /* ------------------------------------------------------------------------ */
 /*  MMIO / BIOS ワークエリアアクセス                                         */
@@ -190,9 +202,55 @@ static void gdc_send(const PegcGdcPorts *g, u8 cmd, const u8 *para, int n)
     gfx_counters.io_accesses += (u32)(n + 1);
 }
 
-/* 表示タイミング一式 (値は pegc.h §10 — 実機の記録で差し替える 1 か所)。 */
+/* テキスト GDC のステータスの VSYNC (bit5) が want になるまで待つ (pegc.h §13)。
+ * 上限で諦めたら数えて先へ。 */
+static void pegc_wait_vsync_edge(u8 want)
+{
+    int i;
+    for (i = 0; i < PEGC_VSYNC_POLLS; i++) {
+        u8 st = (u8)_in(GDC_TEXT_STAT);
+        gfx_counters.io_accesses++;
+        if ((u8)(st & GDC_STAT_VSYNC) == want) return;
+        cpu_delay_us(PEGC_VSYNC_POLL_US);
+    }
+    pegc_vsync_timeouts++;
+}
+
+/* VSYNC が来て、明けるまで (= 次の表示期間の頭)。実機の ROM の群の間の待ち。 */
+static void pegc_wait_vsync(void)
+{
+    pegc_wait_vsync_edge(GDC_STAT_VSYNC);
+    pegc_wait_vsync_edge(0);
+}
+
+/* 6Eh (拡張アトリビュート) の 1 書き。[U] io_disp.md I/O 006Eh 0010000nb
+ * 「OUT 時には OUT 5Fh,AL によるウェイトが必要」なので毎回 1 つ挟む
+ * (io_wait = 5Fh への書き込み。v86 -g の記録は 5Fh を捕まえないので、実機の
+ * ROM が挟んでいたかは列からは見えない)。 */
+static void xattr_write(u8 val)
+{
+    _out(PEGC_XATTR_PORT, val);
+    io_wait();
+    gfx_counters.io_accesses += 2;
+}
+
+static void gdc_cmd(const PegcGdcPorts *g, u8 cmd)
+{
+    gdc_send(g, cmd, (const u8 *)0, 0);
+}
+
+static void gdc_cmd1(const PegcGdcPorts *g, u8 cmd, u8 para)
+{
+    gdc_send(g, cmd, &para, 1);
+}
+
+/* 表示モード一式 (値は pegc.h §10 — 実機の記録で差し替える 1 か所)。 */
 typedef struct {
-    u8        hsync;       /* 09A8h */
+    int       pegc;        /* 1 = PEGC の probe が通った機種: 6Ah・6Eh を書く */
+    u8        ext;         /* 6Ah: PEGC_FF2_EXT_GFX (21h) / PEGC_FF2_STD_GFX (20h) */
+    u8        vram;        /* 6Ah: PEGC_FF2_VRAM_800L (69h) / PEGC_FF2_VRAM_400L (68h) */
+    u8        xattr;       /* 6Eh: PEGC_XATTR_31KHZ (21h) / PEGC_XATTR_24KHZ (20h) */
+    u8        hsync;       /* 09A8h (今の読みと違うときだけ書く) */
     int       set_clock;   /* 0 = クロックと PITCH に触らない (起動時の値が分からない) */
     u8        clk1;        /* 6Ah: PEGC_FF2_GDC_CLK1_* */
     u8        clk2;        /* 6Ah: PEGC_FF2_GDC_CLK2_* */
@@ -202,50 +260,125 @@ typedef struct {
     const u8 *scroll;      /* グラフィック GDC の SCROLL 4 バイト */
 } PegcTiming;
 
-/* 表示タイミングを入れ、両 GDC の表示を開始する。**書く順序はここ 1 か所**
- * (票 TASK_PEGC480_REALHW §2 H2 — 実機の ROM の OUT 列が違えばここを並べ替える):
- *   1. 09A8h (水平周波数)。[U] io_disp.md 09A8h「切り替えたら GDC の SYNC 等を
- *      設定し直さないと正常に表示されない」→ SYNC より前。
- *   2. 6Ah GDC CLOCK-1、CLOCK-2。[B] 3-2 表3-2「周波数を変更したら SYNC の
- *      再設定が必要」→ SYNC より前。NP21/W の BIOS の記録 (s480) の順も
- *      PITCH → 6Ah 40h → 6Ah 83h で、SYNC は内部状態へ直接書かれて列に出ない。
- *   3. テキスト GDC の SYNC、グラフィック GDC の SYNC (0Eh、DE=0 = 表示禁止)。
- *   4. グラフィック GDC の PITCH。
- *   5. グラフィック GDC の SCROLL。
- *   6. 画面表示可 (モード F1 0Fh)、両 GDC の START。
- * SYNC (DE=0) で同期パラメータを流し込んでから START (0Dh) で表示を許可する
- * — これが NP21/W 側の gdcs.textdisp / gdcs.grphdisp の GDCSCRN_ENABLE
- * (= /api/status の grph_disp) を立てる唯一の道 (io/gdc.c gdc_work())。
- * モード F1 の 0Fh は、NP21/W の vram/scrndraw.c scrndraw_draw() が gdc.mode1
- * bit7 を見て合成するため。起動時から立っている値だが念を押す。 */
+/* 表示モードを入れる。**書く順序はここ 1 か所** で、実機 PC-9821Ra266 の ROM の
+ * INT 18h AH=30h の OUT 列 (`v86 -g`、票 TASK_PEGC480_REALHW §3-3 の比較表) を
+ * そのままなぞる。s480 と back は値が違うだけで同じ形だった。
+ *   1. 6Ah 07h/(21h|20h)/06h、6Ah 41h (LCD モード)
+ *   2. 68h 0Eh (画面表示を止める)
+ *   3. [OS32] 09A8h — 今の読み (D0) と違うときだけ。実機 Ra266 の ROM は起動時
+ *      から 31kHz なので書いていない (09A8h は 3 回読んだだけ)。24kHz で起動する
+ *      機種 (NP21/W) では書かないと 31kHz にならない。
+ *   4. 6Ah GDC CLOCK-1、CLOCK-2 ([B] 3-2 表3-2「周波数を変更したら SYNC の再設定」)
+ *   5. VSYNC 待ち、グラフィック GDC RESET1・SLAVE、VSYNC 待ち
+ *   6. テキスト GDC RESET1・MASTER・SYNC・CSRFORM
+ *   7. グラフィック GDC SYNC・CSRFORM
+ *   8. 両 GDC RESET1 (グラフィック → テキスト)、VSYNC 待ち ×2
+ *   9. 両 GDC STOP2
+ *  10. グラフィック GDC PITCH・ZOOM・SCROLL、テキスト GDC PITCH・ZOOM・SCROLL
+ *  11. VSYNC 待ち、START ×2、VSYNC 待ち、STOP2 ×2、START ×2、STOP2 ×2
+ *  12. 68h 08h、6Ah 07h/(69h|68h)/06h、6Eh 03h/(21h|20h)/02h、CRTC 70h〜7Ah
+ *  13. VSYNC 待ち、68h 0Fh (画面表示)、6Eh 03h・68h 07h・68h 00h・6Eh 02h
+ * 実機の ROM は両 GDC を**止めたまま**返す (表示の開始は呼び手の AH=40h / 0Ch
+ * の仕事)。OS32 は呼び手を兼ねるので、START は呼び手 (pegc_enter_480_ports /
+ * pegc_text_sync_400) が出す。
+ * 実機の列から**意図的に外したもの** (理由は票 §3-3):
+ *   - 6Ah 07h・A0h DFh・A2h 28h・6Ah 06h: A2h 28h は WRITE (描画) コマンドで
+ *     [HW1]。意味は資料に無く、直後の RESET1 が FIFO を捨てる。
+ *   - A2h 20h・78h 00h 00h: WRITE と TEXTW (描画パターン) — [HW1]。
+ *   - 09A0h 03h (+ 読み): ROM が表示状態を読む選択。OS32 は最後に必ず表示可。
+ *   - emu 行 (063Ch・A46Eh・A660h): 記録では実機へ通していない = ROM が見た
+ *     読み値は偽 (FFh)。063Ch は D8000h の ROM バンク ([U] io_mem.md)、A46Eh・
+ *     A660h は PC-98GS の SGP/同期 ([U] io_gs.md) で、Ra266 での意味は不明。
+ *   - back の 68h 09h: ROM は BIOS ワークエリアの「グラフィック 200 ライン」を
+ *     戻す。OS32 の 400 ライン構成 (gfx_core.c の 68h 08h) に合わせて 08h。
+ * PEGC の probe が通っていない機種 (v86 -g の FALLBACK が 9801 で来た場合) は
+ * 6Ah・6Eh を書かない (6Eh は古い 9801 では周波数切換 — pegc.h §13)。 */
 static void pegc_apply_timing(const PegcTiming *t)
 {
-    u8 pitch[PEGC_GDC_PITCH_LEN];
+    int i;
 
-    _out(PEGC_HSYNC_PORT, t->hsync & PEGC_HSYNC_MASK);
+    if (t->pegc) {
+        ff2_locked_write(t->ext);
+        _out(MODE_FF2_PORT, PEGC_FF2_LCD_MODE);
+        gfx_counters.io_accesses++;
+    }
+    _out(MODE_FF1_PORT, MFF1_DISP_OFF);
     gfx_counters.io_accesses++;
+
+    if (((u8)_in(PEGC_HSYNC_PORT) & PEGC_HSYNC_READ_HF) !=
+        (u8)(t->hsync & PEGC_HSYNC_READ_HF)) {
+        _out(PEGC_HSYNC_PORT, t->hsync & PEGC_HSYNC_MASK);
+    }
+    gfx_counters.io_accesses += 2;
     if (t->set_clock) {
         _out(MODE_FF2_PORT, t->clk1);
         _out(MODE_FF2_PORT, t->clk2);
         gfx_counters.io_accesses += 2;
     }
 
+    pegc_wait_vsync();
+    gdc_cmd(&s_gdc_gfx, GDC_CMD_RESET);
+    gdc_cmd(&s_gdc_gfx, GDC_CMD_SLAVE);
+    pegc_wait_vsync();
+
+    gdc_cmd(&s_gdc_text, GDC_CMD_RESET);
+    gdc_cmd(&s_gdc_text, GDC_CMD_MASTER);
     gdc_send(&s_gdc_text, GDC_CMD_SYNC, t->msync, PEGC_GDC_SYNC_LEN);
+    gdc_send(&s_gdc_text, GDC_CMD_CSRFORM, s_tcsrform, PEGC_GDC_CSRFORM_LEN);
     gdc_send(&s_gdc_gfx,  GDC_CMD_SYNC, t->ssync, PEGC_GDC_SYNC_LEN);
-    if (t->set_clock) {
-        pitch[0] = t->pitch;
-        gdc_send(&s_gdc_gfx, GDC_CMD_PITCH, pitch, PEGC_GDC_PITCH_LEN);
-    }
+    gdc_send(&s_gdc_gfx,  GDC_CMD_CSRFORM, s_gcsrform, PEGC_GDC_CSRFORM_LEN);
+
+    gdc_cmd(&s_gdc_gfx,  GDC_CMD_RESET);
+    gdc_cmd(&s_gdc_text, GDC_CMD_RESET);
+    pegc_wait_vsync();
+    pegc_wait_vsync();
+
+    gdc_cmd(&s_gdc_gfx,  PEGC_GDC_CMD_STOP2);
+    gdc_cmd(&s_gdc_text, PEGC_GDC_CMD_STOP2);
+    if (t->set_clock) gdc_cmd1(&s_gdc_gfx, GDC_CMD_PITCH, t->pitch);
+    gdc_cmd1(&s_gdc_gfx, GDC_CMD_ZOOM, PEGC_GDC_ZOOM);
     gdc_send(&s_gdc_gfx, GDC_CMD_SCROLL, t->scroll, PEGC_GDC_SCROLL_LEN);
+    gdc_cmd1(&s_gdc_text, GDC_CMD_PITCH, PEGC_GDC_TPITCH);
+    gdc_cmd1(&s_gdc_text, GDC_CMD_ZOOM, PEGC_GDC_ZOOM);
+    gdc_send(&s_gdc_text, GDC_CMD_SCROLL, s_tscroll, PEGC_GDC_SCROLL_LEN);
+    pegc_wait_vsync();
+
+    gdc_cmd(&s_gdc_gfx,  PEGC_GDC_CMD_START2);
+    gdc_cmd(&s_gdc_text, PEGC_GDC_CMD_START2);
+    pegc_wait_vsync();
+    gdc_cmd(&s_gdc_gfx,  PEGC_GDC_CMD_STOP2);
+    gdc_cmd(&s_gdc_text, PEGC_GDC_CMD_STOP2);
+    gdc_cmd(&s_gdc_gfx,  PEGC_GDC_CMD_START2);
+    gdc_cmd(&s_gdc_text, PEGC_GDC_CMD_START2);
+    gdc_cmd(&s_gdc_gfx,  PEGC_GDC_CMD_STOP2);
+    gdc_cmd(&s_gdc_text, PEGC_GDC_CMD_STOP2);
+
+    _out(MODE_FF1_PORT, MFF1_HIRES);
+    gfx_counters.io_accesses++;
+    if (t->pegc) {
+        ff2_locked_write(t->vram);
+        xattr_write(PEGC_XATTR_UNLOCK);
+        xattr_write(t->xattr);
+        xattr_write(PEGC_XATTR_LOCK);
+    }
+    for (i = 0; i < PEGC_CRTC_COUNT; i++) {
+        _out(s_crtc_port[i], s_crtc_val[i]);
+    }
+    gfx_counters.io_accesses += (u32)PEGC_CRTC_COUNT;
+    pegc_wait_vsync();
 
     _out(MODE_FF1_PORT, MFF1_DISP_ON);
     gfx_counters.io_accesses++;
-    gdc_send(&s_gdc_text, GDC_CMD_START, (const u8 *)0, 0);
-    gdc_send(&s_gdc_gfx,  GDC_CMD_START, (const u8 *)0, 0);
+    if (t->pegc) xattr_write(PEGC_XATTR_UNLOCK);
+    _out(MODE_FF1_PORT, MFF1_ANK_7x13);
+    _out(MODE_FF1_PORT, MFF1_ATR_VLINE);
+    gfx_counters.io_accesses += 2;
+    if (t->pegc) xattr_write(PEGC_XATTR_LOCK);
 }
 
 /* 480 ラインへ入るときの一式 (pegc.h §10 の値)。 */
 static const PegcTiming s_timing_480 = {
+    1, PEGC_FF2_EXT_GFX, PEGC_FF2_VRAM_800L, PEGC_XATTR_31KHZ,
     PEGC_HSYNC_31KHZ, 1, PEGC_GDC_CLK1_480, PEGC_GDC_CLK2_480,
     s_msync_480, s_ssync_480, PEGC_GDC_PITCH_480, s_scroll_480
 };
@@ -627,11 +760,54 @@ static void pegc_prepare(void)
 
 /* 480 ラインへ入るポート操作の全部 (MMIO の前まで)。ホスト試験
  * (tools/tests/test_pegc_mode.py) はここを実物のまま回して OUT 列を見る。 */
+/* 実機の ROM が止めたまま返す両 GDC を、OS32 が呼び手 (AH=40h / 0Ch の役) と
+ * して表示開始する — ROM の列に対する OS32 の追加 (票 §3-3)。 */
 static void pegc_enter_480_ports(void)
 {
     pegc_apply_timing(&s_timing_480);
-    ff2_locked_write(PEGC_FF2_VRAM_800L);
-    ff2_locked_write(PEGC_FF2_EXT_GFX);
+    gdc_cmd(&s_gdc_gfx,  PEGC_GDC_CMD_START2);
+    gdc_cmd(&s_gdc_text, PEGC_GDC_CMD_START2);
+}
+
+/* 状態の記録 (シリアル越しでも読める 1 行にして出す — rshell は kprintf を写す)。
+ * 09A8h の生の読みと、09A0h で読める 6Ah / 68h の状態 ([U] io_disp.md
+ * I/O 09A0h: 02h = 奇数ラスタのマスク (68h 09h で 1)、03h = 表示 (68h 0Fh で 1)、
+ * 05h = LCD モード (6Ah 41h で 1)、09h = GDC クロック (bit0 CLOCK-1 / bit1
+ * CLOCK-2)、0Ah = 256 色、0Dh = 800 ライン構成)、FIFO と VSYNC の打ち切り数。
+ * 実機で画面を見ずに確かめる材料 (`pegcchk`、票 TASK_PEGC480_REALHW §5)。
+ * 480 ラインへ入ったときは**読むだけ**で、出すのは戻った後 (CUI で 480 ラインの
+ * 間に出すとテキスト面がテスト画に重なる — テキストはグラフィックより優先)。 */
+typedef struct {
+    u8  hs;
+    u8  clk;
+    u8  msk, dsp, lcd, ext, pgc;
+    u32 fifo_to, vs_to;
+} PegcDiag;
+
+static PegcDiag s_diag_enter;
+
+static void pegc_diag_take(PegcDiag *d)
+{
+    d->hs  = (u8)_in(PEGC_HSYNC_PORT);
+    d->msk = (u8)pegc_stat(PEGC_STAT_SEL_ODDMASK);
+    d->dsp = (u8)pegc_stat(PEGC_STAT_SEL_DISP);
+    d->lcd = (u8)pegc_stat(PEGC_STAT_SEL_LCD);
+    _out(PEGC_STAT_PORT, PEGC_STAT_SEL_GDCCLK1);
+    d->clk = (u8)(_in(PEGC_STAT_PORT) & (PEGC_STAT_BIT | PEGC_STAT_RD_GDCCLK2));
+    d->ext = (u8)pegc_stat(PEGC_STAT_SEL_GFXMODE);
+    d->pgc = (u8)pegc_stat(PEGC_STAT_SEL_PAGECONT);
+    d->fifo_to = pegc_gdc_fifo_timeouts;
+    d->vs_to = pegc_vsync_timeouts;
+    gfx_counters.io_accesses += 14;
+}
+
+static void pegc_diag_print(const char *tag, const PegcDiag *d)
+{
+    kprintf(0x07, "[pegc] %s 09a8=%02x msk=%d dsp=%d lcd=%d clk=%x ext=%d "
+            "800l=%d fifo_to=%u vs_to=%u\n", tag, (unsigned int)d->hs,
+            (int)d->msk, (int)d->dsp, (int)d->lcd, (unsigned int)d->clk,
+            (int)d->ext, (int)d->pgc, (unsigned int)d->fifo_to,
+            (unsigned int)d->vs_to);
 }
 
 static void pegc_init(void)
@@ -645,17 +821,16 @@ static void pegc_init(void)
     if (!pegc_reserve_backbuffer()) return;
 
     /* --- 表示モード ---
-     * 31kHz (640x480 は 31kHz のときだけ指定できる) → GDC クロック 5MHz →
-     * GDC の同期信号・PITCH・表示区間を 480 ライン用に入れ直す → 800 ライン
-     * VRAM 構成 (「480 ラインモードのデフォルト」) → 拡張グラフィックモード。
-     * 順序と値の置き場は pegc_apply_timing / pegc.h §10。
+     * 実機 Ra266 の ROM (INT 18h AH=30h) と同じ列 (pegc_apply_timing、票
+     * TASK_PEGC480_REALHW §3-3): 拡張グラフィックモード → 表示停止 → GDC
+     * クロック 5MHz → 両 GDC の RESET・SYNC・CSRFORM・PITCH・ZOOM・SCROLL →
+     * 800 ライン VRAM 構成・6Eh・テキスト CRTC → 表示。値は pegc.h §10。
      *
-     * SYNC を 6Ah の 69h/21h より **前** に置くのが肝 (票 H2c)。NP21/W は
-     * 表示サイズを毎フレーム再計算するが、それを走らせるのは
-     * gdcs.textdisp / gdcs.grphdisp の GDCSCRN_EXT で、09A8h への書き込み
-     * (io/gdc.c gdc_o9a8) と gdc_analogext() (6Ah 21h) がそれを立てる
-     * (pccore.c → vram/dispsync.c dispsync_renewalvertical)。SYNC を先に
-     * 入れておけば、その再計算が新しい 480 ラインの値を読む。 */
+     * 以前は「SYNC を 6Ah の 69h/21h より前に置くのが肝」(票 H2c) だったが、
+     * 実機の ROM は 21h を最初に出す。NP21/W でも SYNC のパラメータが変われば
+     * gdcs.*disp に GDCSCRN_EXT が立ち (io/gdc_cmd.tbl gdc_dirtyflag)、次の
+     * フレームで表示サイズが計算し直されるので、順序に依らず 480 ラインになる
+     * (NP21/W の回帰で確かめる)。 */
     pegc_enter_480_ports();
 
     /* --- VRAM の見せ方: パックトピクセル + F00000h にリニア窓 --- */
@@ -674,22 +849,16 @@ static void pegc_init(void)
      * 480 ラインでは 30 行ぶんが見えるので 25 行では足りない (票 H2c)。
      * テキスト面が非 0 の画素はグラフィックより優先されるため、消し残しは
      * そのまま窓を隠す (NP21/W vram/sdrawex.mcr pex_2)。
-     * 文字セルは 400/25 行と 480/30 行で同じ 16 ラスタなので、CSRFORM も
-     * テキスト CRTC (70h〜) も触る必要はない
-     * (NP21/W bios/bios18.c crtdata の "400-25" と "480-30" が同値)。 */
+     * 文字セル (CSRFORM L/R・テキスト CRTC) は pegc_apply_timing が実機の
+     * ROM と同じ値 (16 ラスタ) で入れ直している。 */
     pegc_tvram_clear(0, PEGC_TEXT_ROWS_480);
 
     pegc_palette_init();
 
-    /* GDC の CSRFORM は触らない: 256 色パックド表示 (NP21/W
-     * vram/makegrex.c makegrphex) はライン 2 倍表示を見ない。PITCH と GDC
-     * クロックは上の pegc_apply_timing が明示的に入れる (以前は起動時の BIOS
-     * 状態に頼っていた — 票 TASK_PEGC480_REALHW §2 H5)。表示の開始と区間長も
-     * 同じく SCROLL で確定済み。 */
-    if (pegc_gdc_fifo_timeouts) {
-        kprintf(0x07, "[pegc] gdc fifo timeouts=%u\n",
-                (unsigned int)pegc_gdc_fifo_timeouts);
-    }
+    /* グラフィック GDC の CSRFORM (L/R = 0)・PITCH・GDC クロックも
+     * pegc_apply_timing が実機の ROM の値で入れる (以前は起動時の BIOS 状態に
+     * 頼っていた — 票 TASK_PEGC480_REALHW §2 H5、§3-3)。 */
+    pegc_diag_take(&s_diag_enter);
 
     /* HAL 共通の状態。PEGC ではハードウェアページ切替を使わない
      * (800 ライン構成では 00A4h が使えない — pegc.h の PEGC_FF2_VRAM_800L)。 */
@@ -822,29 +991,29 @@ static void pegc_leave(void) { }
 /* ------------------------------------------------------------------------ */
 /*  shutdown — 標準グラフィックモード / 起動時の周波数のテキストへ戻す        */
 /*                                                                          */
-/*  リニア窓を閉じる → 拡張モードを抜ける → 400 ライン VRAM 構成へ →         */
-/*  24kHz へ、の順。E0000h の意味が「制御レジスタ」から「プレーン 3」へ       */
-/*  戻るのは拡張モードを抜けた瞬間なので、MMIO への最後の書き込みは          */
-/*  そのに済ませておく。                                                     */
+/*  リニア窓を閉じる → (pegc_apply_timing が) 拡張モードを抜ける → 起動時の   */
+/*  周波数・クロックの 400 ラインの表示モード → 400 ライン VRAM 構成、の順。  */
+/*  E0000h の意味が「制御レジスタ」から「プレーン 3」へ戻るのは拡張モードを   */
+/*  抜けた瞬間なので、MMIO への最後の書き込みはその前に済ませておく。        */
 /*  ※ 周波数は **起動時に BIOS が作っていた値** へ戻す (pegc_boot_sync_record */
-/*  の記録)。以前は 24kHz 決め打ちで、31kHz で起動する機種では戻った後の     */
-/*  同期が起動時と変わっていた (桁ずれとの関係は仮説、TASK_FDC_REALHW §9-1)。 */
-/*  s_active が 0 の                                                         */
-/*  とき (480 ラインへ入っていない) は何もしない = 同期に一切触らない。      */
-/*  ※ 480 ライン化で GDC の SYNC を書き換えているので、周波数だけでなく      */
-/*  同期パラメータと表示区間も 400 ライン用へ確実に戻す (票 H2c)。           */
-/*  戻したあとグラフィック GDC は STOP にする — 9801 経路の gfx_init() が     */
-/*  改めて START を出すし、テキストだけの状態では表示していてはいけない       */
-/*  (従来の挙動を維持)。テキスト GDC は START のままにしてコンソールを残す。  */
+/*  の記録。24kHz 決め打ちで CUI がずれた件 — TASK_FDC_REALHW §9-1)。         */
+/*  s_active が 0 のとき (480 ラインへ入っていない) は何もしない。           */
+/*  戻り方は実機の ROM の back の列と同じ (pegc_apply_timing)。ROM は両 GDC を  */
+/*  止めたまま返すので、OS32 はテキスト GDC だけを START してコンソールを残す  */
+/*  (グラフィック GDC は止めたまま — 9801 経路の gfx_init() が改めて START を  */
+/*  出す、従来の挙動)。                                                      */
 /* ------------------------------------------------------------------------ */
-/* 09A8h を hs に → それに合う 400 ラインの SYNC・表示区間 → グラフィック GDC を
- * 止める。pegc_shutdown と pegc_restore_text_sync が共有する後半。 */
-/* クロックと PITCH は**起動時に記録したクロック**へ戻す (480 ラインへ入る側と
+/* 起動時の周波数 hs とクロックの 400 ラインへ。pegc_shutdown と
+ * pegc_restore_text_sync が共有する後半。
+ * クロックと PITCH は**起動時に記録したクロック**へ戻す (480 ラインへ入る側と
  * 対称。pegc_boot_sync_record)。記録が無い (PEGC の probe が通っていない =
- * 09A0h を読んでいない) ときは触らない — 従来どおり。 */
-/* グラフィック GDC の SYNC と SCROLL (IM) もクロックとの組で選ぶ (pegc.h §10、
+ * 09A0h を読んでいない) ときは触らない — 従来どおり。
+ * グラフィック GDC の SYNC と SCROLL (IM) もクロックとの組で選ぶ (pegc.h §10、
  * Codex レビュー P2): 起動時が 5MHz (両方) なら 5MHz 用、2.5MHz なら 2.5MHz 用。
- * 記録が無いときは従来の組 (5MHz 用 SYNC + IM=0) で、クロックと PITCH は触らない。 */
+ * 記録が無いときは従来の組 (5MHz 用 SYNC + IM=0) で、クロックと PITCH は触らない。
+ * 実機の ROM の列はテキスト GDC の CSRFORM を「カーソル非表示」(CS = 0) で
+ * 入れるので、CUI (GUI のシンクが無効) ならコンソールのカーソルを戻す。GUI
+ * から抜けるときは console_text_gdc_start() が同じことをする。 */
 static void pegc_text_sync_400(u8 hs)
 {
     PegcTiming t;
@@ -852,6 +1021,10 @@ static void pegc_text_sync_400(u8 hs)
     int is5m = (s_boot_clk1 == 1 && s_boot_clk2 == 1) ? 1 : 0;
     int ss5m = known ? is5m : 1;     /* 記録なし = 従来の 5MHz 用 SYNC */
 
+    t.pegc = s_probe_ok;
+    t.ext = PEGC_FF2_STD_GFX;
+    t.vram = PEGC_FF2_VRAM_400L;
+    t.xattr = (hs == PEGC_HSYNC_31KHZ) ? PEGC_XATTR_31KHZ : PEGC_XATTR_24KHZ;
     t.hsync = hs;
     t.set_clock = known;
     t.clk1 = (s_boot_clk1 == 1) ? PEGC_FF2_GDC_CLK1_5M : PEGC_FF2_GDC_CLK1_2M5;
@@ -867,7 +1040,8 @@ static void pegc_text_sync_400(u8 hs)
     t.scroll = (known && is5m) ? s_scroll_400_5m : s_scroll_400_2m5;
     pegc_apply_timing(&t);
 
-    gdc_send(&s_gdc_gfx, GDC_CMD_STOP, (const u8 *)0, 0);
+    gdc_cmd(&s_gdc_text, PEGC_GDC_CMD_START2);
+    if (!con_sink_is_enabled()) console_hw_cursor_enable();
 }
 
 static void pegc_shutdown(void)
@@ -877,14 +1051,12 @@ static void pegc_shutdown(void)
     if (!s_active) return;
 
     mmio_w16(PEGC_MMIO_LINEAR, PEGC_LINEAR_OFF);
-    ff2_locked_write(PEGC_FF2_STD_GFX);
-    ff2_locked_write(PEGC_FF2_VRAM_400L);
 
     /* 480 ラインでだけ見えていた 26〜30 行目を消す。25 行までは
      * コンソールの内容なので触らない (init 側で一度消してある)。 */
     pegc_tvram_clear(TVRAM_ROWS, PEGC_TEXT_ROWS_480);
 
-    /* 起動時に記録した周波数へ戻し、それに合う 400 ラインの SYNC を入れる
+    /* 起動時に記録した周波数へ戻し、それに合う 400 ラインの表示モードを入れる
      * (24kHz 決め打ちをやめた。TASK_FDC_REALHW §9-1)。起動時の 09A8h が
      * 読めなかった機種は従来どおり 24kHz。 */
     hs = pegc_restore_hsync();
@@ -892,6 +1064,12 @@ static void pegc_shutdown(void)
 
     gfx_current_height = GFX_HEIGHT;
     s_active = 0;
+    {
+        PegcDiag d;
+        pegc_diag_take(&d);
+        pegc_diag_print("enter", &s_diag_enter);
+        pegc_diag_print("exit ", &d);
+    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -910,14 +1088,11 @@ static void pegc_shutdown(void)
 /* ------------------------------------------------------------------------ */
 void pegc_restore_text_sync(int hsync31)
 {
-    /* 6Ah の 07h/20h/68h/06h と 09A0h は PEGC の probe が通った機種の値。
-     * 9801 で ROM の戻しに失敗してここへ来ても書かない (代行レビュー P3-2)。 */
-    if (s_probe_ok) {
-        if (pegc_stat(PEGC_STAT_SEL_GFXMODE)) {
-            mmio_w16(PEGC_MMIO_LINEAR, PEGC_LINEAR_OFF);
-        }
-        ff2_locked_write(PEGC_FF2_STD_GFX);
-        ff2_locked_write(PEGC_FF2_VRAM_400L);
+    /* 09A0h と 6Ah・6Eh は PEGC の probe が通った機種の値。9801 で ROM の戻しに
+     * 失敗してここへ来ても書かない (代行レビュー P3-2。6Ah・6Eh は
+     * pegc_apply_timing が t.pegc = s_probe_ok で見る)。 */
+    if (s_probe_ok && pegc_stat(PEGC_STAT_SEL_GFXMODE)) {
+        mmio_w16(PEGC_MMIO_LINEAR, PEGC_LINEAR_OFF);
     }
     pegc_text_sync_400(hsync31 ? PEGC_HSYNC_31KHZ : PEGC_HSYNC_24KHZ);
 
