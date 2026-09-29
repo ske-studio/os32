@@ -88,9 +88,11 @@ notest:
       - userland/cmds/tar.c
       - userland/cmds/wget.c
   # カーネルの描画。ホスト試験が組むのは backend_pc98.c / gfx_core.c
-  # (check-boot-splash-host) だけで、残りはヘッダ (-Igfx) しか読まない。
+  # (check-boot-splash-host) と backend_cirrus.c (check-cirrus-win-host) だけで、
+  # 残りはヘッダ (-Igfx) しか読まない。
   - glob: gfx/*.c
     except:
+      - gfx/backend_cirrus.c
       - gfx/backend_pc98.c
       - gfx/gfx_core.c
   # man ページ。hsync.1 は test_hsync_h2 / test_h4_manifest が読む。
@@ -2621,3 +2623,32 @@ checks:
     - sdk/include/os32/os32_kapi_generated.h
     - sdk/include/os32/os32_kapi_shared.h
     - sdk/include/os32/os32api.h
+  check-cirrus-win-host:
+    - arch/x86/arch_io.h
+    - drivers/np2sysp.h
+    - drivers/wab_cirrus.h
+    - drivers/wab_glue.h
+    - drivers/wab_glue_xe10.c
+    - drivers/wab_glue_xe10.h
+    - gfx/backend_cirrus.c
+    - gfx/gfx.h
+    - gfx/gfx_internal.h
+    - gfx/palette.h
+    - include/gfx_hal.h
+    - include/io.h
+    - include/kprintf.h
+    - include/memmap.h
+    - include/pc98.h
+    - include/sys.h
+    - include/types.h
+    - include/wab_xe10.h
+    - kernel/paging.h
+    - kernel/pgalloc.h
+    - kernel/physmem.h
+    - lib/kstring.h
+    - platform/pc98/platform_io.h
+    - sdk/include/os32/os32_kapi_generated.h
+    - sdk/include/os32/os32_kapi_shared.h
+    - tools/tests/cirrus_win_host.c
+    - tools/tests/mutpar.py
+    - tools/tests/test_cirrus_win.py

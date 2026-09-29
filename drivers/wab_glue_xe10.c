@@ -89,7 +89,7 @@ static int xe10_probe(void)
 /*  2. VRAM 窓を既定 (F60000h) に固定する。ITF が設定済みの値と同じなので     */
 /*     実機では実質 no-op、NP21/W でも初期値と同じ                           */
 /*     (pc98_cirrus_vga_initVRAMWindowAddr → VRAMWindowAddr2 = 0xf60000)。   */
-/*  3. リニア窓 (レジスタ 02h) を 01000000h に開く (票 H3b)。バンク窓と違い   */
+/*  3. リニア窓 (レジスタ 02h) を FE000000h に開く (v3 の窓の帯)。バンク窓と違い   */
 /*     VRAM オフセット 0 から 2MB が連続して見えるので、300KB のクライアント  */
 /*     面を CPU から一望できる。ページを張るのはバックエンド (K の            */
 /*     paging_map_phys) の仕事で、ここはレジスタを出すだけ。番地の根拠は      */
@@ -98,6 +98,22 @@ static int xe10_probe(void)
 /*     MMIO 窓は Xe10 では NP21/W に存在しない (pciMMIO_Addr = 0 のまま) ので */
 /*     bit0 は 0 のまま = BLT レジスタは I/O 経由で設定する。                 */
 /* ------------------------------------------------------------------------ */
+/* リニア窓は v3 のデバイス窓の帯の中、しかも paging_init が静的に持つ PT
+ * 1 枚 (帯の先頭 4MB) の中に、NP21/W が窓として出す全体 (4MB) ごと収まること。
+ * 外へ出ると、exec の後の gfx init では PT を足せず窓を張れない。 */
+STATIC_ASSERT(WAB_XE10_LINEARWIN_BASE >= MEM_DEVICE_APERTURE_BASE,
+              xe10_linear_in_aperture_band);
+STATIC_ASSERT(WAB_XE10_LINEARWIN_BASE - MEM_DEVICE_APERTURE_BASE +
+              WAB_XE10_LINEARWIN_DECODE <= MEM_DEVICE_APERTURE_PDE_SIZE,
+              xe10_linear_in_static_aperture_pt);
+STATIC_ASSERT(WAB_XE10_LINEARWIN_SIZE <= WAB_XE10_LINEARWIN_DECODE,
+              xe10_linear_draw_within_decode);
+/* dat = FFh は NP21/W が捨てる (窓が開かない)。00h は「閉じる」。 */
+STATIC_ASSERT(WAB_XE10_LINEARWIN_SEL != 0x00 && WAB_XE10_LINEARWIN_SEL != 0xFF,
+              xe10_linear_sel_accepted);
+STATIC_ASSERT(((u32)WAB_XE10_LINEARWIN_SEL << WAB_XE10_LINEARWIN_SHIFT) ==
+              MEM_DEVICE_APERTURE_BASE, xe10_linear_sel_exact);
+
 static void xe10_linear_enable(int on);
 
 static void xe10_init(void)
@@ -113,7 +129,7 @@ static void xe10_init(void)
 /* ------------------------------------------------------------------------ */
 /*  リニア窓の開閉 ([W] 0FABh レジスタ 02h / include/wab_xe10.h §4)           */
 /*                                                                          */
-/*  on  : dat = 01h → 物理 01000000h から 2MB。                              */
+/*  on  : dat = FEh → 物理 FE000000h から (v3 のデバイス窓の帯)。             */
 /*  off : dat = 00h。⚠ NP21/W はこの値を捨てる                               */
 /*        ([N] cirrusvga_ofab case 0x02 の `if(dat!=0x00 && dat!=0xff)`)      */
 /*        ので、エミュレータ上では窓は開いたまま残る。実際の後始末は          */
@@ -199,7 +215,7 @@ WabGlue wab_glue_xe10 = {
     xe10_mmio_enable,
     (u32)WAB_XE10_WIN_BASE,
     (u32)WAB_XE10_WIN_SIZE,
-    (u32)WAB_XE10_LINEARWIN_BASE,   /* リニア窓 01000000h (票 H3b) */
+    (u32)WAB_XE10_LINEARWIN_BASE,   /* リニア窓 FE000000h (v3 の窓の帯) */
     (u32)WAB_XE10_LINEARWIN_SIZE,   /* 2MB */
     xe10_linear_enable,
     (volatile u8 *)0,   /* MMIO 窓なし (NP21/W の Xe10 は pciMMIO_Addr = 0) */

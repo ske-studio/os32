@@ -152,8 +152,11 @@ u32 paging_pte_flags(u32 virt_addr);
 /*    PDE 1 (0x400000-0x7FFFFF) : アプリ固有 — プログラム帯 (APP_BAND_PDE)   */
 /*    PDE 2 (0x800000-0xBFFFFF) : 共有                                       */
 /*    PDE 3 (0xC00000-0xFFFFFF) : 共有 — 物理末尾のホットデプロイ窓を含む     */
-/*    PDE 4-7 (0x1000000-0x1FFFFFF) : 共有 — 実 RAM 無し。既定は全 Not-      */
-/*      Present で、デバイス窓 (Cirrus のリニア窓 01000000h) だけを張る。      */
+/*    PDE 4-7 (0x1000000-0x1FFFFFF) : 共有 — 16MB 超の RAM の恒等写像。     */
+/*      RAM が無ければ全 Not-Present。                                       */
+/*    PDE 0x3F8 (0xFE000000-0xFE3FFFFF) : 共有 — OS が割り当てるデバイス窓の */
+/*      帯の先頭 (memmap.h MEM_DEVICE_APERTURE_*、Cirrus のリニア窓)。PT は  */
+/*      paging_init が静的に 1 枚用意し、既定は全 Not-Present。              */
 /*      paging_addrspace_create は PDE を 1024 本すべてコピーするので、       */
 /*      master に張った窓はそのまま全アプリ PD から見える (H3b)。            */
 /*                                                                          */

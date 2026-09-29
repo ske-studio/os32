@@ -155,6 +155,24 @@ STATIC_ASSERT((PAGING_BOOT_MAP_SIZE % (PTE_COUNT * PAGE_SIZE)) == 0,
 static u8 pd_raw[4096] __attribute__((aligned(4096)));      /* ページディレクトリ用生バッファ */
 static u8 pt_raw[PAGING_BOOT_PT_COUNT * 4096] __attribute__((aligned(4096)));  /* ページテーブル用生バッファ */
 
+/* OS が割り当てるデバイス窓の帯 (memmap.h MEM_DEVICE_APERTURE_*) の先頭 4MB を
+ * 覆う PT。**静的に 1 枚** 持つ (2026-09-29、Cirrus のリニア窓 FE000000h)。
+ * 新しい PDE を足せるのは live AS が 0 の間だけ (prepare_tables) だが、窓を
+ * 張る gfx の init は exec の後にも走る。paging_init で PDE を present にして
+ * おけば、以後のアプリ PD は PDE ごとこの PT を写し、paging_map_phys は PTE を
+ * 書くだけで済む (PDE 4-7 の 16MB〜32MB と同じやり方)。legacy 経路 (8MB) には
+ * 動的 PT の置き場が無いので、動的確保にはしない。 */
+#define PAGING_APERTURE_PDI (MEM_DEVICE_APERTURE_BASE / MEM_DEVICE_APERTURE_PDE_SIZE)
+STATIC_ASSERT(MEM_DEVICE_APERTURE_PDE_SIZE == (u32)PTE_COUNT * PAGE_SIZE,
+              aperture_pt_covers_one_pde);
+STATIC_ASSERT((MEM_DEVICE_APERTURE_BASE % MEM_DEVICE_APERTURE_PDE_SIZE) == 0,
+              aperture_base_pde_aligned);
+STATIC_ASSERT(MEM_DEVICE_APERTURE_BASE + MEM_DEVICE_APERTURE_PDE_SIZE <=
+              MEM_DEVICE_APERTURE_END, aperture_pt_inside_band);
+STATIC_ASSERT(PAGING_APERTURE_PDI >= PAGING_BOOT_PT_COUNT &&
+              PAGING_APERTURE_PDI < PAGING_PT_COUNT, aperture_pdi_static_free);
+static u8 aperture_pt_raw[4096] __attribute__((aligned(4096)));
+
 static u32 *page_directory;          /* アライン済みポインタ */
 static u32 *page_tables[PAGING_PT_COUNT];
 
@@ -234,6 +252,14 @@ void paging_init(u32 mem_kb)
         /* ページディレクトリにテーブルを登録 */
         page_directory[i] = (u32)page_tables[i] | PAGE_RW;
     }
+
+    /* デバイス窓の帯の PT (静的 1 枚)。中身は全 Not-Present、PDE は present。
+     * 窓を張るのは gfx バックエンドの paging_map_phys (supervisor + PCD)。 */
+    page_tables[PAGING_APERTURE_PDI] = (u32 *)aperture_pt_raw;
+    for (j = 0; j < PTE_COUNT; j++)
+        page_tables[PAGING_APERTURE_PDI][j] = PAGE_NOT_PRESENT;
+    page_directory[PAGING_APERTURE_PDI] =
+        (u32)page_tables[PAGING_APERTURE_PDI] | PAGE_RW;
 
     /* ========================================================
      *  保護属性の設定

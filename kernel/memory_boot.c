@@ -79,8 +79,8 @@ u32 memory_boot_detect(u32 mem_kb)
     reported = *(volatile u16 *)boot_ptr(BIOS_WORK_MEM_HIGH_MB);
     /* 最上位の ROM / PCI MMIO 帯は RAM にならないので、そこまでで頭打ち。
      * これは人為的な上限ではなく、デバイスが居る番地の除外である。 */
-    if (reported > (MEM_PHYS_MMIO_TOP - MEM_HIGH_RAM_BASE) / MEM_1MB)
-        reported = (MEM_PHYS_MMIO_TOP - MEM_HIGH_RAM_BASE) / MEM_1MB;
+    if (reported > (MEM_PHYS_RAM_CEILING - MEM_HIGH_RAM_BASE) / MEM_1MB)
+        reported = (MEM_PHYS_RAM_CEILING - MEM_HIGH_RAM_BASE) / MEM_1MB;
     accepted = 0;
     for (k = 0; k < reported; k++) {
         addr = MEM_HIGH_RAM_BASE + k * MEM_1MB;
@@ -150,13 +150,15 @@ static u32 memory_boot_high_fit(u32 high_end, u32 top)
 }
 
 /* 検出した 16MB 超の RAM をモデルへ登録する。RAM にならない番地
- * (15-16MB のシステム空間、最上位の ROM / PCI MMIO) は予約として明示的に
- * 抜く。0 = モデル不変の失敗 (呼び出し側は fail-stop)。 */
+ * (15-16MB のシステム空間、OS が割り当てるデバイス窓の帯、最上位の ROM /
+ * PCI MMIO) は予約として明示的に抜く。窓の帯と最上位の帯は隣り合うので
+ * [MEM_PHYS_RAM_CEILING, 4GB) を 1 回で MMIO にする。
+ * 0 = モデル不変の失敗 (呼び出し側は fail-stop)。 */
 static int memory_boot_add_high(u32 high_end)
 {
     return physmem_exclude(&boot_memory, MEM_SYSTEM_SPACE_BASE / PAGE_SIZE,
                            MEM_HIGH_RAM_BASE / PAGE_SIZE, PHYSMEM_RESERVED) &&
-           physmem_exclude(&boot_memory, MEM_PHYS_MMIO_TOP / PAGE_SIZE,
+           physmem_exclude(&boot_memory, MEM_PHYS_RAM_CEILING / PAGE_SIZE,
                            PHYSMEM_MAX_PFN, PHYSMEM_MMIO) &&
            physmem_add_trusted(&boot_memory, MEM_HIGH_RAM_BASE / PAGE_SIZE,
                                high_end, PHYSMEM_SOURCE_MACHINE);
