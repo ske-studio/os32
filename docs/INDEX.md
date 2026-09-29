@@ -285,6 +285,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 |-------------|------|
 | [tasks/fep/00_INDEX.md](tasks/fep/00_INDEX.md) | FEP (日本語入力) 拡張 — 詳細設計 P1〜P7 の索引 (実装状況付き) |
 | [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) / [FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP のアーキテクチャ説明 (2026-04-27 の快照) / 今後の拡張 |
+| [tasks/fep/TASK_DICT_META.md](tasks/fep/TASK_DICT_META.md) | FEP 辞書のメタ情報 (形式の版・dict_id・license/attribution・`mem_reserve_kb` 等) と学習データの別ファイル化 — **計画** (ユーザー決定 2026-09-30、着手は **v3 の後の方**。v3 P10) |
 | [tasks/v86v2/README.md](tasks/v86v2/README.md) | **V86 サブシステム (再挑戦)** — 16bit ゲスト実行。進捗の正典は `04_implementation_status.md` |
 | [tasks/wintree_port/PORT_PLAN.md](tasks/wintree_port/PORT_PLAN.md) | feat/vdm 系作業ツリーの移植計画と実施結果 |
 | [tasks/sqlite/00_INDEX.md](tasks/sqlite/00_INDEX.md) | SQLite カーネル統合 — 設計・実装 (全 7 部) |
