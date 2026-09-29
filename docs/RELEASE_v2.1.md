@@ -24,6 +24,7 @@ HDD インストール・HDD 起動まで**通した版。
 gshell (WM)、libos32gui.shlib、PEGC / Cirrus のバックエンド、ファイラー、エディタの GUI 版、FEP、設定レジストリ (settings.db)。
 v2.1 で足したもの: **キーボードだけで GUI を操作する** (Windows 98 と同じ割り当て — CTRL+ESC、GRPH+TAB、GRPH+f･4、GRPH+SPACE の窓メニュー、
 SHIFT+f･10、カナ ON のマウスキー。PC-98 の GRPH = Alt)。GUI 1.4 の残りのうち **About** (`ver` と同じ内容を表示、Start → Programs の `about.bin`) と **R2 計測** (PEGC 640x480・NP21/W の Cirrus 640x480 で gui_gate v11/v12g1/v12g4 が通る) は 2026-09-29 に入った。
+ドラッグ枠の線が他の窓に残る件・前面を替えたとき旧前面のタイトルがアクティブ色のまま残る件も直した (gshell が損傷を申告していなかった。重なり順はアプリ → 枠 → モーダル → タスクバー → メニュー → FEP → カーソルに統一、Codex 5 回で Approve)。
 
 ## 3. カーネル層で直した不具合 (主なもの)
 
@@ -49,7 +50,6 @@ SHIFT+f･10、カナ ON のマウスキー。PC-98 の GRPH = Alt)。GUI 1.4 �
 
 ## 6. 分かっている制限 (v3 以降)
 
-- gshell で窓をドラッグすると、途中の枠の線が他の窓の上に残る (前に出すと消える)。前面を替えたとき、重なっていない旧前面のタイトルがアクティブ色のまま残る。修正は v2.1 の後 (ブランチ wt/xor-frame、Codex レビュー中)。
 - 実機 Ra266 の内蔵アクセラレータ (PCI の Trident 1023:9660) のドライバは設計票だけ ([TASK_TRIDENT_DRIVER](tasks/realhw/TASK_TRIDENT_DRIVER.md)、Codex Approve)。
 
 - (v2.1 のタグまでに直す) 実機の PEGC 640x480 で桁がずれる (GUI を `gfxmode pc98` で使えば正しい)。`v86 -g` の NP21/W での記録では、BIOS が 480 ラインで
