@@ -50,6 +50,7 @@ OS 全体のビルド・ゲスト実行・実機測定は今回行っていな�
 | M29 | **v3必須実装課題**: PE32/i386ローダをP5bで実装し、P6前の必須ゲートにする | P5aのVM／VFS／資源回収／配置契約が固まった後、GUI発展前 | Q22を決定。PE32 section配置、base relocation、import/export、module基本機構、entry point、zero-fill、section protectionを実装。外部Win32 DLLを使わない自己完結テストで再配置・import・複数section・zero-fill・保護属性・正常終了を受入。Win32 API互換、SEH完全互換、delay import、SxS等は閉じる条件にしない |
 | M30 | **後段受入計画**: VDM/V86互換試験にアリスソフトDOSタイトル群を基準として使う | PE32/Win95-98互換基盤の初期受入後 | Q23を決定。タイトルごとにDOSメモリ、ファイルI/O、キーボード、日本語表示、FM/PCM、マウス、タイマ、必要時DOS extender/プロテクトモード経路のチェックリストを作る。起動のみを合格にせず、同一メーカーのDOS→Win95世代比較も記録する |
 | M31 | **早期ネイティブ実装課題**: ATAPI CD-DAデジタル再生と軽量software mixerを実装する | PCM backendの基本能力が使える段階、Win98音声互換層より前 | Q24を決定。READ CD等でCD-DA PCMを取得し、44.1kHz/16bit/stereo基準、32bit accumulator、Q1.15 gain/pan、hard saturation、ring buffer、underrun/overrun計数で再生。digitalを既定、analog PLAY AUDIOを設定fallbackとして受入。DX4/Pentium級でCD-DA単独とCD-DA+SFXのCPU負荷を実測する |
+| M32 | **後半実装・境界設計課題**: FM/PCM device層を整理しMUCOM-compatible演奏backendを接続 | V3後半。V3-17の時間基盤、M31のmixer/PCM基盤、FM実機backendの責務が整理された後 | Q25を決定。現行`drivers/fm.c`の低レベルI/Oと簡易MML再生を分離し、FM register/capability/time source APIを定義。YM2203実機、YM2608実機、software FMの少なくとも2系統で同一演奏データを再生し、CPU速度依存busy waitを使わずテンポ・note on/off・register更新時刻を観測する。MUCOM88のコードをMIT本体へ直接混在させる場合は採用せず、別componentまたは仕様参照による独自実装としてライセンス境界を満たすことを閉じる条件にする |
 
 M05 は exec／AppSlot／ring3_entry の読取りから未定義範囲を挙げたもので、
 リポジトリ全域に FPU 実装が存在しないと証明したものではない。
@@ -90,7 +91,7 @@ copy2 の例外とは別経路。修正時は実モジュールを使う回帰�
 
 ## 5. 課題の更新様式
 
-新規項目は M32 以降を使う。既存 ID は再利用しない。
+新規項目は M33 以降を使う。既存 ID は再利用しない。
 解決時は「修正 SHA／試験条件／観測結果／残る制限／閉じた日」を追記する。
 コードが変わっただけ、文書の状態語が変わっただけでは解決としない。
 反例未確認の設計課題を、現行リリースを止める blocker として扱わない。
