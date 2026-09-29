@@ -18,10 +18,22 @@
  *  同じ (09A8h 81h・GDC 2.5MHz) ときに実物の backend_pegc.c が出す OUT 列と
  *  1 行ずつ突き合わせる。一致しない行は下の「意図的に違える」表 (EDIT_*・ADD_*)
  *  に理由付きで列挙したものだけで、それ以外は完全一致を要求する。
+ *  比べる区間: 入る = pegc_enter_480_ports() の全部、戻る = pegc_text_sync_400()
+ *  の全部 (CUI なら末尾の console_hw_cursor_enable の実物の OUT を含む)。
+ *  比べないもの: 起動時の記録 (pegc_boot_sync_record) と診断 (pegc_diag_take) —
+ *  どちらも 09A0h の選択と読み・09A8h の読みだけ。5Fh (io_wait) は比べない。
  * ========================================================================= */
 #include "types.h"
 
 #include "../../gfx/backend_pegc.c"
+/* 戻りの後のカーソル復帰 (console_hw_cursor_enable) も実物の OUT を記録する */
+/* カーネルは -Wall だけで組む (build/config.mk)。この試験の -Wextra -Werror で
+ * console.c 側の既存の警告 2 種を止める (console.c そのものは写さず変えない)。 */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#include "../../kernel/console.c"
+#pragma GCC diagnostic pop
 
 /* ---- 出力と終了 (libc なし、ILP32 の int 0x80) ---- */
 static void output(const char *s)
@@ -53,7 +65,6 @@ static void fail(const char *message, int line)
 #define EV_IN     0
 #define EV_OUT    1
 #define EV_DELAY  2     /* cpu_delay_us (val = us、port = 0) */
-#define EV_CURSOR 3     /* console_hw_cursor_enable */
 #define EV_MAX 1200000  /* 詰まったまま (fifo_stuck) は 1 バイト 5000 回読んで待つ */
 static u16 ev_port[EV_MAX];
 static u8  ev_val[EV_MAX];
@@ -71,6 +82,7 @@ static int fake_full_after_sync; /* テキスト GDC に SYNC を書いたら FU
 static int fake_vsync_mode;    /* 0 = 2 回ごとに反転、1 = ずっと 0、2 = ずっと 1 */
 static u32 text_stat_reads;
 static int fake_con_sink;      /* con_sink_is_enabled の返り値 */
+static int fake_v86_active;    /* v86_is_active の返り値 */
 static unsigned int fake_busy_port; /* 0 = 両 GDC、それ以外 = そのステータスだけ詰まる */
 
 static void ev_add(int kind, unsigned int port, unsigned int val)
@@ -148,8 +160,22 @@ void cpu_delay_us(u32 us)
     ev_add(EV_DELAY, 0, us);
 }
 
-void console_hw_cursor_enable(void) { ev_add(EV_CURSOR, 0, 0); }
 int con_sink_is_enabled(void) { return fake_con_sink; }
+/* console.c が参照するもの (カーソル復帰の経路では呼ばれないか無害) */
+void bootlog_push(const char *buf, u32 len) { (void)buf; (void)len; }
+void con_sink_enable(void) { }
+void con_sink_disable(void) { }
+void con_sink_push_print(const char *buf, u32 len, u8 color) { (void)buf; (void)len; (void)color; }
+void con_sink_push_clear(void) { }
+void con_sink_push_cursor(int x, int y) { (void)x; (void)y; }
+void kbd_inject_discard(void) { }
+u32 kstrlen(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
+int kutoa_dec(u32 val, char *buf, int bufsz) { (void)val; if (bufsz > 0) buf[0] = 0; return 0; }
+int serial_putchar(char c) { (void)c; return 0; }
+u16 unicode_to_jis(u32 cp) { (void)cp; return 0; }
+u8 unicode_to_ank(u32 cp) { (void)cp; return 0; }
+utf8_decode_t utf8_decode(const u8 *src) { utf8_decode_t d; (void)src; kmemset(&d, 0, sizeof(d)); return d; }
+int v86_is_active(void) { return fake_v86_active; }
 
 /* ---- 残りの依存 (この試験の経路では呼ばれない、または無害) ---- */
 GfxCounters gfx_counters;
@@ -238,10 +264,20 @@ typedef struct { int kind; int idx; u8 val; const char *why; } Edit;
 
 static const Edit EDIT_COMMON[] = {
     { E_DROP,  4, 0, "09A0h 03h: ROM reads DISP ENABLE; OS32 always ends with 68h 0Fh" },
-    { E_DROP,  8, 0, "6Ah 07h .. 06h around A0h DFh / A2h 28h (undocumented pair)" },
-    { E_DROP,  9, 0, "A0h DFh: meaning not in [U]/[B]; next RESET1 flushes the FIFO" },
-    { E_DROP, 10, 0, "A2h 28h: GDC WRITE = drawing command, [HW1]" },
-    { E_DROP, 11, 0, "6Ah 06h closing the undocumented pair" },
+    /* ---- 未解明の差分 (Codex P2、2026-09-29): ROM がこの 4 行で何をしているかは
+     * 資料から決まらない。[U] io_disp.md は A0h/A2h をグラフィック GDC の
+     * パラメータ/コマンドとしか書かず、A2h 28h は WRITE (20h〜3Fh) — [B] 2-6
+     * 表2-26 の「GDC 描画制御コマンド」= [HW1] が禁じる類。6Ah 07h/06h は
+     * [U] 006Ah 0000011nb「(*1) の F/F 変更 許可/禁止」・[B] 表3-2「拡張モード
+     * 変更可/不可」で、A0h/A2h の意味を変えるとはどこにも無い。パラメータ DFh が
+     * コマンドより先に来るのは [B] 2-6「コマンド → パラメータ」の手順の外で、
+     * そのときの GDC の状態 (直前のコマンド) 次第 = OS32 からは再現できない。
+     * よって送らない。**RESET1 で打ち消されるとは言えない** (RESET の前に処理
+     * された設定が残るかは資料に無い)。実機で表示が直らなければ最初に疑う差分。 */
+    { E_DROP,  8, 0, "UNRESOLVED: 6Ah 07h before A0h DFh / A2h 28h" },
+    { E_DROP,  9, 0, "UNRESOLVED: A0h DFh, a parameter before any command (meaning not in [U]/[B])" },
+    { E_DROP, 10, 0, "UNRESOLVED: A2h 28h = GDC WRITE ([B] table 2-26 drawing control, [HW1])" },
+    { E_DROP, 11, 0, "UNRESOLVED: 6Ah 06h after the pair" },
     { E_DROP, 64, 0, "A2h 20h: GDC WRITE, [HW1]" },
     { E_DROP, 65, 0, "A2h 78h: GDC TEXTW (pattern), [HW1]" },
     { E_DROP, 66, 0, "TEXTW parameter" },
@@ -255,6 +291,17 @@ static const Edit EDIT_BACK[] = {
  * OS32 は呼び手を兼ねる: 480 は両方、戻りはテキストだけ START (6Bh)。 */
 static const PV ADD_S480[] = { {0xA2,0x6B}, {0x62,0x6B} };
 static const PV ADD_BACK[] = { {0x62,0x6B} };
+/* CUI へ戻るとき (GUI のシンクが無効で V86 中でない) は、続けて実物の
+ * console_hw_cursor_enable() (kernel/console.c) がカーソルを戻す OUT を出す:
+ * CSRFORM (DC=1 | L/R 0Fh、上端 14、下端 15<<3 | 3) と CSRW (論理カーソルの
+ * 番地)。ROM の CSRFORM がカーソル非表示 (CS=0) なので要る — 意図的な追加。
+ * 試験は論理カーソルを (5, 3) に置く = 番地 3*80+5 = 00F5h。 */
+#define XCUR_X 5
+#define XCUR_Y 3
+static const PV ADD_CURSOR[] = {
+    {0x62,0x4B}, {0x60,0x8F}, {0x60,0x0E}, {0x60,0x7B},
+    {0x62,0x49}, {0x60,0xF5}, {0x60,0x00}
+};
 
 static u16 xp[512];
 static u8  xv[512];
@@ -267,6 +314,13 @@ static void x_out(unsigned int port, unsigned int val)
     xp[xn] = (u16)port;
     xv[xn] = (u8)val;
     xn++;
+}
+
+static void x_cursor(void)
+{
+    int k;
+    for (k = 0; k < (int)(sizeof(ADD_CURSOR) / sizeof(ADD_CURSOR[0])); k++)
+        x_out(ADD_CURSOR[k].port, ADD_CURSOR[k].val);
 }
 
 /* ROM の列に EDIT を当てて期待列を組む。insert_after >= 0 なら ROM の
@@ -337,8 +391,14 @@ static u16 stat_of(u16 p)
  * (fifo_ok = 0) こと。 */
 static void check_fifo_gate(int fifo_ok)
 {
-    int i, gdc_writes = 0;
+    int i, gdc_writes = 0, end = -1;
+    /* 見るのは backend_pegc.c が出す分 (最後の 62h 6Bh まで)。その後の
+     * console_hw_cursor_enable は従来から FIFO を見ずに書く (範囲外)。 */
     for (i = 0; i < ev_n; i++) {
+        if (ev_kind[i] == EV_OUT && ev_port[i] == GDC_TEXT_CMD &&
+            ev_val[i] == PEGC_GDC_CMD_START2) end = i;
+    }
+    for (i = 0; i <= end; i++) {
         u16 p = ev_port[i];
         if (ev_kind[i] != EV_OUT || !(is_gdc_cmd(p) || is_gdc_prm(p))) continue;
         gdc_writes++;
@@ -420,6 +480,9 @@ static void world_reset(void)
     fake_vsync_mode = 0;
     text_stat_reads = 0;
     fake_con_sink = 0;
+    fake_v86_active = 0;
+    cursor_x = XCUR_X;
+    cursor_y = XCUR_Y;
     fake_busy_port = 0;
     pegc_gdc_fifo_timeouts = 0;
     pegc_vsync_timeouts = 0;
@@ -584,7 +647,7 @@ static void case_rom_s480(void)
  *    (pegc_text_sync_400) と v86 -g の FALLBACK の口 (pegc_restore_text_sync) */
 static void case_rom_back(void)
 {
-    int i, curs;
+    int i;
     XMode m;
     s_case = "rom_back";
     world_reset();
@@ -592,20 +655,27 @@ static void case_rom_back(void)
     CHECK(s_boot_hsync == PEGC_HSYNC_31KHZ);
     CHECK(s_boot_clk1 == 0 && s_boot_clk2 == 0);
     pegc_text_sync_400(pegc_restore_hsync());
+    /* CUI: ROM の back + テキスト START + カーソル復帰 (実物の console.c の OUT) */
     x_from_rom(ROM_BACK, EDIT_BACK, 1, ADD_BACK, 1, -1, 0, 0);
+    x_cursor();
     check_outs();
     check_fifo_gate(1);
     check_xattr_wait();
-    /* CUI (シンク無効) ならテキスト START の後でカーソルを戻す */
-    curs = 0;
-    for (i = 0; i < ev_n; i++) if (ev_kind[i] == EV_CURSOR) curs++;
-    CHECK(curs == 1 && ev_kind[ev_n - 1] == EV_CURSOR);
 
+    /* GUI から抜ける途中 (シンク有効): カーソルは console_text_gdc_start に任せる */
     world_reset();
     boot_with(RA266_09A8, RA266_CLK);
-    fake_con_sink = 1;                   /* GUI から抜ける途中 */
+    fake_con_sink = 1;
+    pegc_text_sync_400(pegc_restore_hsync());
+    x_from_rom(ROM_BACK, EDIT_BACK, 1, ADD_BACK, 1, -1, 0, 0);
+    check_outs();
+
+    /* v86 -g の FALLBACK の口 (V86 中 = console が GDC に触らない)。先頭に
+     * 09A0h の選択と読み (拡張モードか) が入る */
+    world_reset();
+    boot_with(RA266_09A8, RA266_CLK);
+    fake_v86_active = 1;
     pegc_restore_text_sync(1);
-    /* 先頭に 09A0h の選択と読み (拡張モードか) が入る */
     x_from_rom(ROM_BACK, EDIT_BACK, 1, ADD_BACK, 1, -1, 0, 0);
     {
         int k = 0;
@@ -618,7 +688,6 @@ static void case_rom_back(void)
         }
         CHECK(k == xn);
     }
-    for (i = 0; i < ev_n; i++) CHECK(ev_kind[i] != EV_CURSOR);
 
     m.pegc = 1; m.set_clock = 1; m.write_hs = 0;
     m.ext = 0x20; m.vram = 0x68; m.xattr = 0x21; m.hs = 0x01;
@@ -627,6 +696,7 @@ static void case_rom_back(void)
     x_reset();
     x_mode(&m);
     x_out(0x62, 0x6B);
+    x_cursor();
     world_reset();
     boot_with(RA266_09A8, RA266_CLK);
     pegc_text_sync_400(pegc_restore_hsync());
@@ -656,6 +726,7 @@ static void case_enter_24k(void)
     x_reset();
     x_mode(&m);
     x_out(0x62, 0x6B);
+    x_cursor();
     check_outs();
 }
 
@@ -676,6 +747,7 @@ static void case_restore_24k_5m(void)
     x_reset();
     x_mode(&m);
     x_out(0x62, 0x6B);
+    x_cursor();
     check_outs();
     check_fifo_gate(1);
 }
@@ -697,6 +769,7 @@ static void case_boot_clock(void)
     x_reset();
     x_mode(&m);
     x_out(0x62, 0x6B);
+    x_cursor();
     check_outs();
 
     world_reset();
@@ -745,6 +818,7 @@ static void case_restore_unrecorded(void)
     x_reset();
     x_mode(&m);
     x_out(0x62, 0x6B);
+    x_cursor();
     check_outs();
     check_fifo_gate(1);
     for (i = 0; i < ev_n; i++) {
@@ -994,6 +1068,18 @@ static void case_defaults(void)
     static const u8 r_crtc[6] = { 0x00, 0x0F, 0x10, 0x00, 0x01, 0x00 };
     int i;
     s_case = "defaults";
+    /* 未解明の差分は ROM の 8〜11 行目の 4 行だけ (票 §3-3 と同じ) */
+    {
+        int k, n = 0;
+        for (k = 0; k < N_EDIT_COMMON; k++) {
+            const char *w = EDIT_COMMON[k].why;
+            if (w[0] == 'U' && w[1] == 'N' && w[2] == 'R') {
+                CHECK(EDIT_COMMON[k].idx >= 8 && EDIT_COMMON[k].idx <= 11);
+                n++;
+            }
+        }
+        CHECK(n == 4);
+    }
     for (i = 0; i < 8; i++) {
         CHECK(x_ms480[i] == R_MS480[i] && x_ss480[i] == R_SS480[i]);
         CHECK(x_ms31k[i] == R_MS31K[i] && x_ss31kl[i] == R_SS31K_L[i]);

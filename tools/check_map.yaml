@@ -2655,25 +2655,32 @@ checks:
     - tools/tests/test_cirrus_win.py
   check-pegc-mode-host:
     - arch/x86/arch_io.h
+    - drivers/serial.h
     - gfx/backend_pegc.c
     - gfx/gfx.h
     - gfx/gfx_internal.h
     - gfx/palette.h
+    - include/bootlog.h
     - include/con_sink.h
+    - include/config.h
     - include/console.h
     - include/gfx_hal.h
     - include/io.h
+    - include/kbd_inject.h
     - include/kprintf.h
     - include/memmap.h
     - include/pc98.h
     - include/pegc.h
     - include/sys.h
+    - include/tvram.h
     - include/types.h
+    - kernel/console.c
     - kernel/cpu_calibrate.h
     - kernel/paging.h
     - kernel/pgalloc.h
     - kernel/physmem.h
     - lib/kstring.h
+    - lib/utf8.h
     - platform/pc98/platform_io.h
     - sdk/include/os32/os32_kapi_generated.h
     - sdk/include/os32/os32_kapi_shared.h

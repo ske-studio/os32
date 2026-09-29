@@ -126,7 +126,7 @@ RED → GREEN: 新しい試験は新しい記号 (`pegc_vsync_timeouts`・`PEGC_
 LEN 0 など) は変異 `hsync_always_written`・`no_gfx_reset`・`no_text_csrform`・`no_gfx_csrform`・`hdr_scroll_480_len0` 等として残し、
 どれも RED。GREEN: `PASS pegc_mode_host (12 cases)`。
 
-### 変異 (74 本、全部 RED、2026-09-29)
+### 変異 (74 本、全部 RED、2026-09-29 — P2 対応で 76 本、下)
 
 FIFO 9 / VSYNC 7 / 順序と ROM の列 26 / 値 11 / 戻りの組 6 / ヘッダの値 15。どの変異がどのケースで落ちるかは
 `python3 -B tools/tests/test_pegc_mode.py --mutate` の出力 (受け入れ A の `rom_s480` / `rom_back` で落ちるのが 35 本)。CONTROL は GREEN。
@@ -136,3 +136,17 @@ FIFO 9 / VSYNC 7 / 順序と ROM の列 26 / 値 11 / 戻りの組 6 / ヘッダ
 - 実機で表示が正しくなるか (受け入れ A は「ROM と同じ列を出す」まで)。実機では `pegcchk` (票 §5 (C)) の行で、09A8h の bit7 が残るか・
   クロックが戻るか・FIFO / VSYNC の打ち切りが 0 かを見る。
 - ROM の VSYNC 待ちの正確な条件 (ROM を逆アセンブルしていない)。
+
+## 2026-09-29 — Codex レビュー P2 ×2 への対応
+
+- **P2-1 (A0h DFh / A2h 28h の除外理由)**: 「[HW1] の描画」「次の RESET1 が FIFO を捨てる」は記録から裏付けられない、の指摘。資料を当たり直し
+  (票 §3-3「意図的に違える点」)、「モード設定の一部」とは読めない (A2h 28h は [B] 表2-26 の描画制御 WRITE、6Ah 07h/06h が A0h/A2h の
+  意味を変えるとの記述なし、DFh はコマンドより先のパラメータ) ので**送らないまま**、試験の `EDIT_COMMON` の 4 行を `UNRESOLVED:` と明記した
+  (未解明の差分)。`defaults` が「UNRESOLVED は ROM の 8〜11 行目の 4 行だけ」を確かめる。RESET1 で打ち消されるという主張は取り下げた。
+- **P2-2 (カーソル復帰の OUT が比較から漏れていた)**: 試験は `console_hw_cursor_enable()` を OUT の無い印に置き換えていた。
+  **実物の kernel/console.c を #include** し (カーネルは -Wall だけで組むので、試験の -Wextra -Werror で出る console.c 側の 2 警告だけ
+  pragma で止める)、CSRFORM + CSRW の実際の OUT を期待列に `ADD_CURSOR` (意図的な追加) として足した。論理カーソルは (5, 3) に置いて
+  CSRW の番地 00F5h まで見る。GUI から抜ける途中 (シンク有効) と V86 中 (FALLBACK の口) では出ないことも見る。FIFO の門は
+  backend_pegc.c が出す分 (最後の 62h 6Bh まで) だけを見る (console.c は従来から FIFO を見ない — 範囲外)。
+- (A) が比較する区間を試験の頭の注記と票 §3-3「(A) が比較する区間」に書いた。
+- 変異 +2 (`cursor_before_start`・`console_cursor_no_dc`、どちらも `rom_back` で RED) で 76 本。
