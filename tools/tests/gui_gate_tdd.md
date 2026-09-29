@@ -77,6 +77,43 @@ rshell を閉じるか、`/api/status` の `scrn_ymax` / `grph_disp` がこの�
 | 16 | GUI から抜けるのに `--h` の座標を使う | begin |
 | 17 | GUI に入っていなくても `leave_gshell` を通す | begin |
 
+## 4c. Cirrus (WAB 中継) の GUI を認識しない (2026-09-29 夕 追加)
+
+- 経緯: NP21/W Cirrus (`np21x64w-cirrus.ini`、feat/gui `44bd0fe1`) で道具そのままの `v11` が NG。
+  gshell 中も 98 の表示レジスタは `scrn_ymax 400 grph_disp 0` のままで、画面は `/api/status` の
+  `wab_relay 1`・`wab_height 480` が表す。`gui_entered` が NG と読み、`back_to_cui` が `grph_disp == 0` の
+  枝で `rshell` を gshell に打ち込んだ (試験担当が踏んだ。wt/r2-cirrus2 の TASK_S5 §6)。
+- 直し: `status()` が `wab_relay` / `wab_width` / `wab_height` を読む。`gui_entered(st, h)` =
+  (`scrn_ymax == h` かつ `grph_disp == 1`) または (`wab_relay == 1` かつ `wab_height == h`)。
+  `back_to_cui` は新しい `gui_height(st)` (WAB 中継中は `wab_height`、でなければ `grph_disp == 1` の
+  `scrn_ymax`、どちらでもなければ None) で GUI に居るかと実際の高さを決める。`Shots.take` は撮影ごとに
+  名前・`X-Screen-Source`・寸法を `outdir/shots.json` に書き足す。
+- 偽ゲスト: `FakeGuest(cirrus=True)` は GUI 中も `scrn_ymax 400 grph_disp 0`、`wab_relay` = GUI 中だけ 1、
+  `wab_height` = 画面高 (CUI でも残す — CUI の実測値は無いので、`wab_relay` を見ない判定を落とす側に置いた)。
+  GUI 中の撮影は `X-Screen-Source: wab`。
+- 試験: `gui_entered` に Cirrus の 5 件 (入った / 高さ違い 2 向き / 中継なし / 値なし)。`begin_cirrus` =
+  入った (OK) / 入らない (NG・rshell 1 段・マウスを押さない) / 高さ違い 2 向き (NG・CUI に戻る・rshell 1 段・
+  GUI に text を打たない)。`shots` = CUI と GUI の撮影で `shots.json` の src が `fake` / `wab`。
+  `scenarios` は 3 台本を Cirrus でも回す。
+- RED (直す前の実物 = feat/gui `44bd0fe1`): `gui_entered` 1 件、`begin_cirrus` 7 件 (`['rshe', 'll']` を
+  GUI に打つ 3 件を含む)、`shots` 1 件 (shots.json 無し)、`scenarios` 6 件 (Cirrus の 3 台本が NG・GUI に残る)。
+  `SUMMARY 3/7 PASS`。GREEN: `SUMMARY 7/7 PASS`。
+- 変異: 1〜3 と 15・17 は対象の行を新しい形に付け替えた (15 = `gui_height` の `grph_disp` 枝を消す、
+  17 = `real_h is not None` を常に真)。追加:
+
+| # | 壊し方 | 当たる試験 |
+|---|---|---|
+| 18 | WAB 中継を見ない (Cirrus の GUI を NG — 踏んだ不具合) | gui_entered, begin_cirrus, shots, scenarios |
+| 19 | `wab_relay` を見ない | gui_entered, begin_cirrus, scenarios |
+| 20 | `wab_height` を見ない | gui_entered, begin_cirrus |
+| 21 | `status()` が `wab_height` を読まない | begin_cirrus, shots, scenarios |
+| 22 | `gui_height` が WAB 中継を見ない (CUI と読んで `rshell` を gshell に打つ) | begin_cirrus |
+| 23 | Cirrus で抜けるのに `scrn_ymax` (400) の座標を使う | begin_cirrus |
+| 24 | 撮影の `X-Screen-Source` を記録しない | shots |
+
+  24 本すべて RED。24 は最初 GREEN (見逃し) だった — `case_shots` が本番の回の `shots.json` を読んでいた
+  ので、撮影先を毎回新しい一時ディレクトリにした。
+
 ## 5. 未検証 (NP21/W で見ること)
 
 - 実ゲストで ESC 1 回目に `[Remote shell closed]` が 5 秒以内に tvram に出ること。
@@ -85,3 +122,6 @@ rshell を閉じるか、`/api/status` の `scrn_ymax` / `grph_disp` がこの�
 - 9801 (`--h 400`) と PEGC (`--h 480`) の両方で、GUI 中の `grph_disp == 1` と `scrn_ymax == --h`。
 - 高さ違いで GUI に入ったとき、実際の高さの座標で Start → CUI mode → Yes が当たり CUI へ戻ること
   (Cirrus で `scrn_ymax` が実際の画面高を表すかを含む)。
+- Cirrus で直した道具そのまま (包み無し) の `v11` / `v12g1` / `v12g4 --h 480` が RESULT OK になること、
+  `shots.json` の src が GUI 中 `wab` になること。CUI での `wab_height` の値 (偽ゲストは画面高のまま置いた)。
+- Cirrus の高さ違い (`--h 400`) で `wab_height` の座標の `leave_gshell` が CUI mode → Yes に当たること。

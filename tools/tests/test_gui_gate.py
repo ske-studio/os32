@@ -9,7 +9,9 @@ RESULT: OK になっていた。ここで固定するのは 3 つ:
 
   1. rshell を閉じたことを tvram の `[Remote shell closed]` で確かめる判定
      (`rshell_closed_fresh`) — 前の回の印が残っているだけでは数えない。
-  2. GUI に居ることの判定 (`gui_entered`) — `scrn_ymax == --h` かつ `grph_disp == 1`。
+  2. GUI に居ることの判定 (`gui_entered`) — `scrn_ymax == --h` かつ `grph_disp == 1`、
+     または Cirrus の WAB 中継 (`wab_relay == 1` かつ `wab_height == --h`)。Cirrus の
+     gshell 中も 98 の表示レジスタは `scrn_ymax 400 grph_disp 0` のまま (2026-09-29 夕)。
   3. 台本の入口 (`begin_gui`) と台本全体 — 偽のゲスト (rshell の段数・GUI の有無・
      tvram・/api/status を持つ) の上で、GUI に入れなければ NG、入れれば OK。
      NG の後は CUI + rshell へ戻す — 高さ違いで GUI に入っていれば GUI から抜けてから。
@@ -68,8 +70,10 @@ class FakeGuest:
     - GUI では Start → CUI mode → Yes で CUI へ戻り、rshell が 1 段で自動起動する。
     """
 
-    def __init__(self, h=480, depth=1, gui_ok=True, esc_works=True, lines=None):
+    def __init__(self, h=480, depth=1, gui_ok=True, esc_works=True, lines=None,
+                 cirrus=False):
         self.h = h
+        self.cirrus = cirrus   # GUI は WAB 中継 (98 の GDC は CUI のまま)
         self.depth = depth
         self.gui = False
         self.gui_ok = gui_ok
@@ -96,6 +100,14 @@ class FakeGuest:
         return {"ok": True, "width": 80, "height": 25, "lines": body}
 
     def status(self):
+        if self.cirrus:
+            # 実測 (TASK_S5 §6、2026-09-29 夕): gshell 中も scrn_ymax 400 / grph_disp 0、
+            # 画面は wab_relay 1 / wab_height 480。CUI での wab_height は未実測なので
+            # 画面高のまま残す (wab_relay を見ない判定を落とすため)。
+            return {"scrn_ymax": 400, "grph_disp": 0,
+                    "wab_relay": 1 if self.gui else 0,
+                    "wab_width": 640, "wab_height": self.h,
+                    "fault_generation": 0}
         return {"scrn_ymax": self.h if self.gui else 400,
                 "grph_disp": 1 if self.gui else 0,
                 "wab_relay": 0, "fault_generation": 0}
@@ -190,7 +202,8 @@ def wire(mod, guest, tmp):
         if path == "/api/status":
             return json.dumps(guest.status()).encode(), {}
         if path.startswith("/api/screenshot"):
-            return b"", {"X-Screen-Source": "fake"}
+            src = "wab" if guest.cirrus and guest.gui else "fake"
+            return b"", {"X-Screen-Source": src}
         raise AssertionError("unexpected GET " + path)
 
     def sleep(s):
@@ -254,6 +267,13 @@ def case_gui_entered(mod, tmp):
     check(not g({"scrn_ymax": 480, "grph_disp": 0}, 480), "entered: グラフィック非表示を GUI と読む")
     check(not g({"scrn_ymax": 400, "grph_disp": 0}, 400), "entered: 9801 の CUI を GUI と読む")
     check(not g({"scrn_ymax": None, "grph_disp": None}, 480), "entered: 値が無いのを GUI と読む")
+    # Cirrus: 98 の GDC は CUI のまま、画面は WAB 中継。
+    cir = {"scrn_ymax": 400, "grph_disp": 0, "wab_relay": 1, "wab_height": 480}
+    check(g(cir, 480), "entered: Cirrus (wab_relay 1 / wab_height 480) の GUI を落とす")
+    check(not g(dict(cir, wab_height=400), 480), "entered: Cirrus の高さ違いを GUI と読む")
+    check(not g(dict(cir, wab_height=480), 400), "entered: Cirrus 480 を --h 400 の GUI と読む")
+    check(not g(dict(cir, wab_relay=0), 480), "entered: WAB 中継なし (CUI) を GUI と読む")
+    check(not g(dict(cir, wab_height=None), 480), "entered: wab_height が無いのを GUI と読む")
 
 
 def case_close(mod, tmp):
@@ -308,22 +328,75 @@ def case_begin(mod, tmp):
           "begin: 高さ違い (480/--h 400) で CUI + rshell に戻らない")
 
 
+def case_begin_cirrus(mod, tmp):
+    # 入った: scrn_ymax 400 / grph_disp 0 のままでも wab_relay 1 / wab_height 480 で OK。
+    guest = FakeGuest(h=480, depth=1, cirrus=True)
+    wire(mod, guest, tmp)
+    check(mod.begin_gui(480) is True, "cirrus begin: 入れるのに NG")
+    check(guest.gui, "cirrus begin: GUI に入っていない")
+    check(not guest.gui_text, "cirrus begin: GUI に text を打ち込む (%r)" % guest.gui_text)
+    # 入らない: NG、rshell を戻す、マウスは押さない。
+    guest = FakeGuest(h=480, depth=1, gui_ok=False, cirrus=True)
+    wire(mod, guest, tmp)
+    check(mod.begin_gui(480) is False, "cirrus begin: GUI に入らないのに OK")
+    check(guest.depth == 1, "cirrus begin: 失敗の後に rshell を戻さない")
+    check(guest.clicks == 0, "cirrus begin: GUI に入っていないのにマウスを押す")
+    # 高さ違い (WAB 480 で入ったのに --h 400): 98 の GDC は 400/0 で CUI と同じに見える。
+    # CUI の前提で `rshell` を打つと gshell に入る (2026-09-29 夕に試験担当が踏んだ)。
+    # wab_height (480) の座標で leave_gshell を通して戻す — scrn_ymax (400) では外れる。
+    guest = FakeGuest(h=480, depth=1, cirrus=True)
+    wire(mod, guest, tmp)
+    check(mod.begin_gui(400) is False, "cirrus begin: 高さ違い (480/--h 400) を OK にする")
+    check(not guest.gui, "cirrus begin: 高さ違い (480/--h 400) で GUI に残す")
+    check(guest.depth == 1, "cirrus begin: 高さ違い (480/--h 400) の後に rshell を戻さない")
+    check(not guest.gui_text, "cirrus begin: GUI に text を打ち込む (%r)" % guest.gui_text)
+    # 逆向き (WAB 400 で入ったのに --h 480)。
+    guest = FakeGuest(h=400, depth=1, cirrus=True)
+    wire(mod, guest, tmp)
+    check(mod.begin_gui(480) is False, "cirrus begin: 高さ違い (400/--h 480) を OK にする")
+    check(not guest.gui and guest.depth == 1,
+          "cirrus begin: 高さ違い (400/--h 480) で CUI + rshell に戻らない")
+    check(not guest.gui_text, "cirrus begin: GUI に text を打ち込む (%r)" % guest.gui_text)
+
+
+def case_shots(mod, tmp):
+    # 撮影ごとに X-Screen-Source を shots.json に残す (Cirrus では wab のはず)。
+    # 前の実行 (変異の前の本番の回) の shots.json を読まないよう、毎回新しい場所に撮る。
+    out = pathlib.Path(tempfile.mkdtemp(prefix="shots_", dir=str(tmp)))
+    guest = FakeGuest(h=480, depth=1, cirrus=True)
+    wire(mod, guest, tmp)
+    shots = mod.Shots(str(out))
+    shots.take("cui")
+    mod.begin_gui(480)
+    shots.take("gui")
+    try:
+        log = json.loads((out / "shots.json").read_text(encoding="utf-8"))
+    except Exception as e:
+        check(False, "shots: shots.json が読めない (%s)" % e)
+        return
+    got = [(e.get("name"), e.get("src")) for e in log]
+    check(got == [("cui", "fake"), ("gui", "wab")],
+          "shots: X-Screen-Source の記録が違う (%r)" % (got,))
+
+
 def case_scenarios(mod, tmp):
     for name, run in (("v11", lambda sh: mod.scenario_v11(480, sh)),
                       ("v12g1", lambda sh: mod.scenario_v12_g1(480, sh)),
                       ("v12g4", lambda sh: mod.scenario_v12_g4(480, sh))):
+      for cirrus in (False, True):
+        tag = name + (" (cirrus)" if cirrus else "")
         # rshell 有効のまま始めても (リセット直後・leave の後の常態) GUI に入って OK。
-        guest = FakeGuest(depth=1)
+        guest = FakeGuest(depth=1, cirrus=cirrus)
         shots = wire(mod, guest, tmp)
-        check(run(shots) is True, "%s: 入れるのに NG" % name)
-        check(guest.gui_entries == 1, "%s: GUI に入っていない (%d)" % (name, guest.gui_entries))
-        check(not guest.gui and guest.depth == 1, "%s: CUI + rshell に戻っていない" % name)
+        check(run(shots) is True, "%s: 入れるのに NG" % tag)
+        check(guest.gui_entries == 1, "%s: GUI に入っていない (%d)" % (tag, guest.gui_entries))
+        check(not guest.gui and guest.depth == 1, "%s: CUI + rshell に戻っていない" % tag)
         # GUI に入れない (元の不具合: CUI のまま RESULT: OK) → NG、Run... のパスを打たない。
-        guest = FakeGuest(depth=1, gui_ok=False)
+        guest = FakeGuest(depth=1, gui_ok=False, cirrus=cirrus)
         shots = wire(mod, guest, tmp)
-        check(run(shots) is False, "%s: GUI に入らないのに OK" % name)
+        check(run(shots) is False, "%s: GUI に入らないのに OK" % tag)
         check(not any("/usr" in k.get("text", "") for k in guest.keys),
-              "%s: CUI にパスを打ち込む" % name)
+              "%s: CUI にパスを打ち込む" % tag)
     # --halt の 2 回目の入口も rshell を閉じてから入る。
     guest = FakeGuest(depth=1)
     shots = wire(mod, guest, tmp)
@@ -336,17 +409,19 @@ CASES = {
     "gui_entered": case_gui_entered,
     "close": case_close,
     "begin": case_begin,
+    "begin_cirrus": case_begin_cirrus,
+    "shots": case_shots,
     "scenarios": case_scenarios,
 }
 
 # 否定側。実装を 1 か所だけ壊して RED になることを見る。
 MUTATIONS = [
-    (r"    return st\.get\(\"scrn_ymax\"\) == h and st\.get\(\"grph_disp\"\) == 1",
+    (r"    if st\.get\(\"scrn_ymax\"\) == h and st\.get\(\"grph_disp\"\) == 1:\n        return True",
      "    return True",
      "GUI に居るかを見ない (CUI のまま RESULT: OK — 元の不具合)"),
     (r" and st\.get\(\"grph_disp\"\) == 1", "",
      "grph_disp を見ない (9801 の CUI は scrn_ymax 400 で GUI と同じ)"),
-    (r"    return st\.get\(\"scrn_ymax\"\) == h and ", "    return ",
+    (r"    if st\.get\(\"scrn_ymax\"\) == h and ", "    if ",
      "scrn_ymax を見ない (400 ラインで入ったのを 480 の合格にする)"),
     (r"    if not close_rshell\(\):\n        return False\n    enter_gshell\(\)",
      "    enter_gshell()",
@@ -381,14 +456,28 @@ MUTATIONS = [
     (r"        if not begin_gui\(h\):\n            return False\n        m\.click\(30, tb\(h\)\)",
      "        enter_gshell()\n        m.click(30, tb(h))",
      "--halt の 2 回目で rshell を閉じない"),
-    (r"    if st\.get\(\"grph_disp\"\) == 1:\n        real_h",
-     "    if False:\n        real_h",
+    (r"    if st\.get\(\"grph_disp\"\) == 1:\n        return st\.get\(\"scrn_ymax\"\) or 0\n", "",
      "高さ違いで GUI に入っても CUI の前提で rshell を打つ (Cirrus 試験で GUI に残った)"),
     (r"leave_gshell\(Mouse\(real_h\)\)", "leave_gshell(Mouse(h))",
      "GUI から抜けるのに --h の座標を使う (実際の高さでないと Start に当たらない)"),
-    (r"    if st\.get\(\"grph_disp\"\) == 1:\n        real_h",
-     "    if True:\n        real_h",
+    (r"    if real_h is not None:", "    if True:",
      "GUI に入っていなくても leave_gshell を通す (従来どおりでない)"),
+    # --- Cirrus (WAB 中継、2026-09-29 夕) ---
+    (r"    return st\.get\(\"wab_relay\"\) == 1 and st\.get\(\"wab_height\"\) == h",
+     "    return False",
+     "WAB 中継を見ない (Cirrus の GUI を NG にする — 試験担当が踏んだ不具合)"),
+    (r"    return st\.get\(\"wab_relay\"\) == 1 and ", "    return ",
+     "wab_relay を見ない (CUI でも wab_height が残っていれば GUI と読む)"),
+    (r" and st\.get\(\"wab_height\"\) == h", "",
+     "wab_height を見ない (Cirrus の高さ違いを合格にする)"),
+    (r"\"wab_width\", \"wab_height\",", "\"wab_width\",",
+     "status() が wab_height を読まない"),
+    (r"    if st\.get\(\"wab_relay\"\) == 1:\n        return st\.get\(\"wab_height\"\) or 0\n", "",
+     "back_to_cui が WAB 中継を見ない (grph_disp 0 で CUI と読み gshell に rshell を打つ)"),
+    (r"return st\.get\(\"wab_height\"\) or 0", "return st.get(\"scrn_ymax\") or 0",
+     "Cirrus で抜けるのに scrn_ymax (400) の座標を使う"),
+    (r"        self\._record\(name, src, size\)\n", "",
+     "撮影の X-Screen-Source を記録しない"),
 ]
 
 

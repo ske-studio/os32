@@ -520,11 +520,17 @@ rshell が立つ前の kprintf はシリアルにも出ない。カーネルは�
   rshell 有効のまま回すと GUI に入らないまま **RESULT: OK** になっていた (R2 の予備調査、
   `docs/archive/settings/TASK_S5.md` §6)。`gui_gate.py` の台本は `begin_gui()` から入る:
   ESC → tvram の末尾に `[Remote shell closed]` が新しく出たのを確認 (出る限り ESC を最大 2 回足して
-  重なりも閉じる) → `os32gui` → `/api/status` が `scrn_ymax == --h` かつ `grph_disp == 1` でなければ
-  NG (rshell を戻して終わる)。ホスト試験は `make check-gui-gate-host`。
-  NG でも `grph_disp == 1` (高さだけ違う) なら GUI に入っているので、CUI の前提で `rshell` を打つと
-  gshell に入ってゲストが GUI に残る (2026-09-29 Cirrus 試験)。`back_to_cui` が実際の高さ
-  (`scrn_ymax`) の座標で `leave_gshell` を通してから戻す。
+  重なりも閉じる) → `os32gui` → `/api/status` が「`scrn_ymax == --h` かつ `grph_disp == 1`」(98 の GDC /
+  PEGC) でも「`wab_relay == 1` かつ `wab_height == --h`」(Cirrus) でもなければ NG (rshell を戻して終わる)。
+  ホスト試験は `make check-gui-gate-host`。
+- **Cirrus の GUI は 98 の表示レジスタに出ない (2026-09-29 夕)。** NP21/W の Cirrus (WAB 中継) では gshell 中も
+  `scrn_ymax 400`・`grph_disp 0` のままで、画面は `/api/status` の `wab_relay 1`・`wab_height 480` が表す。
+  `grph_disp` だけで「GUI に居るか」を決めると、Cirrus の GUI を CUI と読んで入口が NG になり、後始末が
+  CUI の前提で打つ `rshell` が **gshell に入る** (試験担当が踏んだ。ゲストは GUI に残る)。高さ違いの NG も同じ
+  (`grph_disp == 1` のまま高さだけ違う 98 / PEGC でも起きる)。`back_to_cui` は `gui_entered` と同じ規則の
+  `gui_height` で GUI に居るかと実際の高さを決め (WAB 中継中は `wab_height`、でなければ `grph_disp == 1` の
+  `scrn_ymax`)、その座標で `leave_gshell` を通してから戻す。撮影は `X-Screen-Source` を `--out` の
+  `shots.json` に残す (Cirrus では `wab` のはず)。
 
 ### 4-32. `ext2_read_file` は端数ブロックでも 1KB 書いていた — 小さな static バッファへ読むと隣を潰す (2026-09-11、修正済み)
 
