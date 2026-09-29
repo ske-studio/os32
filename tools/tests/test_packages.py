@@ -86,7 +86,7 @@ MOVED_TO_NORMAL_CMDS = ['more', 'find', 'sort', 'head', 'tail', 'wc', 'tee', 'to
                         'sleep', 'diff', 'du', 'cal', 'man', 'sndctl']
 FONT_GUEST = '/sys/font/default.kcgfont'
 GUI_FILES = ['/bin/gshell.bin', '/sys/lib/libos32gui.shlib',
-             '/usr/bin/filer.bin', '/usr/bin/edit_gui.bin']
+             '/usr/bin/filer.bin', '/usr/bin/edit_gui.bin', '/usr/bin/about.bin']
 
 
 def check(cond, label):

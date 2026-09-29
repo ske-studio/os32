@@ -829,6 +829,7 @@ checks:
     - tools/pc98pt.py
     - tools/tests/os32api_host.py
     - tools/tests/stat_cmd_host.c
+    - tools/tests/test_about_info.py
     - tools/tests/test_emu_playbook.py
     - tools/tests/test_filer_copy_abort.py
     - tools/tests/test_filer_normalize.py
@@ -846,12 +847,16 @@ checks:
     - userland/cmds/stat.c
     - userland/cmds/tar.c
     - userland/deploy.yaml
+    - userland/rust/about/src/info.rs
+    - userland/rust/about/src/lib.rs
+    - userland/gshell/src/wm.rs
     - userland/rust/filer/host/model_tests.rs
     - userland/rust/filer/src/model.rs
     - userland/rust/libos32gui/src/app.rs
     - sdk/include/os32/os32_kapi_generated.h
     - drivers/kbd.h
     - drivers/kbd_status.h
+    - include/config.h
     - include/console.h
     - include/kbd.h
     - include/memmap.h

@@ -12,6 +12,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "about"
+version = "0.1.0"
+dependencies = [
+ "libos32gui_stub",
+ "os32api",
+]
+
+[[package]]
 name = "alloc_demo"
 version = "0.1.0"
 dependencies = [

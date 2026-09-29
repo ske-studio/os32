@@ -26,6 +26,8 @@ members = [
     "filer",
     # 票 TASK_EDIT_GUI: v1.4 の最後の受入試験 (/usr/bin/edit_gui.bin)。
     "edit_gui",
+    # ROADMAP v1.4 About dialog: Start → About OS32 (/usr/bin/about.bin)。
+    "about",
 ]
 resolver = "2"
 
