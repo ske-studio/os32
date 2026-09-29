@@ -273,13 +273,35 @@ static int case_decide(void)
     CHECK(v86g_decide(0x00, 0x0E, &al, &bh) == V86G_LAYOUT_NONE);   /* bit3 480 で 24kHz */
     CHECK(v86g_decide(0x0C, 0x33, &al, &bh) == V86G_LAYOUT_NONE);   /* bit2 行数 3 */
     CHECK(v86g_decide(0x00, 0x18, &al, &bh) == V86G_LAYOUT_NONE);   /* bit3 行数 3 */
-    CHECK(v86g_decide(0x09, 0x21, &al, &bh) == V86G_LAYOUT_NONE);
     CHECK(v86g_decide(0x04, 0x21, &al, &bh) == V86G_LAYOUT_NONE);
-    CHECK(v86g_decide(0x01, 0x0C, &al, &bh) == V86G_LAYOUT_NONE);
+    CHECK(v86g_decide(0x0A, 0x21, &al, &bh) == V86G_LAYOUT_NONE);   /* bit1 は予約 */
+    CHECK(v86g_decide(0x02, 0x0C, &al, &bh) == V86G_LAYOUT_NONE);
+    CHECK(v86g_decide(0x05, 0x0C, &al, &bh) == V86G_LAYOUT_NONE);   /* bit3 並びで bit2 */
     CHECK(v86g_decide(0x08, 0x61, &al, &bh) == V86G_LAYOUT_NONE);
     CHECK(v86g_decide(0x00, 0x0D, &al, &bh) == V86G_LAYOUT_NONE);
+    /* AL bit0 = ラスタスキャン ([US] memsys.md 0459h bit3「Function 30h,31h の
+     * モード設定情報 bit 0」)。**実機 Ra266 の AH=31h は AX=310Dh BX=0100h**
+     * (2026-09-29、44bd0fe の v86 -g)。bit2 並び + bit0 で、30h へは bit0 を
+     * 保って渡す (ROM の値を勝手に落とさない)。 */
+    CHECK(v86g_decide(0x0D, 0x01, &al, &bh) == V86G_LAYOUT_BIT2);
+    CHECK(al == 0x0D && bh == 0x32);
+    CHECK(v86g_decide(0x09, 0x21, &al, &bh) == V86G_LAYOUT_BIT2);
+    CHECK(al == 0x0D && bh == 0x32);
+    CHECK(v86g_decide(0x0C, 0x01, &al, &bh) == V86G_LAYOUT_BIT2);   /* bit0 無しは 0 のまま */
+    CHECK(al == 0x0C && bh == 0x32);
+    CHECK(v86g_mode_is_31k(V86G_LAYOUT_BIT2, 0x0D) == 1);
+    CHECK(v86g_mode_is_31k(V86G_LAYOUT_BIT2, 0x09) == 0);
+    /* bit3 並びでも同じ bit0 (資料は並びを区別しない) */
+    CHECK(v86g_decide(0x01, 0x0C, &al, &bh) == V86G_LAYOUT_BIT3);
+    CHECK(al == 0x09 && bh == 0x16);
+    CHECK(v86g_decide(0x09, 0x0C, &al, &bh) == V86G_LAYOUT_BIT3);
+    CHECK(al == 0x09 && bh == 0x16);
+    /* 両方の並びで正しい値は bit0 が立っていても決めない */
+    CHECK(v86g_decide(0x09, 0x00, &al, &bh) == V86G_LAYOUT_NONE);
     /* 上位ビットは見ない (AX / BX から切り出して渡す呼び手の保険) */
     CHECK(v86g_decide(0x3108, 0x2100 >> 8, &al, &bh) == V86G_LAYOUT_BIT2);
+    CHECK(v86g_decide(0x310D, 0x0100 >> 8, &al, &bh) == V86G_LAYOUT_BIT2);
+    CHECK(al == 0x0D && bh == 0x32);
     return 0;
 }
 

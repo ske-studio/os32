@@ -64,6 +64,13 @@
 #define PEGC_STAT_SEL_GFXMODE  0x0A  /* 読むと bit0: 1=拡張(256色) / 0=標準 */
 #define PEGC_STAT_SEL_PAGECONT  0x0D /* 読むと bit0: 1=表裏ページ連続 */
 #define PEGC_STAT_BIT          0x01  /* 返り値のうち意味があるのは bit0 だけ */
+/* GDC クロックの読み戻し ([U] io_disp.md I/O 09A0h、同 I/O 006Ah 82h〜85h)。
+ *   09h を書いて読むと bit0 = GDC CLOCK-1 (0 = 82h 状態 2.5MHz / 1 = 83h 状態 5MHz)。
+ *   読み値の bit1 は選択に関係なく GDC CLOCK-2 (0 = 84h 2.5MHz / 1 = 85h 5MHz)。
+ * [B] 表3-3 には 09h の行が無い (UNDOCUMENTED を採る)。起動時の値を記録して、
+ * 480 ラインから戻るときにそのクロックへ戻す (backend_pegc.c pegc_boot_sync_record)。 */
+#define PEGC_STAT_SEL_GDCCLK1  0x09  /* 読むと bit0: GDC CLOCK-1 = 5MHz */
+#define PEGC_STAT_RD_GDCCLK2   0x02  /* 読み値 bit1: GDC CLOCK-2 = 5MHz */
 
 /* ------------------------------------------------------------------------ */
 /*  3. 水平走査周波数 (I/O 09A8h)                                            */
@@ -82,6 +89,13 @@
 #define PEGC_HSYNC_24KHZ       0x00  /* 24.83kHz (640x400 の既定) */
 #define PEGC_HSYNC_31KHZ       0x01  /* 31.47kHz (640x480 に必須) */
 #define PEGC_HSYNC_MASK        0x03  /* 有効なのは bit1,0 */
+/* 書くのは bit1,0 だけで、bit7〜2 は 0 ([U] io_disp.md I/O 09A8h「bit 7〜2:
+ * 未使用 (常に 0 にする)」)。**読み値を書き戻さない** — 実機 Ra266 の起動時の
+ * 読みは 81h (bit7=1、2026-09-29 の boot.log)。[U] 同項の解説は「Bp･Bs･Be･Bf･
+ * Xt･Xa･Xn･Xp･Xs･Xe, BA2･BS2･BX2･BA3･BX3･BX4 はプログラマブル PLL シンセサイザ
+ * (ドットクロック) のアクセスにもこのポートを使うが、通常はマスクされている」。
+ * Ra266 はその機種表に無く、bit7 の意味は資料に無い。読んだ bit7 を書き戻すと
+ * マスクされていない機種で PLL を叩きうるので、資料どおり 0 を書く。 */
 /* 読み戻し ([B] §3-2 表3-1「リード 09A8H 水平同期周波数の読み出し」)。
  * 読み出しで定義があるのは **D0 (HF) だけ** で、D7〜D1 は「×」= 不定。
  * **読み値ではポートの有無を判定しない** (FFh も D0=1 の正常な読みであり
@@ -224,6 +238,9 @@
 #define PEGC_BIOS_CRT_480LINE  0x01   /* bit0: 1=640x480 */
 #define PEGC_BIOS_PRXDUPD      0x054DUL
 #define PEGC_BIOS_PRX_EXTGFX   0x80   /* bit7: 1=拡張グラフィックス (現在値) */
+/* 054Dh bit2「GDC クロック 1=5.0MHz / 0=2.5MHz — 現在の GDC クロック周波数」
+ * ([US] memsys.md PRXDUPD)。診断表示の突き合わせにだけ使う (採るのは 09A0h)。 */
+#define PEGC_BIOS_PRX_GDC5M    0x04
 /* 0000:054Ch PRXCRT bit5「水平走査周波数 [PC-9821(初代を除く), PC-H98]」
  * 0=24.83kHz(640x400) / 1=31.47kHz(640x400 または 640x480)。
  * ⚠ PC-9821 初代は 31kHz でも 0 のまま、対象外の機種は常に 0 ([US] 同項)。
@@ -255,8 +272,14 @@
 /*      — 256 色 (packed) の表示は GDC_SCROLL の SAD/LEN と GDC_PITCH で走査   */
 /*        する。LEN が表示ライン数より小さいと下端がパーティション 1 の内容に  */
 /*        化けるので、BIOS と同じ「SAD=0 / para[3]=40h (LEN=1024)」を入れる。  */
-/*        PITCH は触らない: 現状 (BIOS 既定 40 + gdc.clock bit7=0) で          */
-/*        実効 80 ワード = 640 バイト/ライン になっており 480 でも変わらない。 */
+/*        (uPD7220 の SCROLL P4 bit6 は IM — [B] 2-7「2.5MHz 時は 0、5MHz 時は */
+/*        1」。40h は 5MHz の IM でもある。)                                  */
+/*        PITCH と GDC クロックは §10 で**明示的に**入れる (2026-09-29〜)。     */
+/*        以前は「BIOS 既定 40 + gdc.clock bit7=0 で実効 80 ワード」に頼って   */
+/*        設定していなかったが、それは起動時の BIOS 状態への依存で、実機 Ra266  */
+/*        で崩れる候補 (TASK_PEGC480_REALHW §2 H5)。NP21/W の実効 PITCH は     */
+/*        vram/makegrex.c: clock が 83h (= 83h と 85h の両方) なら PITCH そのまま、*/
+/*        それ以外は 2 倍。80 + 5MHz でも 40 + 2.5MHz でも 640 バイト/ライン。 */
 /*  ※ P1〜P8 は uPD7220 SYNC の並び (P1=モード, P2=CR, P5=HBP, P7/P8=AL/VBP)。 */
 /*    ポート番号は pc98.h の GDC_TEXT_CMD/PARAM (マスタ=テキスト) と          */
 /*    GDC_GFX_CMD/PARAM (スレーブ=グラフィック) が正典。                      */
@@ -264,14 +287,56 @@
 #define PEGC_GDC_SYNC_LEN      8    /* SYNC のパラメータ数 */
 #define PEGC_GDC_SCROLL_LEN    4    /* SCROLL のパラメータ数 (パーティション 1 面) */
 
-/* 31.47kHz / 640x480 (テキストは 16 ラスタ × 30 行) */
+/* 値そのものは §10 (実機の記録で差し替える 1 か所) に置く。 */
+
+/* ------------------------------------------------------------------------ */
+/*  10. 表示タイミングの値 — **実機の記録で差し替える箇所はここだけ**        */
+/*                                                                          */
+/*  票 docs/tasks/realhw/TASK_PEGC480_REALHW.md §3 段 1 の `v86 -g` が実機の */
+/*  ROM (INT 18h AH=30h) の OUT 列を記録する。差し替えは次の対応で行う:      */
+/*    O s480 の 60h/A0h (62h/A2h 0Eh の後の 8 バイト) → *_SYNC_480           */
+/*    O s480 の A2h 47h の後の A0h                   → PEGC_GDC_PITCH_480    */
+/*    O s480 の 6Ah 82h〜85h                         → PEGC_GDC_CLK*_480     */
+/*    O s480 の A2h 70h の後の 4 バイト              → PEGC_GDC_SCROLL_480   */
+/*    O back の同じ行                                → *_400 / *_400_31K と  */
+/*                                                     PEGC_GDC_PITCH_400_*  */
+/*  書く**順序**は backend_pegc.c の pegc_apply_timing() 1 か所 (§10 の値を  */
+/*  そこが 1 回だけ読む)。値を差し替えたら tools/tests/test_pegc_mode.py の   */
+/*  `defaults` ケース (NP21/W の値を固定している) も合わせる — 残りのケースは */
+/*  このヘッダの値から期待列を組むので直さなくてよい。                       */
+/*                                                                          */
+/*  今の値の出所はすべて **NP21/W** (実機の ROM ではない):                   */
+/*    SYNC: bios/bios18.c gdcmastersync / gdcslavesync (§9 の注記)。          */
+/*    PITCH・クロック: 同 bios0x18_30 と、NP21/W 上の `v86 -g` の記録          */
+/*      (2026-09-26、票 §3「段 1 の NP21/W での記録」: s480 で A2h 47h/A0h 50h */
+/*      = PITCH 80、6Ah 83h = 5MHz。back で PITCH 40、6Ah 82h = 2.5MHz)。      */
+/*    資料の裏付け: [B] 2-7 PITCH「通常 5MHz 時は 80、2.5MHz 時は 40」。        */
+/*      [US] memsys.md 0000:054Dh bit2「640x480 / 31.47kHz / 拡張 → 5.0MHz    */
+/*      固定」。[B] 3-2 表3-2「5MHz にするには 83H と 85H を両方出力する。     */
+/*      周波数を変更したら SYNC の再設定が必要」→ クロックは SYNC の前。        */
+/*      NP21/W の BIOS が 83h しか出さないのは CLOCK-2 を内部で直接立てる     */
+/*      (gdc.clock |= 3) から。OS32 は I/O しか持たないので 85h も出す。      */
+/* ------------------------------------------------------------------------ */
+
+/* --- 480 ラインへ入る (31.47kHz / 640x480、テキストは 16 ラスタ × 30 行) --- */
 #define PEGC_GDC_MSYNC_480     { 0x10, 0x4E, 0x4B, 0x0C, 0x03, 0x06, 0xE0, 0x95 }
 #define PEGC_GDC_SSYNC_480     { 0x02, 0x4E, 0x4B, 0x0C, 0x83, 0x06, 0xE0, 0x95 }
-/* 24.83kHz / 640x400 (OS32 のテキストコンソールの前提) — 復帰用 */
+/* グラフィック GDC の表示開始・区間長。SAD=0、para[3]=40h (NP21/W では LEN=1024、
+ * uPD7220 では IM=1 = 5MHz)。 */
+#define PEGC_GDC_SCROLL_480    { 0x00, 0x00, 0x00, 0x40 }
+/* グラフィック GDC の PITCH (ワード)。5MHz で 80 = 640 バイト/ライン。 */
+#define PEGC_GDC_PITCH_480     80
+/* GDC クロック (§11 の 6Ah の値)。640x480 は 5MHz 固定 ([US] 054Dh bit2)。 */
+#define PEGC_GDC_CLK1_480      PEGC_FF2_GDC_CLK1_5M
+#define PEGC_GDC_CLK2_480      PEGC_FF2_GDC_CLK2_5M
+
+/* --- 400 ラインへ戻る — 24.83kHz (NP21/W の CUI、資料の標準) --- */
 #define PEGC_GDC_MSYNC_400     { 0x10, 0x4E, 0x07, 0x25, 0x07, 0x07, 0x90, 0x65 }
 #define PEGC_GDC_SSYNC_400     { 0x02, 0x4E, 0x07, 0x25, 0x87, 0x07, 0x90, 0x65 }
 
-/* 31.47kHz / 640x400 — **起動時の 09A8h が 31kHz だった機種へ戻すときだけ** 使う。
+/* --- 400 ラインへ戻る — 31.47kHz。**起動時の 09A8h が 31kHz だった機種だけ**。
+ * 実機 Ra266 の CUI はこちら (boot.log `[pegc] hsync=31k 09a8=81`、液晶 OSD
+ * H31.5kHz V70.2Hz、2026-09-29)。
  * 出典は NP21/W bios/bios18.c gdcmastersync[2] "31" / gdcslavesync[5] "31-M"
  * (INT 18h AH=30h/42h が 31kHz の 400 ラインで流す値)。
  * ⚠ ミラー [B]/[U] にこの表は無い。uPD7220 の SYNC は書き込み専用で
@@ -281,10 +346,50 @@
 #define PEGC_GDC_MSYNC_400_31K { 0x10, 0x4E, 0x47, 0x0C, 0x07, 0x0D, 0x90, 0x89 }
 #define PEGC_GDC_SSYNC_400_31K { 0x02, 0x4E, 0x47, 0x0C, 0x87, 0x0D, 0x90, 0x89 }
 
-/* グラフィック GDC の表示開始・区間長。SAD=0、LEN は para[3] bit6 = 1024 ライン。
- * 400 ライン側は BIOS と同じ全 0 (LEN=0 = 無制限扱い)。 */
-#define PEGC_GDC_SCROLL_480    { 0x00, 0x00, 0x00, 0x40 }
+/* 400 ライン側の SCROLL は BIOS と同じ全 0 (NP21/W では LEN=0 = 無制限扱い)。
+ * ⚠ IM (P4 bit6) も 0 = 2.5MHz の値。起動時に 5MHz だった機種 (DIP SW 2-8 ON、
+ * [US] 054Dh bit5) で BIOS が IM=1 を入れているかは未確認 — 実機の O back で見る。 */
 #define PEGC_GDC_SCROLL_400    { 0x00, 0x00, 0x00, 0x00 }
+
+/* 400 ラインへ戻るときの PITCH。**PITCH は書き込み専用で読み戻せない**
+ * (uPD7220 の読み出しは READ/LPEN/CSRR だけ) ので、起動時に**読める** GDC
+ * クロック (§2 の 09A0h) から [B] 2-7 の「通常」の値を選ぶ: 両方 5MHz なら 80、
+ * それ以外 (どちらか一方でも 2.5MHz — [U] 006Ah 82h の注) は 40。 */
+#define PEGC_GDC_PITCH_400_2M5 40
+#define PEGC_GDC_PITCH_400_5M  80
+
+/* ------------------------------------------------------------------------ */
+/*  11. GDC クロック (I/O 6Ah 82h〜85h) と PITCH コマンド                    */
+/*                                                                          */
+/*  出典 [U] io_disp.md I/O 006Ah「1000001nb: GDC CLOCK-1」「1000010nb: GDC   */
+/*  CLOCK-2」■[ノーマル]、[B] 3-2 表3-2 (84H / 83H と 85H)。                */
+/*  5MHz には CLOCK-1・2 の**両方**を 5MHz に、2.5MHz にはどちらか一方でよい。*/
+/*  [B] 表3-2 は 07h の解錠を要する値に * を付けるが、82h〜85h には無い      */
+/*  (NP21/W io/gdc.c gdc_o6a も解錠を見ない) — 解錠せずに直接書く。         */
+/*  PITCH (47h) は pc98.h の GDC_CMD_PITCH、パラメータ 1 バイト。           */
+/* ------------------------------------------------------------------------ */
+#define PEGC_FF2_GDC_CLK1_2M5  0x82
+#define PEGC_FF2_GDC_CLK1_5M   0x83
+#define PEGC_FF2_GDC_CLK2_2M5  0x84
+#define PEGC_FF2_GDC_CLK2_5M   0x85
+#define PEGC_GDC_PITCH_LEN     1
+
+/* ------------------------------------------------------------------------ */
+/*  12. GDC の FIFO を待つ上限 (票 TASK_PEGC480_REALHW §4、仮説 H3)          */
+/*                                                                          */
+/*  uPD7220 のステータス (60h / A0h の READ、pc98.h GDC_STAT_*) の            */
+/*  FIFO FULL (bit1) / FIFO EMPTY (bit2) を見てから書く。コマンドの前は       */
+/*  EMPTY (前のコマンドを GDC が食べ終わった)、パラメータの前は FULL でない  */
+/*  こと。1 回読んで満たなければ PEGC_GDC_FIFO_POLL_US 待って読み直し、      */
+/*  PEGC_GDC_FIFO_POLLS 回で諦めて書く (数えて先へ — 画面の設定を途中で      */
+/*  止めるより、書いて後で数を見る方が戻れる)。上限は 1 バイトあたり         */
+/*  2µs × 5000 = 10ms。SYNC などの表示制御コマンドは GDC のクロックで数十     */
+/*  サイクルなので桁違いに余裕がある。cpu_delay_us は校正前だと 0 で返るが、 */
+/*  回数で打ち切るので無限ループにはならない。NP21/W はステータスを読むと    */
+/*  FIFO を処理するので 1〜2 回で抜ける (io/gdc.c gdc_i60 / gdc_ia0)。       */
+/* ------------------------------------------------------------------------ */
+#define PEGC_GDC_FIFO_POLL_US  2
+#define PEGC_GDC_FIFO_POLLS    5000
 
 /* 480 ラインでのテキスト行数 (16 ラスタ/行)。モード切替時にここまでクリアして
  * おかないと 25 行目以降に古い内容が残り、テキスト面がグラフィックを隠す

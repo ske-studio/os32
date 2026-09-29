@@ -1,6 +1,6 @@
 # TASK_PEGC480_REALHW — 実機の PEGC 640x480 で桁がずれる (v3)
 
-> 状態: **§3 段 1 (`v86 -g`) 実装済み — 手元ビルドとホスト試験のみ、NP21/W・実機は未実施 (2026-09-26)**。段 0・段 2・§4 は未着手。設計は Codex 設計レビュー 2 回で P1 なし、2 回目の P2×1・P3×1 は文面で反映 (2026-09-25)。発行: PM (Claude Code `claude-opus-5-5`)、2026-09-25。
+> 状態: **§3 段 1 (`v86 -g`) 実装済み。実機の 1 回目 (2026-09-29) は AH=31h の並びが決まらず 30h へ進まなかった → AL bit0 を許す修正済み (§3「段 1 の実機での記録」)。段 2 の下準備 (PITCH・GDC クロックの明示、順序の 1 か所化、値の差し替え口) と §4 (FIFO 待ち) を実装 — ホスト試験と NP21/W の回帰まで、実機は未実施 (2026-09-29、wt/pegc480-prep)**。段 0 は未着手。設計は Codex 設計レビュー 2 回で P1 なし、2 回目の P2×1・P3×1 は文面で反映 (2026-09-25)。発行: PM (Claude Code `claude-opus-5-5`)、2026-09-25。
 > 対象: 実機 PC-9821Ra266 + 液晶モニター。v2.1 には入れない (ユーザー決定: v3 で良い)。
 > 関係: [PLAN.md](PLAN.md) §7、[TASK_FDC_REALHW.md](TASK_FDC_REALHW.md) §9-1 (CUI のずれ、prepare で直した件)、
 > `gfx/backend_pegc.c` / `include/pegc.h`。
@@ -145,6 +145,64 @@ O back 006a 0068 / 00a2 0047 / 00a0 0028 / 006a 0040 / 006a 0082 / 0062 000c   �
 (PITCH は既定 40 + クロック状態で実効 640 バイトという前提、`include/pegc.h:254`)。NP21/W は PITCH・クロックの違いでは画面がずれないので
 表に出ないが、実機でずれる候補として最有力。SYNC の 8 バイトは NP21/W では内部状態へ直接書かれるので記録に出ない — 実機の記録で確かめる。
 
+### 段 1 の実機での記録 (2026-09-29、44bd0fe、PC-9821Ra266)
+
+```
+v86 -g -t : OK
+v86 -g    : R result : AH=31h value not recognized (status=2)
+            R 31h    : AX=310d BX=0100 layout=-
+            O 行 0 件 (30h まで進んでいない)
+```
+
+- **AL=0Dh は NP21/W の bit2 並び (bit3 常に 1、bit2 = 31kHz — NP21/W は AX=3108h) に bit0 が足された形**。BH=01h は
+  NP21/W と同じ。`kernel/v86_gcap_math.c` の並びの判定が bit0 を予約 bit として弾いていた (`(al & FBh) == 08h`)。
+  - 出典: [US] memsys.md 0000:0459h (990〜1007 行付近)「bit 3 — 対象 PC-98GS, PC-9821(ノーマル), PC-9801BA2･BS2･BX2 —
+    ラスタスキャンモード (1 = ノンインターレース / 0 = インターレース)。**INT 18h - Function 30h,31h のモード設定情報
+    bit 0。BIOS とは値の意味が逆転している**」。同 0459h bit0 (1030〜1045 行) は「CRT 解像度 480 ラインフラグ —
+    INT 18h Function 30h で 640x480 に設定したとき 1」。
+  - 直し (wt/pegc480-prep): 両方の並びで AL bit0 を許し、30h へ渡す AL に bit0 を保つ (ROM の値を勝手に落とさない)。
+    戻しは従来どおり 31h の値そのまま。ホスト試験に実機の値 (AX=310Dh BX=0100h → 30h へ AL=0Dh BH=32h) と変異 5 本
+    (`tools/tests/v86_gcap_tdd.md`)。KAPI は変えていない。**次の実機の回で `v86 -g` をやり直す**。
+- **実機の CUI は起動時から 31kHz** — boot.log `[pegc] hsync=31k 09a8=81`、液晶の OSD は 720x400 H31.5kHz V70.2Hz、
+  31h の AL bit2 = 1。NP21/W の CUI は 24kHz。`pegc_shutdown` / `pegc_restore_text_sync` は 2026-09-24 から起動時の
+  09A8h (D0) へ戻す作りで、31kHz の 400 ラインの SYNC (`PEGC_GDC_MSYNC_400_31K` — これも NP21/W 由来) を使う。
+  「CUI = 24kHz」を前提にしているのは起動時の 09A8h が読めなかったときの既定だけ (PEGC の probe が通った機種では来ない)。
+- **09A8h の読みは 81h (bit7 = 1)**。[U] io_disp.md I/O 09A8h (1870〜1895 行): bit1,0 = 周波数 (01b = 31.47kHz、
+  00b = 24.83kHz、10b/11b 設定禁止)、**bit7〜2 は「未使用 (常に 0 にする)」**、解説に「PC-9821Bp･Bs･Be･Bf･Xt･Xa･Xn･Xp･
+  Xs･Xe, PC-9801BA2･BS2･BX2･BA3･BX3･BX4 ではプログラマブル PLL シンセサイザ (ドットクロック) のアクセスにもこの I/O
+  09A8h を使うが、通常はマスクされているので設定できない」「周波数を切り替えたら GDC の SYNC コマンド等で同期信号を
+  設定しなおさないと正常に表示が行われない」。Ra266 は機種表に無く、bit7 の意味は資料に無い。
+  → **書くときは bit1,0 だけ (bit7〜2 は 0)、読み値は書き戻さない** (`include/pegc.h` §3、試験 `hsync_bits`)。
+- **GDC クロック**: [B] 3-2 表3-2「84H = GDC 2.5MHz モード」「**83H と 85H = GDC 5MHz モード。5MHz にするには 83H と
+  85H を両方出力する。周波数を変更したら SYNC コマンドの再設定が必要**」。[U] io_disp.md I/O 006Ah「1000001nb:
+  GDC CLOCK-1 (82h/83h)」「1000010nb: GDC CLOCK-2 (84h/85h)」— 5MHz には両方、2.5MHz にはどちらか一方。
+  [US] memsys.md 0000:054Dh bit2「640x480 / 31.47kHz / 拡張 → 5.0MHz 固定」、400 ラインは「054Dh bit5 (DIP SW 2-8)
+  に従う」。NP21/W の記録に 83h しか無いのは、NP21/W の BIOS が CLOCK-2 を内部状態へ直接立てる (`gdc.clock |= 3`)
+  から。→ OS32 は **83h と 85h を両方、SYNC の前に**出す。
+- [U] io_disp.md 455〜470 行: 6Ah 68h/69h の VRAM 構成 (800 ライン構成が 480 ラインモードの既定)。同 106 行付近:
+  INT 18h 30h の後は VSYNC 割り込みが止まるので 0064h へ書いて再開が要る (ROM の 30h を呼ぶ `v86 -g` の後始末の候補。
+  今の `v86 -g` は OS32 の CUI を作り直すだけで 0064h は書かない — 未確認)。
+
+### 段 2 の下準備 (2026-09-29、wt/pegc480-prep — 実機の記録を待たずに先に作った部分)
+
+- `pegc_apply_timing()` (`gfx/backend_pegc.c`) が**順序の 1 か所**: 09A8h → 6Ah CLOCK-1 → CLOCK-2 → テキスト GDC SYNC →
+  グラフィック GDC SYNC → グラフィック GDC PITCH → SCROLL → 68h 0Fh → 両 GDC START。入る (`pegc_enter_480_ports`、
+  その後に 6Ah 69h・21h) も戻る (`pegc_text_sync_400`、その後にグラフィック GDC STOP) もこれを通る。
+- **値は `include/pegc.h` §10 に集めた = 実機の記録で差し替える箇所はそこだけ** (SYNC 480 / 400 / 400_31K、SCROLL、
+  `PEGC_GDC_PITCH_480` = 80、`PEGC_GDC_CLK1_480` / `CLK2_480` = 83h / 85h、戻りの `PEGC_GDC_PITCH_400_2M5` / `_5M`)。
+  今の値はすべて NP21/W 由来。差し替えたらホスト試験の `defaults` ケースだけ直す。
+- 戻りのクロックは**起動時に読んだ値**: `pegc_boot_sync_record` が 09A0h に 09h を書いて読み、bit0 = CLOCK-1、
+  bit1 = CLOCK-2 ([U] io_disp.md I/O 09A0h)。boot.log に `[pegc] gdcclk=… clk1= clk2= bios054d.b2= pitch400=` を出す
+  (054Dh bit2 = BIOS の記録する現在のクロック、突き合わせ用)。PITCH は書き込み専用なので、戻す PITCH は起動時の
+  クロックから [B] 2-7 の「通常」(両方 5MHz なら 80、それ以外 40) を選ぶ。probe が通っていない (記録が無い) ときは
+  クロックと PITCH に触らない。
+- **§4 の FIFO 待ちも実装** (下)。
+- ホスト試験 `make check-pegc-mode-host` (`tools/tests/pegc_mode_tdd.md`): OUT 列 (ポート・値・順序)、FIFO 待ち、上限、変異 25 本。
+- 未確定のまま残したもの: テキスト GDC の PITCH (NP21/W の BIOS は 80 のまま内部で入れる、OS32 は触らない)、6Ah 40h
+  (NP21/W の BIOS が s480 / back の両方で出す CRT / プラズマ表示モード — テキストの 1 ドットずれの制御で、今回は出さない)、
+  テキスト GDC の STOP (NP21/W の BIOS が 30h の最後に出す — OS32 は直後に START するので出さない)、400 ラインの SCROLL の IM。
+  どれも実機の `v86 -g` の O 行で決める。
+
 ### 段 2 — 直す (段 1 の結果で分岐)
 
 | 段 1 の結果 | 直し方 |
@@ -158,6 +216,11 @@ O back 006a 0068 / 00a2 0047 / 00a0 0028 / 006a 0040 / 006a 0082 / 0062 000c   �
 出たときだけ進める。
 
 ## 4. 段 1 と独立にできる小さな修正 — `gdc_send` が FIFO を待つ
+
+> **実装済み (2026-09-29、wt/pegc480-prep)**: コマンドの前は FIFO EMPTY (bit2)、パラメータの前は FIFO FULL (bit1) で
+> ないことをステータス (60h / A0h) で見てから書く。満たなければ `cpu_delay_us(2)` を挟んで読み直し、5000 回
+> (1 バイトあたり 10ms) で諦めて書き、`pegc_gdc_fifo_timeouts` (kernel.map から読めるグローバル) を数える。
+> START / STOP も同じ口を通す。値は `include/pegc.h` §12。NP21/W はステータスを読むと FIFO を処理するので 1〜2 回で抜ける。
 
 `gfx/backend_pegc.c` の `gdc_send` はコマンドとパラメータを待たずに流している。
 uPD7220 のステータス (60h / A0h の READ) の FIFO FULL が落ちるのを待ってから 1 バイトずつ
