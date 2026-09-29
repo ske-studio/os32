@@ -6,7 +6,7 @@ AI コーディングアシスタント共通の入口。**置くのは指示と
 
 ## 体制
 
-PM = Claude Code (**`claude-opus-5-5`**、2026-09-23 夕〜)、コーダー = サブエージェント (worktree 隔離。**Codex が重大 (P1 / major) と判定した指摘を含む修正は Fable 5.1**、それ以外は **Opus 5.5**、2026-09-25〜)、
+PM = Claude Code (**`claude-sonnet-5-5`**、2026-09-29〜。**判断はせず各エージェントとの取り次ぎに徹する**。それ以前は `claude-opus-5-5`)、コーダー = サブエージェント (worktree 隔離。**Codex が重大 (P1 / major) と判定した指摘を含む修正は Fable 5.1**、それ以外は **Opus 5.5**、2026-09-25〜)、
 レビュアー = **Codex だけ** (`codex exec -s read-only`、2026-09-25〜)。**3 ラリーで決着しない争点はユーザーへ**、テスター = ローカル AI (`tools/emu_agent/`、スキル `os32-local-ai`)。
 実装は基盤・アプリ層とも Claude Code (PM) がサブエージェントで行う (別エージェント案は撤回。ROLES §0)。
 役割の境界・起動コマンド・規約の正典は [`docs/tasks/agents/ROLES.md`](docs/tasks/agents/ROLES.md)。
