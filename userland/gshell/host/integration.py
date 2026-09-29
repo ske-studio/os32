@@ -157,6 +157,15 @@ MUTATIONS = [
     ('P3-B TAB during a modal keeps advancing the switch', 'src/kbdnav.rs',
      '    if st.kn.sw_active && modal::is_open() {\n        cancel_switch(st);\n    }\n', '',
      'review_p3_b'),
+    # gui_gate v11 (2026-09-29): ドラッグ枠の跡が背面窓のクライアント面に残る / 旧前面のタイトル。
+    ('drag frame erase does not repaint the clients it crossed', 'src/input.rs',
+     '    erase_frame_edges(st, old_frame);\n    expose_frame_edges(st, old_frame);\n',
+     '    erase_frame_edges(st, old_frame);\n',
+     'drag_frame_trail_'),
+    ('the old front keeps the active title', 'src/wm.rs',
+     '            let o = st.windows[oi].outer();\n            st.dirty_screen(o);\n',
+     '            let _ = oi;\n',
+     'focus_change_repaints_the_old_front_title'),
 ]
 
 

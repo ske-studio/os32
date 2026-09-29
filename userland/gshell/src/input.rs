@@ -818,6 +818,13 @@ fn wm_button_up(st: &mut GuiState, mx: i32, my: i32) {
         st.windows[idx].y = cy;
         st.drag_index = -1;
         st.drag_frame = Rect::EMPTY;
+        /* 最後の枠を消す。普通は新しい外形と同じ位置なので窓自身が覆うが、
+         * クランプで外形とずれたときに跡を残さない (下地は損傷、クライアント
+         * 面は Paint)。 */
+        for e in frame_edges(nf).iter() {
+            st.dirty_screen(*e);
+        }
+        expose_frame_edges(st, nf);
 
         /* 露出計算 + 旧位置と新位置を画面損傷に。 */
         st.dirty_screen(old_outer);
@@ -915,6 +922,7 @@ pub fn redraw_frame(st: &mut GuiState, new_frame: Rect) {
     /* 旧枠を下地で消し、新枠を描いて、両者の縁とカーソルを 1 回で present。 */
     cursor::hide(st);
     erase_frame_edges(st, old_frame);
+    expose_frame_edges(st, old_frame);
     crate::chrome::draw_drag_outline(
         new_frame.x,
         new_frame.y,
@@ -1093,6 +1101,30 @@ fn queue_frame_edges(st: &GuiState, f: Rect) {
 fn erase_frame_edges(st: &mut GuiState, f: Rect) {
     for e in frame_edges(f).iter() {
         wm::composite_rect(st, *e);
+    }
+}
+
+/// 枠の縁 4 本が横切った窓のクライアント面へ `Paint` を返す (損傷に足す)。
+///
+/// 枠はバックバッファへ**そのまま**描いている (XOR ではない)。消去の
+/// [`erase_frame_edges`] (= `composite_rect`) は下地とクロームしか描き直さず、
+/// クライアント面は WM が持っていないので、枠が窓の中を通った跡はアプリに
+/// 描き直させる以外に消せない。これが無かったので、途中位置の枠の線が背面の
+/// 窓 (gui_gate v11 の Help) に残っていた (2026-09-29、PEGC / Cirrus)。
+/// 足すのは縁の帯だけなので、アプリが描き直すのは細い帯で済む。
+fn expose_frame_edges(st: &mut GuiState, f: Rect) {
+    if f.is_empty() {
+        return;
+    }
+    for e in frame_edges(f).iter() {
+        let mut i = 0;
+        while i < st.windows.len() {
+            if st.windows[i].used && st.windows[i].visible {
+                let (ox, oy) = st.windows[i].client_origin();
+                crate::damage::add_dirty(&mut st.windows[i], e.translate(-ox, -oy));
+            }
+            i += 1;
+        }
     }
 }
 

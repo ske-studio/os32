@@ -424,7 +424,10 @@ pub struct GuiState {
     pub drag_index: i32, /* ドラッグ中ウィンドウの index。-1=なし */
     pub drag_dx: i32,
     pub drag_dy: i32,
-    pub drag_frame: Rect,   /* 現在描いている XOR 枠 (空=未描画) */
+    pub drag_frame: Rect,   /* 現在描いているドラッグ枠 (空=未描画。XOR ではなく実線) */
+    /// 最後にアクティブ (前面) のクロームで描いた窓の id (0 = なし)。前面が
+    /// 替わったら旧・新の両方を描き直す ([`sync_active_chrome`])。
+    pub chrome_active: u32,
     pub mouse_x: i32,
     pub mouse_y: i32,
     pub prev_buttons: u8,
@@ -499,6 +502,7 @@ impl GuiState {
         drag_dx: 0,
         drag_dy: 0,
         drag_frame: Rect::EMPTY,
+        chrome_active: 0,
         mouse_x: 320,
         mouse_y: 200,
         prev_buttons: 0,
@@ -993,6 +997,33 @@ pub fn composite_full(st: &mut GuiState) {
     flush_present();
 }
 
+/// 前面 (= アクティブのクローム) が前回の合成から替わっていたら、旧前面と新前面の
+/// 外形を画面損傷に足す。
+///
+/// タイトルの色は z の最上位かどうかで決まるが、前面を替える経路 (マウス・
+/// タスクバー・GRPH+TAB・set_focus・raise・閉じる・最小化 …) は新しい前面の外形
+/// しか損傷にしていなかった。`composite_rect` は損傷に**掛かった**窓のクロームだけを
+/// 描き直すので、旧前面が新前面と重なっていないと旧前面のタイトルがアクティブ色の
+/// まま残った (2026-09-29 の束ねビルドの報告)。経路ごとに足すと漏れるので、合成の
+/// 入口で 1 か所にまとめて見る。
+fn sync_active_chrome(st: &mut GuiState) {
+    let front = st.front_id();
+    if front == st.chrome_active {
+        return;
+    }
+    if let Some(oi) = st.win_by_id(st.chrome_active) {
+        if st.windows[oi].used && st.windows[oi].visible {
+            let o = st.windows[oi].outer();
+            st.dirty_screen(o);
+        }
+    }
+    if let Some(ni) = st.front_index() {
+        let o = st.windows[ni].outer();
+        st.dirty_screen(o);
+    }
+    st.chrome_active = front;
+}
+
 /// WM が溜めた画面損傷 (デスクトップ + クローム) を合成して present し、クリアする。
 /// アプリのクライアント面 (COMMIT) とは独立。commit は 1 回にまとめる。
 pub fn flush_screen_dirty(st: &mut GuiState) {
@@ -1002,6 +1033,7 @@ pub fn flush_screen_dirty(st: &mut GuiState) {
     if crate::fullscreen::active() {
         return;
     }
+    sync_active_chrome(st);
     let dragging = st.drag_index >= 0;
     if st.screen_dirty.is_empty() && !dragging {
         return;

@@ -1127,3 +1127,168 @@ fn menu_open_ctrl_esc_closes_and_grph_tab_closes_then_switches() {
         assert!(keys(&st, s).is_empty());
     }
 }
+
+/* ================================================================ */
+/*  ドラッグ枠の跡 (gui_gate v11、2026-09-29: PEGC / Cirrus で再現)   */
+/* ================================================================ */
+
+/// アプリが描いたことにするクライアント面の見張り色 (システム色と重ならない)。
+const CLIENT_SENTINEL: u8 = 201;
+
+/// 可視な窓のクライアント面を見張り色で塗り、損傷を空にする
+/// (「アプリが全部描き終えた」状態)。
+fn paint_clients_as_app(st: &mut GuiState) {
+    let mut i = 0;
+    while i < st.windows.len() {
+        if st.windows[i].used && st.windows[i].visible {
+            let r = st.windows[i].client_rect_screen();
+            unsafe { os32api::gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, CLIENT_SENTINEL) };
+            st.windows[i].dirty.clear();
+            st.windows[i].issued.clear();
+        }
+        i += 1;
+    }
+}
+
+/// 窓 `idx` の可視なクライアント面で、アプリが描いた画素 (見張り色) を WM が
+/// 書き替えたのに Paint (dirty / issued) が出ていない点を探す。WM はクライアント面を
+/// 持たないので、書き替えた画素は**アプリに描き直させる以外に消せない**。
+fn stale_client_pixel(st: &GuiState, idx: usize) -> Option<(i32, i32, u8)> {
+    let px = mocks::pixels();
+    let w = &st.windows[idx];
+    let (ox, oy) = w.client_origin();
+    let covered = |lx: i32, ly: i32| {
+        let mut k = 0;
+        while k < w.dirty.len {
+            if w.dirty.rects[k].contains(lx, ly) {
+                return true;
+            }
+            k += 1;
+        }
+        k = 0;
+        while k < w.issued.len {
+            if w.issued.rects[k].contains(lx, ly) {
+                return true;
+            }
+            k += 1;
+        }
+        false
+    };
+    let mut v = 0;
+    while v < w.vis.len {
+        let r = w.vis.rects[v];
+        let mut ly = r.y;
+        while ly < r.bottom() {
+            let mut lx = r.x;
+            while lx < r.right() {
+                let (sx, sy) = (ox + lx, oy + ly);
+                let got = px[sy as usize * mocks::W + sx as usize];
+                if got != CLIENT_SENTINEL && !covered(lx, ly) {
+                    return Some((sx, sy, got));
+                }
+                lx += 1;
+            }
+            ly += 1;
+        }
+        v += 1;
+    }
+    None
+}
+
+/// gui_gate v11 の台本: Widgets を掴んで Help の上を通し、Help と重ねて離す。
+/// 途中位置の枠 (x=459 の縦線・y=111 の横線) が Help のクライアント面に残っていた
+/// — 枠の消去 (`redraw_frame`) は下地とクロームしか描き直さず、枠が横切った窓へ
+/// Paint を返していなかった。
+#[test]
+fn drag_frame_trail_on_another_client_gets_a_paint() {
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    /* 添字 0 = Help (背面)、1 = Widgets (前面)。gui_gate v11 の配置。 */
+    let mut st = windows(&shm, &[(372, 80, 242, 180), (40, 40, 320, 240)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    park_pointer(&mut st, 20, 400);
+    paint_clients_as_app(&mut st);
+    let tb = st.windows[1].titlebar_rect();
+    let (tx, ty) = (tb.x + 20, tb.y + tb.h / 2);
+    park_pointer(&mut st, tx, ty);
+    /* 掴む → 途中 (枠が Help の中を横切る) → Help と重なる位置 → 離す */
+    for &(dx, dy, b) in &[(0, 0, 1u8), (100, 71, 1), (200, 160, 1), (200, 160, 0)] {
+        *mocks::MOUSE.lock().unwrap() = ((tx + dx) as i16, (ty + dy) as i16, b);
+        input::capture(&mut st, input::Ctx::Wait);
+        wm::flush_screen_dirty(&mut st);
+    }
+    assert_eq!(st.drag_index, -1, "離しでドラッグが終わらない");
+    assert_eq!((st.windows[1].x, st.windows[1].y), (240, 200), "窓が枠の位置へ移らない");
+    assert_eq!(stale_client_pixel(&st, 0), None, "Help のクライアント面に枠の跡が残り、Paint も出ていない");
+}
+
+/// ドラッグ中 (離す前) も、消した枠が横切ったクライアント面には Paint を返す
+/// (跡がドラッグの間ずっと画面に残らない)。自分自身の窓の旧位置も同じ。
+#[test]
+fn drag_frame_trail_is_repainted_while_dragging() {
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(372, 80, 242, 180), (40, 40, 320, 240)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    park_pointer(&mut st, 20, 400);
+    paint_clients_as_app(&mut st);
+    let tb = st.windows[1].titlebar_rect();
+    let (tx, ty) = (tb.x + 20, tb.y + tb.h / 2);
+    park_pointer(&mut st, tx, ty);
+    for &(dx, dy) in &[(0, 0), (30, 20), (100, 71), (200, 160)] {
+        *mocks::MOUSE.lock().unwrap() = ((tx + dx) as i16, (ty + dy) as i16, 1);
+        input::capture(&mut st, input::Ctx::Wait);
+        wm::flush_screen_dirty(&mut st);
+    }
+    assert_eq!(st.drag_index, 1, "ドラッグが続いていない");
+    /* いまの枠 (240,200)-(559,439) の上は描いてあって当然なので除く */
+    let f = st.drag_frame;
+    for idx in 0..2 {
+        if let Some((x, y, c)) = stale_client_pixel(&st, idx) {
+            let on_live = (x == f.x || x == f.right() - 1 || y == f.y || y == f.bottom() - 1)
+                && f.contains(x, y);
+            let under_cursor = crate::cursor::rect(&st).contains(x, y);
+            assert!(on_live || under_cursor, "窓 {idx} の ({x},{y}) に消した枠の跡 (色 {c}) が残り、Paint も無い");
+        }
+    }
+}
+
+/// 前面が替わったら、**重なっていなくても**旧前面のタイトルを非アクティブ色へ
+/// 描き直す (束ねビルドの報告: GRPH+TAB / タスクバーで旧前面が青のまま)。
+#[test]
+fn focus_change_repaints_the_old_front_title_without_overlap() {
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    /* 重ならない 2 枚。添字 1 が前面。 */
+    let mut st = windows(&shm, &[(20, 20, 200, 120), (300, 200, 200, 120)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    park_pointer(&mut st, 600, 20);
+    wm::flush_screen_dirty(&mut st);
+    let px_at = |st: &GuiState, i: usize| {
+        let tb = st.windows[i].titlebar_rect();
+        mocks::pixels()[(tb.y + 1) as usize * mocks::W + (tb.x + tb.w / 2) as usize]
+    };
+    let inactive = px_at(&st, 0);
+    let active = px_at(&st, 1);
+    assert_ne!(inactive, active, "前提: アクティブと非アクティブのタイトル色が違う");
+    /* タスクバー / GRPH+TAB の共通経路で窓 0 を前面へ */
+    wm::activate_index(&mut st, 0);
+    wm::flush_screen_dirty(&mut st);
+    assert_eq!(px_at(&st, 0), active, "新しい前面のタイトルがアクティブ色にならない");
+    assert_eq!(px_at(&st, 1), inactive, "旧前面のタイトルがアクティブ色のまま残る");
+}
