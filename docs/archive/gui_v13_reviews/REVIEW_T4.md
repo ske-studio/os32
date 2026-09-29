@@ -3,7 +3,7 @@
 > 発行: PM (2026-09-09) / 状態: **完了記録 (2026-09-10)**
 
 T4受入済み（独立ホストモデルの範囲）。実装 Codex、独立レビュー claude-opus-5。
-親: [TASK_T4_MODEL.md](../../tasks/gui/v13/TASK_T4_MODEL.md)、[PLAN.md](../../tasks/gui/v13/PLAN.md)。
+親: [TASK_T4_MODEL.md](../gui_v13/TASK_T4_MODEL.md)、[PLAN.md](../../tasks/gui/v13/PLAN.md)。
 原レビュー: `/tmp/os32-v13-t4-review.txt` (一時ファイル)。
 
 ## 検証済み

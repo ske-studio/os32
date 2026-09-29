@@ -17,9 +17,18 @@
 | `gui_v11/` | GUI シェル v1.1 の票 12 本 |
 | `gui_v12/` | GUI シェル v1.2 の票 5 本 |
 | `gui_v13_reviews/` | GUI シェル v1.3 のレビュー記録・クロスリンク・途中保存 |
-| `settings/` | 設定レジストリの受入完了票 (S2 / S3 / S3I2 / S4 / S5) |
+| `settings/` | 設定レジストリの受入完了票 (S2 / S3 / S3I2 / S4 / S5、2026-09-29 に S0 / S6 / S6P と S0 の計画・基盤設計を追加) |
 | `network/` | Host Services の票 (N0〜N4) |
 | `kernel_v2/` | カーネル 2.0 の完了記録 8 本 |
+| `shell/` | hsync H1〜H4・B8 (FS_TYPE)・シェルの切り詰め・終了コードの票 7 本 (2026-09-29 に移動) |
+| `test/` | ゲスト試験ランナー 3 段 (FSTAT_REDIR / TEST_RESULT / TEST_RUNNER) |
+| `tools/` | キー注入 (KEY_INJECT)・変異試験の並列化 (CHECK_MUT_PARALLEL) |
+| `kernel_v21/` | v2.1 までに直したカーネル層の不具合の票 6 本 (KSTACK_USER / EXT2_EMPTY_NAME / KAPI_DATA_FIELDS / VFS_FD_PATH / KAPI_OUTPUT_GUARD / DB_ERRSTR) |
+| `gui_v13/` | GUI シェル v1.3 の票 15 本と監査 (AUDIT_2026-09-10)。計画 `PLAN.md` と `MEMORY_BUDGET.md` は `tasks/gui/v13/` に残る |
+| `gui_v14/` | GUI 1.4 のエディタ GUI 版 (TASK_EDIT_GUI) |
+| `realhw_v21/` | v2.1 で実機 Ra266 に届いた票 (FDC / SERIAL_VFAST / HDD_INSTALL / SERIAL_HOSTFS / ATAPI_TIMEOUT)、実機の回の手順 3 本 (CHECKLIST_2026-09-24〜26、09-26 は v2.1 の判定の記録)、PEGC_RA266_TIMING (完了記録、正典は `tasks/realhw/TASK_PEGC480_REALHW.md`) |
+| `portability/` | kstring の速度実測 (TASK_KSTRING_BENCH) |
+| `agents/` | 引き継ぎ (HANDOVER_v14 / 2026-09-16 / 09-18 / 09-22)・体制の快照 (RETROSPECTIVE_2026-09-09)・Hermes の最上位プロンプト (SOUL.md、撤収済み・効力なし) |
 | 直下 | 領域に属さない単発の記録 (`REFACTORING_PLAN.md` `ROADMAP_v1.0.md` `TEST_INVENTORY_2026-09-14.md` `debug_kcg_load_font.md`) |
 
 **計画・設計・契約・索引は落とさない。** `PLAN.md` `DESIGN.md` `CONTRACTS.md`

@@ -238,10 +238,10 @@ KernelAPI の構造体を変えたときは `make clean` → `make all` が必�
   `mutant_tree` / `build_in_tree` / `run_script_in_tree` で一時ディレクトリの写しの木 (変異を当てるファイルと
   gcc -MM の依存は実体、残りは symlink) に当て、変異なしの写しが GREEN であること (`CONTROL`) を
   先に確かめる。新しい変異試験もこの作りにする — 実物を書き換える試験は列に足さない
-  (票 [TASK_CHECK_MUT_PARALLEL](tasks/tools/TASK_CHECK_MUT_PARALLEL.md) §5)。
+  (票 [TASK_CHECK_MUT_PARALLEL](archive/tools/TASK_CHECK_MUT_PARALLEL.md) §5)。
 
 <a id="kapi-v63-移行"></a>
-#### KAPI v63 への移行 (データ欄の固定配置、票 [TASK_KAPI_DATA_FIELDS](tasks/memory/TASK_KAPI_DATA_FIELDS.md))
+#### KAPI v63 への移行 (データ欄の固定配置、票 [TASK_KAPI_DATA_FIELDS](archive/kernel_v21/TASK_KAPI_DATA_FIELDS.md))
 
 v63 で KernelAPI のデータ欄を 0x4B8 に固定し、OS32X ヘッダを v3 にした
 ([KAPI_SPEC.md](KAPI_SPEC.md) §4-0)。**v62 以前のバイナリ (アプリ・常駐シェル・
@@ -265,7 +265,7 @@ shlib ローダが要求版で断ったときは、GUI を選んでいても CUI
 配置違いの `rebuild required (KAPI data layout)` とは直し方が逆なので案内を分けてある。
 
 <a id="区画表の移行-v64"></a>
-**v64 の区画表の移行 (NHD、票 [TASK_HDD_INSTALL](tasks/realhw/TASK_HDD_INSTALL.md) N3)**:
+**v64 の区画表の移行 (NHD、票 [TASK_HDD_INSTALL](archive/realhw_v21/TASK_HDD_INSTALL.md) N3)**:
 v64 のカーネルとローダは区画表 (LBA 1) を **PC-98 標準配置**でしか読まない
 (開始 = +8/+9/+10-11。2026-09-23 までの OS32 は +6/+7/+8-9 の独自配置で書いていた)。
 旧配置の NHD を新しいカーネルで起動すると `/` (hd0) がマウントできず、新しいローダは
@@ -286,7 +286,7 @@ make nhd-migrate-pt           # = python3 tools/nhd_deploy.py migrate-pt (push �
 CD / FD のインストーラ (`cdinst` / `install`) は段 2 から標準配置・BIOS 幾何で書く。
 空の hd0 か OS32 の区画 1 つ (旧配置の 8/17 の NHD を含む) を**作り直す**ので、旧配置の NHD は
 `migrate-pt` の代わりに入れ直してもよい (中のファイルは消える)。規則は
-[TASK_HDD_INSTALL](tasks/realhw/TASK_HDD_INSTALL.md) の「段 2 の実装メモ」。
+[TASK_HDD_INSTALL](archive/realhw_v21/TASK_HDD_INSTALL.md) の「段 2 の実装メモ」。
 
 - **旧配置の NHD には下の HostDrv の手順 (`make deploy` → ゲストで `hsync boot`) を使わない。**
   カーネルだけが v64 になり、次の起動で `/` がマウントできない (ローダは旧いままなので起動は

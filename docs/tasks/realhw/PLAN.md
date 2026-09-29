@@ -14,7 +14,7 @@
 エミュレータでの検証は現に機能している (2026-09-17 の 1 日でカーネル層の不具合を
 2 件検出・修正・受入した)。実機は**エミュレータが嘘をついている箇所**を暴くために使う。
 
-> **次の実機の回の手順**: [`CHECKLIST_2026-09-26.md`](CHECKLIST_2026-09-26.md) (入れ直しと v2.1 の確認、b8f76e0)。前回: [`CHECKLIST_2026-09-25.md`](CHECKLIST_2026-09-25.md) (HDD インストール、合格)、[`CHECKLIST_2026-09-24.md`](CHECKLIST_2026-09-24.md)。
+> **次の実機の回の手順**: [`CHECKLIST_2026-09-26.md`](../../archive/realhw_v21/CHECKLIST_2026-09-26.md) (入れ直しと v2.1 の確認、b8f76e0)。前回: [`CHECKLIST_2026-09-25.md`](../../archive/realhw_v21/CHECKLIST_2026-09-25.md) (HDD インストール、合格)、[`CHECKLIST_2026-09-24.md`](../../archive/realhw_v21/CHECKLIST_2026-09-24.md)。
 
 ## 1. 機体の構成 (調査済み、2026-09-17)
 
@@ -49,7 +49,7 @@ CHS へ変換する。**CHS の上限がそのまま容量の上限になる。*
 - **起動パーティションの位置**。PC-98 の IDE BIOS は起動領域が特定の容量内にあることを
   要求することがある。**先頭に小さく切れば回避できる可能性が高い** (未検証)。
 
-**2026-09-23 着手**: 票 [`TASK_HDD_INSTALL.md`](TASK_HDD_INSTALL.md) (幾何の食い違い F4 を含む)。
+**2026-09-23 着手**: 票 [`TASK_HDD_INSTALL.md`](../../archive/realhw_v21/TASK_HDD_INSTALL.md) (幾何の食い違い F4 を含む)。
 
 **やること (この順)**:
 
@@ -65,7 +65,7 @@ CHS へ変換する。**CHS の上限がそのまま容量の上限になる。*
 |---|---|
 | FD **1.2MB** (2HD、77cyl × 2head × 8sect × 1024B) | **対応済み**。既定はこちら |
 | FD **1.44MB** (80cyl × 2head × 18sect × 512B) | **エミュレータで対応済み** (2026-09-18)。`make fd144` → `images/os32_boot144.img`。実機は未検証 → [`TASK_FD144.md`](TASK_FD144.md) |
-| FD 起動 **実機** | **2026-09-22 に合格** (1.2MB)。原因は 3 つ (シーク時間のタイムアウト / `0439h` bit2 の DMA 1MB 制限 / FRY) → [`TASK_FDC_REALHW.md`](TASK_FDC_REALHW.md) |
+| FD 起動 **実機** | **2026-09-22 に合格** (1.2MB)。原因は 3 つ (シーク時間のタイムアウト / `0439h` bit2 の DMA 1MB 制限 / FRY) → [`TASK_FDC_REALHW.md`](../../archive/realhw_v21/TASK_FDC_REALHW.md) |
 | CD | **対応済み**。`userland/system/cdinst.c`、`make iso`、`fs/iso9660.c` |
 | IDE | 対応済み (§2 の上限つき) |
 
@@ -87,7 +87,7 @@ CHS へ変換する。**CHS の上限がそのまま容量の上限になる。*
 
 ## 4. 通信 — ここに一番大きい穴がある
 
-> **2026-09-23**: 実機でのファイル更新は票 [`TASK_SERIAL_HOSTFS.md`](TASK_SERIAL_HOSTFS.md) (SerialFS の復活 + カーネルの 2 ファイル化・高圧縮)。
+> **2026-09-23**: 実機でのファイル更新は票 [`TASK_SERIAL_HOSTFS.md`](../../archive/realhw_v21/TASK_SERIAL_HOSTFS.md) (SerialFS の復活 + カーネルの 2 ファイル化・高圧縮)。
 
 **ゲスト側は問題ない。** リモートシェル (`userland/shell/rshell.c`) は
 **シリアル前提で既に動いている** (uPD8251A、IRQ4)。
@@ -124,7 +124,7 @@ CHS へ変換する。**CHS の上限がそのまま容量の上限になる。*
 NP21/W は `io/serial.c` で `013Ah` (V-FAST の速度表 `{0,115200,57600,38400,28800,0,19200,0,14400,0,0,0,9600,...}` = 資料と一致) と
 `0130h/0132h/0134h/0136h/0138h` を実装している。ただし通信速度そのものは模擬しない (§4-49) ので、**レジスタの手順はエミュレータで、速度は実機で**確かめる。
 
-**実装の段取り** → 票 [`TASK_SERIAL_VFAST.md`](TASK_SERIAL_VFAST.md) (2026-09-22 着手、ユーザー決裁「ここの改善が開発のきも」):
+**実装の段取り** → 票 [`TASK_SERIAL_VFAST.md`](../../archive/realhw_v21/TASK_SERIAL_VFAST.md) (2026-09-22 着手、ユーザー決裁「ここの改善が開発のきも」):
 1. `0136h` bit6 が読むたびに反転するかで FIFO 搭載を判定 (資料の判定法)。
 2. `0138h` bit0=1 で FIFO モード、データは `0130h`、TxRDY/RxRDY は `0132h`。
 3. `013Ah` = 0x80 | 分周 (115200 なら 0x81)。互換モードに戻すときは bit7=0 で 8253 経路へ。
@@ -146,7 +146,7 @@ NP21/W は `io/serial.c` で `013Ah` (V-FAST の速度表 `{0,115200,57600,38400
 - `tools/emu_agent/` (ローカル AI のテスター)
 
 **ただし直すのは難しくない。** ランナーは**「ゲストを叩く部分」と「生成・集計する部分」を
-意図的に分けてある** ([`../test/TASK_TEST_RUNNER.md`](../test/TASK_TEST_RUNNER.md) §2-2、受入 R7)。
+意図的に分けてある** ([`../../archive/test/TASK_TEST_RUNNER.md`](../../archive/test/TASK_TEST_RUNNER.md) §2-2、受入 R7)。
 叩く側を差し替えられる形なので、**シリアル版を 1 つ書けば集計側はそのまま使える。**
 
 `tools/np21w_mcp/` の**メモリ・レジスタ系は実機では使えない** (エミュレータの
@@ -247,7 +247,7 @@ Cirrus は対照的に `cirrus_vga.c` が 247KB あり ini のキーで切り替
 **PEGC 自体も実機では 640x480 で桁がずれる** (2026-09-25、GUI を `gfxmode pegc` で起動したとき。pc98 は正しい)。
 v3 の票 [TASK_PEGC480_REALHW.md](TASK_PEGC480_REALHW.md) — 480 ラインの SYNC 値がエミュレータ由来なのが最有力、実機の ROM が流す値を V86 で記録して合わせる。
 
-ATAPI の待ち上限はループ回数 (約 1 秒) で、実機のスピンアップや SRST 後の BSY に足りない → [TASK_ATAPI_TIMEOUT.md](TASK_ATAPI_TIMEOUT.md) (秒単位に、SRST は 31 秒)。
+ATAPI の待ち上限はループ回数 (約 1 秒) で、実機のスピンアップや SRST 後の BSY に足りない → [TASK_ATAPI_TIMEOUT.md](../../archive/realhw_v21/TASK_ATAPI_TIMEOUT.md) (秒単位に、SRST は 31 秒)。
 
 ## 8. 段取り (案)
 

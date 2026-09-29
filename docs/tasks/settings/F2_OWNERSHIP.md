@@ -9,7 +9,7 @@ F1 は受入済みという依頼条件を前提とする。
 本票作成時の作業ツリーでは `kapi/kapi_db.c/.h` に F1 の未コミット変更があり、
 `db_cleanup_owned(int owner)` は存在するが **exec には未統合**。本票は実装承認・試験合格の記録ではない。
 
-上位契約: [S0_FOUNDATION.md](S0_FOUNDATION.md) §2、§3 F1/F2/F3。
+上位契約: [S0_FOUNDATION.md](../../archive/settings/S0_FOUNDATION.md) §2、§3 F1/F2/F3。
 本票は S0 の F2 に必要な内部 VFS 前提作業を具体化する。終了順序の変更だけを先行させない。
 
 ## 1. 範囲と受入の意味

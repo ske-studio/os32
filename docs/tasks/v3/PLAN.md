@@ -13,7 +13,7 @@
 ## 0. なぜ「構造を組み直す」なのか
 
 2026-09-17 に**カーネル帯域 1MB が 17KB 足りない**状態を踏んだ
-([`../memory/TASK_KSTACK_USER.md`](../memory/TASK_KSTACK_USER.md))。共有メモリ帯が
+([`../../archive/kernel_v21/TASK_KSTACK_USER.md`](../../archive/kernel_v21/TASK_KSTACK_USER.md))。共有メモリ帯が
 カーネルスタックを飲み、**スタックが設計の 16KB ではなく 4KB しかなく**、
 **余裕は 224 バイト**しか残っていなかった。誰も気づいていなかった。
 

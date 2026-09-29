@@ -1,6 +1,6 @@
 # hsync H2 TDD 記録 — 一時ファイル + 検証 + 置換
 
-対象票: [`docs/tasks/shell/TASK_H2.md`](../../docs/tasks/shell/TASK_H2.md) §2-3 / §2-4 / §4-1
+対象票: [`docs/archive/shell/TASK_H2.md`](../../docs/archive/shell/TASK_H2.md) §2-3 / §2-4 / §4-1
 試験: `tools/tests/hsync_h2_host.c` (実物の `userland/system/hsync.c` を `#include`)
 実行: `python3 -B tools/tests/test_hsync_h2.py [--target] [--mutate]` / `make check-hsync-h2-host`
 
@@ -287,7 +287,7 @@ default_sys_exclusion (-v でしか出ない) で黙って飛ばされていた 
 ### `--root <根>` — 同期先の根を替える (2026-09-26、ユーザー提案)
 
 FD の新しいカーネルで起動し、SerialFS 越しの /host から /hd0 (HDD) を更新するための口
-(docs/tasks/realhw/TASK_SERIAL_HOSTFS.md §5)。`case_root` (FD 起動 = ルート fd0、/hd0 = hd0
+(docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md §5)。`case_root` (FD 起動 = ルート fd0、/hd0 = hd0
 で根の inode 2) で見るもの:
 
 - `--root /hd0` (全体)・`--root /hd0 bin`: /hd0 の下だけが変わり、FD の /bin/a.bin と / は無変更

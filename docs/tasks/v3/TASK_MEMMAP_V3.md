@@ -5,7 +5,7 @@
 > 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / それまでの状態: **設計 v2 (Codex 往復 1 の 9 件を反映。2-2 は保留、2-3 は着地)**。
 > 出所: ユーザー指示 2026-09-23「カーネル予算はシュリンクではなく考え直す。順に実行」。1 (KHEAP 320 → 192KB) は着地済み (aa536e9)、
 > ここは 2 (ページ表を画像の外へ) と 4 (帯の切り直し) をまとめた票。3 (動的読み込み) は [`PLAN.md`](PLAN.md) §3。
-> 正典の関係: 番地の正典は `include/memmap.h`、地図は `docs/02_memory.md` §2-1 (生成)、経緯は [`../memory/TASK_KSTACK_USER.md`](../memory/TASK_KSTACK_USER.md)。
+> 正典の関係: 番地の正典は `include/memmap.h`、地図は `docs/02_memory.md` §2-1 (生成)、経緯は [`../../archive/kernel_v21/TASK_KSTACK_USER.md`](../../archive/kernel_v21/TASK_KSTACK_USER.md)。
 
 > **v2 (Codex 往復 1 の 9 件を反映)**: 2-2 (カーネル帯 2MB) は「シェルを PDE 1 に置くと CPL=3 起動でシェルの写像が消える」
 > 「pgalloc の配布域にシェルが入る」「予算式・予約域・スタックの境界」「番地を焼く 5 つのビルド経路」「NHD の移行単位」「アプリ帯の

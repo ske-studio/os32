@@ -243,4 +243,4 @@ CRCだけの追加とmtime API追加で、必要なビルド・ABI確認を分�
 残る設計判断は、(1) H2の電源断復旧をどこまで保証するか、(2) 時刻有効性を将来のstat拡張へいつ載せるか、(3) manifestと世代ディレクトリの形式・保存先、(4) CRCコアの共通ビルド配置と測定後の表サイズ。
 これらが未確定でもH1の同サイズ比較の実装範囲は切り出せる。
 
-関連: [ファイルシステム仕様](../../06_filesystem.md)、[配備経路](../../08_build.md#配備3経路)、[デバッグ教訓](../../POLICY_DEBUG.md)、[設定保護](../settings/S0_FOUNDATION.md)、[hsync保護試験](../../../tools/tests/test_hsync_protect.py)。
+関連: [ファイルシステム仕様](../../06_filesystem.md)、[配備経路](../../08_build.md#配備3経路)、[デバッグ教訓](../../POLICY_DEBUG.md)、[設定保護](../../archive/settings/S0_FOUNDATION.md)、[hsync保護試験](../../../tools/tests/test_hsync_protect.py)。

@@ -5,7 +5,7 @@
 設計提案・独立レビュー R0 待ち／実装未承認。
 本票は現行仕様や試験合格の宣言ではない。作成時の `feat/gui` HEAD は
 `8b5642f`。既存 dirty の F1 DB 所有管理・F2a FD lease を含む作業ツリーを静的に照合した。
-参照: [S0_FOUNDATION.md](S0_FOUNDATION.md)、[F2_OWNERSHIP.md](F2_OWNERSHIP.md) §6。
+参照: [S0_FOUNDATION.md](../../archive/settings/S0_FOUNDATION.md)、[F2_OWNERSHIP.md](F2_OWNERSHIP.md) §6。
 F2 の「SQLite 内部 fault は通常 cleanup で回復できない」という停止条件を具体化する。
 
 ## 1. 範囲・禁止事項

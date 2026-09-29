@@ -3,7 +3,7 @@
 > 発行: PM (2026-09-09) / 状態: **完了記録 (2026-09-10)**
 
 ホスト実装・独立レビュー通過、ゲスト未受入。
-親: [TASK_T5A_APP.md](../../tasks/gui/v13/TASK_T5A_APP.md)。原報告 `/tmp/os32-v13-t5a-review-final.txt`。
+親: [TASK_T5A_APP.md](../gui_v13/TASK_T5A_APP.md)。原報告 `/tmp/os32-v13-t5a-review-final.txt`。
 
 ## PM確認済み
 

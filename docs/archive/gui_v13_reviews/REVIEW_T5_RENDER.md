@@ -3,7 +3,7 @@
 > 発行: PM (2026-09-09) / 状態: **完了記録 (2026-09-10)**
 
 再実装後のT5Rホストアダプタを受入済み。初回の手順未達は下記のとおり保持する。
-親: [TASK_T5_RENDER.md](../../tasks/gui/v13/TASK_T5_RENDER.md)。
+親: [TASK_T5_RENDER.md](../gui_v13/TASK_T5_RENDER.md)。
 初回独立レビュー: `/tmp/os32-v13-t5-render-review.txt`。
 
 PM再実行でhost21試験/check/fmt成功。独立レビューは機能上の反例未検出。

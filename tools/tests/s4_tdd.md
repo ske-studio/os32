@@ -1,7 +1,7 @@
 # S4-W — gshell の設定レジストリ消費と設定ダイアログのホスト TDD 記録
 
 票: [`docs/archive/settings/TASK_S4.md`](../../docs/archive/settings/TASK_S4.md) 第 4 版 §0 の **S4-W**。
-契約の正典は [`S0_FOUNDATION.md`](../../docs/tasks/settings/S0_FOUNDATION.md) §2、
+契約の正典は [`S0_FOUNDATION.md`](../../docs/archive/settings/S0_FOUNDATION.md) §2、
 [`DESIGN.md`](../../docs/tasks/settings/DESIGN.md) §3〜§5、
 API は [`TASK_S2.md`](../../docs/archive/settings/TASK_S2.md) §1 と `userland/lib/cfg/libos32cfg.h`。
 

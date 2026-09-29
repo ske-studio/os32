@@ -1,7 +1,7 @@
 # エージェント運用体制 — 役割と起動
 
 状態: **現行 (2026-09-09 発効、2026-09-14 に v1.4 の分担を追加 = §0)**。このファイルは**今の体制だけ**を書く。
-過去の体制変更の経緯は [RETROSPECTIVE_2026-09-09.md](RETROSPECTIVE_2026-09-09.md) にあり、
+過去の体制変更の経緯は [RETROSPECTIVE_2026-09-09.md](../../archive/agents/RETROSPECTIVE_2026-09-09.md) にあり、
 このファイルからは辿らせない (入口を履歴で太らせないため)。
 
 ## 0. 実装体制 (2026-09-14 更新)
@@ -10,7 +10,7 @@
 > - **レビューの確認の基準**: P3 だけの直しには確認のレビューを回さない — PM が差分を読んで着地する。P1・P2 の直しの確認は、**前回と同じレビュアーに差分だけ**を見せる (新しく全体を読ませない)。
 > - **検査の段**: コーダーは作業中 `make check-fast` (変異なし) と `make check-changed` (変えた所の変異だけ) を回す。**完了報告の条件は `make check-changed` の rc=0**。
 >   PM は着地 (feat/gui への取り込み) のときに `make all` と **`make check` (全部) を 1 回だけ**流し、rc を読んでから push する。
-> - 測定と背景は [TASK_CHECK_MUT_PARALLEL](../tools/TASK_CHECK_MUT_PARALLEL.md)・docs/08_build.md。段のターゲットができるまでは従来どおり `make check`。
+> - 測定と背景は [TASK_CHECK_MUT_PARALLEL](../../archive/tools/TASK_CHECK_MUT_PARALLEL.md)・docs/08_build.md。段のターゲットができるまでは従来どおり `make check`。
 >
 > **2026-09-26 のユーザー指示**: Codex のレビューが日曜 (2026-09-27) の朝まで止まる見込み。**Codex にはレビューの冒頭でモデル名を名乗らせ** (出力の `model:` 行でも確かめる)、**`astra` (gpt-6-astra) でなければ、以後そのセッションでは Codex をレビュアーから外す** (休ませる)。その間の**レビューの代行は Fable 5.1 サブエージェント** (`Agent(model: "fable")`、読むだけ、コーダーの報告は渡さず独立に読ませる)。コーダーの割り当て (重大な指摘を含む修正は Fable、それ以外は Opus) は変えない。
 >

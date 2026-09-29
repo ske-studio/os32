@@ -3,7 +3,7 @@
 > 発行: PM (2026-09-09) / 状態: **完了記録 (2026-09-10)**
 
 静的接続の主要疑問を解消・描画アダプタ先行の方針確定。
-親: [TASK_T5_DISPLAY.md](../../tasks/gui/v13/TASK_T5_DISPLAY.md)。独立調査: claude-opus-5。
+親: [TASK_T5_DISPLAY.md](../gui_v13/TASK_T5_DISPLAY.md)。独立調査: claude-opus-5。
 原報告: `/tmp/os32-v13-t5-gates.txt`（一時ファイル）。
 
 ## コードと照合した確定事項

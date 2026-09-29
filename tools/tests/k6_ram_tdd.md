@@ -1,6 +1,6 @@
 # K6-RAM: 物理 RAM の人為的な上限 (16MB) の撤廃 — ホスト TDD 記録
 
-票: `docs/tasks/gui/v13/TASK_K6_ram_ceiling.md` (2026-09-11)。
+票: `docs/archive/gui_v13/TASK_K6_ram_ceiling.md` (2026-09-11)。
 ゲスト検証 (受入 M1〜M5) は PM / テスターの担当で、ここに記録があるのはホスト試験だけ。
 
 ## 実行した RED → GREEN
