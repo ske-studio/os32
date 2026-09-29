@@ -38,6 +38,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | 試験の一覧 (`make check` のターゲット、`_tdd.md` と票の対応) | [TESTS.md](TESTS.md) (`tools/gen_tests_inventory.py` で生成、`make check-tests-inventory` が鮮度を照合) | 各票は自分の `_tdd.md` を指すだけ |
 | 移植性 (CPU / 機種の 2 軸、ARM 計測、順序 1〜4 の経過) | [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) (計測と経過)、[../arch/README.md](../arch/README.md) (足し方) | [tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) (調査)、`tasks/arch_port/` は**別リポジトリ `pw-sh4-research` の調査の快照** (正典はそちら。本リポジトリでは更新しない)、[tasks/portability/TASK_KSTRING_BENCH.md](tasks/portability/TASK_KSTRING_BENCH.md) (kstring の速度実測 **完了 2026-09-17** — x86 は asm 維持、C 版は他 32 ビットアーキ向け。数字は ARM_GAUGE §9、語長の前提は §10) |
 | 版数 (カーネル 2.0 / GUI 1.x / 次期 v3 / v4 草案) | [ROADMAP.md §0](ROADMAP.md) | CHANGELOG.md、`ver` の文字列、タグ |
+| 実機 Ra266 の画面ドライバ (内蔵 Trident 1023:9660) の設計・資料・段取り | [tasks/realhw/TASK_TRIDENT_DRIVER.md](tasks/realhw/TASK_TRIDENT_DRIVER.md) | [tasks/realhw/PLAN.md](tasks/realhw/PLAN.md) §7、[tasks/realhw/TASK_PEGC480_REALHW.md](tasks/realhw/TASK_PEGC480_REALHW.md) §6、[ROADMAP.md](ROADMAP.md) (1 行) |
 | 現行 / 未実装 / 過去 の区別 | 各文書の冒頭に「現行仕様」「計画」「YYYY-MM-DD 時点のスナップショット」を明記 | — |
 
 ## カーネル技術仕様書 (§1-§10)
@@ -140,6 +141,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/gui/TASK_EDIT_GUI.md](tasks/gui/TASK_EDIT_GUI.md) | テキストエディタの GUI 版 **計画 (2026-09-17)** — v1.4 の最後の受入試験。アプリを増やすのが目的ではなく **API の退行検出を兼ねる**。中心は**複数行の編集部品** (既存の textbox は 1 行しか扱えない)。libos32gui / 設定 / Host Services を通しで使う |
 | [tasks/v3/PLAN.md](tasks/v3/PLAN.md) | **v3 の計画 (2026-09-17)** — 機能を足す前に入れ物を作り直す。順序は C11 → メモリマップ再配置 → **ドライバの動的読み込み** → PCI → Intel 82557。カーネルは 433.6KB で残り 34.4KB しかなく、静的リンクのままでは積めない。アプリへの払い出しの見直しは §4。**アイデア (計画ではない) は §5** — ネットワーク越しの仮想メモリ、**V86 の装置要求をホストへ逃がす** (86 ボードを実機に用意せず互換性を出す)、EMS をネットワークへ、レガシー VRAM をホストへ転送 (実機に画面を取る手段が無い穴を埋める) |
 | [tasks/realhw/PLAN.md](tasks/realhw/PLAN.md) | 実機 PC-9821Ra266 で動かす計画 **計画 (2026-09-17、着手は v3)** — 8GB ディスクは CHS 専用ドライバで未検証、FD 1.2MB と CD は実装済み、**ホスト側にシリアルの実装が無いのが最大の穴**、LAN は C バスの LGY-98 が最短、PCI と Trident は v3 |
+| [tasks/realhw/TASK_TRIDENT_DRIVER.md](tasks/realhw/TASK_TRIDENT_DRIVER.md) | **実機 Ra266 の内蔵 Trident (1023:9660) ドライバ 調査・設計票 v4 (2026-09-29、実装なし、Codex 3 回目の所見・ユーザー決裁 T8/T9・段 0 の実測・X.Org xf86-video-trident の PC-9821 コードの調査 §3-6 を反映)** — ユーザー決定「Cirrus はエミュレータ用、実機は Trident」。GDC の 480 ライン切り替えを使わずに桁ずれを回避しうる経路。**レジスタ資料が docs/hw に無い**、VGA ポートの置き場所と映像の切り替えは資料に記述なし (3C0h 系は 640KB FDD・GP-IB の部分デコードに当たる)。段 0 実測: Command I/O- Mem+ (I/O 経路は閉じている)。段 1 は出典付き許可リストの読み取りだけ (空なら 0 件で停止)、段 2 は映像を 98 側へ戻す経路 (§3-5) と窓の予約・写像 (§4-2) が揃うまで禁止、探索試験は段 2-X (承認済み)、KAPI 変更なし (8bpp) |
 | [tasks/v3/TASK_MEMMAP_V3.md](tasks/v3/TASK_MEMMAP_V3.md) | **カーネル帯の切り直し** (ページ表を画像の外へ +48KB、カーネル帯 2MB 案。KHEAP 192KB は着地済み、2026-09-23) |
 | [tasks/v3/TASK_PCM_CS4231.md](tasks/v3/TASK_PCM_CS4231.md) | **CS4231 (MATE-X PCM) の PCM 再生ドライバ** (§5-5 P1、設計 v1、2026-09-23)。NP21/W で開発できる。ini の SNDboard は [D2] |
 | [tasks/memory/TASK_KAPI_OUTPUT_GUARD.md](tasks/memory/TASK_KAPI_OUTPUT_GUARD.md) | **出力ポインタを受ける既存 KAPI 43 本が RO ページに書ける** (CR0.WP=0、Codex 往復 10 で発見、2026-09-23)。設計済み、着手は TASK_HAL_WIRING 実装 A の着地後。**POLICY_DEV §1 で新機能より先** |

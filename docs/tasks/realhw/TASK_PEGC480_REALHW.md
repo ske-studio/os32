@@ -173,5 +173,5 @@ uPD7220 のステータス (60h / A0h の READ) の FIFO FULL が落ちるのを
 
 ## 6. しないこと
 
-- Trident (TGUI9682) のドライバは作らない (PLAN §7 のまま)。
+- ~~Trident (TGUI9682) のドライバは作らない (PLAN §7 のまま)。~~ → 2026-09-29 のユーザー決定で着手 (調査・設計は [TASK_TRIDENT_DRIVER.md](TASK_TRIDENT_DRIVER.md))。この票 (PEGC の直し) は続けるかどうかを同票 §7 T1 で決める。
 - 液晶の型番ごとの対処はしない。PC-98 の信号を BIOS と同じにするところまで。
