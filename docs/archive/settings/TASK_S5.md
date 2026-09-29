@@ -84,3 +84,36 @@ Codex (枯渇時は Fable 5.1 サブエージェント、ROLES §5) に S5-C (`c
     (`[Remote shell closed]` を tvram で確かめる)。台本側で直すなら、先頭の ESC と `status()` の `scrn_ymax == --h` かつ
     `grph_disp == 1` の照合を合否に入れる案 (道具の変更 = 別作業、未着手)。Cirrus 側は `[pci] 0 devices`・ini の
     USEGD5430 の有無を未確認で、有効化が要るなら ini の変更 = [D2] の承認事項。
+- **R2 (Cirrus、2026-09-29 夕、テスター Opus 5.5、観測のみ)**: feat/gui `44bd0fe1` (A2: 窓の可否を物理地図で・リニア窓を
+  FE000000h・auto は `np2_detect()` が真のときだけ Xe10 の ID を読む) を NP21/W `np21x64w-cirrus.ini`
+  (USEGD5430=true, GD5430TYPE=91。PM 作成、テスターは無変更) で確認した。
+  - **配備**: `np21w_ctl stop` → `make nhd-pull` → `make deploy-kernel` (rc=0、`Done! (199.9 MB copied)`) →
+    `np21w_ctl start --ini np21x64w-cirrus.ini --wait-ready` → `make deploy` (rc=0) → ゲストで `hsync sys`
+    (copied=0 errors=0) と `hsync` (copied=2 errors=0)。反映: `ver` = `Commit: 44bd0fe`・`API: v68`・Image 463,928 B、
+    `ls -l /boot/vmkernel.lz4` = 463,928 B = 手元 `build/out/vmkernel.lz4`。kselftest (新 map `0x169ae0`) = pass 242 / fail 0。
+  - **auto の probe** (`/etc/system.cfg` = `GUI=0` のみ、GFX 行なし): `hal_test` 1 行目 = **`backend cirrus (packed 8bpp)`**、
+    `screen 640x480 bpp=8`。`/api/mem` (新 `kernel.elf` の nm): cirrus `s_probed` = 1・`s_probe_ok` = 1、pegc `s_probed` = 0・
+    `s_probe_ok` = 0 (cirrus が先に通り PEGC は試されていない)、`sys_top_reserved` = 0 (予約するのは PEGC だけ — 期待どおり)。
+    実行中の `s_lin` = **0xFE000000**・`s_lin_pages` = 0x200 (2MB)。A2 の症状 (probe が ID 判定の前に 0) は消えた。
+  - **gui_gate (--h 480)**: 道具そのままの `gui_gate.py v11` は **NG** — 入口の `gui_entered()` が 98 の GDC
+    (`scrn_ymax 400`・`grph_disp 0`) しか見ず、Cirrus の GUI は WAB 中継 (`/api/status` の `wab_relay 1`・`wab_height 480`)
+    なので、gshell に入っているのに NG と判定し、`back_to_cui` が `grph_disp == 0` の枝で `rshell` を **gshell に打ち込んだ**
+    (ゲストは GUI に残り、`leave_gshell(Mouse(480))` で手で戻した。害は無し)。§4-31 の `back_to_cui` の説明
+    (「高さ違いでも `grph_disp == 1`」) は Cirrus には当たらない。**道具の修正は別作業 (未着手)**。
+    台本は scratch の包み (道具は無変更、`status()` に `wab_*` を足し、`gui_entered()` に「`wab_relay == 1` かつ
+    `wab_height == h`」を足し、撮影を src=auto / src=wab の両方にしただけ) で回した:
+
+    | 台本 | 結果 | 画像で確かめたこと |
+    |---|---|---|
+    | `v11` | RESULT OK、最後の `wab_relay` = 0 | gui_demo 2 窓・XOR 枠のドラッグ・重なり・Help の前面化・チェックボックス / OK の配送 (`OK pressed!`)・× で閉じる |
+    | `v12g1` | RESULT OK、CUI back ok | タスクバー・Start (6 項目)・Programs・右クリックのメニュー・窓ボタンで前面化・時計 17:28 → 17:29 |
+    | `v12g4` (halt なし) | RESULT OK、`system.cfg: GUI=0` | Run... で v12_api_test 起動・key 4 で gui_demo 起動・CUI mode の確認ダイアログ (日本語) → Yes |
+
+    撮影 19 手 × 2: src=auto も src=wab も **`X-Screen-Source: wab`・640x480**、auto と wab の画素は全枚一致。
+    描画は FE000000h の窓経由 (present は `s_lin` へ書く) で、画面が正しく出ていることを画像で確認した。
+    `fault_kill_count` = 0、`fault_generation` = 0、kselftest fail = 0 (台本後)。
+  - 観察 (不具合とは判定しない): `v12g4` の「Run... again while demo runs -> v12_api_test **replaces** it」は、実際には
+    gui_demo を残したまま v12_api_test が**並んで**起動する (タスクバーに Widgets / Help / v12 api tes)。台本の文言が
+    多重アプリ (G7) 以前のもの。9801 で同じかは今回見ていない。
+  - 終了時: ゲストは CUI + rshell、`/etc/system.cfg` = `GUI=0` のみ (GFX 行なし = auto)。NP21/W は `np21x64w-cirrus.ini` のまま稼働。
+  - 未実施: PEGC 構成での R2 (台本の入口を直した後の再測)、`v12g4 --halt`、S4 の G2 (Settings で色変更) の Cirrus 版。
