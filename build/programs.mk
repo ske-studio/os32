@@ -410,7 +410,7 @@ userland/tests/cfg_bench.elf: sdk/link/app.ld $(CRT0_OBJ) userland/tests/cfg_ben
 	      $(LGRP_BEG) $(LIBCFG_OBJ) $(LGRP_END) -lc -lgcc
 
 # kstr_bench — kstring のアセンブリ版と C 版を実機で測る
-# (票 docs/tasks/portability/TASK_KSTRING_BENCH.md)。
+# (票 docs/archive/portability/TASK_KSTRING_BENCH.md)。
 #
 # **出荷するソースそのもの**を測る。写しは作らない。lib/kstring_asm.asm と
 # lib/kstring_c.c は 13 本すべてが同名なので 1 つの実行ファイルに入らない。

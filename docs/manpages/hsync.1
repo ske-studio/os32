@@ -45,7 +45,7 @@ reason=other_mount`)。
 用途は**実機の更新**: 新しいカーネルの FD で起動し (HDD は `/hd0` に自動でマウント
 される)、シリアル越しの `/host` (SerialFS、`sfs run`) から HDD を更新して、HDD から
 起動し直す。HDD にある古いカーネル (KAPI v65 以前) は SerialFS を持たないので、
-新しいカーネルは FD から運ぶ (docs/tasks/realhw/TASK_SERIAL_HOSTFS.md「FD 起動から
+新しいカーネルは FD から運ぶ (docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md「FD 起動から
 HDD を更新する」)。NP21/W でも FD 起動 + HostDrv の `/host` で同じ形を試せる。
 
 **`<根>` の門** — どれか 1 つでも当たれば**1 件も書かずに**非ゼロ終了する
@@ -547,6 +547,6 @@ sfs run hsync --root /hd0 --no-backup boot
 install, ls, ver, cfg
 
 設計と段階分け: `docs/tasks/shell/HSYNC_IMPROVEMENT_PLAN.md`
-日時を前置フィルタにした決裁: `docs/tasks/shell/TASK_H3.md` §8
-一時ファイル + 検証 + 置換の決裁: `docs/tasks/shell/TASK_H2.md` §2-2 / §2-3 / §2-4
+日時を前置フィルタにした決裁: `docs/archive/shell/TASK_H3.md` §8
+一時ファイル + 検証 + 置換の決裁: `docs/archive/shell/TASK_H2.md` §2-2 / §2-3 / §2-4
 `O_EXCL` と rename の置き換えの契約: `docs/06_filesystem.md` §6-1

@@ -89,7 +89,7 @@ check-kapi-version:
 	@python3 tools/check_kapi_version.py
 
 # KAPI の出力ポインタ宣言 (sdk/kapi.json の "out") と、そこから生成される
-# 書き込み可検査 (票 docs/tasks/memory/TASK_KAPI_OUTPUT_GUARD.md 受入 G1)。
+# 書き込み可検査 (票 docs/archive/kernel_v21/TASK_KAPI_OUTPUT_GUARD.md 受入 G1)。
 # 見るのは 2 つ: **非 const のポインタ引数があるのに "out" が無いエントリで
 # 生成が落ちること** (書き忘れがそのまま穴になるため) と、len / size / unit の
 # 解釈と検査順 (**全範囲を検査してから target を呼ぶ**)。合成した kapi.json を
@@ -150,7 +150,7 @@ check-t5a-host:
 	cargo test --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline
 
 # K5a (4 アプリ、契約 T2a) の設計をホストの純粋状態機械で固定したもの。カーネル実装の
-# 正しさは何も言わない (実装は K5b)。docs/tasks/gui/v13/TASK_K5_multiapp.md §設計。
+# 正しさは何も言わない (実装は K5b)。docs/archive/gui_v13/TASK_K5_multiapp.md §設計。
 check-multiapp-model-host:
 	python3 -B tools/tests/test_multiapp_model.py
 	python3 -B tools/tests/test_multiapp_impl.py
@@ -167,7 +167,7 @@ check-memory-host:
 	python3 -B tools/tests/test_device_reservation.py
 	python3 -B tools/tests/test_sbrk_tier.py
 
-# 記録: tools/tests/memmap_tdd.md (票 docs/tasks/memory/TASK_KSTACK_USER.md)
+# 記録: tools/tests/memmap_tdd.md (票 docs/archive/kernel_v21/TASK_KSTACK_USER.md)
 #
 #   check-memmap       実ツリーの地図を検査する。帯どうしの重なり・範囲の逆転・
 #                      カーネル本体の予算超過・memmap.h の値を写している場所
@@ -625,7 +625,7 @@ check-sh-launch-host:
 check-sh-shell-host:
 	python3 -B tools/tests/test_sh_shell.py
 
-# シェルが入力を黙って切り詰める経路 (票 docs/tasks/shell/TASK_SH_TRUNCATION.md)。
+# シェルが入力を黙って切り詰める経路 (票 docs/archive/shell/TASK_SH_TRUNCATION.md)。
 # tools/tests/sh_truncation_host.c が userland/shell/main.c を丸ごと #include し、
 # **登録表も execute_command も実物のまま**回す (sh_shell_host.c は
 # execute_command をスタブにしているのでこの経路を試験できない)。
@@ -635,7 +635,7 @@ check-sh-shell-host:
 check-sh-truncation-host:
 	python3 -B tools/tests/test_sh_truncation.py
 
-# 終了コードの配線と `$?` (票 docs/tasks/shell/TASK_EXIT_STATUS.md)。
+# 終了コードの配線と `$?` (票 docs/archive/shell/TASK_EXIT_STATUS.md)。
 # tools/tests/sh_status_host.c が userland/shell/main.c を丸ごと #include し、
 # **登録表も execute_command も実物のまま**回す (受入 R2)。同じ 1 本を
 # **2 通り** — 常駐 (exec_run + exec_last_result、KAPI v55) と
@@ -661,7 +661,7 @@ check-settings-protect-host:
 check-hsync-h1-host:
 	python3 -B tools/tests/test_hsync_h1.py --target
 
-# hsync の mtime 取得・保存と日時の前置判定 (票 H3、docs/tasks/shell/TASK_H3.md
+# hsync の mtime 取得・保存と日時の前置判定 (票 H3、docs/archive/shell/TASK_H3.md
 # §6 / §8)。H1 と同じく実物の userland/system/hsync.c を #include し、贋 FS に
 # **ノードごとの mtime** と sys_set_mtime (成功 / NOSYS / I/O 失敗) を持たせて回す。
 # FILETIME (1601 起点・100ns) -> Unix 秒の境界 (A16) は fs/hostdrv_stat_rules.inc の
@@ -681,7 +681,7 @@ check-hsync-h3-host:
 check-vfs-excl-host:
 	python3 -B tools/tests/test_vfs_excl.py --target $(MUT)
 
-# 配備マニフェストと世代の確認 (票 H4、docs/tasks/shell/TASK_H4.md §2-1〜§2-3)。
+# 配備マニフェストと世代の確認 (票 H4、docs/archive/shell/TASK_H4.md §2-1〜§2-3)。
 # **読む側**は H1 / H2 / H3 と同じく実物の userland/system/hsync.c を #include し、
 # 贋 FS の /host/.deploy/manifest.txt に票が挙げた壊し方を注入して回す。
 # 名札が無い配備元が今までどおり動くこと、壊れた名札を捨てること、断るのが
@@ -699,7 +699,7 @@ check-h4-manifest-host:
 	python3 -B tools/tests/test_h4_manifest.py --target $(MUT)
 	python3 -B tools/tests/test_hostdrv_manifest.py $(MUT)
 
-# KAPI データ欄の固定配置と OS32X ヘッダ v3 (票 docs/tasks/memory/TASK_KAPI_DATA_FIELDS.md)。
+# KAPI データ欄の固定配置と OS32X ヘッダ v3 (票 docs/archive/kernel_v21/TASK_KAPI_DATA_FIELDS.md)。
 # exec / shlib ローダ / 常駐シェルの判定関数 (exec/os32x_hdr.c を
 # tools/tests/os32x_layout_host.c が #include)、gen_kapi.py の容量拒否、
 # mkos32x.py / mkshlib.py のヘッダ v3 (値 = ELF の .os32_kapi_layout、刻印が
@@ -709,7 +709,7 @@ check-h4-manifest-host:
 check-kapi-layout-host:
 	python3 -B tools/tests/test_kapi_layout.py $(MUT)
 
-# hsync の置換安全化 (票 H2、docs/tasks/shell/TASK_H2.md §2-3 / §2-4)。H1 / H3 と
+# hsync の置換安全化 (票 H2、docs/archive/shell/TASK_H2.md §2-3 / §2-4)。H1 / H3 と
 # 同じく実物の userland/system/hsync.c を #include し、贋 FS に O_EXCL /
 # sys_rename (公開の前に失敗 / 公開の後に失敗 / 判定不能) / ROFS / st_nlink /
 # api->version を持たせて回す。公開の判定が **st_ino** であること、NOSYS で
@@ -856,7 +856,7 @@ check-gui-host:
 check-host-lib-host:
 	python3 -B tools/tests/test_host_lib.py --target
 
-# 試験プログラムの合否を機械が読める形にする約束事 (票 docs/tasks/test/
+# 試験プログラムの合否を機械が読める形にする約束事 (票 docs/archive/test/
 # TASK_TEST_RESULT.md §2 / §11)。終了コード (0 / 1 / 2、予約値 126/127/130/139 は
 # 返さない) と最終行の集計行 `<名前>: PASS <n>/<m>` が**必ず一致する**ことと、
 # その集計行が **fd 1 に出る**ことを固定する。実物の userland/lib/rt/testresult.h
@@ -873,7 +873,7 @@ check-host-lib-host:
 check-result-conv-host:
 	python3 -B tools/tests/test_result_conv.py --target $(MUT)
 
-# ゲストで一括実行してホストで集計するランナー (票 docs/tasks/test/
+# ゲストで一括実行してホストで集計するランナー (票 docs/archive/test/
 # TASK_TEST_RUNNER.md)。**2 つのターゲットは別物なので混ぜないこと。**
 #
 #   check-guest-host  ランナーの**ホスト試験** (受入 R7)。NP21/W に触らない。
@@ -909,7 +909,7 @@ check-kstring-c-host:
 	python3 -B tools/tests/test_kstring_c.py $(MUT)
 
 # kstring の実測プログラム kstr_bench の**計測の枠組み** (票
-# docs/tasks/portability/TASK_KSTRING_BENCH.md)。実物の
+# docs/archive/portability/TASK_KSTRING_BENCH.md)。実物の
 # userland/tests/kstr_bench.c を 1 行も写さず #include し、KernelAPI
 # (get_tick / sys_write / sys_yield) と測られる 13 本だけを贋物にして回す。
 # 見るのは数字ではなく**数字の作り方**: 出力の固定書式、1 ケース 1MB 以上 →
@@ -983,7 +983,7 @@ check-packages-host:
 
 # check は 1 段 (2026-09-26 から)。変異試験は**一時ディレクトリの写しの木**に
 # 変異を当てる (tools/tests/mutpar.py の overlay / mutant_tree、票
-# docs/tasks/tools/TASK_CHECK_MUT_PARALLEL.md §5) ので、全部を並列に回せる。
+# docs/archive/tools/TASK_CHECK_MUT_PARALLEL.md §5) ので、全部を並列に回せる。
 # 以前は実物のソースを書き換えて戻す試験が 14 本あり、2 段目 check-mut を
 # 逐次 (-j1) で回していた (docs/POLICY_DEBUG.md §4-40・§4-41)。
 #
@@ -1044,7 +1044,7 @@ check-map:
 check-check-select-host:
 	python3 -B tools/tests/test_check_select.py $(MUT)
 
-# キー注入 (票 docs/tasks/tools/TASK_KEY_INJECT.md)。**np21w-src の
+# キー注入 (票 docs/archive/tools/TASK_KEY_INJECT.md)。**np21w-src の
 # aidebug_keys.cpp を実物のまま g++ にリンクして**変換表を照合する
 # (エミュレータのソースはホストで試験できる)。np21w-src が無ければ SKIP。
 # 併せて tools/gui_gate.py の逃がし記法と、**既定で既存の送信バイト列が
