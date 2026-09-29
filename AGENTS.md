@@ -12,7 +12,7 @@ Use the WSL toolchain described in [INSTALL.md](INSTALL.md): i386-elf GCC, NASM,
 - `make kernel`: build the kernel and SQLite.
 - `make programs`: build userland programs.
 - `git submodule update --init` then `make external`: initialize and build apps and game.
-- `make check`: check KAPI versions, manifests, constraint IDs, and privileged instructions.
+- `make check-fast` / `make check-changed` / `make check`: host tests and repository checks (KAPI versions, manifests, constraint IDs, privileged instructions, docs links / orphans / status-line vocabulary) — without mutants / with mutants only for what you changed / with all mutants (before merging). Stages and times: [docs/08_build.md](docs/08_build.md) §8-4.
 - `make math_test`: build an individual guest test.
 
 Run images in NP21/W. Stop the emulator before `make deploy-kernel`, then restart it. See [docs/08_build.md](docs/08_build.md) for deployment details.
@@ -33,4 +33,4 @@ Use focused Conventional Commits, matching history: `fix(exec): ...`, `feat(depl
 
 ## Authoritative Guidance
 
-Read [CLAUDE.md](CLAUDE.md) for agent instructions and [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) for mandatory rules. Use [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) to navigate tasks. Update the authoritative document identified in [docs/INDEX.md](docs/INDEX.md), keeping summaries here brief. Never expose `.env` contents or commit the copyrighted `docs/hw/` mirror.
+Read [CLAUDE.md](CLAUDE.md) for agent instructions (current team roles: [docs/tasks/agents/ROLES.md](docs/tasks/agents/ROLES.md) §0) and [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) for mandatory rules. Use [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) to navigate tasks. Update the authoritative document identified in [docs/INDEX.md](docs/INDEX.md), keeping summaries here brief. Never expose `.env` contents or commit the copyrighted `docs/hw/` mirror.

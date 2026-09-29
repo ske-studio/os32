@@ -6,15 +6,20 @@ AI コーディングアシスタント共通の入口。**置くのは指示と
 
 ## 体制
 
-PM = Claude Code (**`claude-opus-5-5`**、2026-09-29 夕〜。同日昼の Sonnet 5.5 (取り次ぎのみ) から戻した)、コーダー = サブエージェント (worktree 隔離。**Codex が重大 (P1 / major) と判定した指摘を含む修正は Fable 5.1**、それ以外は **Opus 5.5**、2026-09-25〜)、
-レビュアー = **Codex だけ** (`codex exec -s read-only`、2026-09-25〜)。**3 ラリーで決着しない争点はユーザーへ**、テスター = ローカル AI (`tools/emu_agent/`、スキル `os32-local-ai`)。
-実装は基盤・アプリ層とも Claude Code (PM) がサブエージェントで行う (別エージェント案は撤回。ROLES §0)。
-役割の境界・起動コマンド・規約の正典は [`docs/tasks/agents/ROLES.md`](docs/tasks/agents/ROLES.md)。
+**現行の体制の正典は [`docs/tasks/agents/ROLES.md`](docs/tasks/agents/ROLES.md) §0** (1 表。ここは要約)。
+PM = Claude Code (**`claude-opus-5-5`**、2026-09-29 夕〜)、コーダー = サブエージェント (worktree 隔離。既定 **Opus 5.5**、
+**Codex が重大 (P1 / major) と判定した指摘を含む修正は Fable 5.1**)、レビュアー = **Codex だけ** (`codex exec -s read-only`。
+モデルを名乗らせ、**astra でなければそのセッションは休ませて Fable 5.1 が代行**)、**ドライバ設計のレビューは必ず Codex と突き合わせる**。
+テスター = ローカル AI (`tools/emu_agent/`、スキル `os32-local-ai`)。コーダーの完了条件は `make check-changed` の rc=0、
+PM は着地で `make all` + `make check` を 1 回。**PM の推奨は基本的に承認、[D2] と実機の物理操作は個別承認**。
+**3 ラリーで決着しない争点はユーザーへ**。
+**現行の開発は v3** (本案確定後は別リポジトリ os32-v3 へ fork)。このリポジトリの v2.x (タグ `v2.1`、`main`) は戻り先 —
+新機能は入れない ([`docs/ROADMAP.md`](docs/ROADMAP.md) §0-1)。
 **カーネル層 (カーネル本体・VFS/FS・exec/ページング・KAPI・shlib 読み込み) に分かっている不具合が
 あるあいだは、新機能より先に直す** — 理由と適用の仕方は
 [`docs/POLICY_DEV.md`](docs/POLICY_DEV.md) §1。
 承認済みスコープの中では止まらずに進め、止まるのは [D1]〜[D3] の承認・仕様の分岐・スコープ拡大・
-**独立レビューが要る地点** の 4 つだけ。レビューは PM が代行せず、ROLES §5 の書式で報告して渡す。
+**独立レビューが要る地点** の 4 つだけ。レビューは PM が代行せず、ROLES §5 の書式で依頼する。
 
 ## Project Overview
 
@@ -30,7 +35,7 @@ Which build and which verification a change actually needs: skill **`os32-build-
 ```bash
 make all / kernel / programs              # build (SDK and images come with `all`)
 make external                             # apps/ + game/ — after any KAPI or SDK library change
-make check-fast / check-changed / check   # no mutants (約 35 秒) / mutants only for what you changed / all mutants (約 2〜3 分, before merging)
+make check-fast / check-changed / check   # no mutants / mutants only for what you changed / all mutants (before merging) — times: docs/08_build.md §8-4
 make clean                                # required after a KAPI struct change ([ABI3])
 make deploy                               # HostDrv (C:\os32) — no reboot, not verification ([V1])
 # userland delivery: make deploy (host -> C:\os32) then `hsync` in the guest
@@ -90,6 +95,7 @@ waits for the image locks to clear before starting; a hand-typed `taskkill` → 
 | `0x300000–0x4FFFFF` | Resident shell (two heaps: newlib sbrk, exec_heap at 0x380000), then the shared-library band — `libos32gui.shlib` `.text` is shared across PDs, `.data`/`.bss` per app |
 | `0x500000–` | External programs: code+bss → sbrk → guard → exec_heap → stack |
 | top (256KB+) | Hot-deploy staging, carved out by `sys_usable_mem_end()`; a PEGC/Cirrus 8bpp backbuffer adds ~300KB below it via `sys_reserve_top()`. exec and pgalloc must avoid the whole reservation |
+| `0xFE000000–0xFEFFFFFF` | Device-window band (v3 layout, landed in v2.1): the Cirrus linear window lives here; the PT for the first 4MB of the band is static. Decide device windows from the physical map, never the RAM ceiling |
 
 **Subsystem map** — which file does what and which spec section covers it:
 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) §2; the task-to-entry-point table is §1.
@@ -120,88 +126,40 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 
 ## ⚠️ Known Gotchas
 
-短い注意だけ。症状・経緯・検証はリンク先の節にある (§ 番号だけの行は [`docs/POLICY_DEBUG.md`](docs/POLICY_DEBUG.md))。
+1 行ずつ。症状・経緯・検証はリンク先 (§ 番号だけのものは [`docs/POLICY_DEBUG.md`](docs/POLICY_DEBUG.md))。
 
-- Boot-time kselftest: read `kselftest_pass` / `kselftest_fail` at the **new** `kernel.map` address, and
-  add a case whenever you touch a kstring / kmalloc / kprintf primitive. → §2
-- Fonts: bake with `tools/gen_font16.py` (baseline-anchored, never shrink vertically, judge at 1x). → §4-10
-- Kanji in external programs: call `utf8_set_jis_table_ready(1)` yourself, but only after checking a few
-  known Unicode→JIS pairs — otherwise every kanji renders as □. → §4-11
-- Binaries missing from `deploy.yaml` go stale on the NHD and can hang rshell ([V2]); `make deploy*` prunes
-  them via `tools/prune_stale.py` (`NO_PRUNE=1` lists only). → §4-12
-- SQLite pool exhaustion shows up as `-2` from `db_query`; always print `db_last_error()` (it returned a kernel pointer and killed CPL=3 apps until 2026-09-17). → §4-13
-- `mui_pump_input()` eats the keyboard queue; apps reading keys themselves pass the char via `mui_pump_input_ch()`. → §4-14
-- Resource ownership on exit: owner tags, protected FDs, `exec_heap_restore_state`. → §4-15, `docs/10_notes.md` §10-9
-- The shell has two heaps, so `kernel/paging.c` must keep 0x380000–0x3FFFFF present. → §4-16
-- NHD work image is `build/nhd/os32.nhd` (auto-pulled when missing, NP21/W stopped). Do not trust a
-  「配備完了」 line — confirm with kselftest or the `os32-cycle deploy` size check. → §4-17
-- The text GDC cursor is controlled only by CSRFORM's DC bit (`console_hw_cursor_enable()` / `_sync()`). → §4-18
-- CPL=3 KAPI calls run with IF=1; a `hlt`-waiting wrap hanging with `tick_count` frozen means the
-  `sti`/`cli` pair in `int80_stub` broke — the exit must stay IF=0. → §4-19
-- GUI internals: `libos32gfx_attach()` (never `gfx_init`), the Cirrus window is mapped once, gshell X4 leaves WM-owned button edges alone. → §4-20〜§4-22
-- GUI verification on NP21/W: `--data-urlencode` for `SHIFT+SPACE`, `/api/mouse` uses `ax/ay`, deploy
-  rewrites `system.cfg`. → §4-23
-- `ext2_g_aux` is the bitmap scratch buffer — never keep an indirect table or data there across a free/alloc
-  (files >12KB got cross-linked on overwrite until 2026-09-06). → §4-24
-- `mount(dev_id)` gets `(dev_type << 8) | unit` — check the type, or `fd0` opens `hd0`. → §4-30
-- "GUI feels slow" → measure first: read `gfx_counters` around the keystroke to see whether a present
-  happened at all, then sample `/api/status` `eip` to find where the CPU is. → §4-25
-- Never touch the FS from a `sys_ls` callback without a private buffer. → §4-26
-- Japanese text is 3 bytes per char and 2 columns wide; `char buf[64]` overflows easily, and truncation
-  must land on a UTF-8 boundary. → §4-27
-- シリアルの速度は 8253 の**整数分周**で決まる。既定 **9600** は 1.9968MHz / 2.4576MHz の
-  どちらでもちょうど出る唯一の標準速度。**38400 は 1.9968MHz で 41600bps に化ける** (+8.3%)。
-  クロックは `0000:0501h` bit7 で判定。`0434h` の 4 分周は**極性が未決着なので自動では触らない**。
-  **NP21/W は通信速度を模擬していない** — ここは「エミュレータで確認済み」が通用しない。 → §4-49、§4-50
-- フロッピーは 2 形式。既定は 2HD 1232KB、`make fd144` が 1.44MB の**生イメージ**を作る。
-  **1.44MB の IPL は 512 バイトしか読まれない**、spt=18 はシフトで割れない、ルートDirが SP に当たる、
-  FAT は 9 セクタ。D88 は `fd_type=0x21` + 全セクタ `rpm_flg=1` が要り未対応。 → §4-47、§4-48
-- FDC の時間上限は**機構の最悪値**から導く (シーク 8ms × 80 トラック、1 回転 200ms)。NP21/W はシーク時間を
-  模擬しないので「エミュレータで困らない 200ms」は実機で `root panic` になった (2026-09-22)。
-  **1MB 超への DMA は `0439h` bit2 (起動時 1 = 禁止) を落とさないと届かない** — これも NP21/W は見ない。 → §4-51
-- PIT の分周は**判定したクロック**で割る (`sysclk_detect()` → `pit_init`)。1.9968MHz 決め打ちだったころ、
-  2.4576MHz 系の実機は 100Hz のつもりで **123Hz (8.125ms)**、tick 由来の待ち・番犬・校正が全部 23% 速かった。
-  **NP21/W は 1.9968MHz なので踏めない**。 → §4-54
-- `kprintf` の属性は PC-98 流 (bit0 = 表示、bit5-7 = BRG) に**入口で変換**している。「画面に出ている」は
-  `/api/tvram` の文字ではなく `/api/screenshot` の**見た目**で確かめる (0x07 の行は 2026-09-22 まで黒かった)。 → §4-52
-- FDC の 0x94 は **FRY (bit6) を立てる**。無いと READY 線の無いドライブで全コマンドが Not Ready (NP21/W は通る)。 → §4-53
-- `io_wait()` (0x5F 書き) を**万単位で連打**すると、以後の FD 読みが古いデータを返して `/sys` が NOTFOUND になる (NP21/W、原因未特定)。待ちは `nop`。 → §4-55
-- ISR が書く状態を foreground で待つループは **`volatile` で読む** (PCM の close が期限まで回って毎回 IO になった)。`/api/mem` は `/api/cmd` の実行中は返らない。 → §4-56
-- キーボード 8251 のコマンド語は **BIOS の定常値 0x16** (DTR = 1 = RTY# HIGH)。0x14 は RTY# LOW = 再送要求で、
-  実機で打鍵が一切届かなかった (2026-09-23)。**NP21/W は DTR・RTS・RxE を見ない**。切り分けは `kbdstat`。 → §4-57
-- 0035h (8255 ポート C) は**全体で書かない** — RS-232C の割り込み許可 bit0-2 と BUZ (bit3、**0 = 鳴動**)・SHUT0/1 が同居。
-  許可は 0037h の BSR で 1 ビットずつ。BUZ は UNDOCUMENTED の向き (**07h = 停止**、Bible は逆)。NP21/W では鳴らなかった (理由未確認)。 → §4-59
-- Boot loaders: PM transition inlined in `loader_fat.asm`, `boot_fat.asm` is `.8086`; the HDD IPL (`boot_hdd.asm`) calls INT 1Bh 16 times (the old "at most 4" note no longer matches the source, cause of the limit unconfirmed). → [`docs/10_notes.md`](docs/10_notes.md) §10-2, §10-3
-- Physical 0x90000 is the auto-play mailbox: change the layout and `game/tools/autoplay/driver.py` in the same commit. → [`docs/02_memory.md`](docs/02_memory.md) §2-1
-- 9MB 構成の `v86 -t` は **2026-09-16 に再現しないことを確認** (原因は特定せず解消)。 → §4-28
-- 配備の成否は文言で判断しない。**ゲストの `ls -l /boot/vmkernel.lz4` と手元のサイズを
-  突き合わせる** ([V4])。コピー失敗自体は 2026-09-10 に非ゼロ終了へ直した。 → §4-29
-- `gui_gate.py` で GUI を叩くときは rshell を ESC で抜けてから `/api/key`、Start メニューの行は
-  `start_row()` (項目数から導く) を使う — 固定値は 1 行ずれて Shut Down に当たった。 → §4-31
-- `ext2_read_file` は端数ブロックを `to_copy` だけ写す (2026-09-11 まで 1KB 溢れていた)。FS の read が
-  要求長ちょうどしか書かないと仮定して小さな static バッファへ読まない。 → §4-32
-- `hsync` はサイズか日時が違うものだけ内容比較する。同サイズ・同日時で中身が違う差し替えだけ見逃す (`--verify` で全件比較)。置き換えは予約名 `.hs~<名前>` へ書いて検証してから `rename` する — **公開の前**に落ちれば旧内容が残り、**公開の後**に落ちれば新内容が現れて `replace_partial` になる (成功に数えない)。KAPI v53 未満のカーネルでは既定で断る (`--unsafe-overwrite` のときだけ直接上書き)。 → §4-36
-- `hsync` は HostDrv の内容で NHD を上書きする。NHD 配備の後は**先に `make deploy`**。 → §4-33
-- 保存の試験は**バイト列**で突き合わせる。行の中身だけ見ていたので、末尾の改行を空行と数えて
-  **開いて保存するたびに 1 バイト増える**のを見逃していた (穴 H16)。冪等も繰り返して見る。 → §4-46
-- アプリが `widget::set_focus()` で移したフォーカスも `on_widget_focus` で返る。捨てていたころは
-  **文字は入るのにカーソルキーだけが死んだ** (穴 H13)。通知のある API は入力経由と API 経由の両方を見る。 → §4-44
-- Host Services (クリップボード・印刷) は**ホスト側の常駐 `tools/host_agent.py` が要る**
-  (`--listen 127.0.0.1:8026`、承認不要)。`-100` = `HOST_ELINK`。初回 open は最大 3 秒待つので
-  クリック直後の画面には結果が出ない。**設定は ini ではなく `/api/net` に聞く** — ini を読んで
-  「LAN 未設定だから [D2] の承認が要る」と誤判断しかけた。 → §4-45
-- GUI アプリの窓が静かに出ない → **共有ライブラリが古い**。`hsync` は既定で `/sys` を外すので
-  `libos32gui` を変えたら **`hsync sys` + リセット**。例外 0 件で窓だけ出ないのが目印。 → §4-42
-- GUI アプリが窓も出さずに消えて **`fault_kill_count` だけ増える** (例外 0 件) → WM (gshell) はアプリの syscall の中で
-  走るので、KAPI の検査を `ring3_in_syscall` だけで「アプリ由来」と決めると **gshell 自身のポインタを弾いてアプリを kill** する。
-  門は `ring3_guard_active(ring3_in_syscall, ring3_wm_depth)` で判定する。→ §4-61
-- ビルドは既定で `-j$(nproc)`。検査は 3 段: `check-fast` (変異なし **約 33 秒**) / `check-changed` (変えた所だけ変異、`tools/check_map.yaml`) / `check` (全変異 **約 2〜3 分 (129〜151 秒、2026-09-26)**、取り込み前)。
-  段の前後に `tools/check_tree_unchanged.py` がソースの残留を見る。 → §4-41
-- 変異試験は**実物のソースを書き換えない** (2026-09-26〜、`tools/tests/mutpar.py` の写しの木で全部並列)。
-  新しい変異試験もこの作りにする — 実物を書き換える作りは打ち切りで変異が残る。 → §4-40
-- Device windows: decide from the physical map (`pgalloc_range_has_ram`), never from the RAM ceiling (`sys_get_mem_kb`). → §4-34
-- VFS errors are `OS32_ERR_*`, translated at the FS boundary; `vfs_open` refuses directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
-- ext2 はメタデータの I/O エラーを 1 回踏むと**そのマウントの間は書き込みを全部断る** (`OS32_ERR_ROFS` = -15)。読み取りは通り、再起動で警告付きで戻る。書き込みが全部 -15 になったらホストの `e2fsck` へ。 → §4-35
+**検証・配備**
+- 配備の成否は文言で判断しない — ゲストの `ls -l /boot/vmkernel.lz4` と手元のサイズ、kselftest (`kselftest_pass` / `_fail`) は**新しい** `kernel.map` の番地で読む。NHD の作業イメージは `build/nhd/os32.nhd`。→ §2、§4-17、§4-29
+- `deploy.yaml` に無いバイナリは NHD で古いまま残り rshell を止める ([V2])。`hsync` は HostDrv の内容で上書きするので NHD 配備の後は先に `make deploy`、`/sys` は `hsync sys` + リセット (GUI の窓が例外 0 件で出ない = shlib が古い)。→ §4-12、§4-33、§4-36、§4-42
+- 保存の試験はバイト列で突き合わせ、冪等も繰り返して見る。通知のある API は入力経由と API 経由の両方を見る。→ §4-46、§4-44
+- 変異試験は実物のソースを書き換えない (写しの木、`tools/tests/mutpar.py`)。検査の 3 段と所要時間は [`docs/08_build.md`](docs/08_build.md) §8-4。→ §4-40、§4-41
+
+**実機と NP21/W の差** (ここは「エミュレータで確認済み」が通用しない)
+- 実機の画面モード設定は NP21/W の BIOS 値ではなく**実機 ROM の OUT 列 (`v86 -g`) に合わせる** (Ra266 の PEGC 640x480)。→ §4-62
+- シリアルは 8253 の整数分周 (既定 9600、38400 は 1.9968MHz で 41600 に化ける)、PIT は判定したクロックで割る。NP21/W は通信速度も 2.4576MHz 系も模擬しない。→ §4-49、§4-50、§4-54
+- FDC: 時間上限は機構の最悪値から、0x94 は FRY を立てる、1MB 超への DMA は 0439h bit2。FD は 2HD 1232KB と 1.44MB の生イメージ (IPL は 512 バイトしか読まれない)。→ §4-47、§4-48、§4-51、§4-53
+- キーボード 8251 のコマンド語は 0x16 (0x14 は再送要求)。0035h は全体で書かない (BUZ は 07h = 停止)。→ §4-57、§4-59
+- `io_wait()` を万単位で連打しない (待ちは `nop`)。ISR が書く状態は `volatile` で読む。→ §4-55、§4-56
+- 「画面に出ている」は `/api/screenshot` の見た目で確かめる (`kprintf` の属性は入口で変換)。→ §4-52
+- NP21/W の停止・起動は `tools/np21w_ctl.py` だけで (手打ちの taskkill → 起動は媒体のロックで止まる)。→ §4-60
+
+**カーネル・FS**
+- kstring / kmalloc / kprintf の基本部品を触ったら kselftest のケースを足す。→ §2
+- ext2: `ext2_g_aux` を free/alloc をまたいで持たない、`ext2_read_file` は端数ブロックを `to_copy` だけ写す、メタデータの I/O エラー後は書き込みを全部断る (-15 → ホストの e2fsck)、OS32 で読めることは正しい ext2 の証拠でない。→ §4-24、§4-32、§4-35、§4-58
+- VFS: エラーは `OS32_ERR_*` (FS の境界で翻訳)、`mount(dev_id)` は `(dev_type << 8) | unit`、`sys_ls` のコールバックから専用バッファ無しで FS を触らない。→ [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1、§4-30、§4-26
+- デバイス窓は物理地図 (`pgalloc_range_has_ram`) で判定する (RAM の上端 `sys_get_mem_kb` ではない)。→ §4-34
+- CPL=3 の KAPI は IF=1 で走る (`int80_stub` の出口は IF=0)。KAPI の検査は `ring3_guard_active(ring3_in_syscall, ring3_wm_depth)` で (WM はアプリの syscall の中で走る)。→ §4-19、§4-61
+- シェルは 2 ヒープ (`kernel/paging.c` は 0x380000–0x3FFFFF を present に保つ)。exit の資源回収は所有者タグ。→ §4-15、§4-16
+- SQLite のプール枯渇は `db_query` の `-2` — `db_last_error()` を必ず出す。→ §4-13
+- 日本語は 1 文字 3 バイト・2 桁、切り詰めは UTF-8 の境界で。外部プログラムの漢字は既知の対で JIS 表を確かめてから `utf8_set_jis_table_ready(1)`。フォントは `tools/gen_font16.py`。→ §4-27、§4-11、§4-10
+- 物理 0x90000 は自動プレイのメールボックス — 配置を変えたら `game/tools/autoplay/driver.py` も同じコミットで。→ [`docs/02_memory.md`](docs/02_memory.md) §2-1
+- ブートローダ: PM 遷移は `loader_fat.asm` に内蔵、`boot_fat.asm` は `.8086`、HDD IPL の INT 1Bh は 16 回 (上限の理由は未確認)。→ [`docs/10_notes.md`](docs/10_notes.md) §10-2、§10-3
+
+**GUI・入力・道具**
+- GUI の内部: `libos32gfx_attach()` (`gfx_init` ではない)、Cirrus の窓は 1 回だけ写像、テキストカーソルは CSRFORM の DC ビットだけ。→ §4-18、§4-20〜§4-22
+- `mui_pump_input()` はキーキューを食う (自前でキーを読むアプリは `mui_pump_input_ch()`)。→ §4-14
+- GUI を NP21/W で叩く: rshell を ESC で抜けてから、`SHIFT+SPACE` は `--data-urlencode`、`/api/mouse` は `ax/ay`、Start メニューの行は `start_row()`、配備は `system.cfg` を書き換える。「遅い」はまず `gfx_counters` と `/api/status` の `eip`。→ §4-23、§4-25、§4-31
+- Host Services は常駐の `tools/host_agent.py` が要る (`-100` = `HOST_ELINK`)。設定は ini ではなく `/api/net` に聞く。→ §4-45
 
 ## Documentation
 

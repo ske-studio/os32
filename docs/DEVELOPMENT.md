@@ -48,6 +48,13 @@
 | `snd_engine.c` | FM/SSG シーケンサ (タイマ IRQ 駆動) | [05 §5-3](05_drivers.md) |
 | `v86*.c` | V86 モニタ、仮想 PIC、キー所有権、脱出キー | [tasks/v86v2/](tasks/v86v2/README.md) |
 | `kselftest.c` | ブート時セルフテスト (kstring / kmalloc / kprintf)。プリミティブを触ったら項目を足す | [POLICY_DEBUG §2](POLICY_DEBUG.md) |
+| `irq.c` `irq_math.c` | 割り込みの動的登録 (`irq_register`、共有 IRQ、storm の検出) — v2.1 | [tasks/v3/TASK_HAL_WIRING](tasks/v3/TASK_HAL_WIRING.md) §1-1 |
+| `dma_pool.c` `dma_pool_math.c` | DMA プール (0x2E8000 の 64KB 固定の穴。64KB 境界をまたがない配り方、[HW2]) — v2.1 | [tasks/v3/TASK_HAL_WIRING](tasks/v3/TASK_HAL_WIRING.md) §1-3、[02 §2-1](02_memory.md) |
+| `ktime.c` `time_math.c` | µs 時計 (`ktime_*`、2.4576MHz 系のクランプ) — v2.1 | [tasks/v3/TASK_HAL_WIRING](tasks/v3/TASK_HAL_WIRING.md) §1-5 |
+| `sysclk.c` `pit_math.c` `cpu_calibrate.c` `cpu_calibrate_math.c` | システムクロックの判定 (1.9968 / 2.4576MHz、`0000:0501h` bit7) → PIT の分周、CPU の校正 — v2.1 | [POLICY_DEBUG §4-54](POLICY_DEBUG.md) |
+| `bootinfo.c` `bootinfo_check.c` | ローダから受け取る起動情報 (起動元、イメージの CRC `VK32` → `ver` の `Image CRC`) — v2.1 | [archive/realhw_v21/TASK_HDD_INSTALL](archive/realhw_v21/TASK_HDD_INSTALL.md) 段 0 |
+| `bootlog.c` `bootlog_save.c` | 起動ログ `/var/log/boot.log` (前回分は `.1`) — v2.1 | [RELEASE_v2.1 §1](RELEASE_v2.1.md) |
+| `v86_gcap.c` `v86_gcap_math.c` `v86_test16_gcap.asm` | `v86 -g`: 実機の ROM が INT 18h AH=30h/31h で流す I/O (OUT 列) を記録 — v2.1 | [tasks/realhw/TASK_PEGC480_REALHW](tasks/realhw/TASK_PEGC480_REALHW.md) §3 段 1、[POLICY_DEBUG §4-62](POLICY_DEBUG.md) |
 
 ### 実行と KernelAPI `exec/` `kapi/` `sdk/`
 
@@ -77,6 +84,13 @@
 | `kcg.c` | 漢字 ROM / ビットマップフォント | [05 §5-9](05_drivers.md) |
 | `np2sysp.c` | NP21/W ハイパーコール | [05 §5-10](05_drivers.md) |
 | `lgy98.c` `ne2000.c` `ne2000_ring.c` `ne2000_io.asm` `ne2000_regs.h` | LGY-98 (NE2000 互換 C バス LAN)。カード固有 / 8390 本体 / リング計算 (ホスト試験可) / 16bit PIO / レジスタ定数の正典。既定は無効 (`CONFIG_LGY98_BASE=0`) | [tasks/network/PLAN.md](tasks/network/PLAN.md) |
+| `pci.c` `pci_decode.c` `pci_bind.c` `pci_bind_match.c` | PCI の列挙 (メカニズム #1)・構成空間のデコード・結線表 (ドライバとの結び付け)、`lspci -v` — v2.1 | [tasks/realhw/TASK_LAN_82557](tasks/realhw/TASK_LAN_82557.md) (L-A)、[tasks/v3/TASK_HAL_WIRING](tasks/v3/TASK_HAL_WIRING.md) §1-4 |
+| `dma8237.c` `dma8237_math.c` | 8237 DMA の共通部 (`dma_chan_setup`、auto-init) — v2.1 | [tasks/v3/TASK_HAL_WIRING](tasks/v3/TASK_HAL_WIRING.md) §1-2 |
+| `pcm_cs4231.c` `pcm_cs4231_math.c` | CS4231 (MATE-X PCM) の PCM 再生 (リングは DMA プール、IRQ は動的登録) — v2.1 | [tasks/v3/TASK_PCM_CS4231](tasks/v3/TASK_PCM_CS4231.md) |
+| `pc98pt.c` `ide_addr.c` | PC-98 の区画表の読み書き (HDD インストール) / ATA のセクタ指定の選択と範囲検査 — v2.1 | [archive/realhw_v21/TASK_HDD_INSTALL](archive/realhw_v21/TASK_HDD_INSTALL.md) |
+| `fdc_track.c` `fdc_decide.c` | FD のトラック読みと 8 セクタの LRU / 時間上限の判定 (機構の最悪値から) — v2.1 | [archive/realhw_v21/TASK_FDC_REALHW](archive/realhw_v21/TASK_FDC_REALHW.md)、[POLICY_DEBUG §4-51](POLICY_DEBUG.md) |
+| `kbd_status.c` `kbd_dlog.c` | キーボード 8251 の状態 (`kbdstat`) と make/break の記録 (`kbdstat -w`) — v2.1 | [POLICY_DEBUG §4-57](POLICY_DEBUG.md) |
+| `serial_plan.c` | シリアルの整数分周の計画 (115200 まで、クロック判定つき) — v2.1 | [archive/realhw_v21/TASK_SERIAL_VFAST](archive/realhw_v21/TASK_SERIAL_VFAST.md)、[POLICY_DEBUG §4-49](POLICY_DEBUG.md) |
 
 ### ファイルシステム `fs/`
 
@@ -88,12 +102,13 @@
 | `hostdrvfs.c` | HostDrv (`/host`) | [06 §6-7](06_filesystem.md) |
 | `pipe_buffer.c` `fd_redirect.c` | パイプ・リダイレクト | [06 §6-4, §6-5](06_filesystem.md) |
 | `iso9660.c` | CD-ROM | [06 §6-6](06_filesystem.md) |
+| `serialfs.c` `serialfs_session.c` `sfs_client.c` `sfs_proto.c` | SerialFS — シリアル越しの `/host` (ホスト側は `tools/serialfs_host.py`)。`hsync --root` と組んで実機の HDD を更新する — v2.1 | [archive/realhw_v21/TASK_SERIAL_HOSTFS](archive/realhw_v21/TASK_SERIAL_HOSTFS.md) |
 
 ### グラフィックス `gfx/`、SQLite `lib/sqlite3/`、ブート `boot/`
 
 | ファイル | 役割 | 仕様 |
 |---|---|---|
-| `gfx/gfx_core.c` `gfx_vram.c` `palette.c` | HAL の入口: バックエンド選択 (probe 順 Cirrus → PEGC → 9801、`GFX=` の強制)、present (ページフリップ)、パレット、カウンタ (`gfx_stats`)、`gfx_bb_phys_range` | [05 §5-5](05_drivers.md) |
+| `gfx/gfx_core.c` `gfx_vram.c` `palette.c` | HAL の入口: バックエンド選択 (probe 順 Cirrus → PEGC → 9801 (auto で Cirrus を試すのは NP21/W の上だけ、Cirrus のリニア窓はデバイス窓の帯 0xFE000000〜 — v2.1)、`GFX=` の強制)、present (ページフリップ)、パレット、カウンタ (`gfx_stats`)、`gfx_bb_phys_range` | [05 §5-5](05_drivers.md) |
 | `gfx/backend_pc98.c` `backend_pegc.c` `backend_cirrus.c` `include/gfx_hal.h` | バックエンド表 `GfxBackend` (probe / init / query / present_rect / fill / blit / enter / leave / shutdown) と 3 実装: 9801 4 プレーン (主記憶 BB 0x6A000)、PEGC 640×480×256 (F00000h 窓、BB は物理末尾 300KB)、Cirrus GD5430 (01000000h リニア窓、表示面 + クライアント面、エンジン BLT) | [05 §5-5](05_drivers.md)、[02 §2-1](02_memory.md)、[tasks/gui/DESIGN.md](tasks/gui/DESIGN.md) |
 | `lib/sqlite3/os32_sqlite_vfs.c` `os32_sqlite_config.h` `sqlite_stack.asm` | カーネル内 SQLite (0x200000 帯、MEMSYS5 384KB、代替スタック) | [tasks/sqlite/](tasks/sqlite/00_INDEX.md) |
 | `boot/boot_*.asm` `loader_*.asm` `boot_main.c` `ext2_mini.c` `lz4_mini.c` | IPL、第 2 段ローダ (PM 遷移を含む、分割禁止)、LZ4 展開 | [01 §1-2](01_system.md)、[10 §10-2, §10-3](10_notes.md)、[tasks/boot_reform/](tasks/boot_reform/00_OVERVIEW.md) |
@@ -106,6 +121,8 @@
 | `gshell/` (Rust) | GUI シェル = WM (シェル帯 0x300000 に CUI と入れ替わりで常駐、`/bin/gshell.bin`)。`wm.rs` 窓 / Z 順 / 所有者、`handler.rs` op 表、`input.rs` X3/X4 の入力取り込み (raw キー・FEP 退避・ボタンエッジの領分)、`visible.rs` 可視領域、`fep.rs` (カーネル FEP を `ime_feed_key` で駆動)、`lease.rs` `modal.rs` `timer.rs` `chrome.rs` `cursor.rs` | [archive/gui_v11/TASK_W1](archive/gui_v11/TASK_W1_wm_core.md)、[TASK_W2](archive/gui_v11/TASK_W2_fep_lease_modal.md)、[API_CONTRACTS.md](tasks/gui/API_CONTRACTS.md) |
 | `rust/libos32gui/` `libos32gui_stub/` | GUI クライアント (G 描画 / `gui_call` / U3 ループ / ウィジェット木 / 箱レイアウト)。`.shlib` として 0x400000 に常駐、アプリは stub (ジャンプ表) をリンク | [archive/gui_v11/TASK_C1〜C3](archive/gui_v11/TASK_C3_shared_lib.md) |
 | `cmds/` `system/` `tests/` `rust/` | コマンド、システムユーティリティ、テスト (`hal_test` `gdi_test` `ring3_guard` `gui_busy` `lease_test` `gui_bench` …)、Rust (Cargo ワークスペース、`os32api` クレート) | 一覧は各 `deploy.yaml` と [07 §7-1](07_shell.md) |
+| `system/cdinst.c` `install.c` `inst_hdd.c` `inst_disk.c` `shell/hdprep_plan.c` | CD からの HDD インストール (段 1・2、他 OS の区画を消す ERASE) — v2.1 | [archive/realhw_v21/TASK_HDD_INSTALL](archive/realhw_v21/TASK_HDD_INSTALL.md) |
+| `tests/pegcchk.c` `pcm_test.c` `time_test.c` | 実機の確認用: PEGC 640x480 の入り・戻りの状態 (`pegcchk`、受け入れ (C)) / PCM の再生 / µs 時計 (`timetest`) — v2.1 | [tasks/realhw/TASK_PEGC480_REALHW](tasks/realhw/TASK_PEGC480_REALHW.md) §5、[tasks/v3/TASK_HAL_WIRING](tasks/v3/TASK_HAL_WIRING.md) |
 | `lib/os32` `math` `input` `gfx` `snd` `db` | 基盤ライブラリ (デバッグ出力 / 整数数学 / 入力抽象 / 描画 (4 プレーンと PACKED8 の両経路、`libos32gfx_attach`) / FM・SSG / SQLite ラッパ) | `tasks/lib*/`、[05 §5-5](05_drivers.md) |
 | `lib/tilemap` `ui` `filer` `md` `asset` `ecs` `save` | 描画・UI 系 (タイルマップ / microUI (テスト導入) / ファイラ / Markdown / アセット / ECS / セーブ) | 同上 |
 | `apps/` `game/` (submodule) | 標準アプリ、対戦スゴロク RPG。ゲームエンジン 11 ライブラリは os32-game が自前ビルド | 各リポジトリの `docs/` |
@@ -113,6 +130,6 @@
 ## 3. 参照
 
 - Claude Code / Codex 共用スキル: [os32-emu-debug](../.claude/skills/os32-emu-debug/SKILL.md) (NP21/W 調査)、[os32-build-verify](../.claude/skills/os32-build-verify/SKILL.md) (変更別ビルド・反映確認)。本文は `.claude/skills/`、Codex の `.agents/skills/` から同じフォルダを参照する。`.agents/` は現行の Git 除外対象なので共有リンクは環境ごとに設置する (例: `.agents/skills/os32-emu-debug` → `../../.claude/skills/os32-emu-debug`)。
-- 規則の正典: [CONSTRAINTS.md](CONSTRAINTS.md) (CLAUDE.md / SOUL.md は ID で参照)
+- 規則の正典: [CONSTRAINTS.md](CONSTRAINTS.md) (CLAUDE.md は ID で参照。Hermes 用だった SOUL.md は [archive/agents/SOUL.md](archive/agents/SOUL.md)、効力なし)
 - 成果の履歴: [CHANGELOG.md](../CHANGELOG.md)、[archive/ROADMAP_v1.0.md](archive/ROADMAP_v1.0.md)。計画: [ROADMAP.md](ROADMAP.md)
 - 落とし穴の経緯: [POLICY_DEBUG.md §4](POLICY_DEBUG.md)。短い注意は CLAUDE.md「Known Gotchas」
