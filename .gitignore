@@ -1,6 +1,5 @@
 #AI Agents
 .agents
-AGENTS.md
 # ビルド生成物
 *.o
 *.d
