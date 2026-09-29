@@ -92,3 +92,19 @@ S="python3 tools/rshell_serial.py --port /dev/ttyUSB0 --fast 115200 --timeout 60
 ## 持ち帰るもの
 
 写真 (手順 1・3 の終わり・5・8 の OSD)、cdinst の所要時間、ノートのシリアル出力 (手順 2・4・6・7・7a — 7a は `v86 -g` の全行)、ビープの有無。
+
+## 実測: HDD 起動のままシリアル経由で更新 (2026-09-29、実機エージェント)
+
+135b6b5 (HDD 起動、SerialFS あり) → **44bd0fe** (CI artifact `os32-feat-gui-44bd0fe`) を、FD を使わず「次の回から」の経路で更新した。
+
+| 段 | 結果 | 所要 |
+|---|---|---|
+| `sfs run hsync -n boot` | `PLAN vmkernel.old reason=backup`、`PLAN vmkernel.lz4 reason=size_changed`、exit=0 | — |
+| `sfs run hsync boot` | `BACKUP → vmkernel.old` (463758 B、crc 1D1C4DDF)、`UPDATE vmkernel.lz4` (463928 B)、errors=0、sfs requests=945 resent=0 timeouts=0 | **59 秒** |
+| `reboot` → `ver` | 37 秒後に応答。Commit 44bd0fe、API v68、Image CRC cc2ade4a (463928 bytes, HDD loader) | 37 秒 |
+| `sfs run hsync sys` | metadata_updated=4 (mtime_only)、copied=0、errors=0 | **63 秒** |
+| `sfs run hsync` (全体) | copied=3 (見えたのは `/usr/bin/about.bin` new_file のみ)、metadata_updated=175、errors=0、protected=0、sfs requests=24196 resent=0 timeouts=0 | **21 分 22 秒** |
+
+- 未実施 (ユーザーが実機の前に居るときに回す): 2 回目の再起動と `cat /var/log/boot.log`、手順 7a (`v86 -g -t` / `v86 -g`)。
+- **道具の制限**: 全体の hsync で `sfs: log dropped 2037 bytes (oldest)` — sfs run が溜める出力の先頭が捨てられ、copied=3 のうち 2 件の名前が分からなかった。長い同期は `hsync -n` の PLAN を先に取るか、出力を分けて取る。
+- 見積もり (CHECKLIST R5「約 10MB で 15 分程度」) に対し、全体の同期は 21 分 (内容の比較は mtime の差分だけ、実際のコピーは 3 件)。
