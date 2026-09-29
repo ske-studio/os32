@@ -286,6 +286,7 @@ v3 では timer interrupt を利用したプリエンプティブ寄りの multi
 
 Trident のバックエンドは**保留** — NP21/W の `tgui9680.c` が結線されておらず
 書いても検証できない。**LAN と違って「無くても困らない」** (PEGC が使える) ので結論が変わる。
+→ **2026-09-29 のユーザー決定で着手** (「Cirrus はエミュレータ用、実機は Trident」)。調査・設計は [tasks/realhw/TASK_TRIDENT_DRIVER.md](tasks/realhw/TASK_TRIDENT_DRIVER.md)。
 
 ### v3 の全体計画 → [tasks/v3/PLAN.md](tasks/v3/PLAN.md)
 
