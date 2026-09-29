@@ -516,6 +516,12 @@ rshell が立つ前の kprintf はシリアルにも出ない。カーネルは�
   `rshell` を手打ちすると 2 段になり、次の ESC は内側の 1 段しか閉じない → 以降の `/api/key` の text が
   外側の rshell に食われて GUI へ入れない (2026-09-11: リセット直後の台本だけ成功し、`leave_gshell` 後の
   台本が全滅した原因)。`leave_gshell()` は `ver` が通るなら打たない形に直した。台本は先頭で ESC を 2 回。
+- **台本の入口は道具が確かめる (2026-09-29)。** 上の「先頭で ESC」を台本が守っておらず、
+  rshell 有効のまま回すと GUI に入らないまま **RESULT: OK** になっていた (R2 の予備調査、
+  `docs/archive/settings/TASK_S5.md` §6)。`gui_gate.py` の台本は `begin_gui()` から入る:
+  ESC → tvram の末尾に `[Remote shell closed]` が新しく出たのを確認 (出る限り ESC を最大 2 回足して
+  重なりも閉じる) → `os32gui` → `/api/status` が `scrn_ymax == --h` かつ `grph_disp == 1` でなければ
+  NG (rshell を戻して終わる)。ホスト試験は `make check-gui-gate-host`。
 
 ### 4-32. `ext2_read_file` は端数ブロックでも 1KB 書いていた — 小さな static バッファへ読むと隣を潰す (2026-09-11、修正済み)
 

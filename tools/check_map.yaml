@@ -390,6 +390,9 @@ checks:
     - tools/gui_gate.py
     - tools/tests/key_inject_host.cpp
     - tools/tests/test_key_inject.py
+  check-gui-gate-host:
+    - tools/gui_gate.py
+    - tools/tests/test_gui_gate.py
   check-kapi-version:
     - docs/INDEX.md
     - docs/KAPI_SPEC.md
