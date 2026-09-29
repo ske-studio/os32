@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """tools/gen_memmap.py — 重なり・逆転の検出と、生成物の鮮度照合。
 
-票 docs/tasks/memory/TASK_KSTACK_USER.md §4-bis / 記録: tools/tests/memmap_tdd.md
+票 docs/archive/kernel_v21/TASK_KSTACK_USER.md §4-bis / 記録: tools/tests/memmap_tdd.md
 
   python3 -B tools/tests/test_memmap_gen.py [--mutate]
 

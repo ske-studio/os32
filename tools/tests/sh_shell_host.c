@@ -2,7 +2,7 @@
  *  sh_shell_host.c — sh.bin の行再描画とスクリプトの exit を **実物のソース
  *                    で** 確かめる
  *
- *  対象票: docs/tasks/gui/v13/TASK_T9_sh.md §1 D2(d) と実装レビュー
+ *  対象票: docs/archive/gui_v13/TASK_T9_sh.md §1 D2(d) と実装レビュー
  *          (往復 1/3) の blocker 1 / 2
  *  実行:   python3 -B tools/tests/test_sh_shell.py
  *  記録:   tools/tests/t9_tdd.md

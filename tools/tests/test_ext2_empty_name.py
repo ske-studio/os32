@@ -1,6 +1,6 @@
 """票 TASK_EXT2_EMPTY_NAME: 長さ 0 の名前を ext2 の媒体に載せない。
 
-票:   docs/tasks/memory/TASK_EXT2_EMPTY_NAME.md
+票:   docs/archive/kernel_v21/TASK_EXT2_EMPTY_NAME.md
 記録: tools/tests/ext2_empty_name_tdd.md
 
 tools/tests/ext2_empty_name_host.c が実物の fs/ext2_*.c / vfs.c / vfs_fd.c と

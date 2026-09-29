@@ -12,7 +12,7 @@ Windows 側の Python (pyserial 入り) で動かす:
   ... --port COM3 repl          # 対話 (exit / Ctrl-C で終了。'exit' はゲストの rshell も閉じる)
   ... --port COM3 sync          # 溜まっている受信を捨てて EOT を待つだけ
 
---fast N で **繋いだあとに速度を上げる** (票 docs/tasks/realhw/TASK_SERIAL_VFAST.md):
+--fast N で **繋いだあとに速度を上げる** (票 docs/archive/realhw_v21/TASK_SERIAL_VFAST.md):
   ... --port COM3 --fast 115200 cmd hexdump /bin/cfg.bin
 ゲストは 9600 の互換モードで起動するので、
   1. --baud (既定 9600) で開いて `serial N` を送る

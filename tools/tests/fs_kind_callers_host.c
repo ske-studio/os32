@@ -2,7 +2,7 @@
  *  FS_KIND_CALLERS_HOST.C — 種別が「分からない」ときに cp / mv / rm が断るか
  *  を、**受け手 (呼び出し元の分岐) で** 確かめる
  *
- *  票: docs/tasks/shell/TASK_FS_TYPE.md §3 (fs_is_dir は「不明」を運べない)
+ *  票: docs/archive/shell/TASK_FS_TYPE.md §3 (fs_is_dir は「不明」を運べない)
  *  実行: python3 -B tools/tests/test_fs_kind_callers.py [--target]
  *  記録: tools/tests/fs_kind_callers_tdd.md
  *

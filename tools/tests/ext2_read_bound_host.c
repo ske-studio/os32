@@ -2,7 +2,7 @@
  *  ext2_read_bound_host.c — ext2_read_file() が max_size を 1 バイトも
  *  越えないことの回帰試験 (K5b-K 差し戻し 2026-09-11 の根本原因)
  *
- *  対象票: docs/tasks/gui/v13/TASK_K5B_kernel.md (差し戻し)
+ *  対象票: docs/archive/gui_v13/TASK_K5B_kernel.md (差し戻し)
  *  実行:   python3 -B tools/tests/test_ext2_read_bound.py
  *  記録:   tools/tests/k5b_kernel_tdd.md 節 R
  *

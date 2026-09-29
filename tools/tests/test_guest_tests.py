@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ゲスト一括実行ランナーのホスト試験 (票 docs/tasks/test/TASK_TEST_RUNNER.md §5 R7)。
+"""ゲスト一括実行ランナーのホスト試験 (票 docs/archive/test/TASK_TEST_RUNNER.md §5 R7)。
 
 記録: tools/tests/guest_tests_tdd.md
 

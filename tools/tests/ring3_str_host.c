@@ -1,7 +1,7 @@
 /* ========================================================================
  *  ring3_str_host.c — KAPI が CPL=3 へ返す文字列の置き場を実物で確かめる
  *
- *  対象票: docs/tasks/gui/v13/TASK_T9_sh.md §12 R1 (Codex 網羅レビュー 往復 7)
+ *  対象票: docs/archive/gui_v13/TASK_T9_sh.md §12 R1 (Codex 網羅レビュー 往復 7)
  *  実行:   python3 -B tools/tests/test_ring3_str.py
  *  記録:   tools/tests/t9_tdd.md
  *

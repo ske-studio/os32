@@ -1,6 +1,6 @@
 """K5b-K: the real AppSlot code (exec/appslot.c) under K5a's 84 checks.
 
-Ticket: docs/tasks/gui/v13/TASK_K5B_kernel.md (host tests, 3rd item)
+Ticket: docs/archive/gui_v13/TASK_K5B_kernel.md (host tests, 3rd item)
 Log:    tools/tests/k5b_kernel_tdd.md
 
 K5a's tools/tests/multiapp_model_host.c hand-wrote the state machine as a

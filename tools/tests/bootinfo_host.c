@@ -3,7 +3,7 @@
 /*                                                                          */
 /*  実物の検証関数を 1 行も写さずに #include する (I/O も低位メモリも無い)。  */
 /*  記録: tools/tests/bootinfo_tdd.md                                       */
-/*  票  : docs/tasks/realhw/TASK_HDD_INSTALL.md 段 0                        */
+/*  票  : docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 0                        */
 /*                                                                          */
 /*  域はローダが書くのと同じ**バイト列**で組む (構造体を重ねない — ホストの  */
 /*  u32 は 64bit)。期待値は式ではなく数で書く。                             */

@@ -2,7 +2,7 @@
  *  owner_reclaim_host.c — 所有者 ID による回収が **その ID の分だけ**で
  *                         閉じることを実物のソースで確かめる
  *
- *  対象票: docs/tasks/gui/v13/TASK_K5B_kernel.md (ホスト試験の 2 本目)
+ *  対象票: docs/archive/gui_v13/TASK_K5B_kernel.md (ホスト試験の 2 本目)
  *  設計:   TASK_K5_multiapp.md D3 (`*_owned(id)` の棚卸しと P3/P5)
  *  実行:   python3 -B tools/tests/test_owner_reclaim.py
  *  記録:   tools/tests/k5b_kernel_tdd.md

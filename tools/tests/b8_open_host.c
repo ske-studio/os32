@@ -2,7 +2,7 @@
  *  b8_open_host.c — 読み取り失敗を「不存在」として扱う経路 (票 B8) を
  *  **実物の vfs_open() / vfs_open_sqlite() を通して**確かめる
  *
- *  票:   docs/tasks/shell/TASK_FS_TYPE.md §2 (B8)
+ *  票:   docs/archive/shell/TASK_FS_TYPE.md §2 (B8)
  *  実行: python3 -B tools/tests/test_b8_open.py
  *  記録: tools/tests/b8_tdd.md
  *

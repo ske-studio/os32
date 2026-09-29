@@ -191,7 +191,7 @@ def check_lists(vars_):
     if vars_.get("CHECK_MUT_TARGETS"):
         raise SystemExit("check_select: CHECK_MUT_TARGETS (逐次の 2 段目) は廃止した — "
                          "変異は写しの木に当てて CHECK_PAR_TARGETS へ "
-                         "(docs/tasks/tools/TASK_CHECK_MUT_PARALLEL.md §5)")
+                         "(docs/archive/tools/TASK_CHECK_MUT_PARALLEL.md §5)")
     return par
 
 

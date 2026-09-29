@@ -1,7 +1,7 @@
 /* ========================================================================
  *  multiapp_model_host.c — K5a のホスト状態モデル (GUI アプリ 4 本同時)
  *
- *  対象票: docs/tasks/gui/v13/TASK_K5_multiapp.md §K5a-8
+ *  対象票: docs/archive/gui_v13/TASK_K5_multiapp.md §K5a-8
  *  実行:   python3 -B tools/tests/test_multiapp_model.py
  *
  *  ここに置いてあるのは「カーネルの状態遷移だけを抜き出した純粋な模型」で、

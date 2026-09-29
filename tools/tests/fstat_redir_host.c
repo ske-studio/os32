@@ -1,7 +1,7 @@
 /* =========================================================================
  *  FSTAT_REDIR_HOST.C — `fstat` がリダイレクトに従い、`isatty` と一致する
  *
- *  票: docs/tasks/test/TASK_FSTAT_REDIR.md の受入 F4 / F5
+ *  票: docs/archive/test/TASK_FSTAT_REDIR.md の受入 F4 / F5
  *  実行: python3 -B tools/tests/test_fstat_redir.py [--target] [--mutate]
  *  記録: tools/tests/fstat_redir_tdd.md
  *

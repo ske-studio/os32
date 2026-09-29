@@ -2,7 +2,7 @@
  *  VFS_EXCL_HOST.C — 排他的作成 O_EXCL (票 H2 §2-1、KAPI v53) を
  *                    **実物の fs/vfs.c + fs/vfs_fd.c** で確かめる
  *
- *  票:   docs/tasks/shell/TASK_H2.md §2-1 / §4-1 の X1 X2
+ *  票:   docs/archive/shell/TASK_H2.md §2-1 / §4-1 の X1 X2
  *  実行: python3 -B tools/tests/test_vfs_excl.py [--target]
  *  記録: tools/tests/vfs_excl_tdd.md
  *

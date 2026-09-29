@@ -1,7 +1,7 @@
 """FD のトラック単位の読み出し (drivers/fdc_track.c + drivers/fdc.c) のホスト試験。
 
 記録: tools/tests/fdc_track_tdd.md
-票  : docs/tasks/realhw/TASK_FDC_REALHW.md (実機 PC-9821Ra266 の FD 起動が遅い件)
+票  : docs/archive/realhw_v21/TASK_FDC_REALHW.md (実機 PC-9821Ra266 の FD 起動が遅い件)
 
 実物の drivers/fdc_track.c / fdc_decide.c / fdc.c を 1 行も写さずに #include
 して回す。fdc.c のポートは tools/tests/fdc_hostshim/io.h が試験側の µPD765A

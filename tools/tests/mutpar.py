@@ -1,4 +1,4 @@
-"""変異試験を並列に回す共通部 (票 docs/tasks/tools/TASK_CHECK_MUT_PARALLEL.md)。
+"""変異試験を並列に回す共通部 (票 docs/archive/tools/TASK_CHECK_MUT_PARALLEL.md)。
 
 使う側 (test_hdd_stage2.py など) は変異 1 本を「自分専用の一時ディレクトリの写しで
 組んで回し、結果を返す」関数にして run_ordered に渡す。結果は**変異の番号順**に

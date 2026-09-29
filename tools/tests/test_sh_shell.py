@@ -1,6 +1,6 @@
 """T9-S: sh.bin の行再描画とスクリプトの exit を実物のソースで確かめる。
 
-票:   docs/tasks/gui/v13/TASK_T9_sh.md §1 D2(d)、実装レビュー (往復 1/3) の
+票:   docs/archive/gui_v13/TASK_T9_sh.md §1 D2(d)、実装レビュー (往復 1/3) の
       blocker 1 (TAB 補完後の redraw が座標に依存) / blocker 2 (source 中の
       exit が後続を止めない)
 記録: tools/tests/t9_tdd.md

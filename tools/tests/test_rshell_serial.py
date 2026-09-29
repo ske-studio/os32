@@ -1,7 +1,7 @@
 """rshell_serial.py の「応答の識別」のホスト試験。
 
 記録: tools/tests/serial_vfast_tdd.md
-票  : docs/tasks/realhw/TASK_SERIAL_VFAST.md (Codex レビュー往復 3 ⑤⑥)
+票  : docs/archive/realhw_v21/TASK_SERIAL_VFAST.md (Codex レビュー往復 3 ⑤⑥)
 
 実物の tools/rshell_serial.py を import して、純粋な判定だけを回す
 (pyserial もシリアルポートも要らない — モジュールは pyserial が無くても

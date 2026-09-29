@@ -1,7 +1,7 @@
 /* ========================================================================
  *  multiapp_impl_host.c — K5b-K の「実装」を K5a の模型と同じ検査で回す
  *
- *  対象票: docs/tasks/gui/v13/TASK_K5B_kernel.md (ホスト試験の 3 本目)
+ *  対象票: docs/archive/gui_v13/TASK_K5B_kernel.md (ホスト試験の 3 本目)
  *  実行:   python3 -B tools/tests/test_multiapp_impl.py
  *  記録:   tools/tests/k5b_kernel_tdd.md
  *

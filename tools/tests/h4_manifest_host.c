@@ -2,7 +2,7 @@
  *  H4_MANIFEST_HOST.C — 票 H4 (配備マニフェストと世代の確認) の
  *                       **読む側** を実物のソースで確かめる
  *
- *  対象票: docs/tasks/shell/TASK_H4.md §2-1 / §2-3 / §2-3-1 / §4-1
+ *  対象票: docs/archive/shell/TASK_H4.md §2-1 / §2-3 / §2-3-1 / §4-1
  *          (M5 M6 M6b M6c M7 M8 M9 M9b M10 M11 M12)
  *  実行:   python3 -B tools/tests/test_h4_manifest.py [--target] [--mutate]
  *  記録:   tools/tests/h4_manifest_tdd.md

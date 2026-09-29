@@ -1,7 +1,7 @@
 /* ========================================================================
  *  con_sink_host.c — console シンクのリングを **実物のソースで** 確かめる
  *
- *  対象票: docs/tasks/gui/v13/TASK_K6C_console.md §2 (設計 3 点 + レコード形式)
+ *  対象票: docs/archive/gui_v13/TASK_K6C_console.md §2 (設計 3 点 + レコード形式)
  *  実行:   python3 -B tools/tests/test_con_sink.py
  *  記録:   tools/tests/con_sink_tdd.md
  *

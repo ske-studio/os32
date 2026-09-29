@@ -1,7 +1,7 @@
 /* ========================================================================
  *  launch_host.c — 起動要求表を **実物のソースで** 確かめる
  *
- *  対象票: docs/tasks/gui/v13/TASK_T9_sh.md §1 D3 / §1a (K 側)
+ *  対象票: docs/archive/gui_v13/TASK_T9_sh.md §1 D3 / §1a (K 側)
  *  実行:   python3 -B tools/tests/test_launch.py
  *  記録:   tools/tests/t9_tdd.md
  *

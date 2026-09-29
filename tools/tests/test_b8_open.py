@@ -1,6 +1,6 @@
 """票 B8: 読み取り失敗を「不存在」として扱う経路を **vfs_open まで** 通して見る。
 
-票:   docs/tasks/shell/TASK_FS_TYPE.md §2 (B8)
+票:   docs/archive/shell/TASK_FS_TYPE.md §2 (B8)
 記録: tools/tests/b8_tdd.md
 
 tools/tests/b8_open_host.c が

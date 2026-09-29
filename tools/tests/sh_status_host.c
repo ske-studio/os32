@@ -1,7 +1,7 @@
 /* ========================================================================
  *  sh_status_host.c — 終了コードの配線と `$?` を **実物のソースで** 押さえる
  *
- *  対象票: docs/tasks/shell/TASK_EXIT_STATUS.md (受入 S1〜S15 / R1〜R2)
+ *  対象票: docs/archive/shell/TASK_EXIT_STATUS.md (受入 S1〜S15 / R1〜R2)
  *  実行:   python3 -B tools/tests/test_sh_status.py [--mutate]
  *  記録:   tools/tests/sh_status_tdd.md
  *

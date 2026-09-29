@@ -1,6 +1,6 @@
 """K5a multi-app state model, ILP32 GNU89; no Make, emulator or libc needed.
 
-Ticket: docs/tasks/gui/v13/TASK_K5_multiapp.md (stage K5a, item 8).
+Ticket: docs/archive/gui_v13/TASK_K5_multiapp.md (stage K5a, item 8).
 Log:    tools/tests/multiapp_model_tdd.md
 
 Same harness shape as test_pgalloc_range.py: build the host C file as a

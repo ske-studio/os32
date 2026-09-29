@@ -1,6 +1,6 @@
 """T9-K: 起動要求表を実物の exec/launch.c で確かめる。
 
-票:   docs/tasks/gui/v13/TASK_T9_sh.md §1 D3 / §1a (K 側 = カーネル + KAPI v49)
+票:   docs/archive/gui_v13/TASK_T9_sh.md §1 D3 / §1a (K 側 = カーネル + KAPI v49)
 記録: tools/tests/t9_tdd.md
 
 test_con_sink.py と同じ様式 — ホスト ILP32 GNU89 で走らせたあと、同じソースが

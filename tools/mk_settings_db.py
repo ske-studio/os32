@@ -15,7 +15,7 @@ SOURCE_DATE_EPOCH → 0 の順で決めた時刻)。
 
 規則違反 (列数、scope / key / type、int32 の範囲、UTF-8、NUL、長さ、
 blob の hex、CR、重複) は非ゼロ終了で理由を出す。仕様は
-docs/tasks/settings/TASK_S0.md §3 と DESIGN.md §3。
+docs/archive/settings/TASK_S0.md §3 と DESIGN.md §3。
 """
 
 import argparse

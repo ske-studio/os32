@@ -1,7 +1,7 @@
 """シリアルの速度判定 (drivers/serial_plan.c) のホスト試験。
 
 記録: tools/tests/serial_vfast_tdd.md
-票  : docs/tasks/realhw/TASK_SERIAL_VFAST.md (実機を 115200bps まで上げる)
+票  : docs/archive/realhw_v21/TASK_SERIAL_VFAST.md (実機を 115200bps まで上げる)
 
 実物の drivers/serial_plan.c を 1 行も写さずに #include して回す。判定は
 I/O もタイマも触らないので模型は要らない。

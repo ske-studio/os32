@@ -1,6 +1,6 @@
 """終了コード: 子の値と起動失敗をシェルまで届け、`$?` で読めることを押さえる。
 
-票:   docs/tasks/shell/TASK_EXIT_STATUS.md (受入 S1〜S15 / R1〜R2)
+票:   docs/archive/shell/TASK_EXIT_STATUS.md (受入 S1〜S15 / R1〜R2)
 記録: tools/tests/sh_status_tdd.md
 
   python3 -B tools/tests/test_sh_status.py [--mutate]

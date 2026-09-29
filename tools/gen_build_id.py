@@ -2,7 +2,7 @@
 # ========================================================================
 #  gen_build_id.py -- カーネルに埋め込むコミット ID の小さな C を作る
 #
-#  票: docs/tasks/realhw/TASK_SERIAL_HOSTFS.md 部品 A-4 (ユーザー指示: ver に
+#  票: docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md 部品 A-4 (ユーザー指示: ver に
 #  Commit を出す)。宣言は include/build_id.h。
 #
 #    python3 tools/gen_build_id.py -o build/out/build_id.c   # 生成 (変化時だけ書く)

@@ -2,7 +2,7 @@
  *  OS32X_LAYOUT_HOST.C — OS32X ヘッダ v3 の配置照合 (exec / shlib ローダ /
  *                        常駐シェルの起動) を実物のソースで確かめる
  *
- *  対象票: docs/tasks/memory/TASK_KAPI_DATA_FIELDS.md (方針 v2 の 4 / 受入)
+ *  対象票: docs/archive/kernel_v21/TASK_KAPI_DATA_FIELDS.md (方針 v2 の 4 / 受入)
  *  実行:   python3 -B tools/tests/test_kapi_layout.py [--mutate]
  *
  *  exec_launch (アプリも常駐シェルも同じ経路) と kernel/shlib.c の shlib_init

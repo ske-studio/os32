@@ -1,6 +1,6 @@
 """KAPI データ欄の固定配置と OS32X ヘッダ v3 (票 TASK_KAPI_DATA_FIELDS)。
 
-票:   docs/tasks/memory/TASK_KAPI_DATA_FIELDS.md (方針 v2 / v3 / ユーザー決裁)
+票:   docs/archive/kernel_v21/TASK_KAPI_DATA_FIELDS.md (方針 v2 / v3 / ユーザー決裁)
 
 見るもの:
   1. exec / shlib ローダ / 常駐シェルが使う判定関数 (exec/os32x_hdr.c) —

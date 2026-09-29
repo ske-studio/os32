@@ -1,6 +1,6 @@
 """S0-T — 初期値 tsv → settings.db の生成とビルド統合のホスト試験。
 
-見るもの (docs/tasks/settings/TASK_S0.md §3):
+見るもの (docs/archive/settings/TASK_S0.md §3):
   * 決定性 — 同じ内容 + 同じ epoch なら同じバイト列。mtime を見ない。
   * スキーマ — DESIGN.md §3 の 2 表、schema_version / user_version / page_size
     / journal_mode。

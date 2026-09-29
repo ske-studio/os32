@@ -1,6 +1,6 @@
 /* ========================================================================
  *  memmap_boot_host.c — ブート順を実物で再生し、地図と PTE を突き合わせる
- *  票 docs/tasks/memory/TASK_KSTACK_USER.md §4 の 2・3
+ *  票 docs/archive/kernel_v21/TASK_KSTACK_USER.md §4 の 2・3
  *  記録: tools/tests/memmap_tdd.md
  *
  *  kernel/paging.c と kernel/shm.c を **そのまま** #include し、

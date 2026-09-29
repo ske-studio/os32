@@ -2,7 +2,7 @@
  *  ext2_empty_name_host.c — 長さ 0 の名前 (と "." / "..") を新しい名前として
  *  媒体に載せないこと、を **実物の ext2 + VFS + pkg 展開**で確かめる
  *
- *  票:   docs/tasks/memory/TASK_EXT2_EMPTY_NAME.md
+ *  票:   docs/archive/kernel_v21/TASK_EXT2_EMPTY_NAME.md
  *  実行: python3 -B tools/tests/test_ext2_empty_name.py
  *  記録: tools/tests/ext2_empty_name_tdd.md
  *

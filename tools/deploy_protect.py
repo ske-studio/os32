@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """deploy_protect.py — 通常配備が /etc/settings.db* を壊さないための共通判定 (票 S0-D / D0)
 
-契約の正典: docs/tasks/settings/S0_FOUNDATION.md §5、手順は docs/tasks/settings/TASK_S0.md §2。
+契約の正典: docs/archive/settings/S0_FOUNDATION.md §5、手順は docs/archive/settings/TASK_S0.md §2。
 
 設定レジストリ (`/etc/settings.db`) は**ゲストが書く**もので、ホストのビルド成果物では
 ない。ところが配備ツールは「マニフェストにある物を書く」「HostDrv の中身をそのまま

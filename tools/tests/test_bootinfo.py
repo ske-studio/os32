@@ -1,7 +1,7 @@
 """ブート情報域 (0x7E00) の検証関数 (kernel/bootinfo_check.c) のホスト試験。
 
 記録: tools/tests/bootinfo_tdd.md
-票  : docs/tasks/realhw/TASK_HDD_INSTALL.md 段 0 (§1-v3 N1 / N2)
+票  : docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 0 (§1-v3 N1 / N2)
 
 実物の kernel/bootinfo_check.c を 1 行も写さずに #include して回す。
 加えて **NASM 側の写し boot/bootinfo.inc** の値が include/bootinfo.h と名前ごとに

@@ -1,7 +1,7 @@
 """票 TASK_HDD_INSTALL 段 1 (HDD の一時置き場) のホスト試験。
 
 記録: tools/tests/hdd_stage1_tdd.md
-票  : docs/tasks/realhw/TASK_HDD_INSTALL.md 段 1 / §1-v3 (N3〜N7、R3-1)
+票  : docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 1 / §1-v3 (N3〜N7、R3-1)
 
 実物を 1 行も写さずに回す:
   tools/tests/hdd_stage1_host.c  drivers/pc98pt.c・drivers/ide_addr.c・

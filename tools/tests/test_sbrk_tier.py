@@ -1,6 +1,6 @@
 """CPL=3 プログラムの sbrk 物理「二段構え」の性質試験 (決裁 2026-09-11).
 
-票:   docs/tasks/gui/v13/TASK_K5B_kernel.md (作業 8)
+票:   docs/archive/gui_v13/TASK_K5B_kernel.md (作業 8)
 記録: tools/tests/k5b_kernel_tdd.md (回 4)
 
 exec/exec.c の判定関数 (exec_ring3_extra_pages / exec_ring3_pages /

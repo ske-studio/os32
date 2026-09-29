@@ -1,7 +1,7 @@
 /* ========================================================================= */
 /*  KSTR_BENCH_HOST.C — kstr_bench の**計測の枠組み**をホストで回す           */
 /*                                                                           */
-/*  票:   docs/tasks/portability/TASK_KSTRING_BENCH.md (受入 K1)             */
+/*  票:   docs/archive/portability/TASK_KSTRING_BENCH.md (受入 K1)             */
 /*  記録: tools/tests/kstr_bench_tdd.md                                      */
 /*  駆動: tools/tests/test_kstr_bench.py                                     */
 /*                                                                           */

@@ -1,6 +1,6 @@
 """TASK_FS_TYPE §3: 種別が「分からない」とき cp / mv / rm が断ること (受け手の試験)。
 
-票:   docs/tasks/shell/TASK_FS_TYPE.md §3 (fs_is_dir は「不明」を運べない)
+票:   docs/archive/shell/TASK_FS_TYPE.md §3 (fs_is_dir は「不明」を運べない)
 記録: tools/tests/fs_kind_callers_tdd.md
 
 tools/tests/fs_kind_callers_host.c が実物の userland/shell/cmd_fs_shared.c と

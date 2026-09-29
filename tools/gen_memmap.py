@@ -8,7 +8,7 @@ gen_memmap.py — メモリ地図の生成と、重なり・逆転の検出
 3 つとも「カーネル本体 ~200KB」と書いていた。実測は **約 432KB**。
 しかもカーネルが育った結果、共有メモリ帯がカーネルスタックに食い込んでいたのに、
 どの地図も相対表記 (「+4KB - +260KB」) だったので誰も気づけなかった
-(票 docs/tasks/memory/TASK_KSTACK_USER.md)。
+(票 docs/archive/kernel_v21/TASK_KSTACK_USER.md)。
 
 そこでこの生成器を置く。
 
@@ -604,7 +604,7 @@ def render(m, sym, rows, map_path, root):
             parts.append("- " + x)
         parts.append("")
         parts.append("直し方は票 "
-                     "[`tasks/memory/TASK_KSTACK_USER.md`](tasks/memory/TASK_KSTACK_USER.md) §4 の 4。")
+                     "[`archive/kernel_v21/TASK_KSTACK_USER.md`](archive/kernel_v21/TASK_KSTACK_USER.md) §4 の 4。")
         parts.append("")
     else:
         parts.append("**地図の矛盾: 0 件** "

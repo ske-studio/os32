@@ -1,6 +1,6 @@
 """WM の文脈では KAPI の出力検査を効かせない — 実物の exec/ring3_str.c と kernel/gui.c で。
 
-票:   docs/tasks/memory/TASK_KAPI_OUTPUT_GUARD.md (追補 2026-09-26)
+票:   docs/archive/kernel_v21/TASK_KAPI_OUTPUT_GUARD.md (追補 2026-09-26)
 記録: tools/tests/ring3_guard_tdd.md
 
 GUI で filer.bin を起動すると窓が出ずに消え、fault_kill_count が +1 した。

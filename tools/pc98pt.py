@@ -1,6 +1,6 @@
 """PC-98 区画表 (LBA 1) の読み書き — drivers/pc98pt.c のホスト側の写し。
 
-票 docs/tasks/realhw/TASK_HDD_INSTALL.md 段 1-4 (F10) / §1-v3 N3。
+票 docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 1-4 (F10) / §1-v3 N3。
 **配置と規則の正典は drivers/pc98pt.h**。ここは同じ値を Python で作るだけで、
 tools/tests/test_hdd_stage1.py が C の実物 (drivers/pc98pt.c) と 1 バイトずつ
 突き合わせる。

@@ -1,6 +1,6 @@
 """H4 (書く側): 配備マニフェスト `.deploy/manifest.txt` を書く規則。
 
-票:   docs/tasks/shell/TASK_H4.md §2-1 / §2-2 / §4-1 (M1 M2 M3 M4)
+票:   docs/archive/shell/TASK_H4.md §2-1 / §2-2 / §4-1 (M1 M2 M3 M4)
 記録: tools/tests/h4_manifest_tdd.md
 
 `tools/hostdrv_deploy.py` を**実物のまま import** し、HOSTDRV_DIR と PROJ_DIR

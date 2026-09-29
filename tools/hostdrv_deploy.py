@@ -16,7 +16,7 @@ sudo 不要。NHDイメージ操作不要。プログラム変更時は NP21/W �
   python3 hostdrv_deploy.py clean              — HostDrvディレクトリをクリア
   python3 hostdrv_deploy.py ls [path]          — HostDrvディレクトリ一覧
 
-配備の**世代の名札** (票 H4、docs/tasks/shell/TASK_H4.md §2-1 / §2-2):
+配備の**世代の名札** (票 H4、docs/archive/shell/TASK_H4.md §2-1 / §2-2):
 `.deploy/manifest.txt` に行指向の平文で「この配備元がどの版か」を書き残す。
 ゲストの `hsync` がこれを読み、`--expect-build` で食い違いを断る。
 **全件成功の後にだけ書き、1 件でも失敗したら既にある名札を消す。**

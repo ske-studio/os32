@@ -1,7 +1,7 @@
 """tools/gen_build_id.py (カーネルに埋め込むコミット ID) のホスト試験。
 
 記録: tools/tests/vk32_crc_tdd.md (「コミット ID」の節)
-票  : docs/tasks/realhw/TASK_SERIAL_HOSTFS.md 部品 A-4 (ユーザー指示: ver に Commit)
+票  : docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md 部品 A-4 (ユーザー指示: ver に Commit)
 
 一時ディレクトリに git リポジトリを作り、実物の生成器を走らせて見る:
   - 変更なし → `git rev-parse --short=7 HEAD` と同じ

@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """guest_tests.py — 所定の試験をゲストで一括実行し、ホストで機械が集計する。
 
-票: docs/tasks/test/TASK_TEST_RUNNER.md (ランナー 3 段目)
-前段: docs/tasks/test/TASK_TEST_RESULT.md — 終了コード (0/1/2) と集計行
+票: docs/archive/test/TASK_TEST_RUNNER.md (ランナー 3 段目)
+前段: docs/archive/test/TASK_TEST_RESULT.md — 終了コード (0/1/2) と集計行
       `<名前>: PASS <n>/<m>` の約束事。**このランナーはその両方を見て、
       食い違いを不合格として報告する。片方だけ見ると約束事が壊れても誰も
       気づけない。**
@@ -820,7 +820,7 @@ def load_entries(path):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="所定の試験をゲストで一括実行し、ホストで集計する "
-                    "(票 docs/tasks/test/TASK_TEST_RUNNER.md)")
+                    "(票 docs/archive/test/TASK_TEST_RUNNER.md)")
     ap.add_argument("--list-file", default=os.path.join(PROJ_DIR, LIST_REL),
                     help="走らせる一覧 (既定: %s)" % LIST_REL)
     ap.add_argument("--dry-run", action="store_true",

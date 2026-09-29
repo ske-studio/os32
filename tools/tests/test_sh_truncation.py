@@ -1,6 +1,6 @@
 """切り詰め: シェルが入力を黙って切り詰める経路を実物のソースで押さえる。
 
-票:   docs/tasks/shell/TASK_SH_TRUNCATION.md §5 の段 2 (T1 と §2-1)
+票:   docs/archive/shell/TASK_SH_TRUNCATION.md §5 の段 2 (T1 と §2-1)
 記録: tools/tests/sh_truncation_tdd.md
 
   python3 -B tools/tests/test_sh_truncation.py [--mutate]

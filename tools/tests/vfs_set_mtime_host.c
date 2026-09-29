@@ -2,7 +2,7 @@
  *  VFS_SET_MTIME_HOST.C — `vfs_set_mtime()` の振り分け規則を
  *                          **実物の fs/vfs.c で** 確かめる
  *
- *  票:   H3 (docs/tasks/shell/TASK_H3.md §4)
+ *  票:   H3 (docs/archive/shell/TASK_H3.md §4)
  *  実行: python3 -B tools/tests/test_vfs_set_mtime.py [--target]
  *  記録: tools/tests/h3_tdd.md
  *

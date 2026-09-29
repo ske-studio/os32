@@ -1,8 +1,8 @@
 /* ========================================================================
  *  sbrk_tier_host.c — CPL=3 プログラムの sbrk 物理「二段構え」の性質試験
  *
- *  対象票: docs/tasks/gui/v13/TASK_K5B_kernel.md (作業 8)
- *  決裁:   docs/tasks/gui/v13/TASK_K5_multiapp.md 決裁表「sbrk は二段構え」
+ *  対象票: docs/archive/gui_v13/TASK_K5B_kernel.md (作業 8)
+ *  決裁:   docs/archive/gui_v13/TASK_K5_multiapp.md 決裁表「sbrk は二段構え」
  *  実行:   python3 -B tools/tests/test_sbrk_tier.py
  *  記録:   tools/tests/k5b_kernel_tdd.md (回 4)
  *

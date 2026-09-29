@@ -1,6 +1,6 @@
 """H2: hsync の置換安全化 (一時ファイル + 検証 + 置換)。
 
-票:   docs/tasks/shell/TASK_H2.md §2-3 / §2-4 / §4-1
+票:   docs/archive/shell/TASK_H2.md §2-3 / §2-4 / §4-1
 記録: tools/tests/hsync_h2_tdd.md
 
 tools/tests/hsync_h2_host.c が userland/system/hsync.c を 1 行も写さず

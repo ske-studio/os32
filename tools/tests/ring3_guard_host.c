@@ -1,7 +1,7 @@
 /* ========================================================================
  *  ring3_guard_host.c — WM の文脈では KAPI の出力検査を効かせない (実物で)
  *
- *  対象票: docs/tasks/memory/TASK_KAPI_OUTPUT_GUARD.md (追補 2026-09-26)
+ *  対象票: docs/archive/kernel_v21/TASK_KAPI_OUTPUT_GUARD.md (追補 2026-09-26)
  *  実行:   python3 -B tools/tests/test_ring3_guard.py
  *  記録:   tools/tests/ring3_guard_tdd.md
  *

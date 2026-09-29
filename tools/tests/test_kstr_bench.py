@@ -1,6 +1,6 @@
 """kstr_bench の**計測の枠組み**をホストで試験する (票 TASK_KSTRING_BENCH)。
 
-票:   docs/tasks/portability/TASK_KSTRING_BENCH.md
+票:   docs/archive/portability/TASK_KSTRING_BENCH.md
 記録: tools/tests/kstr_bench_tdd.md
 
 tools/tests/kstr_bench_host.c が実物の userland/tests/kstr_bench.c を 1 行も

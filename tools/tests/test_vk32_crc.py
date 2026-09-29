@@ -1,7 +1,7 @@
 """VK32 v2 (CRC32 表 + 完全長) の生成と、両ローダの検査・展開のホスト試験。
 
 記録: tools/tests/vk32_crc_tdd.md
-票  : docs/tasks/realhw/TASK_SERIAL_HOSTFS.md 部品 A-4 / §1-v3「FD ローダ」
+票  : docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md 部品 A-4 / §1-v3「FD ローダ」
 
 tools/mkvmkernel.py (実物) で VK32 v2 を作り、
   mode 0  boot/vk32_boot.c の vk32_boot + boot/lz4_mini.c (HDD ローダ)

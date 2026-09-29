@@ -1,6 +1,6 @@
 """T9-S: sh.bin の起動待ちを実物の userland/shell/sh_launch.inc で確かめる。
 
-票:   docs/tasks/gui/v13/TASK_T9_sh.md §1 D3a (S 側 = シェル)
+票:   docs/archive/gui_v13/TASK_T9_sh.md §1 D3a (S 側 = シェル)
 記録: tools/tests/t9_tdd.md
 
 test_launch.py (K 側) と同じ様式 — ホスト ILP32 GNU89 で走らせたあと、

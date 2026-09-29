@@ -1,6 +1,6 @@
 """S0-D: 通常配備が /etc/settings.db* を作らない・上書きしない・消さないことの試験。
 
-票:   docs/tasks/settings/TASK_S0.md §2 (S0-D)、契約は S0_FOUNDATION.md §5 (D0)
+票:   docs/archive/settings/TASK_S0.md §2 (S0-D)、契約は S0_FOUNDATION.md §5 (D0)
 記録: tools/tests/s0_tdd.md 節 D
 
 設定レジストリ (/etc/settings.db) は**ゲストが書く**もので、ホストのビルド成果物では
@@ -771,7 +771,7 @@ class Stamp(Base):
 
 # ======================================================================
 #  Codex 実装レビュー 往復 1 の blocker B1〜B9 の反例
-#  (docs/tasks/settings/TASK_S0.md §6 / tools/tests/s0_tdd.md §D)
+#  (docs/archive/settings/TASK_S0.md §6 / tools/tests/s0_tdd.md §D)
 # ======================================================================
 class ReviewB1DirDestination(Base):
     """B1: cp / copy2 は宛先が既存ディレクトリなら中へ書く。"""
@@ -1116,7 +1116,7 @@ class ManifestEntryPoints(Base):
 
 # ======================================================================
 #  Codex 実装レビュー 往復 2 の blocker 1〜9 の反例
-#  (docs/tasks/settings/TASK_S0.md §6 / tools/tests/s0_tdd.md §D.7)
+#  (docs/archive/settings/TASK_S0.md §6 / tools/tests/s0_tdd.md §D.7)
 # ======================================================================
 class Review2DoubleFill(Base):
     """1: 補完後のパスが (symlink 越しに) ディレクトリだと cp が再補完する。"""
@@ -1316,7 +1316,7 @@ class Review2WalkPruning(Base):
 
 # ======================================================================
 #  Codex 実装レビュー 往復 3 の反例 (D1〜D6)
-#  (docs/tasks/settings/TASK_S0.md §6 / tools/tests/s0_tdd.md §D.8)
+#  (docs/archive/settings/TASK_S0.md §6 / tools/tests/s0_tdd.md §D.8)
 # ======================================================================
 class Review3TreeSymlink(Base):
     """D1 / D2: 配備ツリーに symlink があれば配備全体を拒否する (PM 方針)。"""
@@ -1491,7 +1491,7 @@ class Review3PruneStat(Base):
 
 # ======================================================================
 #  Codex 追加往復の 3 件 (P2)
-#  (docs/tasks/settings/TASK_S0.md §6 / tools/tests/s0_tdd.md §D.9)
+#  (docs/archive/settings/TASK_S0.md §6 / tools/tests/s0_tdd.md §D.9)
 # ======================================================================
 class Review4AncestorCompletion(Base):
     """1: 保護祖先の配下へ補完したら「成功除外」(失敗にしない)。"""
@@ -1671,7 +1671,7 @@ class Review4SourceTreeCheck(Base):
 
 # ======================================================================
 #  実配備 1 回目の差し戻し: ext2 の lost+found
-#  (docs/tasks/settings/TASK_S0.md §8f / tools/tests/s0_tdd.md §D.11)
+#  (docs/archive/settings/TASK_S0.md §8f / tools/tests/s0_tdd.md §D.11)
 # ======================================================================
 class Review5LostFound(Base):
     """mkfs.ext2 が作る root 所有 mode 700 の `lost+found` で止まらない。

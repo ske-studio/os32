@@ -4,7 +4,7 @@
  *  実行: python3 -B tools/tests/test_pegc_mode.py [--mutate]
  *  記録: tools/tests/pegc_mode_tdd.md
  *  票:   docs/tasks/realhw/TASK_PEGC480_REALHW.md (§3-3 比較表、§4、§5)
- *        docs/tasks/gui/v21/TASK_PEGC_RA266_TIMING.md
+ *        docs/archive/realhw_v21/TASK_PEGC_RA266_TIMING.md
  *
  *  実物の gfx/backend_pegc.c を 1 行も写さずに #include し、ポート I/O だけを
  *  偽物 (tools/tests/pegc_hostshim/io.h → pegc_shim_inp / pegc_shim_outp) に

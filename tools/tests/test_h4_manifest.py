@@ -1,6 +1,6 @@
 """H4 (読む側): 配備マニフェスト `.deploy/manifest.txt` を読む規則。
 
-票:   docs/tasks/shell/TASK_H4.md §2-1 / §2-3 / §2-3-1 / §4-1
+票:   docs/archive/shell/TASK_H4.md §2-1 / §2-3 / §2-3-1 / §4-1
 記録: tools/tests/h4_manifest_tdd.md
 
 tools/tests/h4_manifest_host.c が userland/system/hsync.c を 1 行も写さず

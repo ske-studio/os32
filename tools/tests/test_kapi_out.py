@@ -1,7 +1,7 @@
 """KAPI の出力ポインタ宣言 `out` とその生成コードのホスト試験。
 
 記録: tools/tests/kapi_out_tdd.md
-票  : docs/tasks/memory/TASK_KAPI_OUTPUT_GUARD.md 受入 G1
+票  : docs/archive/kernel_v21/TASK_KAPI_OUTPUT_GUARD.md 受入 G1
 
 見るものは 2 つ。
 

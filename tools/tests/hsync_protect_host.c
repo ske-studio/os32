@@ -2,7 +2,7 @@
  *  hsync_protect_host.c — hsync の「コピー先が /etc/settings.db* か」の
  *  字句判定を **実物のソースで** 確かめる (票 S0-D / D0)
  *
- *  対象票: docs/tasks/settings/TASK_S0.md §2
+ *  対象票: docs/archive/settings/TASK_S0.md §2
  *  実行:   python3 -B tools/tests/test_hsync_protect.py
  *  記録:   tools/tests/s0_tdd.md 節 D
  *

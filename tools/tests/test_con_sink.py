@@ -1,6 +1,6 @@
 """K6C: console シンクのリングを実物の kernel/con_sink.c で確かめる。
 
-票:   docs/tasks/gui/v13/TASK_K6C_console.md §2 (設計 3 点 + レコード形式)
+票:   docs/archive/gui_v13/TASK_K6C_console.md §2 (設計 3 点 + レコード形式)
 記録: tools/tests/con_sink_tdd.md
 
 test_multiapp_model.py と同じ様式 — ホスト ILP32 GNU89 で走らせたあと、

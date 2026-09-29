@@ -1,6 +1,6 @@
 """S0-D: hsync が /etc/settings.db* を切り詰めないことの字句判定を実物のソースで見る。
 
-票:   docs/tasks/settings/TASK_S0.md §2 (S0-D)、契約は S0_FOUNDATION.md §5 (D0)
+票:   docs/archive/settings/TASK_S0.md §2 (S0-D)、契約は S0_FOUNDATION.md §5 (D0)
 記録: tools/tests/s0_tdd.md 節 D
 
 hsync は HostDrv (C:\\os32) の中身を NHD の / へ O_CREAT|O_TRUNC で写す。HostDrv に

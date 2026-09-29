@@ -1,6 +1,6 @@
 """T9-K R1: KAPI が CPL=3 へ返す文字列の置き場を実物の exec/ring3_str.c で確かめる。
 
-票:   docs/tasks/gui/v13/TASK_T9_sh.md §12 R1 (Codex 網羅レビュー 往復 7)
+票:   docs/archive/gui_v13/TASK_T9_sh.md §12 R1 (Codex 網羅レビュー 往復 7)
 記録: tools/tests/t9_tdd.md
 
 sys_getcwd は fs/vfs.c の static cwd (カーネル帯) をそのまま返していた。

@@ -1,7 +1,7 @@
 """票 TASK_VFS_FD_PATH: FD は inode で動き名前空間の変更で失効する / 長いパスは
 切り詰めずに断る / パッケージの長さ / newlib の errno。
 
-票:   docs/tasks/memory/TASK_VFS_FD_PATH.md
+票:   docs/archive/kernel_v21/TASK_VFS_FD_PATH.md
 記録: tools/tests/vfs_fd_path_tdd.md
 
 tools/tests/vfs_fd_path_host.c が実物の fs/ext2_*.c / vfs.c / vfs_fd.c と

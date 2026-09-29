@@ -1,7 +1,7 @@
 """票 TASK_HDD_INSTALL 段 2 (インストーラ cdinst / install) のホスト試験。
 
 記録: tools/tests/hdd_stage2_tdd.md
-票  : docs/tasks/realhw/TASK_HDD_INSTALL.md 段 2 (9〜11) / §1-v3 (N4・N6・N8・R3-1)
+票  : docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 2 (9〜11) / §1-v3 (N4・N6・N8・R3-1)
 
 実物を 1 行も写さずに回す:
   tools/tests/hdd_stage2_host.c   userland/system/inst_disk.c (+ pc98pt.c・

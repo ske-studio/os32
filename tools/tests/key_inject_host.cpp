@@ -1,4 +1,4 @@
-/* aidebug_keys.cpp のホスト試験 (票 docs/tasks/tools/TASK_KEY_INJECT.md 受入 K1/K2/K3/K5)。
+/* aidebug_keys.cpp のホスト試験 (票 docs/archive/tools/TASK_KEY_INJECT.md 受入 K1/K2/K3/K5)。
  * ドライバは test_key_inject.py が np21w-src の実物とリンクして走らせる。 */
 #include "compiler.h"	/* 試験用スタブ (SUPPORT_AIDEBUG を立てるだけ) */
 #include <stdio.h>

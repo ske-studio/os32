@@ -1,4 +1,4 @@
-"""キー注入の退行試験 (票 docs/tasks/tools/TASK_KEY_INJECT.md 受入 K1〜K6)。
+"""キー注入の退行試験 (票 docs/archive/tools/TASK_KEY_INJECT.md 受入 K1〜K6)。
 
 2 つを見る。どちらもホストだけで完結し、NP21/W もゲストも要らない。
 

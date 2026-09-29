@@ -2,7 +2,7 @@
  *  sh_truncation_host.c — シェルの「黙って切り詰める」経路を **実物のソース
  *                         で** 押さえる足場
  *
- *  対象票: docs/tasks/shell/TASK_SH_TRUNCATION.md §5 の段 1「足場」
+ *  対象票: docs/archive/shell/TASK_SH_TRUNCATION.md §5 の段 1「足場」
  *  実行:   python3 -B tools/tests/test_sh_truncation.py
  *  記録:   tools/tests/sh_truncation_tdd.md
  *

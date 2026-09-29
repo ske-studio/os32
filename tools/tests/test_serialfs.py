@@ -1,7 +1,7 @@
 """SerialFS (シリアル越しの /host) のホスト試験 — 票 TASK_SERIAL_HOSTFS §3 の T1 と T5。
 
 記録: tools/tests/serialfs_tdd.md
-票  : docs/tasks/realhw/TASK_SERIAL_HOSTFS.md 部品 B (§1-v2 / §1-v3 / ユーザー決裁 2026-09-24)
+票  : docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md 部品 B (§1-v2 / §1-v3 / ユーザー決裁 2026-09-24)
 
 5 つの段:
 

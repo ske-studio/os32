@@ -7,7 +7,7 @@
 /*    fs/ext2_layout.c          format の大きさの固定点 (N7)                 */
 /*    userland/shell/hdprep_plan.c  hdprep の断る条件と計画                  */
 /*  記録: tools/tests/hdd_stage1_tdd.md                                     */
-/*  票  : docs/tasks/realhw/TASK_HDD_INSTALL.md 段 1 / §1-v3                */
+/*  票  : docs/archive/realhw_v21/TASK_HDD_INSTALL.md 段 1 / §1-v3                */
 /*                                                                          */
 /*  ホストは 64 ビット (u32 = unsigned long = 64 bit)。試験対象は 32 ビットの */
 /*  桁あふれに頼らない書き方をしているので、同じ答えになる。期待値は式では   */

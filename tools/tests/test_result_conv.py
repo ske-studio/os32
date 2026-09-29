@@ -1,4 +1,4 @@
-"""試験プログラムの「合否の出し方」を固定する (票 docs/tasks/test/TASK_TEST_RESULT.md §2 / §11)。
+"""試験プログラムの「合否の出し方」を固定する (票 docs/archive/test/TASK_TEST_RESULT.md §2 / §11)。
 
 記録: tools/tests/result_conv_tdd.md
 

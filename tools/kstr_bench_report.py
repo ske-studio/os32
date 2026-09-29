@@ -3,7 +3,7 @@
 """
 kstr_bench_report.py — kstr_bench の出力を読んで「C 版 / asm 版」の比の表を出す
 
-票: docs/tasks/portability/TASK_KSTRING_BENCH.md §2 の 3 (判断の材料)
+票: docs/archive/portability/TASK_KSTRING_BENCH.md §2 の 3 (判断の材料)
 
     python3 tools/kstr_bench_report.py run1.txt [run2.txt run3.txt] [--tsv]
     ゲストの出力をそのまま食わせる (引数が無ければ標準入力)。

@@ -218,7 +218,7 @@ void _start(void)
 #endif
 
     /* ---- H. per-app 物理 (K5b P1/P2/P6) -------------------------------
-     *  票 docs/tasks/gui/v13/TASK_K5_multiapp.md D1 (I5/I6)。
+     *  票 docs/archive/gui_v13/TASK_K5_multiapp.md D1 (I5/I6)。
      *    P2 paging_addrspace_clear_app_band — アプリ帯を空から始める (I6)
      *    P1 paging_addrspace_map_user_range_phys — 仮想 != 物理で張る (I5)
      *    P6 paging_addrspace_free_user_range — 張った物理だけを返す

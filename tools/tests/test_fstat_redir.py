@@ -1,6 +1,6 @@
 """F4 / F5: `fstat` がリダイレクトに従い、`isatty` と食い違わない。
 
-票:   docs/tasks/test/TASK_FSTAT_REDIR.md の受入 F4 / F5
+票:   docs/archive/test/TASK_FSTAT_REDIR.md の受入 F4 / F5
 記録: tools/tests/fstat_redir_tdd.md
 
 tools/tests/fstat_redir_host.c が実物の fs/vfs.c + fs/vfs_fd.c +

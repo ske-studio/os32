@@ -3,7 +3,7 @@
  *
  *  実行: python3 -B tools/tests/test_result_conv.py [--target] [--mutate]
  *  記録: tools/tests/result_conv_tdd.md
- *  票  : docs/tasks/test/TASK_TEST_RESULT.md §2 / §6 の 1 / §11 (追補)
+ *  票  : docs/archive/test/TASK_TEST_RESULT.md §2 / §6 の 1 / §11 (追補)
  *
  *  ゲストの試験プログラムの合否を人が画面を読まずに判定できるようにするには、
  *  **終了コードと最終行の集計行が必ず一致している**ことと、その集計行が

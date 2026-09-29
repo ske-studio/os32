@@ -3,7 +3,7 @@
  *  長いパス・深いパスは切り詰めずに断る、を **実物の vfs + vfs_fd + ext2 +
  *  rt/pkg.c** で確かめる
  *
- *  票:   docs/tasks/memory/TASK_VFS_FD_PATH.md (方針 v2 の 8〜12、v3、ラリー 3)
+ *  票:   docs/archive/kernel_v21/TASK_VFS_FD_PATH.md (方針 v2 の 8〜12、v3、ラリー 3)
  *  実行: python3 -B tools/tests/test_vfs_fd_path.py [--target] [--mutants] [case]
  *  記録: tools/tests/vfs_fd_path_tdd.md
  *

@@ -1,6 +1,6 @@
 """K5b-K: owner-ID reclamation closes on one app, using the real sources.
 
-Ticket: docs/tasks/gui/v13/TASK_K5B_kernel.md (host tests, 2nd item)
+Ticket: docs/archive/gui_v13/TASK_K5B_kernel.md (host tests, 2nd item)
 Design: TASK_K5_multiapp.md D3 (the `*_owned(id)` inventory, P3/P5)
 Log:    tools/tests/k5b_kernel_tdd.md
 

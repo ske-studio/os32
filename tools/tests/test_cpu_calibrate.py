@@ -1,7 +1,7 @@
 """CPU 校正の止め方と丸め (kernel/cpu_calibrate_math.c) のホスト試験。
 
 記録: tools/tests/cpu_calibrate_tdd.md
-票  : docs/tasks/realhw/TASK_SERIAL_VFAST.md (往復 3 — 1 バイト 2ms の固定費)
+票  : docs/archive/realhw_v21/TASK_SERIAL_VFAST.md (往復 3 — 1 バイト 2ms の固定費)
 
 実物の kernel/cpu_calibrate_math.c を 1 行も写さずに #include して回す。
 判定は tick_count も I/O も触らないので模型は要らない。

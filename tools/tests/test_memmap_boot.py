@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """ブート順を実物 (kernel/paging.c + kernel/shm.c) で再生し、地図と PTE を照合する。
 
-票 docs/tasks/memory/TASK_KSTACK_USER.md §4 の 2・3 / 記録: tools/tests/memmap_tdd.md
+票 docs/archive/kernel_v21/TASK_KSTACK_USER.md §4 の 2・3 / 記録: tools/tests/memmap_tdd.md
 
   python3 -B tools/tests/test_memmap_boot.py [--mutate]
 

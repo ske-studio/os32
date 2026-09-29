@@ -2,7 +2,7 @@
  *  b8_hostdrv_host.c — HostDrv の「OPEN の失敗を全部 NOTFOUND に畳む」
  *  経路 (票 B8 / Codex 実装レビュー P1-4) を **実物の fs/hostdrvfs.c** で見る
  *
- *  票:   docs/tasks/shell/TASK_FS_TYPE.md §2
+ *  票:   docs/archive/shell/TASK_FS_TYPE.md §2
  *  実行: python3 -B tools/tests/test_b8_hostdrv.py
  *  記録: tools/tests/b8_tdd.md §5
  *

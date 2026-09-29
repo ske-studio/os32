@@ -2,7 +2,7 @@
  *  HSYNC_H2_HOST.C — 票 H2 (一時ファイル + 検証 + 置換) を
  *                    **実物のソースで** 確かめる
  *
- *  対象票: docs/tasks/shell/TASK_H2.md §2-3 / §2-4 / §4-1
+ *  対象票: docs/archive/shell/TASK_H2.md §2-3 / §2-4 / §4-1
  *          (A14a A14a2 A14a3 A14a4 A14a5 A14a6 A14b A14b2 A14c
  *           A15 A15b A15c A17a A17b A17c R1 R1b R3 R4 R5)
  *  実行:   python3 -B tools/tests/test_hsync_h2.py [--target] [--mutate]

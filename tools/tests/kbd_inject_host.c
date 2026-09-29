@@ -1,7 +1,7 @@
 /* ========================================================================
  *  kbd_inject_host.c — 打鍵の注入リングを **実物のソースで** 確かめる
  *
- *  対象票: docs/tasks/gui/v13/TASK_K7_input.md §1 D2〜D5 / §5 (R1 / R2 / B)
+ *  対象票: docs/archive/gui_v13/TASK_K7_input.md §1 D2〜D5 / §5 (R1 / R2 / B)
  *  実行:   python3 -B tools/tests/test_kbd_inject.py
  *  記録:   tools/tests/k7_tdd.md
  *

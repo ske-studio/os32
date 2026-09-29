@@ -1,6 +1,6 @@
 """票 B8 / P1-4: HostDrv の OPEN 失敗を「不存在」と読み替えない。
 
-票:   docs/tasks/shell/TASK_FS_TYPE.md §2
+票:   docs/archive/shell/TASK_FS_TYPE.md §2
 記録: tools/tests/b8_tdd.md §5
 
 tools/tests/b8_hostdrv_host.c が **実物の fs/hostdrvfs.c** をそのまま

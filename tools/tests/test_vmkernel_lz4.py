@@ -1,7 +1,7 @@
 """vmkernel.lz4 の高圧縮 (LZ4 HC) と展開側 3 実装の一致、生成時の上限検査。
 
 記録: tools/tests/vmkernel_lz4_tdd.md
-票  : docs/tasks/realhw/TASK_SERIAL_HOSTFS.md 部品 A-1 (N8 の生成側は TASK_HDD_INSTALL)
+票  : docs/archive/realhw_v21/TASK_SERIAL_HOSTFS.md 部品 A-1 (N8 の生成側は TASK_HDD_INSTALL)
 
 tools/mkvmkernel.py (実物) で VK32 イメージを作り、各エントリを
   mode 0  boot/lz4_mini.c        (HDD ローダ loader_hdd.bin が使う)
