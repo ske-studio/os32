@@ -475,7 +475,7 @@ $ cd userland/rust && cargo build --release -p libos32gui -p libos32gui_stub -p 
 ### shlib のリンク (2026-09-13 に通った)
 
 ```text
-$ CROSS_DIR=/home/hight/opt/cross make userland/libos32gui.elf userland/libos32gui.shlib
+$ CROSS_DIR=~/opt/cross make userland/libos32gui.elf userland/libos32gui.shlib
 i386-elf-ld ... --start-group libos32gfx.a libos32math.a libos32cfg.a liblibos32gui.a --end-group -lc -lgcc
   mkshlib: 番号表 OK (105 本, version=1)
   SHLIB: libos32gui.shlib (nfunc=105, version=1, text_pages=22,
@@ -483,7 +483,7 @@ i386-elf-ld ... --start-group libos32gfx.a libos32math.a libos32cfg.a liblibos32
 ```
 
 `CROSS_DIR` を渡しているのは、この作業環境のクロス一式が
-`/home/hight/opt/cross` にあり `build/config.mk` の既定 (`/usr/local/cross`) と
+`~/opt/cross` にあり `build/config.mk` の既定 (`/usr/local/cross`) と
 違うため (S2 の変更とは無関係)。
 
 ### まだ通っていないもの ([V4])

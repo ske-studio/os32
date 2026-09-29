@@ -7,7 +7,7 @@ OS ビルド・配備・NHD コピー・commit・agent 起動は実施してい�
 
 ## ソース根拠と承認された差
 
-読取対象は `/home/hight/np21w-src/src/win9x/` のソース。
+読取対象は `~/np21w-src/src/win9x/` のソース。
 
 | 根拠 | 意味 |
 |---|---|
@@ -106,7 +106,7 @@ CloseMainWindow / CIM / NTFS API の実検証は未実施。制限回避や再�
 ```bash
 python3 -B -m unittest discover -s tools/tests -p 'test_*.py' -v
 # Ran 120 tests / OK (skipped=2)
-python3 -B /home/hight/.codex/skills/.system/skill-creator/scripts/quick_validate.py .claude/skills/os32-emu-config
+python3 -B ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .claude/skills/os32-emu-config
 # Skill is valid!
 python3 -B tools/np21w_trial.py --help
 # exit0
@@ -125,9 +125,9 @@ python3 -B tools/np21w_trial.py --help
 
 ```bash
 python3 -B tools/np21w_trial.py \
-  --exe 'C:\Users\hight\Documents\np21w\np21x64w.exe' \
-  --baseline 'C:\Users\hight\Documents\np21w\np21x64w.ini' \
-  --cwd 'C:\Users\hight\Documents\np21w' \
+  --exe '$NP21W_DIR\np21x64w.exe' \
+  --baseline '$NP21W_DIR\np21x64w.ini' \
+  --cwd '$NP21W_DIR' \
   --pid SELECTED_PID --created 'SELECTED_CREATION_UTC' \
   --model 'LOCAL_MODEL_ID' \
   --llm-url 'http://127.0.0.1:1234/v1/chat/completions' \

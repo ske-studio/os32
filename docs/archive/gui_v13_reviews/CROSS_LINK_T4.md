@@ -20,7 +20,7 @@
 
 ```sh
 cargo build --manifest-path userland/libos32term/Cargo.toml --release \
-  --target /home/hight/os32/sdk/rust/i686-os32-none.json \
+  --target ~/os32/sdk/rust/i686-os32-none.json \
   -Z json-target-spec -Z build-std=core,compiler_builtins \
   -Z build-std-features=compiler-builtins-mem --offline
 ```
@@ -32,7 +32,7 @@ panic handlerは停止ループ。これはリンク専用であり、実行し�
 
 ```sh
 cargo build --manifest-path /tmp/os32-t4-link-probe/Cargo.toml --release \
-  --target /home/hight/os32/sdk/rust/i686-os32-none.json \
+  --target ~/os32/sdk/rust/i686-os32-none.json \
   -Z json-target-spec -Z build-std=core,compiler_builtins \
   -Z build-std-features=compiler-builtins-mem --offline
 i386-elf-gcc -nostdlib -static \

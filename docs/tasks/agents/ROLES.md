@@ -155,7 +155,7 @@ python3 tools/emu_agent/agent.py tail
 
 ```bash
 # レビュー依頼 (読むだけ。--dangerously-skip-permissions は使わない)
-cd /home/hight/os32 && timeout 1500 agy --mode plan --print-timeout 4m \
+cd ~/os32 && timeout 1500 agy --mode plan --print-timeout 4m \
     --print='<依頼文>' < /dev/null
 ```
 

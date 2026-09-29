@@ -163,7 +163,7 @@ links_count を参照しないこととも突き合わせていなかった。
   `cp -r` が誤った枝へ進む。H1 以前からの欠陥。解消には `cp`/`mv` が
   `fs_path_kind()` の負値を見て断る必要があり、呼び出し元の変更になる
   (`userland/shell/cmd_file.c` の 5 箇所)。
-- **NP21/W の `hostdrvNT_getHostPath`** (`/home/hight/np21w-src/src/generic/hostdrvnt.c:368-390`) の
+- **NP21/W の `hostdrvNT_getHostPath`** (`~/np21w-src/src/generic/hostdrvnt.c:368-390`) の
   ルート検査が区切り境界を見ない前方一致なので、`C:\os32` をルートにすると
   `C:\os32-other` 以下が通る。**別リポジトリ**なのでビルドと配備が要る。
   OS32 側は `\` を含む要素の拒否で緩和済み (H1 の B1) だが、これは修正ではない。

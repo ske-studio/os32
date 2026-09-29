@@ -72,7 +72,7 @@ K5a の設計 (D0〜D11) をカーネルに実装し、**gshell (W レーン) �
 
 ## 完了条件
 
-- `make clean && make all && make external && make check` が EXIT=0 (`CROSS_DIR=/home/hight/opt/cross` が要る場合あり)。
+- `make clean && make all && make external && make check` が EXIT=0 (`CROSS_DIR=~/opt/cross` が要る場合あり)。
 - `sdk/kapi.json` の version が 44、生成物と `KAPI_VERSION` が一致 (`check-kapi-version`)。
 - 上記ホスト試験がすべて GREEN で、RED の記録がある。
 - 変更ファイル一覧、KAPI 追加の最終署名、`snd_focus` の形 (KAPI か内部か)、既知の未確認を ROLES §5 の書式で報告。

@@ -39,7 +39,7 @@ TDD_LOG.mdの過去の未履行・初回GREENという事実を取り消さな�
 c05b5e7053e70a7774df6b28346b30f9248c81e9f3e9a315cb821426c3388fe8  userland/libos32term_render/src/lib.rs
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: unused imports: `Cell`, `ClipError`, and `Grid`
   --> src/lib.rs:28:12
    |
@@ -306,7 +306,7 @@ warning: function `mark_bits` is never used
    |    ^^^^^^^^^
 
 warning: `libos32term_render` (lib) generated 4 warnings (run `cargo fix --lib -p libos32term_render` to apply 1 suggestion)
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
      Running tests/rework.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/rework-a44ed2b7fc01ef6a)
 
@@ -350,7 +350,7 @@ exit=101
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test rework
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: unused import: `Cell`
   --> src/lib.rs:29:13
    |
@@ -429,7 +429,7 @@ warning: function `mark_bits` is never used
     |    ^^^^^^^^^
 
 warning: `libos32term_render` (lib) generated 4 warnings (run `cargo fix --lib -p libos32term_render` to apply 1 suggestion)
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
      Running tests/render.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/render-d81e800db59649a1)
 
@@ -546,7 +546,7 @@ exit=0
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --lib saved_
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: function `ank_bits` is never used
    --> src/lib.rs:109:4
     |
@@ -612,7 +612,7 @@ a0f3b988af9d3bac4c132962d3f9c5b8a74d119fccb2859087a917e3e6a4bab4  userland/libos
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --lib saved_
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: function `ank_bits` is never used
    --> src/lib.rs:120:4
     |
@@ -655,7 +655,7 @@ a0f3b988af9d3bac4c132962d3f9c5b8a74d119fccb2859087a917e3e6a4bab4  userland/libos
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test render width_mismatch
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: function `ank_bits` is never used
    --> src/lib.rs:120:4
     |
@@ -697,7 +697,7 @@ exit=0
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --lib halo_
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: function `ank_bits` is never used
    --> src/lib.rs:120:4
     |
@@ -775,7 +775,7 @@ d27b5e4cb71f02590d6e8f5b4d1635fea3a6f6768f48cd41cf200f714194286b  userland/libos
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --lib halo_
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: function `ank_bits` is never used
    --> src/lib.rs:130:4
     |
@@ -818,7 +818,7 @@ dd999f8136ec4f22e28fe780fd52edb91711c677ec49bebc043f64353deb2f45  userland/libos
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --lib dispatch_ank
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: function `ank_bits` is never used
    --> src/lib.rs:130:4
     |
@@ -875,7 +875,7 @@ dd999f8136ec4f22e28fe780fd52edb91711c677ec49bebc043f64353deb2f45  userland/libos
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --lib dispatch_ank
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: function `kanji_bits` is never used
    --> src/lib.rs:137:4
     |
@@ -911,7 +911,7 @@ exit=0
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --lib dispatch_unicode
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: function `kanji_bits` is never used
    --> src/lib.rs:137:4
     |
@@ -962,7 +962,7 @@ exit=101
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --lib dispatch_unicode
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: function `mark_bits` is never used
    --> src/lib.rs:144:4
     |
@@ -992,7 +992,7 @@ exit=0
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test render forwarded_glyph
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: function `mark_bits` is never used
    --> src/lib.rs:144:4
     |
@@ -1022,7 +1022,7 @@ ff75de9fa5d6443091d843461c626bfa0460839d2bc8b19be77f0de15349ab17  userland/libos
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --lib dispatch_fallback
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: function `mark_bits` is never used
    --> src/lib.rs:144:4
     |
@@ -1067,7 +1067,7 @@ ff75de9fa5d6443091d843461c626bfa0460839d2bc8b19be77f0de15349ab17  userland/libos
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 4ab5efc3e20e2d6d277e1f104fb03b579bebf0fc2bcbce2d50128a50c6652150  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --lib dispatch_
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -1090,7 +1090,7 @@ ff75de9fa5d6443091d843461c626bfa0460839d2bc8b19be77f0de15349ab17  userland/libos
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 33d863affebe931302624746c6e137f82300dfa5bab1d4652314d42857ddafae  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test rework crop_
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
      Running tests/rework.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/rework-a44ed2b7fc01ef6a)
 
@@ -1189,7 +1189,7 @@ ff75de9fa5d6443091d843461c626bfa0460839d2bc8b19be77f0de15349ab17  userland/libos
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 33d863affebe931302624746c6e137f82300dfa5bab1d4652314d42857ddafae  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test rework crop_
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
      Running tests/rework.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/rework-a44ed2b7fc01ef6a)
 
@@ -1217,7 +1217,7 @@ ff75de9fa5d6443091d843461c626bfa0460839d2bc8b19be77f0de15349ab17  userland/libos
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 33d863affebe931302624746c6e137f82300dfa5bab1d4652314d42857ddafae  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test render
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.36s
      Running tests/render.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/render-d81e800db59649a1)
 
@@ -1258,7 +1258,7 @@ ff75de9fa5d6443091d843461c626bfa0460839d2bc8b19be77f0de15349ab17  userland/libos
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 0e1ed11ccd540c671a8306a5140f0774a8223fe723bd9da536be574282534ca2  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test rework width_mismatch
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
      Running tests/rework.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/rework-a44ed2b7fc01ef6a)
 
@@ -1305,7 +1305,7 @@ PM再実行・独立レビュー・共有ゲート登録は本作業では未実
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 474d631fa6df33cfd8ee3c06baeaea1660016871c36ca28e6a59ee6eb9f7ca82  userland/libos32term_render/tests/rework.rs
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -1382,7 +1382,7 @@ exit=0
 566684ab5459d6d80eaa0fbe921e75479411de2e88c691010a351558ebd6cd3c  userland/libos32term_render/tests/render.rs
 474d631fa6df33cfd8ee3c06baeaea1660016871c36ca28e6a59ee6eb9f7ca82  userland/libos32term_render/tests/rework.rs
 $ cargo check --manifest-path userland/libos32term_render/Cargo.toml --lib --target x86_64-unknown-linux-gnu --offline
-    Checking libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+    Checking libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
 
 exit=0

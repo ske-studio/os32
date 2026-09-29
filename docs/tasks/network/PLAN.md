@@ -26,7 +26,7 @@ ARP/IP/ICMP/UDP/TCP、DHCP、DNS、ソケット、アプリケーションは別
 
 NE2000 互換なのは制御方式であり、PC/AT 向けの I/O 定数を流用してはいけない。
 以下は NP21/W の解析資料と、ローカルの ai-debug fork
-`/home/hight/np21w-src/src/network/lgy98.c` の `lgy98_bind()` 等で確認した値。
+`~/np21w-src/src/network/lgy98.c` の `lgy98_bind()` 等で確認した値。
 エミュレータ実装の確認と実カードの検証は区別する。
 
 | 項目 | 設計に使う値・扱い |
@@ -238,7 +238,7 @@ NHD/エミュレータ設定変更は実施時に該当する承認・停止手�
   PC-98 固有設定の一次調査。未解明部分を含むため実機条件と区別する。
 - [National Semiconductor DP8390D/NS32490D データシート](https://media.digikey.com/pdf/Data%20Sheets/Texas%20Instruments%20PDFs/DP8390D,NS32490D.pdf):
   §7 受信と overwrite recovery、§8 送信、§9 Remote DMA、§10 レジスタ、§11 初期化、§12 loopback。
-- ローカル NP21/W: `/home/hight/np21w-src/src/network/lgy98.c`、`lgy98.h`、`lgy98dev.h`。
+- ローカル NP21/W: `~/np21w-src/src/network/lgy98.c`、`lgy98.h`、`lgy98dev.h`。
   実装上の観測値を参照し、エミュレータ特有の省略を実カードの仕様にしない。
 - OS32: `include/io.h`、`kernel/idt.c`、`kernel/isr_stub.asm`、`kernel/isr_handlers.c`、
   `kernel/cpu_calibrate.h`、`build/kernel.mk`、`build/os32.ld`。
@@ -250,7 +250,7 @@ NIC コード、KAPI、エミュレータ設定、ディスクイメージは変
 
 ## 8. エミュレータ側の確認 (2026-09-05 追記、ローカル ai-debug fork のソースで照合)
 
-§2 の値は `/home/hight/np21w-src/src/network/lgy98.c` の `lgy98_reset()` / `lgy98_bind()` と
+§2 の値は `~/np21w-src/src/network/lgy98.c` の `lgy98_reset()` / `lgy98_bind()` と
 一致することを確認した (BASE 既定 0x10D0、IRQ 既定 5、`lgy98_IRQ2IDX` は IRQ 3/5/6/12 だけが
 有効、ポートは BASE+0x00〜0x0F / +0x18 / +0x200 / +0x300〜0x30F)。加えて、計画に載っていない
 エミュレータ側の事実と道具を記録する。**いずれもエミュレータの挙動であり実カードの仕様ではない。**
@@ -268,7 +268,7 @@ NIC コード、KAPI、エミュレータ設定、ディスクイメージは変
 ### ai-debug の LAN 道具 (M2 の対向試験に使う)
 
 fork には TAP 不要のソケットバックエンド (`SUPPORT_NET_SOCKET`) と HTTP API がある
-(`/home/hight/np21w-src/docs/05-network.md`):
+(`~/np21w-src/docs/05-network.md`):
 
 | 道具 | 使い方 | 計画での位置 |
 |---|---|---|

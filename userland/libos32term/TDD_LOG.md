@@ -1,6 +1,6 @@
 # T4 RED / GREEN 実行記録
 
-作業root: `/home/hight/os32`。各節は実コマンド、終了コード、実出力を記録する。
+作業root: `~/os32`。各節は実コマンド、終了コード、実出力を記録する。
 RED はコンパイル成功後の assertion 失敗を確認してから実装した。
 初期の型/API stub は空出力または明示エラーのみ。挙動実装は対応REDの後。
 
@@ -9,7 +9,7 @@ RED はコンパイル成功後の assertion 失敗を確認してから実装�
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test utf8
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.23s
      Running tests/utf8.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/utf8-ed5f1e078ab67bb1)
 
@@ -40,7 +40,7 @@ error: test failed, to rerun pass `--test utf8`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test utf8
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.84s
      Running tests/utf8.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/utf8-ed5f1e078ab67bb1)
 
@@ -55,7 +55,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test utf8
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.87s
      Running tests/utf8.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/utf8-ed5f1e078ab67bb1)
 
@@ -87,7 +87,7 @@ error: test failed, to rerun pass `--test utf8`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test utf8
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.00s
      Running tests/utf8.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/utf8-ed5f1e078ab67bb1)
 
@@ -103,7 +103,7 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test utf8
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.81s
      Running tests/utf8.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/utf8-ed5f1e078ab67bb1)
 
@@ -136,7 +136,7 @@ error: test failed, to rerun pass `--test utf8`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test utf8
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.89s
      Running tests/utf8.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/utf8-ed5f1e078ab67bb1)
 
@@ -155,7 +155,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test utf8
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.98s
      Running tests/utf8.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/utf8-ed5f1e078ab67bb1)
 
@@ -190,7 +190,7 @@ error: test failed, to rerun pass `--test utf8`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test utf8
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.99s
      Running tests/utf8.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/utf8-ed5f1e078ab67bb1)
 
@@ -209,7 +209,7 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
 warning: fields `cols`, `rows`, and `width` are never read
   --> src/model.rs:21:5
    |
@@ -263,7 +263,7 @@ error: test failed, to rerun pass `--test model`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
 warning: fields `cols`, `rows`, and `width` are never read
   --> src/model.rs:21:5
    |
@@ -295,7 +295,7 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
 warning: fields `cols`, `rows`, and `width` are never read
   --> src/model.rs:21:5
    |
@@ -353,7 +353,7 @@ error: test failed, to rerun pass `--test model`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
 warning: field `width` is never read
   --> src/model.rs:23:5
    |
@@ -395,7 +395,7 @@ warning: field `width` is never read
    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `libos32term` (lib) generated 1 warning
-   Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+   Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.85s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -439,7 +439,7 @@ error: test failed, to rerun pass `--test model`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.91s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -459,7 +459,7 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.88s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -505,7 +505,7 @@ error: test failed, to rerun pass `--test model`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.94s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -527,7 +527,7 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.84s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -575,7 +575,7 @@ error: test failed, to rerun pass `--test model`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.96s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -599,7 +599,7 @@ test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.05s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -640,7 +640,7 @@ error: test failed, to rerun pass `--test model`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.91s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -665,7 +665,7 @@ test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.93s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -716,7 +716,7 @@ error: test failed, to rerun pass `--test model`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.98s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -743,7 +743,7 @@ test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.05s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -796,7 +796,7 @@ error: test failed, to rerun pass `--test model`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.99s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -825,7 +825,7 @@ test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.27s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -881,7 +881,7 @@ error: test failed, to rerun pass `--test model`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.04s
      Running tests/model.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/model-d838952001b05b71)
 
@@ -913,7 +913,7 @@ test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test stream
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
 warning: field `decoder` is never read
   --> src/stream.rs:13:5
    |
@@ -965,7 +965,7 @@ error: test failed, to rerun pass `--test stream`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test stream
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
 warning: unused import: `Error`
  --> tests/stream.rs:1:32
   |
@@ -989,7 +989,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test stream
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.86s
      Running tests/stream.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/stream-778d381a245c0799)
 
@@ -1042,7 +1042,7 @@ error: test failed, to rerun pass `--test stream`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test stream
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.80s
      Running tests/stream.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/stream-778d381a245c0799)
 
@@ -1092,7 +1092,7 @@ error: test failed, to rerun pass `--test stream`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test stream
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.95s
      Running tests/stream.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/stream-778d381a245c0799)
 
@@ -1110,7 +1110,7 @@ test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test stream
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.90s
      Running tests/stream.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/stream-778d381a245c0799)
 
@@ -1154,7 +1154,7 @@ error: test failed, to rerun pass `--test stream`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test stream
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.93s
      Running tests/stream.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/stream-778d381a245c0799)
 
@@ -1174,7 +1174,7 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test stream
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.16s
      Running tests/stream.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/stream-778d381a245c0799)
 
@@ -1195,7 +1195,7 @@ test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test clip
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.76s
      Running tests/clip.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/clip-9f6efbc955e77ea7)
 
@@ -1235,7 +1235,7 @@ error: test failed, to rerun pass `--test clip`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test clip
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.82s
      Running tests/clip.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/clip-9f6efbc955e77ea7)
 
@@ -1251,7 +1251,7 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test clip
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.12s
      Running tests/clip.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/clip-9f6efbc955e77ea7)
 
@@ -1309,7 +1309,7 @@ error: test failed, to rerun pass `--test clip`
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test clip
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.91s
      Running tests/clip.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/clip-9f6efbc955e77ea7)
 
@@ -1331,7 +1331,7 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline
 exit: 101
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
 error[E0277]: can't compare `String` with `&mut str`
  --> tests/utf8.rs:9:48
   |
@@ -1362,7 +1362,7 @@ warning: build failed, waiting for other jobs to finish...
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.98s
      Running unittests src/lib.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/libos32term-504a1294aad4cb91)
 
@@ -1448,7 +1448,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```text
 cargo check --manifest-path userland/libos32term/Cargo.toml --lib --target x86_64-unknown-linux-gnu --offline
 exit: 0
-Checking libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Checking libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.56s
 ```
 
@@ -1468,7 +1468,7 @@ exit: 0
 ```text
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline
 exit: 0
-Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
+Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.50s
      Running unittests src/lib.rs (userland/libos32term/target/x86_64-unknown-linux-gnu/debug/deps/libos32term-504a1294aad4cb91)
 

@@ -1,7 +1,7 @@
 # 02. NP21/W のページング保護実装の検証 (Phase 0-3)
 
 > 実施日: 2026-08-08
-> 対象: `/home/hight/np21w-src`（ai-debug fork）の i386c CPU コア
+> 対象: `~/np21w-src`（ai-debug fork）の i386c CPU コア
 > 目的: 前回「NP21/W が PTE の U/S ビットを無視する」とされた主張の事実確認
 
 ---
@@ -194,11 +194,11 @@ MCP でフォルト地点を凍結できるようになっていれば（Phase 0
 
 ## 7. 参照
 
-- `/home/hight/np21w-src/src/i386c/ia32/paging.c:750-845`（`paging()`）, `:937-966`（`tlb_lookup()`）
-- `/home/hight/np21w-src/src/i386c/ia32/paging.h:126-133`（`ucrw` フラグ定義）
-- `/home/hight/np21w-src/src/i386c/ia32/ia32.c:320-327`（`set_cpl`）
-- `/home/hight/np21w-src/src/i386c/ia32/segments.c:137-151`（`load_cs`）
-- `/home/hight/np21w-src/src/i386c/ia32/exception.c:485-575`（V86→Ring0 割り込み配送）
-- `/home/hight/np21w-src/src/i386c/ia32/ctrlxfer.c:745-830`（コールゲート経路）
+- `~/np21w-src/src/i386c/ia32/paging.c:750-845`（`paging()`）, `:937-966`（`tlb_lookup()`）
+- `~/np21w-src/src/i386c/ia32/paging.h:126-133`（`ucrw` フラグ定義）
+- `~/np21w-src/src/i386c/ia32/ia32.c:320-327`（`set_cpl`）
+- `~/np21w-src/src/i386c/ia32/segments.c:137-151`（`load_cs`）
+- `~/np21w-src/src/i386c/ia32/exception.c:485-575`（V86→Ring0 割り込み配送）
+- `~/np21w-src/src/i386c/ia32/ctrlxfer.c:745-830`（コールゲート経路）
 - `archive/feat-vdm:docs/V86_STATUS.md` §9.2/§9.3（前回の「NP21/W 固有の制約」）
 - `docs/tasks/v86v2/01_prior_session_analysis.md` §6, §7

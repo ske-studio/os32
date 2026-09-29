@@ -210,7 +210,7 @@ BMPヘッダーの確認や台本完走は、画像内容やGUI結果が正し�
 捕捉して `_direct=False` とし、`get` / `get_to_file` がWindows curlへfallbackする。
 従来のprivate observation bindingでも、この内部の再試行相当の通信を防げなかった。
 `tools/np21w_mcp/server.py` の説明に加え、実サーバーの
-`/home/hight/np21w-src/src/win9x/aidebug/aidebug_api.cpp` の `handle_status`
+`~/np21w-src/src/win9x/aidebug/aidebug_api.cpp` の `handle_status`
 （214〜261行）を読んで次を確認した。
 
 - `ok` はJSON true。`running` はuser pauseまたはtrap pauseで0、そうでなければ1。

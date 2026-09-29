@@ -54,7 +54,7 @@ source 判定だけを条件コンパイルで制限し、ヘッダーにフラ�
 
 ## ターゲット GNU89 コンパイル
 
-`/home/hight/opt/cross/bin/i386-elf-gcc -dumpmachine` → `i386-elf`。
+`~/opt/cross/bin/i386-elf-gcc -dumpmachine` → `i386-elf`。
 同コンパイラで `kernel/physmem.c` 単体を一時ディレクトリにコンパイルした。
 共通オプション:
 

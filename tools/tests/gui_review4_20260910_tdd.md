@@ -165,12 +165,12 @@ test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 | コマンド | 結果 |
 |---|---|
-| `CROSS_DIR=/home/hight/opt/cross make programs` | EXIT=0 |
-| `CROSS_DIR=/home/hight/opt/cross make check` | EXIT=0 |
-| `CROSS_DIR=/home/hight/opt/cross make check-gshell-host` | EXIT=0、12 passed / 0 failed |
+| `CROSS_DIR=~/opt/cross make programs` | EXIT=0 |
+| `CROSS_DIR=~/opt/cross make check` | EXIT=0 |
+| `CROSS_DIR=~/opt/cross make check-gshell-host` | EXIT=0、12 passed / 0 failed |
 
 `make check` の `check-manifests` を通すため、gitignore 済みの生成物を本家
-`/home/hight/os32` から symlink した (`assets/fep.db`、`assets/fonts/ipaexg16.kcgfont`、
+`~/os32` から symlink した (`assets/fep.db`、`assets/fonts/ipaexg16.kcgfont`、
 `assets/fonts/ipaexg_subset.ttf`、`build/out/unicode.bin`)。
 `build/out/vmkernel.lz4` と `boot/*.bin` は worktree 内で `make kernel` / `make boot` して作った。
 

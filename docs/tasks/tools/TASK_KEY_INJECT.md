@@ -6,7 +6,7 @@
 発見: [`../gui/TASK_EDIT_GUI.md`](../gui/TASK_EDIT_GUI.md) §7-2 (受入 E2〜E7 がこれで止まった)。
 経緯: [`../../POLICY_DEBUG.md`](../../POLICY_DEBUG.md) §4-43。
 
-**直す先は NP21/W (`/home/hight/np21w-src`) と `tools/gui_gate.py` の両方。**
+**直す先は NP21/W (`~/np21w-src`) と `tools/gui_gate.py` の両方。**
 OS32 本体は変えない。**検証の側の穴**であって製品の穴ではない。
 
 ## 0. 症状
@@ -168,7 +168,7 @@ FEP は **SHIFT+SPACE** で起動する。`seq=SHIFT+SPACE` は既にあり、
 
     python3 -c "import sys;sys.path.insert(0,'tools');import np21w_restart as r;r.stop_np21w()"
     # プロセスが 0 になったことを確かめる
-    cd /home/hight/np21w-src && make deploy
+    cd ~/np21w-src && make deploy
     python3 -c "import sys;sys.path.insert(0,'tools');import np21w_restart as r;r.start_np21w()"
 
 **稼働中は exe が掴まれているので置き換えられない。** 必ず止めてから。

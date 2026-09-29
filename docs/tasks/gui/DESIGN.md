@@ -113,7 +113,7 @@ GUI の設計判断はすべてこの上限の内側で行い、下限は 386 �
 
 ## 4. NP21/W のウィンドウアクセラレータ再現範囲 (ソース確認 2026-09-04)
 
-`/home/hight/np21w-src/src/wab/` に実装がある。ai-debug fork の x64 Release
+`~/np21w-src/src/wab/` に実装がある。ai-debug fork の x64 Release
 (`np21vs2019.vcxproj`) は `SUPPORT_WAB` + `SUPPORT_CL_GD5430` + `SUPPORT_PEGC`
 + `SUPPORT_PCI` を定義してビルドしている。
 

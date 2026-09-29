@@ -201,5 +201,5 @@ IOPL=0 へのフォールバックも切替可能にしておき、実測で比�
 - [01_prior_session_analysis.md](01_prior_session_analysis.md) — 前回セッション残存ログの再解析
 - [02_np21w_paging_analysis.md](02_np21w_paging_analysis.md) — NP21/W のページング保護実装の検証
 - [03_ys_profile.md](03_ys_profile.md) — Ys I 実挙動プロファイル（本書の一次データ）
-- `/home/hight/np21w-src/src/i386c/ia32/interface.c:238-242` — V86 の `INT n` と IOPL の関係
+- `~/np21w-src/src/i386c/ia32/interface.c:238-242` — V86 の `INT n` と IOPL の関係
 - `docs/ROADMAP.md:199-213` — 静的移植スキーム（方式 D）

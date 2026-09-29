@@ -1,6 +1,6 @@
 # T5R 実行証跡（2026-09-08）
 
-全コマンドは `/home/hight/os32` から実行。以下はstdout/stderrの実出力と子プロセス終了コード。
+全コマンドは `~/os32` から実行。以下はstdout/stderrの実出力と子プロセス終了コード。
 採取器 `record.py` の呼出形式は `python3 userland/libos32term_render/record.py <段階名> <以下のコマンド>`。
 初期採取器は記録対象のexitを表示し自身は0で終了した。最終版は対象exitをそのまま返す。
 REDはすべてコンパイル後のassertion失敗（対象exit=101）であり、コンパイル失敗を含めない。
@@ -27,8 +27,8 @@ REDはすべてコンパイル後のassertion失敗（対象exit=101）であり
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
      Locking 1 package to latest compatible version
-   Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.81s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -75,7 +75,7 @@ exit=101
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -105,7 +105,7 @@ exit=0
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: unused imports: `Cell`, `ClipError`, and `Grid`
   --> src/lib.rs:17:26
    |
@@ -164,7 +164,7 @@ warning: unused imports: `Cell`, `ClipError`, and `Grid`
    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 warning: `libos32term_render` (lib) generated 1 warning (run `cargo fix --lib -p libos32term_render` to apply 1 suggestion)
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
 warning: `libos32term_render` (lib test) generated 1 warning (1 duplicate)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
@@ -210,7 +210,7 @@ exit=101
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -241,7 +241,7 @@ exit=0
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline background_and_empty
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -279,7 +279,7 @@ exit=101
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -311,7 +311,7 @@ exit=0
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.36s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -362,7 +362,7 @@ exit=101
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.41s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -396,7 +396,7 @@ exit=0
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -467,7 +467,7 @@ exit=101
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -505,7 +505,7 @@ exit=0
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -571,7 +571,7 @@ exit=101
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -612,7 +612,7 @@ exit=0
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -658,7 +658,7 @@ exit=0
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.35s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -707,7 +707,7 @@ exit=0
 
 ```text
 $ cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.85s
      Running unittests src/lib.rs (userland/libos32term_render/target/x86_64-unknown-linux-gnu/debug/deps/libos32term_render-5dff5fbdedfd54a5)
 
@@ -756,8 +756,8 @@ exit=0
 
 ```text
 $ cargo check --manifest-path userland/libos32term_render/Cargo.toml --lib --target x86_64-unknown-linux-gnu --offline
-    Checking libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
-    Checking libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
+    Checking libos32term v0.1.0 (~/os32/userland/libos32term)
+    Checking libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.20s
 
 exit=0

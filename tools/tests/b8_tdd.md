@@ -143,7 +143,7 @@ CHECK(ext2_vfs_get_size(g_ec, "/tmp/d", &sz) == VFS_OK);   /* /tmp/d はディ�
   `FILE_ATTRIBUTE_DIRECTORY` から `stdInfo.Directory` を埋めており、
   その `GetFileAttributesEx` が失敗したときは `returnData` が NULL のまま =
   問い合わせ自体がエラーになる (`std_rc != 0`) ので取りこぼしは無い
-  (`/home/hight/np21w-src/src/generic/hostdrvnt.c`)。
+  (`~/np21w-src/src/generic/hostdrvnt.c`)。
   **問い合わせの回数は増やしていない** — 種別は元から引いていた
   `FileStandardInformation` の応答で分かるので、`hdrv_stat` のように
   `FileBasicInformation` を追加で引くことはしなかった (get_file_size は
@@ -205,7 +205,7 @@ stat は成功 → サイズ取得の OPEN だけ失敗 → NOTFOUND → `vfs_op
 `hdrv_create_status_to_vfs()` (`fs/hostdrv_stat_rules.inc`) で VFS エラーへ写し、
 **呼び手 11 か所すべてがそのまま返す**。応答が無いとき (番兵) は IO。
 
-**NP21/W 側の根拠** (`/home/hight/np21w-src/src/generic/hostdrvnt.c` の
+**NP21/W 側の根拠** (`~/np21w-src/src/generic/hostdrvnt.c` の
 `hostdrvNT_IRP_MJ_CREATE`、読むだけで変更していない):
 
 | NTSTATUS | NP21/W が返す場面 | 写し先 |

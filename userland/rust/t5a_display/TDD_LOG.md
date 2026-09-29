@@ -9,9 +9,9 @@ host_testsは本体srcをpath参照する独立workspace。コマンドはリポ
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml
      Locking 2 packages to latest compatible versions
-   Compiling libos32term v0.1.0 (/home/hight/os32/userland/libos32term)
-   Compiling libos32term_render v0.1.0 (/home/hight/os32/userland/libos32term_render)
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling libos32term v0.1.0 (~/os32/userland/libos32term)
+   Compiling libos32term_render v0.1.0 (~/os32/userland/libos32term_render)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.76s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -43,7 +43,7 @@ exit=101
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -66,7 +66,7 @@ exit=0
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -126,7 +126,7 @@ exit=101
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -153,7 +153,7 @@ exit=0
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -209,7 +209,7 @@ exit=101
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -240,7 +240,7 @@ exit=0
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml storage::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
 warning: unused import: `Ordering`
  --> src/../../src/storage.rs:1:75
   |
@@ -291,7 +291,7 @@ exit=101
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml storage::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -308,7 +308,7 @@ exit=0
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml input::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -338,7 +338,7 @@ exit=101
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml input::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -355,7 +355,7 @@ exit=0
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml status::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
 warning: unused import: `Stop`
  --> src/../../src/status.rs:1:38
   |
@@ -396,7 +396,7 @@ exit=101
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml status::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -413,7 +413,7 @@ exit=0
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml paint::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -461,7 +461,7 @@ exit=101
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml paint::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -480,7 +480,7 @@ exit=0
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml boundary::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -519,7 +519,7 @@ exit=101
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml boundary::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.35s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -537,7 +537,7 @@ exit=0
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml session::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
 warning: field `backing` is never read
  --> src/../../src/session.rs:7:5
   |
@@ -581,7 +581,7 @@ exit=101
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml session::tests
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 
@@ -598,7 +598,7 @@ exit=0
 
 ```text
 $ cargo test --offline --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml
-   Compiling t5a_display_host_tests v0.1.0 (/home/hight/os32/userland/rust/t5a_display/host_tests)
+   Compiling t5a_display_host_tests v0.1.0 (~/os32/userland/rust/t5a_display/host_tests)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
      Running unittests src/lib.rs (userland/rust/t5a_display/host_tests/target/debug/deps/t5a_display_host_tests-68c8df534be032f4)
 

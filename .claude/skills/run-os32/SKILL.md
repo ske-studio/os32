@@ -13,7 +13,7 @@ NP21/W (ai-debug fork) の中で走る。** だから「起動する」はホス
 
     .claude/skills/run-os32/driver.py
 
-以下のパスはすべてリポジトリのルート (`/home/hight/os32`) からの相対。
+以下のパスはすべてリポジトリのルート (`~/os32`) からの相対。
 
 ## 前提
 
@@ -27,7 +27,7 @@ python3 .claude/skills/run-os32/driver.py doctor
 実際の出力:
 
 ```
-i386-elf-gcc             OK   /home/hight/opt/cross/bin/i386-elf-gcc
+i386-elf-gcc             OK   ~/opt/cross/bin/i386-elf-gcc
 nasm                     OK   /usr/bin/nasm
 .env の鍵                  OK   3 個ある
 HostDrv                  OK   /mnt/c/os32
@@ -105,7 +105,7 @@ python3 .claude/skills/run-os32/driver.py build kernel programs
 
 引数なしは `kernel programs`。中身は `make -C <ルート>` なので、**必ず `.env` の
 ある本体で回る** (worktree には `.env` が無く、`-lc` が見つからず落ちる)。
-worktree で直接 `make` するなら `make CROSS_DIR=/home/hight/opt/cross <target>`。
+worktree で直接 `make` するなら `make CROSS_DIR=~/opt/cross <target>`。
 
 `make check` は 55 本のホスト試験を回すもので、このスキルの範囲外。
 どのビルドとどの検証が要るかはスキル `os32-build-verify` が決める。
@@ -181,7 +181,7 @@ Windows 側で `np21x64w.exe` を起動すると窓が開く。WSL からは見�
 |---|---|
 | `... に届かない` | NP21/W が動いていない、または `np21x64w.ini` の `aidebug` が落ちている |
 | `[aidebug: timeout waiting for EOT]` | 失敗ではない。ゲストがまだ走っている。`cmd --wait` を使う |
-| `cannot find -lc` / `-lgcc` | `.env` の無い worktree で `make` した。`CROSS_DIR=/home/hight/opt/cross` を渡す |
+| `cannot find -lc` / `-lgcc` | `.env` の無い worktree で `make` した。`CROSS_DIR=~/opt/cross` を渡す |
 | `pull` が「現れなかった」 | ゲストの `/host` が繋がっていない (実機構成)、または `cp` が失敗した |
 | 画面が真っ黒 | 起動していないか落ちている。`status` の `protected_mode` と `fault_generation` を見る |
 | ゲストが固まった | CTRL+STOP で抜ける。深追いはスキル `os32-emu-debug` |

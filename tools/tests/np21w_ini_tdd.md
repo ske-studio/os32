@@ -24,7 +24,7 @@
 ```bash
 python3 -B -m unittest discover -s tools/tests -p test_np21w_ini.py -v
 PYTHONPYCACHEPREFIX=/tmp/os32-np21w-ini-pycache python3 -m py_compile tools/np21w_ini.py tools/tests/test_np21w_ini.py
-python3 -B /home/hight/.codex/skills/.system/skill-creator/scripts/quick_validate.py .claude/skills/os32-emu-config
+python3 -B ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .claude/skills/os32-emu-config
 python3 -B tools/np21w_ini.py --help
 ```
 

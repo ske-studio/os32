@@ -4,7 +4,7 @@
 
 共有ファイルへの同時編集で先行ログが上書きされた。以下は保存済みの
 `deleg_f0383505/task-0.log` を読み直して回収した経過であり、独立した過去実行の再現ではない。
-ログは `/home/hight/.hermes/cache/delegation/live/` 以下にある。
+ログは `~/.hermes/cache/delegation/live/` 以下にある。
 
 - 43–46行: 実 pipe 回帰テスト作成後、`python3 -B tools/tests/test_np21w_transport.py -v`
   が exit 1、trial の bounded failure テストが FAIL。保存ログの出力は途中省略されている。

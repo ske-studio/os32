@@ -87,7 +87,7 @@ UTF-8では追加で全65536通りの2バイト列と4096通りの4バイト列�
 
 ## ホスト検証
 
-リポジトリルート `/home/hight/os32` から実行する。
+リポジトリルート `~/os32` から実行する。
 
 ```sh
 cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline

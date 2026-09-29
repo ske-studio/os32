@@ -35,7 +35,7 @@
 
 1. **検出**: PC-98 の BIOS ワークエリアで 16MB 超の容量を読む (`0x594` = 16MB 超の MB 数、`0x401` = 15MB までの 128KB 単位。
    正典は `docs/hw/` の UNDOCUMENTED、矛盾は UNDOCUMENTED を採る) か、ローダのプローブを 16MB 超へ伸ばす。
-   どちらを採るかはソースと `docs/hw/` で根拠を出す。NP21/W の `ExMemory` の意味 (`/home/hight/np21w-src/src/mem.c` /
+   どちらを採るかはソースと `docs/hw/` で根拠を出す。NP21/W の `ExMemory` の意味 (`~/np21w-src/src/mem.c` /
    `pccore.c`) も確認し、ini の値 → ゲストが見る MB 数の対応表を票に書く。
 2. **physmem**: 16MB clamp を撤廃し、RAM の範囲を **[1MB, 15MB) + [16MB, N)** として登録 (15〜16MB は `PHYSMEM_RESERVED` /
    デバイス、4GB 最上位の ROM / MMIO も予約)。`PHYSMEM_LEGACY_MAX_PFN` は「旧ローダ互換の下限保証」の意味だけに

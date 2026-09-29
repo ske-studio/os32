@@ -32,7 +32,7 @@ OS32 カーネルに統合した SQLite 3.53.0 が `double` 型の浮動小数�
 現在のクロスコンパイラ (`i386-elf-gcc 13.2.0`) は **ハード FPU 前提** で構築されている:
 
 ```
-../gcc-13.2.0/configure --target=i386-elf --prefix=/home/hight/opt/cross \
+../gcc-13.2.0/configure --target=i386-elf --prefix=~/opt/cross \
     --disable-nls --enable-languages=c,c++ --without-headers
 ```
 
@@ -54,18 +54,18 @@ OS32 カーネルに統合した SQLite 3.53.0 が `double` 型の浮動小数�
 
 | コンポーネント | バージョン | インストール先 |
 |---------------|-----------|---------------|
-| GCC | 13.2.0 | `/home/hight/opt/cross/` |
-| binutils | 2.41 | `/home/hight/opt/cross/` |
-| newlib | 4.4.0.20231231 | `/home/hight/opt/cross/i386-elf/` |
+| GCC | 13.2.0 | `~/opt/cross/` |
+| binutils | 2.41 | `~/opt/cross/` |
+| newlib | 4.4.0.20231231 | `~/opt/cross/i386-elf/` |
 | NASM | 2.16.01 | システム |
 
 ### ソースコード (全て保持済み)
 
 | ソース | パス |
 |--------|------|
-| GCC 13.2.0 | `/home/hight/src/gcc-13.2.0/` |
-| binutils 2.41 | `/home/hight/src/binutils-2.41/` |
-| newlib 4.4.0 | `/home/hight/src/newlib-4.4.0.20231231/` |
+| GCC 13.2.0 | `~/src/gcc-13.2.0/` |
+| binutils 2.41 | `~/src/binutils-2.41/` |
+| newlib 4.4.0 | `~/src/newlib-4.4.0.20231231/` |
 
 ### 現行の libgcc 依存シンボル (sqlite3.o)
 
@@ -109,19 +109,19 @@ __floatsidf, __fixdfsi
 
 ```bash
 # 現行の cross ディレクトリをバックアップ
-cp -a /home/hight/opt/cross /home/hight/opt/cross.bak.$(date +%Y%m%d)
+cp -a ~/opt/cross ~/opt/cross.bak.$(date +%Y%m%d)
 ```
 
 #### Step 1: GCC 再構築 (soft-float)
 
 ```bash
-cd /home/hight/src
+cd ~/src
 mkdir -p build-gcc-softfp
 cd build-gcc-softfp
 
 ../gcc-13.2.0/configure \
     --target=i386-elf \
-    --prefix=/home/hight/opt/cross \
+    --prefix=~/opt/cross \
     --disable-nls \
     --enable-languages=c \
     --without-headers \
@@ -141,13 +141,13 @@ make install-gcc install-target-libgcc
 #### Step 2: newlib 再構築
 
 ```bash
-cd /home/hight/src
+cd ~/src
 mkdir -p build-newlib-softfp
 cd build-newlib-softfp
 
 ../newlib-4.4.0.20231231/configure \
     --target=i386-elf \
-    --prefix=/home/hight/opt/cross \
+    --prefix=~/opt/cross \
     --disable-multilib \
     --disable-newlib-supplied-syscalls \
     --enable-newlib-nano-malloc \
@@ -241,8 +241,8 @@ FPU なしの環境でもカーネルが正常動作する。
 
 ```bash
 # バックアップから復元
-rm -rf /home/hight/opt/cross
-mv /home/hight/opt/cross.bak.YYYYMMDD /home/hight/opt/cross
+rm -rf ~/opt/cross
+mv ~/opt/cross.bak.YYYYMMDD ~/opt/cross
 hash -r  # シェルのコマンドキャッシュクリア
 
 # OS32 を再ビルドして動作確認

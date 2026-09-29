@@ -81,11 +81,11 @@ PSの静的契約テストは、Windows API実行の代替ではない。Win32/.
 非機密の対応ソースを読み、実iniは読んでいない。
 最初の探索先 `.../windows/np2.cpp` 等は不存在。その後以下を確認した:
 
-- `/home/hight/np21w-src/src/win9x/np2arg.cpp:40`:
+- `~/np21w-src/src/win9x/np2arg.cpp:40`:
   `Np2Arg::Parse()` はGetCommandLine→milstr_getarg、位置引数 `.ini` を採用する。
 - 同 `ini.cpp:943`: `initgetfile()` は指定されたiniを使用。未指定時の探索は今回未対応。
 - 同 `np2.cpp:4402`: modulefile設定と `file_setcd(modulefile)` 後に引数解析・ini読込。
-- `/home/hight/np21w-src/src/common/milstr.c:618`: 引用符を除去し、引用外空白で区切る。
+- `~/np21w-src/src/common/milstr.c:618`: 引用符を除去し、引用外空白で区切る。
   実装は安全に理解できる2つの完全引用絶対パストークンに限定した。
 
 PowerShell/.NETの根拠（Microsoft一次資料、2026-09-08参照）:
@@ -112,7 +112,7 @@ PowerShell/.NETの根拠（Microsoft一次資料、2026-09-08参照）:
 ```bash
 python3 -B -m unittest discover -s tools/tests -p 'test_*.py' -v
 PYTHONPYCACHEPREFIX=/tmp/os32-np21w-live-pycache python3 -m py_compile tools/np21w_ini_live.py tools/tests/test_np21w_ini_live.py tools/np21w_ini.py tools/tests/test_np21w_ini.py
-python3 -B /home/hight/.codex/skills/.system/skill-creator/scripts/quick_validate.py .claude/skills/os32-emu-config
+python3 -B ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .claude/skills/os32-emu-config
 python3 -B tools/np21w_ini_live.py --help
 ```
 

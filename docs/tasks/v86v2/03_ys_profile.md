@@ -14,8 +14,8 @@ OS32 は一切関与しない。**既存の `np21x64w.ini` は変更していな
 
 ```bash
 # HDD/SCSI/FDD を空にしたプロファイル専用 INI を用意 (aidebug=true は維持)
-#   C:\Users\hight\Documents\np21w\ysprof.ini
-np21x64w.exe C:\Users\hight\Documents\np21w\ysprof.ini C:\os32\Ys_FM.D88
+#   $NP21W_DIR\ysprof.ini
+np21x64w.exe $NP21W_DIR\ysprof.ini C:\os32\Ys_FM.D88
 ```
 
 - 拡張子 `.ini` の引数は設定ファイルとして解釈される (`-i<path>` も可)
@@ -344,8 +344,8 @@ Ys は `CLI` を 286/s (本編 96/s) 発行し、対の `STI` も同数なので
 
 ## 7. 参照
 
-- `/home/hight/np21w-src/src/win9x/aidebug/aidebug_prof.c/h` — 計測実装
-- `/home/hight/np21w-src/src/win9x/np2arg.cpp` — コマンドライン引数の解釈
-- `/home/hight/np21w-src/src/win9x/ini.cpp:initgetfile()` — INI パスの決定
+- `~/np21w-src/src/win9x/aidebug/aidebug_prof.c/h` — 計測実装
+- `~/np21w-src/src/win9x/np2arg.cpp` — コマンドライン引数の解釈
+- `~/np21w-src/src/win9x/ini.cpp:initgetfile()` — INI パスの決定
 - `docs/tasks/v86v2/01_prior_session_analysis.md` — 前回セッションの再解析
 - `archive/feat-vdm:docs/tasks/v86/03_io_port_map.md` — 前回の I/O 分類（本計測で上書き）

@@ -234,10 +234,10 @@ IPL 直後は **IRQ0 (タイマ) がマスクされている** (master IMR = 0x7
 
 | 対象 | 場所 |
 |---|---|
-| NP21/W ai-debug fork | `/home/hight/np21w-src` (`main` にマージ済み) |
+| NP21/W ai-debug fork | `~/np21w-src` (`main` にマージ済み) |
 | MCP サーバ | `tools/np21w_mcp/server.py` |
 | テスト用ディスクイメージ | `/mnt/c/os32/` (`Ys.D88` が動作する。`Ys_FM.D88` は壊れている) |
-| プロファイル専用 INI | `C:\Users\hight\Documents\np21w\ysprof.ini` (HDD 無し・20MHz) |
+| プロファイル専用 INI | `$NP21W_DIR\ysprof.ini` (HDD 無し・20MHz) |
 
 ### エミュレータ側に追加した機能
 

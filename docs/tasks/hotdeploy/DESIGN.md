@@ -2,7 +2,7 @@
 
 > 発行: PM (2026-09-01) / 状態: **受入完了 (2026-09-01)**
 > 段 1〜3 実装済み (2026-09-01)。
-> 関連: `docs/POLICY_DEBUG.md`、`/home/hight/np21w-src/docs/02-architecture.md`
+> 関連: `docs/POLICY_DEBUG.md`、`~/np21w-src/docs/02-architecture.md`
 
 再起動なしで単一バイナリを実機へ送り込む経路が、4 箇所で独立に壊れている。
 本書はその実測結果と、aidebug (NP21/W 内蔵デバッグ API) と同じ流儀で
