@@ -22,11 +22,14 @@
 /*  できないため bb_base = NULL / bb_size = 0 にしていた。結果、libos32gfx の */
 /*  CPU 描画 (gshell / gdi_test) は Cirrus では #PF していた。               */
 /*  H3b で 0FABh レジスタ 02h の **2MB リニア窓** (§4) を採用し、            */
-/*  カーネルのページテーブルを 32MB へ広げて (kernel/paging.h の             */
-/*  PAGING_BOOT_MAP_SIZE) 01000000h に張れるようにした。       */
-/*  以後 CPU 直書きはすべてこの窓越しで、バンク切替は使わない。              */
-/*    01000000h + 000000h  表示面      (CPL=3 へは見せない)                  */
-/*    01000000h + 04B000h  クライアント面 = bb_base、300KB                   */
+/*  窓の番地は 2026-09-29 に 01000000h から v3 のデバイス窓の帯 FE000000h へ  */
+/*  移した (16MB 超の RAM と重なるため。include/wab_xe10.h §4)。帯の PT は     */
+/*  paging_init が静的に持つ。以後 CPU 直書きはすべてこの窓越しで、バンク切替 */
+/*  は使わない。                                                             */
+/*    FE000000h + 000000h  表示面      (CPL=3 へは見せない)                  */
+/*    FE000000h + 04B000h  クライアント面 = bb_base、300KB                   */
+/*  **Cirrus は NP21/W 互換のためだけ** (ユーザー決定 2026-09-29): auto では   */
+/*  NP21/W 上でしかボードの ID を読みにいかない (cirrus_probe の段 2)。      */
 /*  窓は master には **supervisor + PCD** で張り、exec が                     */
 /*  gfx_bb_phys_range() を見てこの 300KB だけをアプリ PD で USER へ昇格させる */
 /*  (paging_addrspace_map_user_keep、PCD は保つ)。表示面の PTE は決して USER  */
@@ -44,6 +47,7 @@
 #include "wab_glue.h"       /* -Idrivers (INC_GFX) */
 #include "wab_glue_xe10.h"
 #include "wab_cirrus.h"
+#include "np2sysp.h"       /* np2_detect: auto で Xe10 を試すのは NP21/W だけ */
 
 /* ------------------------------------------------------------------------ */
 /*  画面ジオメトリと VRAM の割り付け ([C4] 三層定数)                         */
@@ -169,34 +173,41 @@ static void cirrus_linear_unmap(void)
 /*                                                                          */
 /*  段取り:                                                                 */
 /*    1. 窓を張れるか。窓に RAM が登録されていたら (物理地図で見る。RAM の   */
-/*       上端では決めない — POLICY_DEBUG §4-34) 張ってはいけないし、ページ  */
-/*       ングの守備範囲 (PAGING_MAP_SIZE) にも収まっていること。PEGC の     */
+/*       上端では決めない — POLICY_DEBUG §4-34) 張ってはいけないし、32bit   */
+/*       の物理空間に収まっていること。PEGC の                              */
 /*       probe と同じ理屈 (backend_pegc.c 段 2)。バンク窓 (F60000h、グルーが */
-/*       reg 01h で既定に固定する) と、H3b で採用したリニア窓 (01000000h、   */
+/*       reg 01h で既定に固定する) と、H3b で採用したリニア窓 (FE000000h、   */
 /*       CPU 描画の本命) の両方を見る。                                      */
-/*    2. ボードグルーの ID 判定。9801 や WAB 非搭載機はここで確実に落ちる    */
+/*    2. **ボードの ID を読みにいってよいか**。Cirrus は NP21/W 互換のため    */
+/*       だけ (ユーザー決定 2026-09-29) なので、auto では NP21/W の上に居る  */
+/*       ときだけ進む (np2_detect = I/O 07EFh の "NP2" 応答)。np2_detect は  */
+/*       マウスの初期化が毎回の起動で既に呼んでいるので、実機に新しい I/O    */
+/*       は増えない。`GFX=cirrus` の明示時は利用者の指定を優先して進む。     */
+/*       実機 (Ra266 = PCI の Trident) で 0FAAh / 0FABh を無用に叩かない。   */
+/*    3. ボードグルーの ID 判定。9801 や WAB 非搭載機はここで確実に落ちる    */
 /*       ので、以降の VGA ポート叩きは走らない = 回帰ゼロ。                  */
-/*    3. チップの解錠キー往復 (SR6)。                                        */
+/*    4. チップの解錠キー往復 (SR6)。                                        */
 /*  1 だけ先に見るのは、窓が張れないなら ID が合っても使えないため。         */
 /* ------------------------------------------------------------------------ */
 static int cirrus_win_usable(u32 base, u32 size)
 {
+    u32 last;
     if (size == 0) return 0;
-    /* ページテーブルの守備範囲に末尾まで収まること。先に見るので、下の
-     * base + size は桁あふれしない (PAGING_MAP_SIZE は 32MB)。 */
-    if (base > PAGING_MAP_SIZE) return 0;
-    if (size > PAGING_MAP_SIZE - base) return 0;
+    /* 32bit の物理空間の末尾を越えないこと (4GB ちょうどで終わるのは可)。
+     * 末尾番地 (inclusive) で持つので base + size の桁あふれを作らない。 */
+    if (size - 1 > 0xFFFFFFFFUL - base) return 0;
+    last = base + (size - 1);
     /* 窓に RAM が登録されていれば張ってはいけない (自分の RAM を隠す)。
      * **RAM の上端 (sys_get_mem_kb) では決めない** — K6-RAM 以後、15MB 機
      * + 高位 RAM (NP21/W ExMemory 16) の上端は 17,408KB で、15-16MB の穴の
      * 中にあるバンク窓 F60000h まで「RAM が届いている」と誤判定して probe が
      * ID 判定の前に落ちていた (PEGC で直した §4-34 と同じ形)。見るのはブート
-     * 時に凍結した物理地図で、窓 [base, base + size) にかかるページを 1 枚も
-     * 落とさずに問い合わせる (末尾は切り上げ)。pgalloc 未初期化は RAM あり
-     * 扱い (張らない)。リニア窓 01000000h は高位 RAM のある構成では本当に
-     * RAM と重なるので、ここで拒まれるのが正しい答え。 */
-    return !pgalloc_range_has_ram(base / PAGE_SIZE,
-                                  (base + size + PAGE_SIZE - 1) / PAGE_SIZE);
+     * 時に凍結した物理地図で、窓 [base, last] にかかるページを 1 枚も
+     * 落とさずに問い合わせる。pgalloc 未初期化は RAM あり扱い (張らない)。
+     * リニア窓は v3 のデバイス窓の帯 (物理地図で MMIO) に置くので RAM とは
+     * 重ならない。ページテーブル側の置き場 (帯の静的 PT) に収まることは
+     * ボードの層 (drivers/wab_glue_xe10.c) の STATIC_ASSERT が見ている。 */
+    return !pgalloc_range_has_ram(base / PAGE_SIZE, last / PAGE_SIZE + 1);
 }
 
 static int cirrus_probe(void)
@@ -215,6 +226,9 @@ static int cirrus_probe(void)
      * 窓に収まること。ボードごとの値なので実行時に見る。 */
     if (s_glue->lin_base & (PAGE_SIZE - 1)) return 0;
     if (s_glue->lin_size < (u32)CIRRUS_VRAM_MIN) return 0;
+
+    /* 段 2: auto では NP21/W の上でだけボードの ID を読む (上の段取りの注記)。 */
+    if (gfx_get_backend_pref() != GFX_PREF_CIRRUS && !np2_detect()) return 0;
 
     if (!s_glue->probe || !s_glue->probe()) { cirrus_sync_io(); return 0; }
     if (!wab_cirrus_probe(s_glue))          { cirrus_sync_io(); return 0; }
@@ -580,7 +594,7 @@ static void cirrus_shutdown(void)
 /* ------------------------------------------------------------------------ */
 /*  バックエンド表。                                                        */
 /*  bb_base / bb_size は init() が埋める (票 H3b): リニア窓の中の非表示面     */
-/*  = 01000000h + 04B000h の 300KB。窓が張れるまでは値が決まらないので、      */
+/*  = FE000000h + 04B000h の 300KB。窓が張れるまでは値が決まらないので、      */
 /*  静的初期化子では NULL / 0 のまま置く (PEGC と同じ流儀)。                 */
 /*  最初の init() で決まったら shutdown() を挟んでも持ち続ける (exec が      */
 /*  アプリ起動時に見るため)。NULL に戻るのは init 途中の失敗だけ。           */

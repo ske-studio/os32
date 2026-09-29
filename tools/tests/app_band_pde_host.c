@@ -13,6 +13,9 @@
  *    E. 引数不正・物理ページ不足で master も pgalloc も汚さずに失敗するか
  *    F. destroy が枚数分の PT + PD をきっちり返すか
  *    G. paging_app_band_selftest() (ブート時 kselftest に載せるもの)
+ *    H. v3 のデバイス窓の帯 (FE000000h、Cirrus のリニア窓) の PT が
+ *       paging_init で静的に用意され、アプリ AS が居る間でも窓を張れ、
+ *       クライアント面だけが USER + PCD でアプリ PD に見えること
  * ======================================================================== */
 #include "types.h"
 static u32 host_cr3;
@@ -293,6 +296,60 @@ void _start(void)
         CHECK(page_tables[APP_BAND_PDE][0] == master_pt1_0);
     }
 
+    /* ---- H. デバイス窓の帯 (静的 PT) ---------------------------------- */
+    {
+        struct addrspace as, as2;
+        u32 pdi = PAGING_APERTURE_PDI;
+        u32 base = MEM_DEVICE_APERTURE_BASE;
+        u32 client = base + 0x4B000UL;          /* Cirrus のクライアント面 */
+        u32 client_end = client + 0x4B000UL;
+        u32 before = used;
+        u32 *pd2;
+        u32 i, nonzero = 0;
+
+        CHECK(pdi == 0x3F8);
+        CHECK(page_tables[pdi] == (u32 *)aperture_pt_raw);
+        CHECK(page_directory[pdi] == ((u32)page_tables[pdi] | PAGE_RW));
+        for (i = 0; i < PTE_COUNT; i++) nonzero |= page_tables[pdi][i];
+        CHECK(nonzero == 0);                    /* 既定は全 Not-Present */
+        /* 帯の外の次の PDE は静的に持たない (動的 PT も作っていない) */
+        CHECK(page_tables[pdi + 1] == 0 && page_directory[pdi + 1] == 0);
+
+        /* アプリ AS が居る間 (live AS > 0) でも窓を張れる = 新 PDE が要らない */
+        CHECK(paging_addrspace_create(&as) == 0);
+        CHECK(paging_map_phys(base, base, 0x200000UL / PAGE_SIZE,
+                              PAGE_RW | PTE_PCD) == 0);
+        CHECK(page_tables[pdi][0] == (base | PAGE_RW | PTE_PCD));
+        /* 対照: 静的 PT の無い PDE は live AS の間は張れない (だから静的に持つ) */
+        CHECK(paging_map_phys(base + MEM_DEVICE_APERTURE_PDE_SIZE,
+                              base + MEM_DEVICE_APERTURE_PDE_SIZE, 1,
+                              PAGE_RW | PTE_PCD) == -1);
+        CHECK(page_tables[pdi + 1] == 0);
+
+        /* 窓を張った後のアプリ AS は PDE ごと同じ PT を写す */
+        CHECK(paging_addrspace_create(&as2) == 0);
+        pd2 = (u32 *)as2.pd_phys;
+        CHECK(pd2[pdi] == page_directory[pdi]);
+        /* クライアント面だけ USER へ昇格。PCD は保つ、表示面は supervisor */
+        CHECK(paging_addrspace_map_user_keep(&as2, client, client_end,
+                                             PAGE_RW | PTE_USER) == 0);
+        CHECK(page_tables[pdi][client / PAGE_SIZE % PTE_COUNT] ==
+              (client | PAGE_RW | PTE_USER | PTE_PCD));
+        CHECK(!(page_tables[pdi][0] & PTE_USER));
+        CHECK(pd2[pdi] & PTE_USER);
+        CHECK(!(page_directory[pdi] & PTE_USER));   /* master の PDE は不変 */
+        CHECK(!(((u32 *)as.pd_phys)[pdi] & PTE_USER));  /* 他のアプリも不変 */
+
+        paging_addrspace_destroy(&as2);
+        paging_addrspace_destroy(&as);
+        CHECK(paging_map_phys(base, base, 0x200000UL / PAGE_SIZE,
+                              PAGE_NOT_PRESENT) == 0);
+        /* 剥がしても PT と PDE は残る (次の init で張り直せる) */
+        CHECK(page_tables[pdi] == (u32 *)aperture_pt_raw);
+        CHECK(page_directory[pdi] == ((u32)page_tables[pdi] | PAGE_RW));
+        CHECK(used == before);
+    }
+
     /* ---- F/G. 自己診断 ------------------------------------------------ */
     {
         u32 before = used;
@@ -312,5 +369,6 @@ void _start(void)
     SAY("PASS: clear_app_band drops I6 identity, map_range_phys maps virt != phys");
     SAY("PASS: free_user_range returns only what it mapped, never shared PTs");
     SAY("PASS: app band selftest, keep/clone selftests still green");
+    SAY("PASS: v3 device aperture PT is static; map with live AS; client-only USER+PCD");
     die(0);
 }

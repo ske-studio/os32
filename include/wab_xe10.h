@@ -24,6 +24,7 @@
 #define __WAB_XE10_H
 
 #include "types.h"
+#include "memmap.h"   /* MEM_DEVICE_APERTURE_* (リニア窓の置き場) */
 
 /* ------------------------------------------------------------------------ */
 /*  1. 内蔵アクセラレータ制御 (2 段 I/O)                                     */
@@ -148,11 +149,20 @@
 /*  つまり窓の先頭 = VRAM オフセット 0 の線形写像で、300KB のクライアント面を  */
 /*  CPU から一望できる。SR4 bit3 (chain4) を立てた 8bpp では 1 バイト 1 画素。 */
 /*                                                                          */
-/*  値は dat<<24 = **16MB 単位**なので最小でも 01000000h。かつては OS32 の     */
-/*  ページテーブルの守備範囲 (16MB) の外だったので使えなかったが、票 H3b で    */
-/*  PAGING_MAP_SIZE を 32MB へ広げた (16MB〜32MB は既定 Not-Present で、       */
-/*  paging_map_phys() が窓だけを張る)。kernel/paging.h の                      */
-/*  PAGING_BOOT_MAP_SIZE / PAGING_MAP_SIZE の注記を参照。                      */
+/*  値は dat<<24 = **16MB 単位**。NP21/W は窓を VRAMWINDOW_SIZE +            */
+/*  EXT_WINDOW_SIZE = **4MB** の範囲で出す ([N] cirrus_vga.c の               */
+/*  pc98_cirrus_vga_update_memp_map、読み書きは RAM より先に窓を判定する)。   */
+/*  窓の番地は OS が選ぶ (2026-09-29、v3 のデバイス窓の帯へ移設):             */
+/*    - かつての dat = 01h (01000000h) は 16MB 超の RAM と重なる。NP21/W      */
+/*      17MB 構成で probe が落ち、実機 64MB (16MB から RAM が連続) でも同じ。 */
+/*    - 512MB 付近 (dat = 20h) は PCI の BIOS が BAR を割り当てる帯           */
+/*      (Ra266 の実測 0x20000000〜、TASK_LAN_82557 §6)。                     */
+/*    - dat = FFh は NP21/W が捨てる。**dat = FEh (FE000000h) が置ける最上位** */
+/*      で、include/memmap.h の MEM_DEVICE_APERTURE_* の帯の先頭に当たる。   */
+/*  この窓は **NP21/W 互換のためだけ** (ユーザー決定 2026-09-29。実機の       */
+/*  Xe10 がレジスタ 02h に応えるかは資料に無く未確認。手元の実機 Ra266 の    */
+/*  アクセラレータは PCI の Trident で、Xe10 の Cirrus は無い)。              */
+/*  帯の PT は paging_init が静的に用意する (kernel/paging.c)。               */
 /*                                                                          */
 /*  ⚠ **窓を閉じる書き込みは NP21/W では効かない**: cirrusvga_ofab case 0x02   */
 /*  は `if(dat!=0x00 && dat!=0xff)` で 00h/FFh を捨てるので、一度開いた窓は    */
@@ -162,10 +172,15 @@
 #define WAB_XE10_LINEARWIN_SHIFT 24          /* dat << 24 が窓の物理先頭 */
 #define WAB_XE10_LINEARWIN_SIZE  0x00200000UL /* 2MB ([N] VRAMWINDOW_SIZE) */
 
-/* OS32 が使うリニア窓。dat = 01h → 01000000h (16MB ちょうど)。
- * PC-98 の 15-16MB システム空間 (MEM_SYSTEM_SPACE_*) の直上で、RAM とは重ならない
- * (重なる構成では backend_cirrus の probe が窓を拒否する)。 */
-#define WAB_XE10_LINEARWIN_SEL   0x01
+/* NP21/W が窓として出す範囲 (VRAMWINDOW_SIZE + EXT_WINDOW_SIZE)。描画に使う
+ * のは先頭の WAB_XE10_LINEARWIN_SIZE だけだが、窓の帯にはこの全体が収まる
+ * こと (backend_cirrus.c の STATIC_ASSERT)。 */
+#define WAB_XE10_LINEARWIN_DECODE 0x00400000UL /* 4MB */
+
+/* OS32 が使うリニア窓。dat = FEh → FE000000h (v3 のデバイス窓の帯の先頭)。
+ * RAM の量に関係なく RAM とは重ならない (帯は物理地図で MMIO)。 */
+#define WAB_XE10_LINEARWIN_SEL \
+    ((u8)(MEM_DEVICE_APERTURE_BASE >> WAB_XE10_LINEARWIN_SHIFT))
 #define WAB_XE10_LINEARWIN_OFF   0x00        /* 窓を閉じる値 (NP21/W は無視) */
 #define WAB_XE10_LINEARWIN_BASE \
     ((u32)WAB_XE10_LINEARWIN_SEL << WAB_XE10_LINEARWIN_SHIFT)

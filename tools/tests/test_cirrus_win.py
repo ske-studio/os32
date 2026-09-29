@@ -9,8 +9,9 @@ tools/tests/cirrus_win_host.c が実物の gfx/backend_cirrus.c を 1 行も写�
   python3 -B tools/tests/test_cirrus_win.py [--mutate]
 
 --mutate は否定側。判定を壊した版 (上端で見る旧判定に戻す / 物理地図を
-見ない / 窓の末尾ページを問い合わせから落とす / 窓の前のページまで広げる /
-ページングの守備範囲を見ない) を写しの木で組み、この試験が RED になることを見る。
+見ない / 窓の末尾ページを落とす / 窓の前のページまで広げる / 32bit の末尾越えを
+見ない / auto で NP21/W 判定を飛ばす / GFX=cirrus を無視する / 窓より先に判定を
+読む / リニア窓を旧番地へ戻す) を写しの木で組み、この試験が RED になることを見る。
 make・エミュレータ・配備には触れない。
 """
 import os
@@ -46,51 +47,68 @@ def target_cmd(obj):
 
 
 MUTATIONS = [
+    # (名前, 対象ファイル, 元, 変異後)
     # 1 = 本件の欠陥そのもの: RAM の上端 (sys_get_mem_kb) で窓を決める旧判定。
-    ("top_of_ram",
-     "    return !pgalloc_range_has_ram(base / PAGE_SIZE,\n"
-     "                                  (base + size + PAGE_SIZE - 1) / PAGE_SIZE);",
-     "    return !(sys_get_mem_kb() > base / 1024UL);"),
+    ("top_of_ram", MUT_TARGET,
+     "    return !pgalloc_range_has_ram(base / PAGE_SIZE, last / PAGE_SIZE + 1);",
+     "    { extern u32 sys_get_mem_kb(void); (void)last;\n"
+     "      return !(sys_get_mem_kb() > base / 1024UL); }"),
     # 2 = 物理地図を見ない (窓は常に空いている扱い)。
-    ("no_map",
-     "    return !pgalloc_range_has_ram(base / PAGE_SIZE,\n"
-     "                                  (base + size + PAGE_SIZE - 1) / PAGE_SIZE);",
-     "    return 1;"),
+    ("no_map", MUT_TARGET,
+     "    return !pgalloc_range_has_ram(base / PAGE_SIZE, last / PAGE_SIZE + 1);",
+     "    (void)last; return 1;"),
     # 3 = 窓の末尾ページを問い合わせから落とす (部分一致の見落とし)。
-    ("end_short",
-     "(base + size + PAGE_SIZE - 1) / PAGE_SIZE);",
-     "(base + size - 1) / PAGE_SIZE);"),
+    ("end_short", MUT_TARGET,
+     "last / PAGE_SIZE + 1);", "last / PAGE_SIZE);"),
     # 4 = 窓の前のページまで問い合わせる (隣の RAM で窓を塞ぐ)。
-    ("first_early",
-     "    return !pgalloc_range_has_ram(base / PAGE_SIZE,",
-     "    return !pgalloc_range_has_ram(base / PAGE_SIZE - 1,"),
-    # 5 = ページングの守備範囲の末尾を見ない。
-    ("no_paging_tail",
-     "    if (size > PAGING_MAP_SIZE - base) return 0;\n",
+    ("first_early", MUT_TARGET,
+     "pgalloc_range_has_ram(base / PAGE_SIZE, last",
+     "pgalloc_range_has_ram(base / PAGE_SIZE - 1, last"),
+    # 5 = 32bit 空間の末尾越えを見ない (末尾番地が桁あふれして小さく見える)。
+    ("no_wrap_check", MUT_TARGET,
+     "    if (size - 1 > 0xFFFFFFFFUL - base) return 0;\n", ""),
+    # 6 = auto でも NP21/W 判定をせずに ID を読む (実機でポートを叩く)。
+    ("no_np2_gate", MUT_TARGET,
+     "    if (gfx_get_backend_pref() != GFX_PREF_CIRRUS && !np2_detect()) return 0;\n",
      ""),
+    # 7 = GFX=cirrus の明示でも NP21/W でなければ試さない (利用者の指定を無視)。
+    ("gate_ignores_forced", MUT_TARGET,
+     "gfx_get_backend_pref() != GFX_PREF_CIRRUS && !np2_detect()",
+     "!np2_detect()"),
+    # 8 = 窓の判定より前に NP21/W 判定を読む (RAM に当たる構成でも I/O を出す)。
+    ("np2_before_window", MUT_TARGET,
+     "    if (!cirrus_win_usable(s_glue->win_base, s_glue->win_size)) return 0;\n",
+     "    if (gfx_get_backend_pref() != GFX_PREF_CIRRUS && !np2_detect()) return 0;\n"
+     "    if (!cirrus_win_usable(s_glue->win_base, s_glue->win_size)) return 0;\n"),
+    # 9 = リニア窓を 16MB 直上 (旧番地) へ戻す。高位 RAM の構成で probe が落ちる
+    #     (帯の外なので STATIC_ASSERT でも止まる)。
+    ("old_linear_sel", "include/wab_xe10.h",
+     "#define WAB_XE10_LINEARWIN_SEL \\\n"
+     "    ((u8)(MEM_DEVICE_APERTURE_BASE >> WAB_XE10_LINEARWIN_SHIFT))",
+     "#define WAB_XE10_LINEARWIN_SEL 0x01"),
 ]
 
 
 def one_mutation(item):
-    name, old, new = item
-    original = (ROOT / MUT_TARGET).read_text(encoding="utf-8")
+    name, target, old, new = item
+    original = (ROOT / target).read_text(encoding="utf-8")
     if old not in original:
-        return "MUTATE %-16s SKIP (目印が見つからない)" % name, 1
+        return "MUTATE %-20s SKIP (目印が見つからない)" % name, 1
     with tempfile.TemporaryDirectory(prefix="os32-cirrus-win-mut-") as td:
         exe = pathlib.Path(td) / ("mut-" + name)
         try:
             tree = mutpar.build_in_tree(
-                ROOT, td, {MUT_TARGET: original.replace(old, new, 1)},
+                ROOT, td, {target: original.replace(old, new, 1)},
                 [host_cmd(exe)], capture_output=True)
         except subprocess.CalledProcessError:
-            return "MUTATE %-16s RED (コンパイルが通らない)" % name, 0
+            return "MUTATE %-20s RED (コンパイルが通らない)" % name, 0
         out = subprocess.run([str(exe)], cwd=str(tree), timeout=60,
                              capture_output=True)
     if out.returncode == 0:
-        return ("MUTATE %-16s **GREEN のまま = 試験が規則を見ていない**"
+        return ("MUTATE %-20s **GREEN のまま = 試験が規則を見ていない**"
                 % name, 1)
     last = out.stdout.decode("utf-8", "replace").strip().splitlines()[-1:]
-    return "MUTATE %-16s RED (期待どおり落ちた: %s)" % (
+    return "MUTATE %-20s RED (期待どおり落ちた: %s)" % (
         name, last[0] if last else "rc=%d" % out.returncode), 0
 
 
@@ -107,8 +125,15 @@ if __name__ == "__main__":
         failed += rc != 0
         subprocess.run(target_cmd(tmp / "backend_cirrus.o"), cwd=ROOT,
                        check=True)
-        print("TARGET i386-elf GNU89 -Werror COMPILE PASS", flush=True)
+        # ボードの層: リニア窓が v3 のデバイス窓の帯と静的 PT に収まることは
+        # drivers/wab_glue_xe10.c の STATIC_ASSERT が見る。同じフラグで通す。
+        subprocess.run(["i386-elf-gcc", *FLAGS, "-O2", *INCLUDES, "-c",
+                        str(ROOT / "drivers/wab_glue_xe10.c"),
+                        "-o", str(tmp / "wab_glue_xe10.o")], cwd=ROOT,
+                       check=True)
+        print("TARGET i386-elf GNU89 -Werror COMPILE PASS "
+              "(backend_cirrus.c + wab_glue_xe10.c)", flush=True)
         if "--mutate" in sys.argv:
             failed += mutpar.run_with_control(one_mutation, MUTATIONS,
-                                              ("control", "", ""))
+                                              ("control", MUT_TARGET, "", ""))
     sys.exit(1 if failed else 0)

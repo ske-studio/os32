@@ -34,7 +34,7 @@
 | 候補 | 一括予約に含める資源 |
 |---|---|
 | PEGC | `PEGC_LINEAR_BASE/SIZE`: `[0x00F00000,0x00F80000)` 全512KiB。表示300KiBだけの予約は禁止。別途 `MEM_GFX_BB8_SIZE` の主記憶 BB（確認済み RAM、既存 owner の再利用または新規取得）。 |
-| Xe10 Cirrus | glue の `win_base/win_size`: `[0x00F60000,0x00F68000)` と `lin_base/lin_size`: `[0x01000000,0x01200000)` 全2MiBを **同一 transaction** にする。CPU 描画が銀行窓を使わなくても glue が設定するので省かない。BB は linear 内の client 面であり、追加の主記憶 BB はない。 |
+| Xe10 Cirrus | glue の `win_base/win_size`: `[0x00F60000,0x00F68000)` と `lin_base/lin_size`: `[0xFE000000,0xFE200000)` (2026-09-29 に v3 のデバイス窓の帯へ移設。NP21/W は `[0xFE000000,0xFE400000)` の 4MiB を窓として出すので予約はこの全体) を **同一 transaction** にする。CPU 描画が銀行窓を使わなくても glue が設定するので省かない。BB は linear 内の client 面であり、追加の主記憶 BB はない。 |
 | 低位固定資源 | PEGC の `PEGC_MMIO_BASE` 側（E0000h〜E7FFFh、標準 plane I と役割交替）、A8000h/B0000h の既存表示窓は一般 RAM を新規取得しない。PC98 表示 owner が GUI 遷移時に明示許可する既存固定表示資源の貸与として検査・記録する。`RESERVED` だから自由に上書き可、とはしない。 |
 
 PEGC と Xe10 銀行窓は重なる。片方の永久所有後に他方へ切替える共有許可は初回範囲外（拒否→PC98/CUI、理由を報告）。現行 Xe10 glue は `mmio=NULL` で BLT は I/O 経由。存在しない追加 MMIO 窓を作らない。PEGC の `PEGC_LINEAR_ALT_BASE` は現行未使用で本票では対応しない。

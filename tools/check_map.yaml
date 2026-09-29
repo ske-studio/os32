@@ -2619,8 +2619,10 @@ checks:
     - sdk/include/os32/os32api.h
   check-cirrus-win-host:
     - arch/x86/arch_io.h
+    - drivers/np2sysp.h
     - drivers/wab_cirrus.h
     - drivers/wab_glue.h
+    - drivers/wab_glue_xe10.c
     - drivers/wab_glue_xe10.h
     - gfx/backend_cirrus.c
     - gfx/gfx.h

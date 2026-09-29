@@ -182,7 +182,7 @@ make check-tests-inventory                      # 表が古くないか検査す
 | 98 | `check-cat-linenum-host` | `python3 -B tools/tests/test_cat_linenum.py --target --mutate` | `userland/shell/cmd_fs_shared.c`<br>`userland/shell/cmd_file.c` | [`tools/tests/cat_linenum_tdd.md`](../tools/tests/cat_linenum_tdd.md) | — | × |
 | 99 | `check-result-conv-host` | `python3 -B tools/tests/test_result_conv.py --target --mutate` | `userland/tests/stat_t.c`<br>`userland/tests/restest.c`<br>`userland/tests/test2.c`<br>`userland/tests/klibc_test.c`<br>`userland/tests/font_load_test.c`<br>`userland/rust/alloc_demo/src/lib.rs` | [`tools/tests/result_conv_tdd.md`](../tools/tests/result_conv_tdd.md) | [`docs/tasks/test/TASK_TEST_RESULT.md`](tasks/test/TASK_TEST_RESULT.md) | × |
 | 100 | `check-guest-host` | `python3 -B tools/tests/test_guest_tests.py --mutate` | — | [`tools/tests/guest_tests_tdd.md`](../tools/tests/guest_tests_tdd.md) | [`docs/tasks/test/TASK_TEST_RUNNER.md`](tasks/test/TASK_TEST_RUNNER.md) | × |
-| 101 | `check-cirrus-win-host` | `python3 -B tools/tests/test_cirrus_win.py --mutate` | `gfx/backend_cirrus.c` | [`tools/tests/cirrus_win_tdd.md`](../tools/tests/cirrus_win_tdd.md) | — | × |
+| 101 | `check-cirrus-win-host` | `python3 -B tools/tests/test_cirrus_win.py --mutate` | `gfx/backend_cirrus.c`<br>`drivers/wab_glue_xe10.c` | [`tools/tests/cirrus_win_tdd.md`](../tools/tests/cirrus_win_tdd.md) | — | × |
 
 ## 3. `check` の列に**入っていない** `check-*` ターゲット (9)
 

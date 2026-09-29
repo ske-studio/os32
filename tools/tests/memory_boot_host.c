@@ -200,6 +200,16 @@ void _start(void)
         CHECK(physmem_count(&device_boot_map, MEM_PHYS_MMIO_TOP / PAGE_SIZE,
                             PHYSMEM_MAX_PFN, PHYSMEM_MMIO, &count));
         CHECK(count == PHYSMEM_MAX_PFN - MEM_PHYS_MMIO_TOP / PAGE_SIZE);
+        /* OS が割り当てるデバイス窓の帯 (v3、Cirrus のリニア窓) も RAM では
+         * なく、デバイス窓の可否の問い合わせは「RAM 無し」と答える。 */
+        CHECK(physmem_count(&device_boot_map,
+                            MEM_DEVICE_APERTURE_BASE / PAGE_SIZE,
+                            MEM_DEVICE_APERTURE_END / PAGE_SIZE,
+                            PHYSMEM_MMIO, &count));
+        CHECK(count == (MEM_DEVICE_APERTURE_END - MEM_DEVICE_APERTURE_BASE) /
+                       PAGE_SIZE);
+        CHECK(!pgalloc_range_has_ram(MEM_DEVICE_APERTURE_BASE / PAGE_SIZE,
+                                     MEM_DEVICE_APERTURE_END / PAGE_SIZE));
         /* 検出量の最終ページまで配れる (切り詰めが無いことの証明) */
         CHECK(pgalloc_alloc_n_pfn(1, limit - 1, limit, &p) && p == limit - 1);
         CHECK(pgalloc_free_n_pfn(p, 1));

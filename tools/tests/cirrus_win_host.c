@@ -15,6 +15,11 @@
  *  贋物にする。pgalloc_range_has_ram は**贋の物理地図** (RAM の span の表)
  *  から答え、sys_get_mem_kb は構成の上端を返す (旧判定を RED にするため)。
  *  ボードグルー wab_glue_xe10 も贋物にして、窓の番地と probe の到達を見る。
+ *
+ *  2026-09-29 (A2): リニア窓は v3 のデバイス窓の帯 FE000000h へ移した。
+ *  Cirrus は NP21/W 互換のためだけなので、auto では np2_detect() が真の
+ *  ときだけボードの ID を読む (GFX=cirrus の明示時は常に読む)。どちらも
+ *  贋物 (np2_detect / gfx_get_backend_pref) で切り替えて見る。
  * ========================================================================= */
 #include "types.h"
 #define NOINST __attribute__((no_instrument_function))
@@ -74,6 +79,11 @@ int pgalloc_range_has_ram(u32 first, u32 end)
     return 0;
 }
 u32 sys_get_mem_kb(void) { return top_kb; }
+
+/* NP21/W 判定と GFX= の希望 (贋物)。np2_calls は「判定を読んだ」回数。 */
+static int fake_np2, fake_pref = GFX_PREF_AUTO, np2_calls;
+int np2_detect(void) { np2_calls++; return fake_np2; }
+int gfx_get_backend_pref(void) { return fake_pref; }
 
 /* ---- 贋のボードグルー ---- */
 static int glue_probe_calls;
@@ -136,8 +146,10 @@ void palette_shadow_set(int i, u8 r, u8 g, u8 b) { (void)i; (void)r; (void)g; (v
 #define MB(x)  ((u32)(x) * 1024UL * 1024UL)
 #define BANK   WAB_XE10_WIN_BASE          /* F60000h */
 #define BANK_N WAB_XE10_WIN_SIZE
-#define LIN    WAB_XE10_LINEARWIN_BASE    /* 01000000h */
+#define LIN    WAB_XE10_LINEARWIN_BASE    /* FE000000h (v3 のデバイス窓の帯) */
 #define LIN_N  WAB_XE10_LINEARWIN_SIZE
+#define LIN_DEC WAB_XE10_LINEARWIN_DECODE /* NP21/W が窓として出す 4MB */
+#define OLD_LIN 0x01000000UL              /* 移す前の番地 (16MB 直上) */
 
 /* 15MB + 高位 1MB (NP21/W ExMemory 16 の K6 以後の地図、上端 17,408KB)。 */
 static void cfg_15m_high1(void)
@@ -158,24 +170,38 @@ static void bank_window_in_hole(void)
     CHECK(cirrus_win_usable(MEM_SYSTEM_SPACE_BASE, MB(1)));
 }
 
-/* 2. リニア窓 16MB はこの構成では高位 RAM と本当に重なる = 張れない。 */
-static void linear_window_on_high_ram(void)
+/* 2. リニア窓の置き場。16MB 直上は高位 RAM と本当に重なるので使えない。
+ *    v3 のデバイス窓の帯 (FE000000h) は RAM の量に関係なく空いている。 */
+static void linear_window_placement(void)
 {
+    /* 番地は帯の先頭、dat = FEh (NP21/W が受け付ける最上位)。 */
+    CHECK(LIN == MEM_DEVICE_APERTURE_BASE);
+    CHECK(WAB_XE10_LINEARWIN_SEL == 0xFE);
+    CHECK(LIN + LIN_DEC <= MEM_DEVICE_APERTURE_END);
+    /* NP21/W 17MB: 旧番地は RAM と重なる、新番地は空いている。 */
     cfg_15m_high1();
-    CHECK(!cirrus_win_usable(LIN, LIN_N));
+    CHECK(!cirrus_win_usable(OLD_LIN, LIN_N));
+    CHECK(cirrus_win_usable(LIN, LIN_N));
+    CHECK(cirrus_win_usable(LIN, LIN_DEC));
+    /* 実機 64MB (16MB から RAM が連続): 旧番地は重なる、新番地は空いている。 */
+    map_reset(65536);
+    map_add(0, KB(640));
+    map_add(MB(1), MB(15));
+    map_add(MB(16), MB(64));
+    CHECK(!cirrus_win_usable(OLD_LIN, LIN_N));
+    CHECK(cirrus_win_usable(LIN, LIN_DEC));
     /* 窓の末尾 1 ページだけ RAM でも拒む (部分一致を見落とさない)。 */
     map_reset(8192);
     map_add(MB(1), MB(8));
     map_add(LIN + LIN_N - PAGE_SIZE, LIN + LIN_N);
     CHECK(!cirrus_win_usable(LIN, LIN_N));
-    /* 窓のすぐ後ろの RAM は窓を塞がない (範囲を広げすぎない)。 */
+    /* 窓のすぐ後ろ・すぐ前の RAM は窓を塞がない (範囲を広げすぎない)。 */
     map_reset(8192);
     map_add(MB(1), MB(8));
     map_add(LIN + LIN_N, LIN + LIN_N + MB(1));
     CHECK(cirrus_win_usable(LIN, LIN_N));
-    /* 窓のすぐ前の RAM も塞がない。 */
     map_reset(8192);
-    map_add(MB(1), LIN);
+    map_add(LIN - MB(1), LIN);
     CHECK(cirrus_win_usable(LIN, LIN_N));
 }
 
@@ -210,41 +236,76 @@ static void map_not_ready(void)
     CHECK(!cirrus_win_usable(BANK, BANK_N));
 }
 
-/* 6. 大きさ 0・ページングの守備範囲の外・桁あふれは拒む (従来どおり)。 */
+/* 6. 大きさ 0・32bit 空間の末尾越え (桁あふれ) は拒む。4GB ちょうどで
+ *    終わる窓は可 (末尾番地で持つので u32 に収まる)。 */
 static void window_bounds(void)
 {
     map_reset(8192);
     map_add(MB(1), MB(8));
     CHECK(!cirrus_win_usable(BANK, 0));
-    CHECK(cirrus_win_usable(PAGING_MAP_SIZE - PAGE_SIZE, PAGE_SIZE));
-    CHECK(!cirrus_win_usable(PAGING_MAP_SIZE - PAGE_SIZE, 2 * PAGE_SIZE));
-    CHECK(!cirrus_win_usable(PAGING_MAP_SIZE, PAGE_SIZE));
-    CHECK(!cirrus_win_usable(0xFFFFF000UL, 0x2000UL));
+    CHECK(cirrus_win_usable(0xFFFFF000UL, PAGE_SIZE));
+    CHECK(!cirrus_win_usable(0xFFFFF000UL, 2 * PAGE_SIZE));
+    CHECK(!cirrus_win_usable(0xFFFFFFFFUL, 2));
+    CHECK(cirrus_win_usable(0xFFFFFFFFUL, 1));
+    /* 末尾が 4GB を越えて先頭側のページへ回り込む窓 (末尾番地を素直に足すと
+     * [1, 2) の 1 ページだけを問い合わせてしまう) も拒む。 */
+    CHECK(!cirrus_win_usable(0x1800UL, 0xFFFFFFFFUL));
+    /* 32MB より上 (旧 PAGING_MAP_SIZE の外) も物理地図で決める。 */
+    CHECK(cirrus_win_usable(0x02000000UL, LIN_N));
 }
 
-/* 7. probe の段: 15MB + 高位 RAM ではバンク窓を通り、リニア窓で落ちる
- *    (ボードの ID 判定には進まない)。リニア窓が空いていれば ID 判定へ進む。 */
+/* 7. probe の段:
+ *    - 15MB + 高位 RAM (NP21/W 17MB) でも両方の窓が通り、NP21/W なら ID
+ *      判定まで進む (本件の症状が消えること)。
+ *    - auto で NP21/W でなければ ID を読みにいかない (実機でポートを叩かない)。
+ *    - GFX=cirrus の明示なら NP21/W でなくても ID 判定へ進む。
+ *    - バンク窓が RAM に当たれば、どの場合も進まない (NP21/W 判定も読まない)。 */
 static void probe_stages(void)
 {
     cfg_15m_high1();
-    glue_reset(BANK, BANK_N, LIN, LIN_N);
-    CHECK(cirrus_probe() == 0);
-    CHECK(glue_probe_calls == 0);
-
-    /* 高位 RAM の無い 15MB 機: 両方の窓が空いている → ID 判定まで進む。 */
-    map_reset(15360);
-    map_add(0, KB(640));
-    map_add(MB(1), MB(15));
+    fake_pref = GFX_PREF_AUTO; fake_np2 = 1; np2_calls = 0;
     glue_reset(BANK, BANK_N, LIN, LIN_N);
     CHECK(cirrus_probe() == 0);     /* 贋グルーの ID 判定は 0 を返す */
     CHECK(glue_probe_calls == 1);
 
-    /* バンク窓だけ RAM に当たる (16MB 丸ごと RAM) → ID 判定へ進まない。 */
+    /* 結果はキャッシュ: 二度目は何も読まない。 */
+    CHECK(cirrus_probe() == 0);
+    CHECK(glue_probe_calls == 1);
+
+    cfg_15m_high1();
+    fake_pref = GFX_PREF_AUTO; fake_np2 = 0; np2_calls = 0;
+    glue_reset(BANK, BANK_N, LIN, LIN_N);
+    CHECK(cirrus_probe() == 0);
+    CHECK(np2_calls == 1);
+    CHECK(glue_probe_calls == 0);
+
+    cfg_15m_high1();
+    fake_pref = GFX_PREF_CIRRUS; fake_np2 = 0; np2_calls = 0;
+    glue_reset(BANK, BANK_N, LIN, LIN_N);
+    CHECK(cirrus_probe() == 0);
+    CHECK(glue_probe_calls == 1);
+
+    /* バンク窓が RAM (16MB 丸ごと RAM) → NP21/W 判定も ID も読まない
+     * (auto / 明示の両方)。 */
     map_reset(16384);
     map_add(MB(1), MB(16));
-    glue_reset(BANK, BANK_N, 2 * LIN, LIN_N);
+    fake_pref = GFX_PREF_AUTO; fake_np2 = 1; np2_calls = 0;
+    glue_reset(BANK, BANK_N, LIN, LIN_N);
     CHECK(cirrus_probe() == 0);
     CHECK(glue_probe_calls == 0);
+    CHECK(np2_calls == 0);
+    fake_pref = GFX_PREF_CIRRUS; np2_calls = 0;
+    glue_reset(BANK, BANK_N, LIN, LIN_N);
+    CHECK(cirrus_probe() == 0);
+    CHECK(glue_probe_calls == 0);
+
+    /* リニア窓が RAM に当たる番地 (旧番地 + 高位 RAM) → 同じく進まない。 */
+    cfg_15m_high1();
+    fake_pref = GFX_PREF_AUTO; fake_np2 = 1; np2_calls = 0;
+    glue_reset(BANK, BANK_N, OLD_LIN, LIN_N);
+    CHECK(cirrus_probe() == 0);
+    CHECK(glue_probe_calls == 0);
+    fake_pref = GFX_PREF_AUTO;
 }
 
 void _start(void)
@@ -252,8 +313,8 @@ void _start(void)
     CHECK(sizeof(u32) == 4);
     bank_window_in_hole();
     output("PASS bank window in the 15-16MB hole (top 17408KB)\n");
-    linear_window_on_high_ram();
-    output("PASS linear window vs high RAM, partial overlap, neighbours\n");
+    linear_window_placement();
+    output("PASS linear window in the v3 aperture band (17MB / 64MB), partial overlap, neighbours\n");
     system_space_is_ram();
     output("PASS system space registered as RAM rejects the bank window\n");
     small_machine();
@@ -261,8 +322,8 @@ void _start(void)
     map_not_ready();
     output("PASS map not ready: refuse\n");
     window_bounds();
-    output("PASS size 0 / paging bound / overflow\n");
+    output("PASS size 0 / 4GB end / overflow\n");
     probe_stages();
-    output("PASS probe stages (bank ok, linear refused, glue not reached)\n");
+    output("PASS probe stages (17MB reaches the ID on NP21/W only; GFX=cirrus forces; RAM blocks)\n");
     finish(0);
 }

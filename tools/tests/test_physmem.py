@@ -261,32 +261,38 @@ void _start(void) {
 
     def test_device_apertures_are_explicit_synthetic_exclusions(self):
         # These constants are existing driver definitions, not new policy.
-        # PEGC F00000 + 80000 is 512KiB; optional 1MiB guard below 16MiB
-        # is NOT a substitute for Xe10's separate full 2MiB aperture.
+        # PEGC F00000 + 80000 is 512KiB. Xe10's linear aperture moved to the
+        # v3 OS-assigned device band at FE000000 (2026-09-29): NP21/W decodes
+        # 4MiB there, the backend draws into the first 2MiB.
         self.run_c('''
     struct physmem m;
-    u32 count, pfn, guard, xe, xe_end;
+    u32 count, pfn, guard, guard_end, xe, xe_end, xe_dec;
     physmem_bootstrap_legacy(&m, 16384);
     guard = PEGC_LINEAR_BASE / PHYSMEM_PAGE_SIZE;
+    guard_end = guard + PEGC_LINEAR_SIZE / PHYSMEM_PAGE_SIZE;
     xe = WAB_XE10_LINEARWIN_BASE / PHYSMEM_PAGE_SIZE;
     xe_end = xe + WAB_XE10_LINEARWIN_SIZE / PHYSMEM_PAGE_SIZE;
+    xe_dec = xe + WAB_XE10_LINEARWIN_DECODE / PHYSMEM_PAGE_SIZE;
     CHECK(PEGC_LINEAR_BASE == 0x00f00000UL);
     CHECK(PEGC_LINEAR_SIZE == 0x00080000UL);
-    CHECK(WAB_XE10_LINEARWIN_BASE == 0x01000000UL);
+    CHECK(WAB_XE10_LINEARWIN_BASE == 0xFE000000UL);
+    CHECK(WAB_XE10_LINEARWIN_BASE == MEM_DEVICE_APERTURE_BASE);
     CHECK(WAB_XE10_LINEARWIN_SIZE == 0x00200000UL);
-    CHECK(xe_end == 0x01200000UL / PHYSMEM_PAGE_SIZE);
+    CHECK(xe_dec <= MEM_DEVICE_APERTURE_END / PHYSMEM_PAGE_SIZE);
+    CHECK(MEM_PHYS_RAM_CEILING == MEM_DEVICE_APERTURE_BASE);
     /* Inactive apertures must not impose a default CUI RAM restriction. */
     CHECK(physmem_count(&m, guard, 4096, PHYSMEM_RAM, &count) && count == 256);
     CHECK(physmem_add_trusted(&m, xe, PHYSMEM_MAX_PFN, PHYSMEM_SOURCE_SYNTHETIC));
     CHECK(physmem_find(&m, xe, xe_end, 512, 1, &pfn) && pfn == xe);
     /* Synthetic boot-only example, NOT safe live backend activation code. */
-    CHECK(physmem_exclude(&m, guard, xe, PHYSMEM_MMIO));
-    CHECK(physmem_exclude(&m, xe, xe_end, PHYSMEM_MMIO));
-    CHECK(physmem_add_trusted(&m, guard, xe_end, PHYSMEM_SOURCE_SYNTHETIC));
-    CHECK(physmem_count(&m, guard, xe_end, PHYSMEM_MMIO, &count) && count == 768);
-    CHECK(!physmem_find(&m, guard, xe_end, 1, 1, &pfn));
+    CHECK(physmem_exclude(&m, guard, guard_end, PHYSMEM_MMIO));
+    CHECK(physmem_exclude(&m, xe, xe_dec, PHYSMEM_MMIO));
+    CHECK(physmem_add_trusted(&m, guard, guard_end, PHYSMEM_SOURCE_SYNTHETIC));
+    CHECK(physmem_count(&m, guard, guard_end, PHYSMEM_MMIO, &count) && count == 128);
+    CHECK(physmem_count(&m, xe, xe_dec, PHYSMEM_MMIO, &count) && count == 1024);
+    CHECK(!physmem_find(&m, xe, xe_dec, 1, 1, &pfn));
     CHECK(!physmem_reserve_ram(&m, xe, xe_end));
-    CHECK(physmem_find(&m, xe_end, PHYSMEM_MAX_PFN, 1, 1, &pfn) && pfn == xe_end);
+    CHECK(physmem_find(&m, xe_dec, PHYSMEM_MAX_PFN, 1, 1, &pfn) && pfn == xe_dec);
 ''')
 
 

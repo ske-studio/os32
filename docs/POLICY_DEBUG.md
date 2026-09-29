@@ -1466,8 +1466,10 @@ read-modify-write で保つ。
   (`sys_get_mem_kb() > base / 1024`)。RAM 17,408KB の NP21/W で**穴の中のバンク窓 0xF60000 まで**
   拒み、Cirrus の probe が ID 判定の前に落ちた (2026-09-29、TASK_S5 §6 R2)。同じ口
   (`pgalloc_range_has_ram`、窓の全ページ) に直した (`tools/tests/test_cirrus_win.py`)。
-  **リニア窓 0x1000000 (2MB) は高位 RAM のある構成では本当に RAM と重なる**ので、直した後も
-  その構成では probe は 0 のまま — 置き場所は設計判断 (未決)。
+  **リニア窓 0x1000000 (2MB) は高位 RAM のある構成では本当に RAM と重なる** (NP21/W 17MB、実機 64MB) ので、
+  ユーザー決定 (2026-09-29、A2) で **v3 のデバイス窓の帯 0xFE000000** (`MEM_DEVICE_APERTURE_*`、物理地図で MMIO、
+  PT は paging_init が静的に 1 枚) へ移した。Cirrus は NP21/W 互換のためだけなので、auto の probe は
+  `np2_detect()` が真のときだけボードの ID (0FAAh/0FABh) を読む (`GFX=cirrus` の明示時は読む)。
   (3) 定義を変えた関数 (`sys_mem_kb`) は、**呼び出し側の意味**まで洗う。
 - **回帰**: `tools/tests/test_memory_boot.py::test_ram_kb_is_the_registered_total_not_the_top`
   (17408 / 33792 / 8192 の 3 構成) と `tools/tests/test_pgalloc_range.py` の `device_window_ram`。

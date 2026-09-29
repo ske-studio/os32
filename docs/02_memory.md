@@ -91,7 +91,7 @@
 読み手に暗算させ、2026-09-17 の「SHM がカーネルスタックに食い込んでいた」穴を隠していた。
 
 ```
-__bss_end      = 0x18FC00   (カーネル本体 575KB)
+__bss_end      = 0x190C00   (カーネル本体 579KB)
 __sqlite_start = 0x200000
 __sqlite_end   = 0x2BC200   (SQLite 本体 752.5KB)
 
@@ -106,15 +106,15 @@ __sqlite_end   = 0x2BC200   (SQLite 本体 752.5KB)
 0x0F0000 - 0x0FFFFF 64KB     BIOS ROM                                                      RO
 
 [ カーネル帯域 (0x100000-0x1FFFFF) ]
-0x100000 - 0x18FBFF 575KB    カーネル .text/.data/.bss  (kernel.map の __bss_end まで)     RW
-0x18FC00 - 0x18FFFF 1KB      空き
-0x190000 - 0x1BFFFF 192KB    カーネルヒープ (kmalloc)  (__bss_end を 4KB に切り上げた位置から) RW
-0x1C0000 - 0x1C0FFF 4KB      KernelAPI テーブル  (KAPI_ADDR)                               RW
-0x1C1000 - 0x1C1FFF 4KB      SHM 前方ガード                                                NP
-0x1C2000 - 0x1F9FFF 224KB    共有メモリ本体  (16KB x SHM_BLOCK_COUNT。CPL=3 アプリの起動時に USER へ昇格 (exec.c、PDE 0 は全 PD 共有)) RW
-0x1EA000 - 0x1F9FFF 64KB     GUI 予約 (末尾 4 ブロック)  (契約 T2。SDK の GUI_SHM_OFFSET = MEM_SHM_GUI_OFFSET) RW
-0x1FA000 - 0x1FAFFF 4KB      SHM 後方ガード                                                NP
-0x1FB000 - 0x1FFFFF 20KB     SHM 後方予約  (カーネルが予算いっぱいなら空になる (それは正しい)) NP
+0x100000 - 0x190BFF 579KB    カーネル .text/.data/.bss  (kernel.map の __bss_end まで)     RW
+0x190C00 - 0x190FFF 1KB      空き
+0x191000 - 0x1C0FFF 192KB    カーネルヒープ (kmalloc)  (__bss_end を 4KB に切り上げた位置から) RW
+0x1C1000 - 0x1C1FFF 4KB      KernelAPI テーブル  (KAPI_ADDR)                               RW
+0x1C2000 - 0x1C2FFF 4KB      SHM 前方ガード                                                NP
+0x1C3000 - 0x1FAFFF 224KB    共有メモリ本体  (16KB x SHM_BLOCK_COUNT。CPL=3 アプリの起動時に USER へ昇格 (exec.c、PDE 0 は全 PD 共有)) RW
+0x1EB000 - 0x1FAFFF 64KB     GUI 予約 (末尾 4 ブロック)  (契約 T2。SDK の GUI_SHM_OFFSET = MEM_SHM_GUI_OFFSET) RW
+0x1FB000 - 0x1FBFFF 4KB      SHM 後方ガード                                                NP
+0x1FC000 - 0x1FFFFF 16KB     SHM 後方予約  (カーネルが予算いっぱいなら空になる (それは正しい)) NP
 
 [ SQLite 帯域 (0x200000-0x2FFFFF) ]
 0x200000 - 0x2BC1FF 752.5KB  SQLite code+BSS  (kernel.map の __sqlite_start / __sqlite_end) RW
@@ -147,12 +147,12 @@ __sqlite_end   = 0x2BC200   (SQLite 本体 752.5KB)
 
 **地図の矛盾: 0 件** (重なりも逆転も無い。`--check` が毎回確かめる)
 
-**カーネル本体の予算**: 596KB 中 575KB を使用 (残り 21KB)。
+**カーネル本体の予算**: 596KB 中 579KB を使用 (残り 17KB)。
 
 **カーネルがあと何 KB 育つと何が壊れるか** (`__bss_end` が伸びると `KHEAP_BASE` 以降が芋づるで動く)
 
-- `__bss_end` +1KB で KHEAP_BASE が 1 ページ上がる。0x190000 → 0x191000。以降の KAPI / SHM / ガードが全部 4KB 動く
-- `__bss_end` +21.0KB で **build/os32.ld の ASSERT がリンクを止める** (予算 MEM_KERNEL_IMAGE_MAX 超過)。止めるのが目的。超えたぶんだけ SHM 帯が カーネル帯域 0x1FFFFF を突き抜ける
+- `__bss_end` +1KB で KHEAP_BASE が 1 ページ上がる。0x191000 → 0x192000。以降の KAPI / SHM / ガードが全部 4KB 動く
+- `__bss_end` +17.0KB で **build/os32.ld の ASSERT がリンクを止める** (予算 MEM_KERNEL_IMAGE_MAX 超過)。止めるのが目的。超えたぶんだけ SHM 帯が カーネル帯域 0x1FFFFF を突き抜ける
 
 <!-- /生成: tools/gen_memmap.py -->
 
@@ -203,13 +203,24 @@ guard_a+4KB - heap_top             exec_heap (KAPI mem_alloc)                 R/
 min(検出量, 32MB) — その上端が paging_boot_identity_end() — で、それより上の RAM は
 pgalloc_stage_online() が paging_map_phys() で張り、PT はブート workspace から動的に取る。
 15〜16MB (F00000h-FFFFFFh) は PC-98 のシステム空間で RAM にはしない (MEM_SYSTEM_SPACE_*)。
-16MB 超で RAM が載っていない範囲は既定 Not-Present で、必要な範囲だけ paging_map_phys() で張る:
+16MB 超で RAM が載っていない範囲は既定 Not-Present で、必要な範囲だけ paging_map_phys() で張る。
+**OS が番地を決めるデバイス窓は v3 のデバイス窓の帯 `[0xFE000000, 0xFF000000)`** (`MEM_DEVICE_APERTURE_*`、
+2026-09-29) に置く。RAM の量に関係なく RAM と重ならないよう物理地図で MMIO にし (RAM として登録できる上端 =
+`MEM_PHYS_RAM_CEILING`)、帯の先頭 4MB の PT を paging_init が**静的に 1 枚** (+4KB BSS) 持つ —
+新しい PDE は live AS が 0 の間しか足せないが、gfx の init は exec の後にも走るため:
 
 ```
 0x00F00000 - 0x00F4AFFF          PEGC のリニア窓 (H2、9821 で PEGC 有効時のみ)  supervisor + PCD
-0x01000000 - 0x011FFFFF          WAB (Cirrus Xe10) の 2MB リニア窓 (H3b、Cirrus 有効時のみ) supervisor + PCD
+0x00F60000 - 0x00F67FFF          WAB (Cirrus Xe10) のバンク窓 (ITF の既定。backend は使わない)
+0xFE000000 - 0xFE1FFFFF          WAB (Cirrus Xe10) の 2MB リニア窓 (NP21/W は 4MB を窓として出す) supervisor + PCD
   +000000h 表示面 / +04B000h クライアント面 (300KB) / +096000h 塗りパターン
+0xFF000000 - 0xFFFFFFFF          ROM ミラー / PCI 機の MMIO (MEM_PHYS_MMIO_TOP、RAM にしない)
 ```
+
+> リニア窓は 2026-09-29 まで 0x01000000 (16MB 直上) だったが、16MB 超の RAM と重なる (NP21/W 17MB、
+> 実機 64MB) ので帯へ移した。512MB 付近は PCI の BIOS が BAR を置く帯 (Ra266 の実測 0x20000000〜) なので
+> 避けた。**Cirrus は NP21/W 互換のためだけ**で、auto の probe は NP21/W の上でだけボードの ID を読む
+> (実機 Ra266 のアクセラレータは PCI の Trident)。経緯は `docs/POLICY_DEBUG.md` §4-34。
 
 > **デバイス窓の貸し出し規則 (レビュー #5 ②③、2026-09-06)**
 > バックエンドが master PD に張る窓は **supervisor + PCD** で、PTE_USER を付けない。

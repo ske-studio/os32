@@ -362,14 +362,31 @@ extern u32 __sqlite_end;
 /*        書き込みプローブが通っても RAM として配ってはならない。           */
 /*    [MEM_HIGH_RAM_BASE, ...)                                              */
 /*        16MB 以上に載る実 RAM。検出量ぶんだけ pgalloc の池に入る。        */
+/*    [MEM_DEVICE_APERTURE_BASE, MEM_DEVICE_APERTURE_END)                   */
+/*        **OS が番地を決めるデバイス窓の帯** (v3 のメモリマップ、         */
+/*        2026-09-29)。ボードの窓の番地をソフトウェアで選べるもの          */
+/*        (NP21/W の Xe10 Cirrus のリニア窓 = 0FABh レジスタ 02h) を、      */
+/*        RAM の量に関係なくここへ置く。RAM にはしない (物理地図で MMIO)。  */
+/*        16MB 直上に置くと 16MB 超の RAM と奪い合い (実機 64MB・NP21/W   */
+/*        17MB で衝突)、512MB 付近は PCI の BIOS が BAR を割り当てる帯     */
+/*        (Ra266 の実測 0x20000000〜) なので、どちらも避けて 4GB の上位に   */
+/*        置く。1 PDE = 4MB ごとに 1 枚の PT で覆い、paging_init が先頭の  */
+/*        PT を静的に用意する (最初のアプリ AS より前に PDE が要るため)。   */
 /*    [MEM_PHYS_MMIO_TOP, 4GB)                                              */
 /*        32bit 空間の最上位。BIOS ROM ミラーと PCI 機の MMIO 窓が          */
 /*        居る帯で、RAM にはならない (Win32 の実効 ≈3.2GB と同じ理由)。     */
+/*                                                                          */
+/*  RAM として登録してよい上端は MEM_PHYS_RAM_CEILING (= 窓の帯の先頭)。    */
+/*  K6 の表の置き場で実効の上限は約 2.8GB なので、この帯で失う RAM は無い。 */
 /* ====================================================================== */
 #define MEM_SYSTEM_SPACE_BASE MEM_APP_BAND_DEVICE_FLOOR /* 0x00F00000 (15MB) */
 #define MEM_SYSTEM_SPACE_END  0x01000000UL              /* 16MB */
 #define MEM_HIGH_RAM_BASE     MEM_SYSTEM_SPACE_END      /* 16MB */
 #define MEM_PHYS_MMIO_TOP     0xFF000000UL              /* 4GB - 16MB */
+#define MEM_DEVICE_APERTURE_BASE 0xFE000000UL           /* 4GB - 32MB */
+#define MEM_DEVICE_APERTURE_END  MEM_PHYS_MMIO_TOP      /* exclusive */
+#define MEM_DEVICE_APERTURE_PDE_SIZE 0x00400000UL       /* PT 1 枚 = 4MB */
+#define MEM_PHYS_RAM_CEILING  MEM_DEVICE_APERTURE_BASE
 
 /* ====================================================================== */
 /*  共有ライブラリ帯域 (0x400000-0x4FFFFF, 1MB)  — GUI v1.1 K3              */
