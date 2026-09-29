@@ -226,5 +226,8 @@ void ring3_wm_leave(void);
  * enter/leave の対が崩れた。KAPI にはせずカーネルシンボルとして読む
  * (ring3_park_reject_count と同じ流儀)。 */
 extern volatile u32 ring3_wm_depth_underflow;
+/* WM の文脈 (深さ 1 以上) でアプリをフォールトで畳んだ回数 (exec.c の注記)。
+ * WM の中で落ちるとアプリの kill として畳まれるので、それを見分ける印。 */
+extern volatile u32 ring3_wm_fault_count;
 
 #endif /* __EXEC_H */

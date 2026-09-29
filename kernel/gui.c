@@ -35,12 +35,16 @@ extern void appslot_gui_op_leave(void);
  * 入れ子の syscall はディスパッチャ入口で深さ 0 に戻るので門の穴にはならない
  * (対の崩れは ring3_wm_depth_underflow が数える)。また深さが素通しにするのは
  * **WM がいま渡すポインタ**だけで、アプリが前に登録したポインタ
- * (fd_redirect のバッファ) は深さに関係なく表を歩く (exec/ring3_str.h)。 */
+ * (fd_redirect のバッファ) は深さに関係なく表を歩く (exec/ring3_str.h)。
+ * 深さ 1 以上 = WM を信頼境界の内側に置く、だがフォールトの帰属は
+ * ring3_in_syscall のまま — WM の中で落ちるとアプリの kill として畳まれる
+ * (ring3_wm_fault_count が数える、docs/POLICY_DEBUG.md §4-61 追記 3)。 */
 extern void ring3_wm_enter(void);
 extern void ring3_wm_leave(void);
 
 /* 「いまの KAPI 呼び出しは CPL=3 のアプリ由来か」(exec/exec.c、実体は
- * exec/ring3_str.c の ring3_guard_active)。gui_ime_set_render が引く。 */
+ * exec/ring3_str.c の ring3_guard_active)。gui_register と gui_ime_set_render
+ * が引く (同じ門)。 */
 extern int ring3_call_from_user(void);
 
 /* GUI_SHELL_OWNER (= 1) は gui.h。K2 の syscall 境界ポンプも同じ値を使う。 */
@@ -78,10 +82,18 @@ i32 gui_call(u32 op, u32 arg)
 /* ======================================================================== */
 /*  gui_register — WM (gshell) がハンドラを登録する                          */
 /*  shell 帯 (owner 1, CPL=0) からのみ。それ以外は OS32_ERR_INVAL。          */
+/*                                                                          */
+/*  門は gui_ime_set_render と同じ「owner 1 かつ ring3_call_from_user() が  */
+/*  偽」(2026-09-26、代行レビュー P3)。登録したハンドラ / ポンプは以後ずっと */
+/*  CPL=0 で呼ばれるので、CPL=3 のアプリの syscall 由来 (WM の外) では断る。 */
+/*  owner 1 は常駐シェルだけなので owner だけでも今は穴ではないが、門を     */
+/*  1 つの形に揃えて「owner の意味が変わったら開く」を塞ぐ。正当な呼び手は   */
+/*  gshell の top-level (ディスパッチの外、ring3_in_syscall = 0) で、これは  */
+/*  通る (tools/tests/ring3_guard_host.c §6)。                               */
 /* ======================================================================== */
 i32 gui_register(void *handler, void *pump)
 {
-    if (res_owner_get() != GUI_SHELL_OWNER) {
+    if (res_owner_get() != GUI_SHELL_OWNER || ring3_call_from_user()) {
         return OS32_ERR_INVAL;
     }
     if (handler == 0) {

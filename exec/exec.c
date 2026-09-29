@@ -344,6 +344,16 @@ void ring3_wm_enter(void)
 
 volatile u32 ring3_wm_depth_underflow = 0;
 
+/* WM (gshell) のコードへ入っている間 (ring3_wm_depth > 0) にアプリを
+ * フォールトで畳んだ数 (2026-09-26、代行レビュー P3)。WM の中の #PF/#GP も
+ * KAPI の門の拒否も、帰属はアプリ (ring3_in_syscall) なので**アプリの kill と
+ * して畳まれ**、fault_kill_count が +1 するだけで例外画面は出ない (§4-61 の
+ * 「例外 0 件・fault_kill_count だけ増える」)。これが増えていれば落ちた場所は
+ * WM の文脈。数えるのは ring3_kill_kind の深さを 0 に戻す**前** (後に置くと
+ * 常に 0)。CTRL+STOP (ABORTED) は数えない。挙動は変えない。
+ * fault_kill_count と同じくカーネルシンボルを emu_read_mem で読む。 */
+volatile u32 ring3_wm_fault_count = 0;
+
 void ring3_wm_leave(void)
 {
     if (ring3_wm_depth > 0) {
@@ -1506,6 +1516,9 @@ void __cdecl ring3_syscall_dispatch(u32 *frame)
 static void ring3_kill_kind(int kind)
 {
     fault_kill_count++;
+    if (kind == EXEC_KIND_FAULT && ring3_wm_depth > 0) {
+        ring3_wm_fault_count++;     /* 深さを 0 に戻す前に数える */
+    }
     ring3_in_syscall = 0;   /* syscall 途中で畳む場合も必ずガードを下ろす */
     ring3_wm_depth = 0;     /* WM の中から畳んだ場合も深さを戻す (出口を通らない) */
     exec_exit(EXEC_ERR_FAULT, kind);   /* longjmp するので戻らない */

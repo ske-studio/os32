@@ -21,6 +21,11 @@ extern void ring3_fault_kill(void);
 /* ring3 syscall (wrap) 実行中フラグ (exec.c, v2 M2e)。立っている間の CPL=0
  * フォールトは「ring3 アプリ由来 (KAPI ポインタ deref 等)」とみなし kill する。 */
 extern volatile int ring3_in_syscall;
+/* カーネルが WM (gshell) のコードへ入っている深さ (exec.c、2026-09-26)。
+ * kill の行に "(in WM)" を足すためだけに読む — 帰属 (kill するか) は変えない。
+ * WM の中で落ちるとアプリの kill として畳まれる (POLICY_DEBUG §4-61) ので、
+ * ここと ring3_wm_fault_count (exec.c) が「WM の中だった」を残す唯一の印。 */
+extern volatile int ring3_wm_depth;
 
 #include "serial.h"
 #include "tvram.h"
@@ -249,6 +254,7 @@ void exception_handler(u32 error_code, u32 vector, u32 fault_eip,
         sputs("\n[ring3] exception (CPL=3 / syscall) vec=");
         sput_hex32(vector);
         sputs(" EIP="); sput_hex32(fault_eip);
+        if (ring3_wm_depth > 0) sputs(" (in WM)");
         sputs(" -> kill app\n");
         ring3_fault_kill();     /* 戻らない */
     }
@@ -347,6 +353,7 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
         if (fault_addr >= MEM_SHLIB_BASE && fault_addr < MEM_SHLIB_END) {
             sputs((error_code & 2) ? " [shlib band, WRITE]" : " [shlib band, READ]");
         }
+        if (ring3_wm_depth > 0) sputs(" (in WM)");
         sputs(" -> kill app\n");
         ring3_fault_kill();     /* 戻らない */
     }

@@ -342,9 +342,12 @@ static void case_registered_ptr(void)
     check(host_walks == walks0 + 1, "4c registration walks the table");
 
     /* 4d-4g WM の文脈 (gui_call のハンドラ、深さ 1) で fd 1 へ書く。ページは RO。 */
+    /* WM の登録は gshell の top-level (ディスパッチの外) から (§6 の門)。 */
     res_owner_set(1);
+    host_in_syscall = 0;
     check(gui_register((void *)wm_writes_fd1, (void *)0) == 0, "4d WM registers");
     res_owner_set(2);
+    host_in_syscall = 1;
     host_page_rw = 0;                      /* 登録の後で RO になった */
     kills0 = host_kills;
     walks0 = host_walks;
@@ -471,6 +474,64 @@ static void case_ime_render(void)
     check(gui_ime_render_rejected == rej0 + 4, "5k four refusals counted");
 }
 
+/* ========================================================================
+ *  6. gui_register の門 — ime_set_render と同じ「owner 1 かつ CPL=0 の直呼び」
+ *     (2026-09-26、代行レビュー P3。kernel/gui.c の gui_register)
+ *
+ *  登録したハンドラ / ポンプは以後ずっと CPL=0 で呼ばれる。正当な呼び手は
+ *  gshell の top-level (ディスパッチの外) だけで、それが通ることを固定する。
+ * ======================================================================== */
+static i32 wm_handler_a(u32 op, u32 arg, int owner)
+{
+    (void)op; (void)arg; (void)owner;
+    return 11;
+}
+
+static i32 app_handler_b(u32 op, u32 arg, int owner)
+{
+    (void)op; (void)arg; (void)owner;
+    return 22;
+}
+
+static void case_register_gate(void)
+{
+    report("6 gui_register は常駐側だけ\n");
+    ring3_wm_depth = 0;
+
+    /* 6a-6b gshell の top-level (owner 1、ディスパッチの外) の登録は通る。 */
+    res_owner_set(1);
+    host_in_syscall = 0;
+    check(gui_register((void *)wm_handler_a, (void *)0) == 0, "6a owner 1 CPL0 registers");
+    res_owner_set(2);
+    check(gui_call(GUI_OP_POLL, 0) == 11, "6b registered WM handler receives gui_call");
+
+    /* 6c-6d owner 1 のままでも CPL=3 の syscall 由来 (ring3_call_from_user 真) は断り、
+     * 登録済みのハンドラは変えない。 */
+    res_owner_set(1);
+    host_in_syscall = 1;
+    check(gui_register((void *)app_handler_b, (void *)0) == OS32_ERR_INVAL,
+          "6c owner 1 but from user -> INVAL");
+    res_owner_set(2);
+    check(gui_call(GUI_OP_POLL, 0) == 11, "6d handler unchanged after refusal");
+
+    /* 6e アプリ (owner 2) の syscall からは従来どおり断る。 */
+    check(gui_register((void *)app_handler_b, (void *)0) == OS32_ERR_INVAL,
+          "6e owner 2 from user -> INVAL");
+
+    /* 6f アプリの syscall の中の WM の文脈 (深さ 1) でも owner が違えば断る。 */
+    ring3_wm_enter();
+    check(gui_register((void *)app_handler_b, (void *)0) == OS32_ERR_INVAL,
+          "6f owner 2 inside WM -> INVAL");
+    ring3_wm_leave();
+
+    /* 6g NULL は常駐側でも断る (従来どおり)。 */
+    res_owner_set(1);
+    host_in_syscall = 0;
+    check(gui_register((void *)0, (void *)0) == OS32_ERR_INVAL, "6g NULL handler -> INVAL");
+
+    gui_owner_exit(GUI_SHELL_OWNER);
+}
+
 int main(void)
 {
     case_table();
@@ -478,6 +539,7 @@ int main(void)
     case_owner_exit();
     case_registered_ptr();
     case_ime_render();
+    case_register_gate();
     if (failures) {
         report("ring3_guard_host: FAIL\n");
         die(1);

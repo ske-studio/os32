@@ -828,6 +828,7 @@ KAPI ではない**カーネルの大域変数** (カウンタ・印)。番地�
 | `gui_ime_render_rejected` | `kernel/gui.c` | アプリ (CPL=3 由来) の `ime_set_render` を断った数 (常駐側だけが差し替えられる、2026-09-26) |
 | `ring3_wm_depth` | `exec/exec.c` | いまカーネルが WM (gshell) のコードへ入っている深さ。ふだん 0、アプリの syscall の中で WM を呼んでいる間だけ 1 以上 |
 | `ring3_wm_depth_underflow` | `exec/exec.c` | WM の出入りの対が崩れて深さを 0 未満へ下げかけた数 (0 でなければ対の崩れ) |
+| `ring3_wm_fault_count` | `exec/exec.c` | WM (gshell) のコードへ入っている間 (`ring3_wm_depth` 1 以上) にアプリをフォールトで畳んだ数。WM の中の #PF/#GP も KAPI の門の拒否もアプリの kill として畳まれ、`fault_kill_count` しか増えない (§4-61) — これが一緒に増えたら落ちた場所は WM の文脈。ISR の kill の行にも ` (in WM)` が付く |
 | `kselftest_pass` / `kselftest_fail` | `kernel/kselftest.c` | 起動時の自己試験 (§2) |
 
 ### 有用なゲスト側コマンド
@@ -1414,6 +1415,17 @@ read-modify-write で保つ。
   (戻りは void のまま、`gui_ime_render_rejected` が数える。NULL も同じ規則)。gshell が抜けたときの NULL 戻しは従来どおり
   `gui_owner_exit(1)`。試験は `ring3_guard_host.c` §5 (変異 11/11 RED) + kselftest `test_ime_render_gate`。
   **関数ポインタを受け取って後で呼ぶ KAPI は、ポインタの帯ではなく呼び手 (常駐側か) で断る** — 帯検査は「呼べるか」を保証しない。
+- **追記 3 (同日、代行レビュー P3) — 「WM は信頼境界の内側」と「WM の中で落ちるとアプリの kill」の関係**: 深さ 1 以上で門を
+  素通しにするのは **WM (gshell) を信頼境界の内側 = カーネルと同じ側に置く**ということで、WM のポインタは検査しない。ところが
+  **フォールトの帰属は `ring3_in_syscall` のまま** (#PF/#GP も KAPI の門の拒否も) なので、WM のコードが落ちると「そのとき syscall を
+  出していたアプリ」の kill として畳まれ、赤画面は出ず `fault_kill_count` だけが増える。これは意図した非対称で、
+  WM のバグでカーネルごと止めずにアプリ 1 本の犠牲で済ませる代わりに、**落ちた場所が見えなくなる** — 今回の障害
+  (例外 0 件・窓だけ出ない) がまさにそれだった。そこで挙動は変えずに観測点を足した: `exec/exec.c` の `ring3_kill_kind` が
+  深さを 0 に戻す前に `ring3_wm_fault_count` を +1 (FAULT のみ)、ISR の kill の行 (`[ring3] exception` / `[ring3] #PF`) に
+  ` (in WM)`。**`fault_kill_count` と一緒に `ring3_wm_fault_count` が増えたら WM の文脈で落ちている** (アプリではなく gshell か、
+  gshell が渡したポインタを疑う)。登録の門 (`gui_register` / `gui_ime_set_render`) は同じ「owner 1 かつ `ring3_call_from_user()`
+  が偽」に揃えた — 信頼境界の内側に入れるのは gshell の top-level が登録したコードだけ。試験は `ring3_guard_host.c` §6 と
+  `test_ring3_guard.py` の静的検査 (変異 17/17 RED)。
 
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 

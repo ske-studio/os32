@@ -1293,28 +1293,58 @@ checks:
     - sdk/include/os32/os32_kapi_generated.h
     - sdk/include/os32/os32_kapi_shared.h
   check-ring3-guard-host:
+  - drivers/kbd.h
+  - drivers/kbd_status.h
+  - exec/appslot.h
+  - exec/exec.c
+  - exec/exec.h
+  - exec/exec_heap.h
+  - exec/exec_kapi_init.inc
+  - exec/os32x_hdr.h
   - exec/ring3_str.c
   - exec/ring3_str.h
   - fs/fd_redirect.c
   - fs/fd_redirect.h
+  - fs/pipe_buffer.h
   - fs/vfs.h
+  - include/con_sink.h
+  - include/console.h
+  - include/cpu.h
+  - include/gfx_hal.h
+  - include/io.h
+  - include/kbd.h
+  - include/kbd_inject.h
+  - include/kprintf.h
+  - include/ksetjmp.h
+  - include/launch.h
+  - include/memmap.h
+  - include/sys.h
+  - include/tvram.h
+  - include/types.h
+  - kernel/gdt.h
   - kernel/gui.c
   - kernel/gui.h
+  - kernel/idt.h
   - kernel/ime.h
   - kernel/ime_render.h
-  - sdk/kapi.json
-  - tools/tests/ring3_guard_host.c
-  - tools/tests/test_ring3_guard.py
-  - drivers/kbd.h
-  - drivers/kbd_status.h
-  - include/kbd.h
-  - include/memmap.h
-  - include/types.h
+  - kernel/isr_handlers.c
+  - kernel/kmalloc.h
   - kernel/paging.h
+  - kernel/pgalloc.h
+  - kernel/physmem.h
+  - kernel/pit_math.h
+  - kernel/shlib.h
+  - kernel/shm.h
+  - kernel/snd_engine.h
+  - kernel/tss.h
   - lib/kstring.h
+  - lib/path.h
   - sdk/include/os32/os32_gui_shared.h
   - sdk/include/os32/os32_kapi_generated.h
   - sdk/include/os32/os32_kapi_shared.h
+  - sdk/kapi.json
+  - tools/tests/ring3_guard_host.c
+  - tools/tests/test_ring3_guard.py
   check-ring3-str-host:
     - exec/ring3_str.c
     - exec/ring3_str.h
