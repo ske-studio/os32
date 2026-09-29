@@ -13,7 +13,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 | 情報単位 | 正典 (ここだけ更新) | 参照側 (要約 + リンクのみ) |
 |---|---|---|
-| 制約規則 [C/HW/ABI/V/D] | [CONSTRAINTS.md](CONSTRAINTS.md) | CLAUDE.md (ID 参照、`make check` が照合)。Hermes 用の SOUL.md は 2026-09-29 に [archive/agents/SOUL.md](archive/agents/SOUL.md) へ (効力なし) |
+| 制約規則 [C/HW/ABI/V/D] | [CONSTRAINTS.md](CONSTRAINTS.md) | CLAUDE.md (ID 参照、`make check` が照合)。Hermes 用の SOUL.md は 2026-09-29 に `SOUL.md` (非公開・リポジトリ外、`.gitignore`) へ (効力なし) |
 | 引き継ぎ (次の PM への申し送り)・v2.1 時点の現在地と残件 | [tasks/agents/HANDOVER_2026-09-29.md](tasks/agents/HANDOVER_2026-09-29.md) (最新、表だけ) | 前回は [archive/agents/HANDOVER_2026-09-22.md](archive/agents/HANDOVER_2026-09-22.md) (09-22〜25 の日ごとの追記) |
 | エージェント運用体制 (役割・起動・規約) | [tasks/agents/ROLES.md](tasks/agents/ROLES.md) (§0「現行の体制」が 1 節で現行、下は経緯) | CLAUDE.md (体制 1 段落 + リンク)。過去の快照は [archive/agents/RETROSPECTIVE_2026-09-09.md](archive/agents/RETROSPECTIVE_2026-09-09.md) |
 | 番地・帯域 | `include/memmap.h` (定義) → [02_memory.md §2-1](02_memory.md) の**生成ブロック** (`tools/gen_memmap.py --write`、地図はここ 1 か所だけ) | CLAUDE.md は帯の粒度のみ。`memmap.h` の先頭は生成先への案内。重なり・逆転・写しのずれは `make check` の `gen_memmap.py --check` が見る |
@@ -128,7 +128,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [archive/gui_v14/](archive/gui_v14/TASK_EDIT_GUI.md) | GUI 1.4 のエディタ GUI 版 | 2026-09-18 |
 | [archive/realhw_v21/](archive/realhw_v21/CHECKLIST_2026-09-26.md) | v2.1 で実機 Ra266 に届いた票 5 本、実機の回の手順 3 本 (09-26 が v2.1 の判定)、PEGC_RA266_TIMING (完了記録) | 2026-09-22〜29 |
 | [archive/portability/](archive/portability/TASK_KSTRING_BENCH.md) | kstring の速度実測 | 2026-09-17 |
-| [archive/agents/](archive/agents/RETROSPECTIVE_2026-09-09.md) | 過去の引き継ぎ・体制の快照・[SOUL.md](archive/agents/SOUL.md) (Hermes の最上位プロンプト、撤収済み・効力なし) | 〜2026-09-29 |
+| [archive/agents/](archive/agents/RETROSPECTIVE_2026-09-09.md) | 過去の引き継ぎ・体制の快照・`SOUL.md` (非公開・リポジトリ外) (Hermes の最上位プロンプト、撤収済み・効力なし) | 〜2026-09-29 |
 | [archive/debug_kcg_load_font.md](archive/debug_kcg_load_font.md) | `kcg_load_font` クラッシュの仮説計画 (単発の障害記録) | — |
 
 ## タスク
@@ -146,7 +146,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [archive/agents/HANDOVER_2026-09-22.md](archive/agents/HANDOVER_2026-09-22.md) | 引き継ぎ 2026-09-22〜25 (完了記録) — 実機初日 (FD 起動・シリアル 115200・PCI 列挙・LAN の橋) から HDD 起動まで、日ごとの追記 |
 | [archive/agents/HANDOVER_2026-09-18.md](archive/agents/HANDOVER_2026-09-18.md) / [HANDOVER_2026-09-16.md](archive/agents/HANDOVER_2026-09-16.md) | それ以前の引き継ぎ (完了記録) — 09-16 は残件 (H2 / H4 / arch 移設 / kstring 判断 / ゲスト試験ランナー / ARM / LAN 実機 / 小物) の推奨順・決裁点 |
 | [archive/agents/HANDOVER_v14.md](archive/agents/HANDOVER_v14.md) | v1.4 の引き継ぎ — **撤回 (2026-09-14)**。アプリ層を別エージェントへ渡す案は取りやめ |
-| [archive/agents/RETROSPECTIVE_2026-09-09.md](archive/agents/RETROSPECTIVE_2026-09-09.md) / [SOUL.md](archive/agents/SOUL.md) | 体制の快照 (2026-09-09) / Hermes の最上位プロンプト (撤収済み・効力なし) |
+| [archive/agents/RETROSPECTIVE_2026-09-09.md](archive/agents/RETROSPECTIVE_2026-09-09.md) / `SOUL.md` (非公開・リポジトリ外) | 体制の快照 (2026-09-09) / Hermes の最上位プロンプト (撤収済み・効力なし) |
 
 ### 実機 PC-9821Ra266 (v2.1 で FD 起動・HDD インストール・HDD 起動まで到達)
 

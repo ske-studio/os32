@@ -243,7 +243,7 @@ VFSの仕様に基づき、固定のバッファサイズ(0x4000など)を利用
 - **その構成のエージェント** は Git の変更操作を自分で実行せず、
   `git add` / `git commit` を `bash` コードブロックで提示してユーザーに実行してもらう
   (読み取りの `git status` / `git diff` は対象外)。以前この構成で動いていた Hermes は撤収済み
-  (最上位プロンプトは [archive/agents/SOUL.md](archive/agents/SOUL.md) §3.2、効力なし)。
+  (最上位プロンプトは `SOUL.md` (非公開・リポジトリ外、`.gitignore`) §3.2、効力なし)。
 - **Linux ファイルシステム側 (`/home/...`) で動くエージェント**には当てはまらない。
   そちらは通常どおり実行してよく、許可の範囲は各エージェントの設定
   (Claude Code なら `.claude/settings.json` / `settings.local.json`) が決める。
