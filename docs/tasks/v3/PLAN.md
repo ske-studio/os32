@@ -1,6 +1,6 @@
 # OS32 v3 開発計画書
 
-> 作成・更新: 2026-09-19 / 状態: **計画・追記中（第10版、設計未凍結）**
+> 作成・更新: 2026-09-19 / 状態: **計画・追記中（第11版、設計未凍結）**
 > 現行リポジトリで準備する計画書。v3 の開発開始・フォーク作成・仕様変更の実施を意味しない。
 
 調査基点: `ske-studio/os32` の `main` = `76c69ddc7601b36e5fae4897ce8a9274e89ed33a`。
@@ -62,11 +62,43 @@ PC-98/x86版v3 は DX4・16MB を最低構成の目標とし、現行系との�
 | V3-21 | PE32/i386ローダをv3必須機能として実装 | 採用方針。将来のWin98互換層を待たず、OS32の正式な実行形式ローダの1つとしてPE32/i386を扱う。P4でABI/C11/旧互換を固定し、P5前半でVM・VFS・資源回収・配置契約を整えた後、P5後半で実装してP6 GUI発展前のゲートとする |
 | V3-22 | VDM/V86互換試験は後段でアリスソフトDOSタイトル群を基準にする | 採用方針。PE32/Win95-98互換の初期ゲートとは分離し、後段のDOS互換評価として扱う。単なる起動確認ではなく、DOSメモリ、ファイルI/O、キーボード、日本語表示、FM/PCM、マウス、タイマ、必要に応じたプロテクトモード移行等をタイトルごとに検証する |
 | V3-23 | CD-DAデジタル再生と軽量ソフトウェアミキサーをOS32ネイティブ機能として早期実装 | 採用方針。ATAPIのデジタル音声抽出を既定、従来のアナログCD-DA再生を設定fallbackとして残す。ミキサーは外部OSSを持ち込まず、16bit PCM入力・32bit整数accumulator・Q1.15 gain・hard saturationを基本とする小規模スクラッチ実装にする |
+| V3-24 | FM/PCM音源デバイス層を整理し、MUCOM88を演奏バックエンドとして接続 | 採用方針。MUCOM88をOS32のFMデバイスドライバそのものにはせず、OS32側でFM register／PCM出力／capability／time sourceの境界を先に整理する。その上でMUCOM互換の演奏エンジンをbackendとして接続し、YM2203/26K、YM2608/86、software FM等の実装差を下位backendへ閉じ込める。MUCOM側からPC-98固有I/O portを直接操作させず、時間基準event／register write要求としてOS32抽象APIへ渡す。MUCOM88本体のCC BY-NC-SA 4.0およびfmgenの個別条件をMIT本体へ混在させないため、直接組込み・別配布component・仕様参照による独自実装の境界をQ25で固定する |
 
 V3-09〜V3-13の根拠・実現方法・受入案は [詳細方針](DEBUG_AND_MODULES.md) を参照。
 固定仮想アドレスや署名付き承認レコードは実現案で、具体的な番地・形式・方式は未凍結。
 V3-14〜V3-16の目的・境界・受入案は [根本方針](PORTABILITY_PRINCIPLES.md) を参照。
 V3-17はRTOS化やOSスケジューラへのdeadline保証を意味しない。まずアプリケーション内の軽量タスク管理を基本とし、OS側は必要に応じて monotonic clock、`sleep_until`、`yield`、優先度指定等の最小限の時間・実行支援を検討する。ゲーム内部の細粒度処理を一律にOSプロセスへ分離せず、コンテキスト切替・IPC・キャッシュ/TLB汚染の増加を避ける。最低性能で必須処理のdeadlineを満たせない場合は、描画だけでなく物理・ロジック周期を含む明示的な低負荷プロファイルを選択し、暗黙にゲーム時間をCPU速度へ従属させない。
+
+
+V3-24では、現行 `drivers/fm.c` のYM2203低レベルI/O、音符API、簡易MML再生を同一層として扱わず、責務を分離する。概念上の層は次の通り。
+
+```text
+application / MML player
+        |
+        v
+music / sequencer backend
+        |
+        +-- MUCOM-compatible backend
+        +-- future MIDI/native sequencer
+        |
+        v
+OS32 sound device abstraction
+        |
+        +-- FM register interface
+        |     +-- YM2203 / PC-9801-26K
+        |     +-- YM2608 / PC-9801-86
+        |     +-- software FM
+        |
+        +-- PCM interface
+              +-- hardware PCM
+              +-- software mixer
+```
+
+MUCOM backendが依存するのは、原則として「音源capability」「FM register write」「必要なPCM/ADPCM出力」「単調増加時間またはevent callback」とし、PC-98固有のI/O port番地、IRQ番号、BUSY待ち、実チップ固有の初期化はdevice backend側へ閉じ込める。これにより、同じ上位演奏エンジンを実YM2203／YM2608／software FMへ接続できるようにする。
+
+時間管理もdevice backendへ埋め込まず、V3-17の時間基準タスク管理と接続する。演奏backendはCPU速度依存のbusy waitで音符長を作らず、monotonic timeまたはevent queueを基準にレジスタ更新を発行する。必要なら将来はtimestamp付きregister queueを追加し、演奏解釈と実デバイス書込みのjitterを分離できる余地を残す。
+
+初期の実装順は、(1) FM/PCM device API整理、(2) YM2203 backend、(3) YM2608 backend、(4) software FM backend、(5) monotonic timer/event queue、(6) MUCOM-compatible backend、(7) MML/MUB playerを候補とする。順序はQ25で依存関係と受入条件を固定する。
 
 V3-18の互換性目標は **PC-98 上の Windows 98 までで実際に動作していたユーザーアプリケーション** を将来再実行できる余地を残すことであり、Windows 2000／NT カーネル互換、VxD／Windows ドライバ互換、NT Object Manager、SMP、プリエンプティブ・マルチタスクをv3へ導入する要求ではない。ReactOS／WineはAPI挙動や互換性調査の参考資料として利用できるが、MITのOS32本体へGPLコードを混入させない。将来の互換実装は別層のラッパーとして構成し、個々の再利用候補はライセンスを個別確認する。
 
@@ -473,10 +505,11 @@ USB着脱は機器とQ14の決定後に段階追加する。動的ロードを�
 | Q22 | PE32ローダのv3凍結範囲とOS32Xとの共通実行基盤 | PE32/i386、section、relocation、import/export、module、entry、zero-fill、protectionを必須範囲とする。TLS callback／SEH／delay import／SxS等をどこまで後段へ送るか、loader frontendと共通exec責務の境界を決める |
 | Q23 | VDM/V86のタイトル別受入範囲 | アリスソフトDOSタイトル群を基準に、メモリ、I/O、音源、入力、タイマ、DOS extender等のどこまでを各段階で保証するかを決める。PE32/Win95互換の初期必須ゲートには含めない |
 | Q24 | CD-DAデジタル再生とmixerの凍結仕様 | 44.1kHz/16bit/stereo基準、32bit accumulator、Q1.15 gain/pan、channel上限、buffer量、underrun処理、resample責務、PCM backend能力照会を実測して決める。CD_AUDIO=digitalを既定、analogをfallbackとする |
+| Q25 | MUCOM backendとOS32音源抽象の凍結範囲 | FM register API、PCM/ADPCM境界、capability、time source/event queue、YM2203/YM2608/software FM backendの責務を決める。MUCOM88本体コードを直接取り込むか、別componentとして配布するか、挙動・形式を参照して独自実装するかをライセンス条件とともに固定する。現行`fm_play_mml()`のbusy-wait型簡易再生は受入対象にせず、CPU速度非依存の時間基準演奏、実機backend切替、jitter/underrun観測を受入条件にする |
 
 ## 9. 更新方法と追加候補
 
-新しい要望は V3-24 以降、未決事項は Q25 以降を追記する。ID は再利用しない。
+新しい要望は V3-25 以降、未決事項は Q26 以降を追記する。ID は再利用しない。
 決定した項目には日付・判断主体・理由・影響する試験を書く。
 未決を決定に変える際は、検討経緯を消さず「置換された案」として残す。
 実装課題の進捗は [移行課題台帳](MIGRATION_AUDIT.md) の M 番号で更新する。
@@ -485,7 +518,7 @@ USB着脱は機器とQ14の決定後に段階追加する。動的ロードを�
 
 | ID | 追加日 | 要望／目的 | 状態 | 依存する課題 | 受入条件 |
 |---|---|---|---|---|---|
-| （次: V3-24） | — | — | 未決 | — | — |
+| （次: V3-25） | — | — | 未決 | — | — |
 
 ## 10. 変更履歴
 
