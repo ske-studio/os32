@@ -541,6 +541,14 @@ check-serialfs-host:
 check-kprintf-attr-host:
 	python3 -B tools/tests/test_kprintf_attr.py --target $(MUT)
 
+# gfx/backend_cirrus.c の窓の可否 (cirrus_win_usable)。RAM の上端ではなく
+# 物理地図 (pgalloc_range_has_ram) で決める — 15MB + 高位 RAM の構成で穴の中の
+# バンク窓まで拒んで probe が落ちていた (POLICY_DEBUG §4-34 と同じ形)。
+# 実物のソースをホスト ILP32 で回し、i386-elf -Werror でも通す。
+# 記録は tools/tests/cirrus_win_tdd.md。
+check-cirrus-win-host:
+	python3 -B tools/tests/test_cirrus_win.py $(MUT)
+
 # fs/vfs.c + fs/ext2_vfs.c の mount 経路。fd0 が hd0 に化けて同じ
 # パーティションを二重マウントする回帰 (2026-09-10) を止める。
 check-vfs-mount-dev-host:
@@ -1066,7 +1074,8 @@ CHECK_PAR_TARGETS := check-bootinfo-host check-hdd-stage1-host \
     check-fstat-redir-host check-kstring-c-host check-kstr-bench-host \
     check-sh-status-host check-hsync-h3-host check-hsync-h2-host \
     check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host \
-    check-cat-linenum-host check-result-conv-host check-guest-host
+    check-cat-linenum-host check-result-conv-host check-guest-host \
+    check-cirrus-win-host
 check-par: $(CHECK_PAR_TARGETS)
 
 # エディタ GUI 版の本文と libos32gui の桁・折り返し (票 TASK_EDIT_GUI 受入 E8 / E10)。

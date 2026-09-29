@@ -36,7 +36,7 @@
 #include "gfx_internal.h"   /* gfx.h, pc98.h, memmap.h */
 #include "gfx_hal.h"
 #include "paging.h"
-#include "sys.h"
+#include "pgalloc.h"
 #include "kstring.h"
 #include "kprintf.h"
 #include "palette.h"
@@ -168,12 +168,12 @@ static void cirrus_linear_unmap(void)
 /*  probe — Xe10 内蔵 (ID 5Bh) + Cirrus チップが居るか                       */
 /*                                                                          */
 /*  段取り:                                                                 */
-/*    1. 窓を張れるか。OS32 の RAM が窓まで届いていたら (実装メモリが多い    */
-/*       機種) 張ってはいけないし、ページングの守備範囲 (PAGING_MAP_SIZE)    */
-/*       にも収まっていること。PEGC の probe と同じ理屈                     */
-/*       (backend_pegc.c 段 2)。バンク窓 (F60000h、グルーが reg 01h で        */
-/*       既定に固定する) と、H3b で採用したリニア窓 (01000000h、CPU 描画の   */
-/*       本命) の両方を見る。                                                */
+/*    1. 窓を張れるか。窓に RAM が登録されていたら (物理地図で見る。RAM の   */
+/*       上端では決めない — POLICY_DEBUG §4-34) 張ってはいけないし、ページ  */
+/*       ングの守備範囲 (PAGING_MAP_SIZE) にも収まっていること。PEGC の     */
+/*       probe と同じ理屈 (backend_pegc.c 段 2)。バンク窓 (F60000h、グルーが */
+/*       reg 01h で既定に固定する) と、H3b で採用したリニア窓 (01000000h、   */
+/*       CPU 描画の本命) の両方を見る。                                      */
 /*    2. ボードグルーの ID 判定。9801 や WAB 非搭載機はここで確実に落ちる    */
 /*       ので、以降の VGA ポート叩きは走らない = 回帰ゼロ。                  */
 /*    3. チップの解錠キー往復 (SR6)。                                        */
@@ -182,14 +182,21 @@ static void cirrus_linear_unmap(void)
 static int cirrus_win_usable(u32 base, u32 size)
 {
     if (size == 0) return 0;
-    /* 実 RAM がそこまで届いているなら窓を開いてはいけない (自分の RAM を
-     * 隠してしまう)。sys_get_mem_kb() は頭打ちされていない生の申告値で、
-     * K6-RAM 以後は 16MB 超も入るので **KB のまま**比べる
-     * (* 1024 は 4GB 構成で桁あふれして判定が裏返る)。 */
-    if (sys_get_mem_kb() > base / 1024UL) return 0;
-    /* ページテーブルの守備範囲に末尾まで収まること。 */
+    /* ページテーブルの守備範囲に末尾まで収まること。先に見るので、下の
+     * base + size は桁あふれしない (PAGING_MAP_SIZE は 32MB)。 */
     if (base > PAGING_MAP_SIZE) return 0;
-    return (size <= PAGING_MAP_SIZE - base);
+    if (size > PAGING_MAP_SIZE - base) return 0;
+    /* 窓に RAM が登録されていれば張ってはいけない (自分の RAM を隠す)。
+     * **RAM の上端 (sys_get_mem_kb) では決めない** — K6-RAM 以後、15MB 機
+     * + 高位 RAM (NP21/W ExMemory 16) の上端は 17,408KB で、15-16MB の穴の
+     * 中にあるバンク窓 F60000h まで「RAM が届いている」と誤判定して probe が
+     * ID 判定の前に落ちていた (PEGC で直した §4-34 と同じ形)。見るのはブート
+     * 時に凍結した物理地図で、窓 [base, base + size) にかかるページを 1 枚も
+     * 落とさずに問い合わせる (末尾は切り上げ)。pgalloc 未初期化は RAM あり
+     * 扱い (張らない)。リニア窓 01000000h は高位 RAM のある構成では本当に
+     * RAM と重なるので、ここで拒まれるのが正しい答え。 */
+    return !pgalloc_range_has_ram(base / PAGE_SIZE,
+                                  (base + size + PAGE_SIZE - 1) / PAGE_SIZE);
 }
 
 static int cirrus_probe(void)
