@@ -1,6 +1,8 @@
 # TASK_SERIAL_VFAST — 実機のシリアルを 115200bps まで上げる (V･FAST + FIFO)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実機で 115200 が通った** (2026-09-22、3.2 KB/s)。番犬は往復 6 で明示の `serial ack` に置換 (9625500、NP21/W で往復と戻りを確認)。**実機で `--fast 115200` も通った (2026-09-23、Ubuntu ノート)**: `hexdump /bin/cfg.bin` 189,034 バイトを 48.7 秒 = **3.9 KB/s**。ホスト側の戻し忘れを直した (`restore_speed`)。残件は出力側の固定費
+> 状態: **受入完了 (2026-09-23)** — 実機で 115200 (09-22) と `--fast 115200` (09-23) が通った。(2026-09-29 の棚卸しで更新)
+>
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / それまでの状態: **実機で 115200 が通った** (2026-09-22、3.2 KB/s)。番犬は往復 6 で明示の `serial ack` に置換 (9625500、NP21/W で往復と戻りを確認)。**実機で `--fast 115200` も通った (2026-09-23、Ubuntu ノート)**: `hexdump /bin/cfg.bin` 189,034 バイトを 48.7 秒 = **3.9 KB/s**。ホスト側の戻し忘れを直した (`restore_speed`)。残件は出力側の固定費
 
 正典: [`PLAN.md`](PLAN.md) §4 (ウェブ情報と資料の突き合わせ)、資料 `docs/hw/undocumented/io_rs.md`、
 実機の実測は [`TASK_FDC_REALHW.md`](TASK_FDC_REALHW.md) §9-1。

@@ -1,6 +1,8 @@
 # TASK_ATAPI_TIMEOUT — ATAPI の待ち上限を秒単位にする
 
-> 状態: **実装済み・レビュー待ち** (wt/atapi-timeout、コーダー `claude-opus-5-5`、2026-09-26。T1・T2 済、T3 は実機)。発行: PM (Claude Code `claude-opus-5-5`)、2026-09-26。
+> 状態: **受入完了 (2026-09-26)** — be184faa で合流、P3 の後始末 b8f76e04。T1・T2 合格。**T3 (CD を 5 分放置した後の `ls /cd0`) は個別の記録が無い** — 実機の v2.1 確認 (CHECKLIST_2026-09-26 手順 6・7) で CD の経路は合格。(2026-09-29 の棚卸しで更新)
+>
+> それまでの状態: **実装済み・レビュー待ち** (wt/atapi-timeout、コーダー `claude-opus-5-5`、2026-09-26。T1・T2 済、T3 は実機)。発行: PM (Claude Code `claude-opus-5-5`)、2026-09-26。
 > 関係: `drivers/atapi.c` / `drivers/ide.h` (`IDE_TIMEOUT_LOOP`)、[`../../05_drivers.md`](../../05_drivers.md) §5-6、
 > ATAPI 装置選びの修正 (wt/cd-fix、2026-09-26 着地) の代行レビュー (Fable 5.1) の P3。
 

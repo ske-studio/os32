@@ -1,5 +1,7 @@
 # 実機 (PC-9821Ra266) の回 — 2026-09-25 の手順: HDD インストール
 
+> 状態: **完了記録 (2026-09-25)** — 実施済み (HDD インストール、合格)。
+
 > 発行: PM (Claude Code `claude-opus-5-5`)。使う成果物: **CI の artifact `os32-feat-gui-e146022`** (KAPI **v65**、HDD インストール段 1+2、VK32 CRC、FD 高速化、ビープ修正)。
 > ノートの取り方: `cd ~/os32 && git pull && tools/ci_fetch.sh --sha e146022` → `./os32-ci/os32-feat-gui-e146022/`。
 > 前回の手順: [CHECKLIST_2026-09-24.md](CHECKLIST_2026-09-24.md)。票: [TASK_HDD_INSTALL.md](TASK_HDD_INSTALL.md)、[TASK_SERIAL_HOSTFS.md](TASK_SERIAL_HOSTFS.md) (部品 A)。

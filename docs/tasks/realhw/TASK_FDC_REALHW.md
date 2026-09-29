@@ -1,6 +1,8 @@
 # TASK_FDC_REALHW — 実機で FD から起動できない (root panic) を直す
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実機で合格 (R6、2026-09-22、bee42cc)** — FD 起動 → シェル、シリアル経由で `ver` / `ls` が返る
+> 状態: **受入完了 (2026-09-22)** — 実機 Ra266 で R6 合格 (bee42cc)。(2026-09-29 の棚卸しで更新)
+>
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / それまでの状態: **実機で合格 (R6、2026-09-22、bee42cc)** — FD 起動 → シェル、シリアル経由で `ver` / `ls` が返る
 
 基点: `feat/gui` `ec48c6b`。実機計画は [`PLAN.md`](PLAN.md)、1.44MB の経緯は [`TASK_FD144.md`](TASK_FD144.md)、
 FDC ドライバの仕様表は [`../../05_drivers.md`](../../05_drivers.md) §5-2。

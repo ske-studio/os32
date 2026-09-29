@@ -1,6 +1,8 @@
 # TASK_KAPI_DATA_FIELDS — KAPI のデータ欄 (sbrk_heap_limit / shm_base) が関数追加のたびにずれ、旧バイナリが黙って壊れる
 
-> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-23) / 状態: **実装済み・実装レビュー Approve (2026-09-24、Codex / Opus のラリー 2 で両者 Approve)** — NP21/W / 実機の受入は v63 への移行 (CD インストール) で — ユーザー指示「別票を着手」(2026-09-24)。カーネル層 (KAPI / exec) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
+> 状態: **受入完了 (2026-09-24)** — NP21/W で v63 へ移行 (CD 新規インストール、kselftest 210/210、05388d1f)。v2.1 に同梱。(2026-09-29 の棚卸しで更新)
+>
+> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-23) / それまでの状態: **実装済み・実装レビュー Approve (2026-09-24、Codex / Opus のラリー 2 で両者 Approve)** — NP21/W / 実機の受入は v63 への移行 (CD インストール) で — ユーザー指示「別票を着手」(2026-09-24)。カーネル層 (KAPI / exec) の既知の欠陥なので POLICY_DEV §1 に沿って新機能より先に扱う。
 > 出所: キーボード修正 (bda95fa / f924275、KAPI v62) の実装レビュー。ラリー 1 で Codex が blocker、Opus が非 blocker と判定が分かれ、ラリー 2 で**両者とも「この commit 固有ではない構造問題、別票 (b)」で一致**。
 
 ## 事実

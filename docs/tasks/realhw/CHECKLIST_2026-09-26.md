@@ -1,5 +1,7 @@
 # 実機 (PC-9821Ra266) の回 — 2026-09-26 発行の手順: 入れ直しと v2.1 の確認
 
+> 状態: **完了記録 (2026-09-29)** — 実施済み。末尾が v2.1 の判定の記録。
+
 > 発行: PM (Claude Code `claude-opus-5-5`)。使う成果物: **CI の artifact `os32-feat-gui-b8f76e0`** (KAPI **v66**)。手順 10・11 は **カナ・CAPS を方式 B (make で ON・break で OFF) にした成果物 — e2ab7b1 を取り込んだ feat/gui 以降** が要る (古い成果物だと「外してもカナのまま」が方式の判定と混ざる) — その回の最新の CI 成果物を使い、ver の Commit を記録する。
 > ノートの取り方: `cd ~/os32 && git pull && tools/ci_fetch.sh --sha b8f76e0` → `./os32-ci/os32-feat-gui-b8f76e0/`。
 > 前回の手順: [CHECKLIST_2026-09-25.md](CHECKLIST_2026-09-25.md) (HDD インストール、合格)。v2.1 の条件は [ROADMAP](../../ROADMAP.md) §0。

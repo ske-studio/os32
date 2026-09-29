@@ -1,5 +1,7 @@
 # 実機 (PC-9821Ra266) の回 — 2026-09-24 の手順
 
+> 状態: **完了記録 (2026-09-24)** — 実施済みの実機の回の手順と結果。
+
 > 発行: PM (Claude Code `claude-opus-5-5`)。使う成果物: **CI の artifact `os32-feat-gui-c7f1ba2`** (KAPI **v63**、LZ4 高圧縮、キーボード修正、HDD 段 0、VFS / ext2 修正入り)。
 > ノートの取り方: `cd ~/os32 && git pull && tools/ci_fetch.sh --sha c7f1ba2` → `./os32-ci/os32-feat-gui-c7f1ba2/`。
 

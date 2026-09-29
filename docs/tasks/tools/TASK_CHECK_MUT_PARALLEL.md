@@ -1,6 +1,8 @@
 # TASK_CHECK_MUT_PARALLEL — `make check` の変異試験を並列にする
 
-> 状態: **実装済み**。check-par の重い 6 本 (案 4) は 2026-09-26 に実装した (コーダー
+> 状態: **受入完了 (2026-09-26)** — 変異試験を全部写しの木へ移し、`check-mut` の段と `-j1` を廃止。(2026-09-29 の棚卸しで更新)
+>
+> それまでの状態: **実装済み**。check-par の重い 6 本 (案 4) は 2026-09-26 に実装した (コーダー
 > Claude Code `claude-opus-5-5`、worktree `wt/mut-parallel`)。check-mut の 14 本 (§5) も同日に全部
 > 写しの木へ移し、`check-mut` の段と `-j1` を消した (コーダー `claude-opus-5-5`、worktree `wt/check-narrow`、§5-1)。
 > 発行: PM (Claude Code `claude-opus-5-5`)、2026-09-26。承認: ユーザー 2026-09-26 (案 4)。

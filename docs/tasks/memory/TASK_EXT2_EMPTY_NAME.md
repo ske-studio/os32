@@ -1,6 +1,8 @@
 # TASK_EXT2_EMPTY_NAME — NP21/W の NHD のルートに「名前の無いディレクトリ項目」があり、Linux の ext2 が読めない
 
-> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-23 夜) / 状態: **修正済み・レビュー待ち** (コーダー Opus 5.5、worktree `wt/ext2-empty`、ホスト試験のみ。エミュレータ・実機では未確認)。FS (カーネル層) の欠陥なので POLICY_DEV §1 に沿って優先。
+> 状態: **受入完了 (2026-09-24)** — 修正 fc5ce67 は実装レビュー両者 Approve で着地、NP21/W の CD 新規インストールで作った HDD をホストで e2fsck → clean (73fd0d03)。v2.1 に同梱。(2026-09-29 の棚卸しで更新)
+>
+> 発行: PM (Claude Code `claude-opus-5-5`、2026-09-23 夜) / それまでの状態: **修正済み・レビュー待ち** (コーダー Opus 5.5、worktree `wt/ext2-empty`、ホスト試験のみ。エミュレータ・実機では未確認)。FS (カーネル層) の欠陥なので POLICY_DEV §1 に沿って優先。
 > **明日の実機の CD インストール (TASK_HDD_INSTALL) と同じ経路 (`cdinst`) で作られた NHD で起きている**。
 
 ## 事実 (PM、読み取り専用で確認)
