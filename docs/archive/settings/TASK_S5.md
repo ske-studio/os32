@@ -66,3 +66,21 @@ Codex (枯渇時は Fable 5.1 サブエージェント、ROLES §5) に S5-C (`c
 - **R4**: gshell host 96 / 96 (S21 TAB を含む)、cfg host 45 / 45 (signed-overflow sanitizer 込み)。
 - **Codex**: S5-C 往復 1 = Request changes 4 件 (cfg_bench の signed overflow、status の採取位置、集計幅、GUI 端末で出力が消える) → `e1b4828` → 往復 2 = **Approve**。S5-W は指摘なし。
 - **R2 (PEGC / Cirrus)**: 未実施。現在の NP21/W は 9801 モデル (`hal_test` = `pc98 (planar 4bpp)`) で、9821 への ini 変更は [D2]。**ユーザー決裁 2026-09-13 (1.b): 未実施のまま S5 を閉じ、v1.4 の描画系の票でまとめて行う。**
+- **R2 の予備調査 (2026-09-29、Opus 5.5 コーダー、観測のみ)**: ユーザー報告「PEGC 構成 (`hal_test` = `backend pegc`、
+  `screen 640x480`) で `gui_gate.py v11` / `v12g1` / `v12g4` は RESULT: OK だが、スクリーンショットは 640x400 (`scrn_ymax` 400)、
+  リセット後も同じ」を NP21/W (ゲスト commit `371bd36`、KAPI v68、HDD 起動、`/etc/system.cfg` = `GUI=0` のみ) で調べた。
+  - **原因: GUI に入っていない。** `gui_gate.py` の台本は `enter_gshell()` の前に rshell を抜けない。rshell が有効なまま
+    (リセット直後・`leave_gshell()` の後・`/api/cmd` を使った後はいつもそう) だと、4 文字ずつ送る `os32gui` が
+    `os32` / `gui` の 2 コマンドになり (`command not found`)、以後の Run... のパスも `/usr` `/bin` … と CUI で実行される。
+    **再現した**: rshell 有効のまま `gui_gate.py v11` → `status` は台本の先頭から最後まで `scrn_ymax 400 grph_disp 0`、
+    7 枚とも 640x400 の CUI の文字画面、それでも **RESULT: OK**。POLICY_DEBUG §4-31 の既知の罠 (「台本は先頭で ESC を 2 回」) と同じ。
+  - **RESULT: OK は GUI に入った証拠にならない**: `v12g1` / `v12g4` の合否は `leave_gshell()` の「`ver` が返るか」だけ、`v11` は
+    それに `wab_relay == 0` を足すだけで、`scrn_ymax` / `grph_disp` を照合しない。CUI に居続けても合格になる。
+  - **PEGC 480 ラインそのものは正常**: 同じゲストで ESC → `os32gui` で入ると `/api/status` = `scrn_ymax 480 grph_disp 1`、
+    `/api/screenshot` = 640x480 (タスクバー・時計が下端 y≈456〜479 に出る)、`emu_gdc` = `m_sync 104e4b0c0306e095`
+    (NP21/W の 480 ラインの値)、`m_pitch 0x50`、`grphymax 480`。CUI では `scrn_ymax 400`・`m_sync 104e072507079065` で、どちらも期待どおり。
+  - `hal_test` の `screen 640x480` は `pegc_query()` の固定値 (`PEGC_HEIGHT_480`) で、今 480 ラインで表示しているかは表さない。
+  - **R2 そのものは未実施のまま** ([V4])。正しく回すには、各台本の前に `/api/key seq=ESC` で rshell を閉じる
+    (`[Remote shell closed]` を tvram で確かめる)。台本側で直すなら、先頭の ESC と `status()` の `scrn_ymax == --h` かつ
+    `grph_disp == 1` の照合を合否に入れる案 (道具の変更 = 別作業、未着手)。Cirrus 側は `[pci] 0 devices`・ini の
+    USEGD5430 の有無を未確認で、有効化が要るなら ini の変更 = [D2] の承認事項。
