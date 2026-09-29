@@ -1624,3 +1624,59 @@ fn commit_frame_redraw_under_the_cursor_saves_the_real_background() {
     assert!(ghost.is_empty(), "カーソルの画素が下地として退避されていた: {} 点 (先頭 {:?})", ghost.len(), ghost.first());
     crate::cursor::show(g);
 }
+
+/// 画面下端の FEP 候補窓がタスクバーに重なり、そこにドラッグ枠の縁が掛かる。
+/// 枠の周 (FEP を描かない) と候補の更新の周 (FEP だけを描く `post_cycle`) とで
+/// 重なりの画素が変わらない = 上下が入れ替わって点滅しない (Codex レビュー 4 回目 P2)。
+#[test]
+fn fep_over_taskbar_keeps_its_order_across_frame_and_fep_cycles() {
+    unsafe extern "C" fn on() -> i32 {
+        1
+    }
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(20, 20, 400, 420)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    park_pointer(&mut st, 600, 20);
+    /* テキストカーソルを画面の下端近くに置いて FEP を出す */
+    st.windows[0].tc_visible = true;
+    st.windows[0].tc_x = 60;
+    st.windows[0].tc_y = 410;
+    unsafe {
+        (*os32api::api_ptr()).ime_is_active = on;
+    }
+    fep::install();
+    fep::pre_cycle(&mut st);
+    wm::flush_screen_dirty(&mut st);
+    fep::post_cycle(&mut st);
+    let fr = fep::rect();
+    let tb = crate::taskbar::rect(&st);
+    assert!(!fr.is_empty() && fr.intersects(&tb), "前提: FEP がタスクバーに重なっていない ({},{},{},{})", fr.x, fr.y, fr.w, fr.h);
+    let r = fr.intersect(&tb);
+    /* ドラッグ中: 枠の左辺が FEP とタスクバーを縦に横切る */
+    st.drag_index = 0;
+    st.drag_frame = wm::Rect::new(fr.x + 5, 100, 100, fr.bottom() - 100);
+    let frame_cycle = |st: &mut GuiState| {
+        wm::flush_screen_dirty(st);
+        snapshot(r)
+    };
+    let fep_cycle = |st: &mut GuiState| {
+        fep::mark_redraw();
+        fep::pre_cycle(st);
+        wm::flush_screen_dirty(st);
+        fep::post_cycle(st);
+        snapshot(r)
+    };
+    let a = frame_cycle(&mut st);
+    let b = fep_cycle(&mut st);
+    let c = frame_cycle(&mut st);
+    assert!(a == b, "枠の周と FEP の周とで FEP / タスクバーの重なりの画素が違う (上下が入れ替わる)");
+    assert!(b == c, "FEP の周の次の枠の周で重なりの画素が戻る (点滅)");
+    st.drag_index = -1;
+    fep_off();
+}

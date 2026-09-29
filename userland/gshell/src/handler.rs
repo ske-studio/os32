@@ -490,7 +490,8 @@ fn op_commit(st: &mut GuiState, owner: i32, _slot_no: usize, arg: u32) -> i32 {
         return 0;
     }
     /* アプリの描画の上に WM が描き直す物: ドラッグ枠 → 最前面物 (モーダル /
-     * FEP の候補窓 / タスクバー / メニュー) → カーソル の順 (X3 と同じ重なり順)。
+     * タスクバー / メニュー / FEP の候補窓) → カーソル の順 (X3 と同じ重なり順。
+     * `wm::overlays_to_refresh` の注記)。
      *
      * 判定範囲は touched ∪ 実際に描き直す枠の縁 ∪ 描き直す最前面物。枠は全周を
      * 描くので、touched に掛からない縁が最前面物を上書きすることがある (Codex

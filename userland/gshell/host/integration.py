@@ -197,6 +197,11 @@ MUTATIONS = [
      '    wm::refresh_overlays(st, &overlays);\n    if cursor_hit {\n        cursor::show(st);\n        let cr = cursor::rect(st);\n        wm::queue_present(st, cr);\n    }\n',
      '    if cursor_hit {\n        cursor::show(st);\n        let cr = cursor::rect(st);\n        wm::queue_present(st, cr);\n    }\n    wm::refresh_overlays(st, &overlays);\n',
      'commit_overlay_redraw_keeps_the_cursor'),
+    # Codex レビュー 4 回目 (2026-09-29) P2: FEP は X3 と同じく最上位。
+    ('FEP is refreshed below the taskbar', 'src/wm.rs',
+     '    if !list[1].is_empty() && taskbar::refresh_if_hit(st, list[1]) {\n        queue_present(st, list[1]);\n    }\n    if !list[2].is_empty() && startmenu::refresh_if_hit(st, list[2]) {\n        queue_present(st, list[2]);\n    }\n    if !list[3].is_empty() && fep::refresh_if_hit(st, list[3]) {\n        queue_present(st, list[3]);\n    }\n',
+     '    if !list[3].is_empty() && fep::refresh_if_hit(st, list[3]) {\n        queue_present(st, list[3]);\n    }\n    if !list[1].is_empty() && taskbar::refresh_if_hit(st, list[1]) {\n        queue_present(st, list[1]);\n    }\n    if !list[2].is_empty() && startmenu::refresh_if_hit(st, list[2]) {\n        queue_present(st, list[2]);\n    }\n',
+     'fep_over_taskbar_keeps_its_order'),
 ]
 
 

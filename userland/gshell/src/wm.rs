@@ -998,12 +998,19 @@ pub fn composite_full(st: &mut GuiState) {
 }
 
 /// WM の最前面物 (モーダル / FEP の候補窓 / タスクバー / Start メニュー) のうち、
-/// `regions` のどれかに掛かって**描き直しが要るもの**の矩形 (順に modal, fep,
-/// taskbar, startmenu。要らないものは空)。描き直した物が後の物を上書きし得るので、
+/// `regions` のどれかに掛かって**描き直しが要るもの**の矩形 (下から順に modal,
+/// taskbar, startmenu, fep。要らないものは空)。描き直した物が後の物を上書きし得るので、
 /// 描き直す物の矩形も判定範囲に足していく。描かずに決めるので、呼ぶ側はこれを見て
 /// カーソルの退避を先に決められる (Codex レビュー 3 回目: カーソルは最後に 1 回)。
+///
+/// **重なり順は X3 の合成と同じ**: `composite_rect` がモーダル → タスクバー →
+/// メニューを描き、FEP (未確定行 / 候補窓) はその後に `redraw_now` / `post_cycle` が
+/// 単独で描く = FEP が最上位。ここで FEP をタスクバーより下にすると、画面下端で
+/// タスクバーに重なる候補窓が、FEP だけを描く周 (候補の更新) と枠の周 (ここ) とで
+/// 上下が入れ替わって点滅した (Codex レビュー 4 回目 P2)。FEP を最上位に置けば、
+/// FEP だけを描き直す経路は順序を崩さない。
 pub fn overlays_to_refresh(st: &GuiState, regions: &[Rect]) -> [Rect; 4] {
-    let cands = [modal::rect(), fep::rect(), taskbar::rect(st), startmenu::rect()];
+    let cands = [modal::rect(), taskbar::rect(st), startmenu::rect(), fep::rect()];
     let mut out = [Rect::EMPTY; 4];
     let mut i = 0;
     while i < 4 {
@@ -1031,13 +1038,13 @@ pub fn refresh_overlays(st: &mut GuiState, list: &[Rect; 4]) {
     if !list[0].is_empty() && modal::refresh_if_hit(st, list[0]) {
         queue_present(st, list[0]);
     }
-    if !list[1].is_empty() && fep::refresh_if_hit(st, list[1]) {
+    if !list[1].is_empty() && taskbar::refresh_if_hit(st, list[1]) {
         queue_present(st, list[1]);
     }
-    if !list[2].is_empty() && taskbar::refresh_if_hit(st, list[2]) {
+    if !list[2].is_empty() && startmenu::refresh_if_hit(st, list[2]) {
         queue_present(st, list[2]);
     }
-    if !list[3].is_empty() && startmenu::refresh_if_hit(st, list[3]) {
+    if !list[3].is_empty() && fep::refresh_if_hit(st, list[3]) {
         queue_present(st, list[3]);
     }
 }
