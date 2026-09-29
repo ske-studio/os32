@@ -1,8 +1,8 @@
 # OS32 v2.1 リリースノート (下書き)
 
-> 状態: **下書き**。タグ `v2.1` は、次の実機の回 ([CHECKLIST_2026-09-26](tasks/realhw/CHECKLIST_2026-09-26.md) の手順 1〜7) を通した後に
-> feat/gui を main へ合流して付ける ([ROADMAP](ROADMAP.md) §0)。発行: PM (Claude Code `claude-opus-5-5`)、2026-09-26。
-> 前の版: `v2.0` (2026-09-03、KernelAPI v39)。この版: KernelAPI **v68** (予定、`v86 -g` の着地後)。
+> 状態: **確定** (2026-09-29)。実機の手順 1〜7 ([CHECKLIST_2026-09-26](tasks/realhw/CHECKLIST_2026-09-26.md) の「v2.1 の判定の記録」) を満たしたので
+> feat/gui を main へ合流してタグ `v2.1` を付けた ([ROADMAP](ROADMAP.md) §0)。発行: PM (Claude Code `claude-opus-5-5`)、2026-09-26 起草・2026-09-29 確定。
+> 前の版: `v2.0` (2026-09-03、KernelAPI v39)。この版: KernelAPI **v68**。
 
 v2.1 は **v3 へ分岐する前の区切り**。v2.0 (リング 3 ネイティブ) の上に GUI シェルを載せ、**実機 PC-9821Ra266 で FD 起動・CD からの
 HDD インストール・HDD 起動まで**通した版。
@@ -15,7 +15,7 @@ HDD インストール・HDD 起動まで**通した版。
 | FD | シーク・回転の最悪値から時間上限、FRY、1MB 超への DMA (0439h)、トラック読みと 8 セクタの LRU |
 | HDD | 標準の PC-98 区画表で OS32 の区画を作る `cdinst` / `install` (段 1・2)、他 OS の区画や壊れた表を消して入れる **ERASE**、HDD の IPL とローダ、イメージの CRC 検査 (VK32) と `ver` の `Commit` / `Image CRC` |
 | CD | ATAPI の READ(10) を 16 セクタずつ、iso9660 のパス・ディレクトリのキャッシュと先読み (cdinst が約 10 分かかっていた件)、マスター/スレーブの両方から媒体のある装置を選ぶ、待ち上限を秒単位に (スピンアップでリセットしない、SRST 31 秒)、死んだバスはすぐ失敗 |
-| シリアル | 115200bps までの整数分周、SerialFS (シリアル越しの `/host`) と `hsync --root` — **FD 起動から HDD を更新**できる |
+| シリアル | 115200bps までの整数分周、SerialFS (シリアル越しの `/host`) と `hsync --root` — **FD 起動から HDD を更新**できる。2026-09-29 に **HDD 起動のまま** 135b6b5 → 44bd0fe を更新 (カーネル 59 秒、`/sys` 63 秒、全体 21 分) |
 | PCI | 列挙と `lspci -v` (82557 LAN、チューナーの識別) |
 | 診断 | 起動ログ `/var/log/boot.log` (前回分は `.1`)、`kbdstat -w` (キーの make/break を 1 行ずつ)、`v86 -g` (実機の BIOS が 480 ラインで書く GDC の値を記録) |
 
@@ -23,13 +23,14 @@ HDD インストール・HDD 起動まで**通した版。
 
 gshell (WM)、libos32gui.shlib、PEGC / Cirrus のバックエンド、ファイラー、エディタの GUI 版、FEP、設定レジストリ (settings.db)。
 v2.1 で足したもの: **キーボードだけで GUI を操作する** (Windows 98 と同じ割り当て — CTRL+ESC、GRPH+TAB、GRPH+f･4、GRPH+SPACE の窓メニュー、
-SHIFT+f･10、カナ ON のマウスキー。PC-98 の GRPH = Alt)。GUI 1.4 の残り (About、R2 計測) は v2.1 に含めない。
+SHIFT+f･10、カナ ON のマウスキー。PC-98 の GRPH = Alt)。GUI 1.4 の残りのうち **About** (`ver` と同じ内容を表示、Start → Programs の `about.bin`) と **R2 計測** (PEGC 640x480・NP21/W の Cirrus 640x480 で gui_gate v11/v12g1/v12g4 が通る) は 2026-09-29 に入った。
 
 ## 3. カーネル層で直した不具合 (主なもの)
 
 - **GUI アプリが起動直後に消えていた** (2026-09-23〜26): KAPI の出力ポインタの検査が、アプリの syscall の中で走る WM (gshell) 自身の
   ポインタを弾いてアプリを kill していた。WM の文脈の深さで判定し、アプリが登録したバッファ (fd_redirect) は由来で必ず検査する。
-- `ime_set_render` にアプリが関数表を渡すと、カーネルがそれを CPL=0 で呼び続けた — 常駐側だけに限る。
+- `ime_set_render` と `gui_register` にアプリが関数表を渡すと、カーネルがそれを CPL=0 で呼び続けた — 常駐側だけに限る。WM の中で起きた障害を `ring3_wm_fault_count` と `(in WM)` で見分ける。
+- **Cirrus の窓の判定を RAM の上端ではなく物理地図で行う** (16MB を超える RAM で Cirrus が選ばれなかった)。リニア窓を 4GB 上位の **v3 のデバイス窓の帯 `[0xFE000000, 0xFF000000)`** へ移し、帯の先頭 4MB の PT を静的に持つ。Cirrus は NP21/W との互換のためだけで、auto では NP21/W の上に居るときだけボードの ID を読む。
 - VFS の FD の失効と ime_dict の開き直し、KAPI のデータ欄の固定 (v63)、SHM 帯とカーネルスタックの重なり、ext2 の書き込みの諸点。
 - カナ・CAPS はロックキー (押し込んで make・外して break) として扱う。
 
@@ -42,10 +43,14 @@ SHIFT+f･10、カナ ON のマウスキー。PC-98 の GRPH = Alt)。GUI 1.4 �
 ## 5. 開発の道具
 
 - `make check` の 3 段: `check-fast` (約 33 秒)・`check-changed` (変えた所だけ変異試験)・`check` (約 2〜3 分、見直し前は約 10 分)。
-- NP21/W ai-debug フォーク: `/api/quit`・`/api/instance`・`/api/cd`・`/api/fdd` (有界な待ち)、`tools/np21w_ctl.py` (停止・起動・媒体の出し入れ)。
+- NP21/W ai-debug フォーク: `/api/quit`・`/api/instance`・`/api/cd`・`/api/fdd` (有界な待ち、ブレーク中は 409)、`tools/np21w_ctl.py` (停止・起動・媒体の出し入れ)。上流 0.86 rev105 を取り込んだ。
+- `gui_gate.py` は台本の前に rshell を閉じ、GUI に入れたか (`scrn_ymax`/`grph_disp`、Cirrus は `wab_relay`/`wab_height`) を合否に入れる — CUI のまま `RESULT: OK` になっていた (R2 の 640x400 の正体)。
 - CI (GitHub Actions) で本体をビルド、実機用の成果物は `tools/ci_fetch.sh`。
 
 ## 6. 分かっている制限 (v3 以降)
+
+- gshell で窓をドラッグすると、途中の枠の線が他の窓の上に残る (前に出すと消える)。前面を替えたとき、重なっていない旧前面のタイトルがアクティブ色のまま残る。修正は v2.1 の後 (ブランチ wt/xor-frame、Codex レビュー中)。
+- 実機 Ra266 の内蔵アクセラレータ (PCI の Trident 1023:9660) のドライバは設計票だけ ([TASK_TRIDENT_DRIVER](tasks/realhw/TASK_TRIDENT_DRIVER.md)、Codex Approve)。
 
 - 実機の PEGC 640x480 で桁がずれる (GUI を `gfxmode pc98` で使えば正しい)。`v86 -g` の NP21/W での記録では、BIOS が 480 ラインで
   PITCH 80・GDC 5MHz にするのに OS32 はしていない — 実機の記録で直し方を決める ([TASK_PEGC480_REALHW](tasks/realhw/TASK_PEGC480_REALHW.md))。
