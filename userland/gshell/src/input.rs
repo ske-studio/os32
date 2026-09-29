@@ -818,13 +818,8 @@ fn wm_button_up(st: &mut GuiState, mx: i32, my: i32) {
         st.windows[idx].y = cy;
         st.drag_index = -1;
         st.drag_frame = Rect::EMPTY;
-        /* 最後の枠を消す。普通は新しい外形と同じ位置なので窓自身が覆うが、
-         * クランプで外形とずれたときに跡を残さない (下地は損傷、クライアント
-         * 面は Paint)。 */
-        for e in frame_edges(nf).iter() {
-            st.dirty_screen(*e);
-        }
-        expose_frame_edges(st, nf);
+        /* 最後の枠 `nf` は update_drag が同じ関数でクランプ済みなので、新しい
+         *外形と一致する (窓自身の再描画が枠を覆う)。 */
 
         /* 露出計算 + 旧位置と新位置を画面損傷に。 */
         st.dirty_screen(old_outer);
@@ -1121,11 +1116,37 @@ fn expose_frame_edges(st: &mut GuiState, f: Rect) {
         while i < st.windows.len() {
             if st.windows[i].used && st.windows[i].visible {
                 let (ox, oy) = st.windows[i].client_origin();
-                crate::damage::add_dirty(&mut st.windows[i], e.translate(-ox, -oy));
+                crate::damage::add_dirty_band(&mut st.windows[i], e.translate(-ox, -oy));
             }
             i += 1;
         }
     }
+}
+
+/// アプリの COMMIT (X2) が present する矩形 `touched` がドラッグ枠の縁に掛かって
+/// いたら、枠を描き直して縁を同じ commit に積む。描き直したら真。
+///
+/// 旧枠の帯は 32px に丸めて Paint にするので、今の枠にも掛かることがある。アプリは
+/// Paint の矩形を丸ごと塗るので、そのまま present すると今の枠の一部が消え、次の
+/// WM 周で戻る = ちらつく (Codex レビュー P2)。モーダル / FEP / カーソルの
+/// `refresh_if_hit` と同じ扱い。
+pub fn refresh_frame_if_hit(st: &mut GuiState, touched: Rect) -> bool {
+    if st.drag_index < 0 || st.drag_frame.is_empty() {
+        return false;
+    }
+    let f = st.drag_frame;
+    let mut hit = false;
+    for e in frame_edges(f).iter() {
+        if e.intersects(&touched) {
+            hit = true;
+        }
+    }
+    if !hit {
+        return false;
+    }
+    crate::chrome::draw_drag_outline(f.x, f.y, f.w, f.h, crate::lease::mono(st));
+    queue_frame_edges(st, f);
+    true
 }
 
 #[cfg(test)]

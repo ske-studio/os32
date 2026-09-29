@@ -1151,48 +1151,40 @@ fn paint_clients_as_app(st: &mut GuiState) {
 }
 
 /// 窓 `idx` の可視なクライアント面で、アプリが描いた画素 (見張り色) を WM が
-/// 書き替えたのに Paint (dirty / issued) が出ていない点を探す。WM はクライアント面を
-/// 持たないので、書き替えた画素は**アプリに描き直させる以外に消せない**。
-fn stale_client_pixel(st: &GuiState, idx: usize) -> Option<(i32, i32, u8)> {
+/// 書き替えたのに Paint (dirty / issued) が出ていない点を**全部**集める。WM は
+/// クライアント面を持たないので、書き替えた画素はアプリに描き直させる以外に消せない。
+/// `allowed(x, y)` が真の画素 (今の枠・カーソル) は走査の中で除く。
+fn stale_client_pixels(st: &GuiState, idx: usize, allowed: &dyn Fn(i32, i32) -> bool) -> Vec<(i32, i32, u8)> {
     let px = mocks::pixels();
     let w = &st.windows[idx];
     let (ox, oy) = w.client_origin();
     let covered = |lx: i32, ly: i32| {
-        let mut k = 0;
-        while k < w.dirty.len {
-            if w.dirty.rects[k].contains(lx, ly) {
-                return true;
-            }
-            k += 1;
-        }
-        k = 0;
-        while k < w.issued.len {
-            if w.issued.rects[k].contains(lx, ly) {
-                return true;
-            }
-            k += 1;
-        }
-        false
+        (0..w.dirty.len).any(|k| w.dirty.rects[k].contains(lx, ly))
+            || (0..w.issued.len).any(|k| w.issued.rects[k].contains(lx, ly))
     };
-    let mut v = 0;
-    while v < w.vis.len {
+    let mut out = Vec::new();
+    for v in 0..w.vis.len {
         let r = w.vis.rects[v];
-        let mut ly = r.y;
-        while ly < r.bottom() {
-            let mut lx = r.x;
-            while lx < r.right() {
+        for ly in r.y..r.bottom() {
+            for lx in r.x..r.right() {
                 let (sx, sy) = (ox + lx, oy + ly);
                 let got = px[sy as usize * mocks::W + sx as usize];
-                if got != CLIENT_SENTINEL && !covered(lx, ly) {
-                    return Some((sx, sy, got));
+                if got != CLIENT_SENTINEL && !covered(lx, ly) && !allowed(sx, sy) {
+                    out.push((sx, sy, got));
                 }
-                lx += 1;
             }
-            ly += 1;
         }
-        v += 1;
     }
-    None
+    out
+}
+
+fn nothing_allowed(_x: i32, _y: i32) -> bool {
+    false
+}
+
+/// 枠 `f` の輪郭 (1px) の上か。
+fn on_outline(f: wm::Rect, x: i32, y: i32) -> bool {
+    f.contains(x, y) && (x == f.x || x == f.right() - 1 || y == f.y || y == f.bottom() - 1)
 }
 
 /// gui_gate v11 の台本: Widgets を掴んで Help の上を通し、Help と重ねて離す。
@@ -1224,7 +1216,8 @@ fn drag_frame_trail_on_another_client_gets_a_paint() {
     }
     assert_eq!(st.drag_index, -1, "離しでドラッグが終わらない");
     assert_eq!((st.windows[1].x, st.windows[1].y), (240, 200), "窓が枠の位置へ移らない");
-    assert_eq!(stale_client_pixel(&st, 0), None, "Help のクライアント面に枠の跡が残り、Paint も出ていない");
+    let stale = stale_client_pixels(&st, 0, &nothing_allowed);
+    assert!(stale.is_empty(), "Help のクライアント面に枠の跡が残り、Paint も出ていない: {} 点 (先頭 {:?})", stale.len(), stale.first());
 }
 
 /// ドラッグ中 (離す前) も、消した枠が横切ったクライアント面には Paint を返す
@@ -1251,16 +1244,118 @@ fn drag_frame_trail_is_repainted_while_dragging() {
         wm::flush_screen_dirty(&mut st);
     }
     assert_eq!(st.drag_index, 1, "ドラッグが続いていない");
-    /* いまの枠 (240,200)-(559,439) の上は描いてあって当然なので除く */
+    /* いまの枠と、カーソルの下は描いてあって当然なので除く */
     let f = st.drag_frame;
+    let cr = crate::cursor::rect(&st);
+    let allowed = move |x: i32, y: i32| on_outline(f, x, y) || cr.contains(x, y);
     for idx in 0..2 {
-        if let Some((x, y, c)) = stale_client_pixel(&st, idx) {
-            let on_live = (x == f.x || x == f.right() - 1 || y == f.y || y == f.bottom() - 1)
-                && f.contains(x, y);
-            let under_cursor = crate::cursor::rect(&st).contains(x, y);
-            assert!(on_live || under_cursor, "窓 {idx} の ({x},{y}) に消した枠の跡 (色 {c}) が残り、Paint も無い");
+        let stale = stale_client_pixels(&st, idx, &allowed);
+        assert!(stale.is_empty(), "窓 {idx} に消した枠の跡が残り、Paint も無い: {} 点 (先頭 {:?})", stale.len(), stale.first());
+    }
+}
+
+/// 旧枠の帯は**帯のまま** Paint にする (Codex レビュー P2: 縦横の帯が外接矩形へ
+/// 畳まれて窓の内側まで丸ごと Paint になっていた)。Help の例で旧枠 1 回の
+/// 消去が出す Paint の面積を、帯 (32px 丸め) の面積の和で抑える。
+#[test]
+fn drag_frame_paint_stays_band_shaped() {
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    let mut st = windows(&shm, &[(372, 80, 242, 180), (40, 40, 320, 240)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    park_pointer(&mut st, 20, 400);
+    paint_clients_as_app(&mut st);
+    let tb = st.windows[1].titlebar_rect();
+    let (tx, ty) = (tb.x + 20, tb.y + tb.h / 2);
+    park_pointer(&mut st, tx, ty);
+    for &(dx, dy) in &[(0, 0), (100, 71)] {
+        *mocks::MOUSE.lock().unwrap() = ((tx + dx) as i16, (ty + dy) as i16, 1);
+        input::capture(&mut st, input::Ctx::Wait);
+    }
+    st.windows[0].dirty.clear();
+    /* 枠 (140,111,320,240) を別の位置へ動かす = 旧枠の縁を Help へ返す */
+    *mocks::MOUSE.lock().unwrap() = ((tx + 200) as i16, (ty + 160) as i16, 1);
+    input::capture(&mut st, input::Ctx::Wait);
+    let d = st.windows[0].dirty;
+    assert!(d.len > 0, "旧枠が横切った Help に Paint が出ない");
+    let area: i32 = (0..d.len).map(|k| d.rects[k].w * d.rects[k].h).sum();
+    /* Help のクライアント内の旧枠: 縦 1 本 (x=459) と横 1 本 (y=111)。32px 丸めで
+     * 縦 = 32 × 高さ、横 = 幅 × 32 が上限 (角の重なりを含めても和を超えない)。 */
+    let (cw, ch) = st.windows[0].client_size();
+    let bound = 32 * ch + cw * 32;
+    assert!(area <= bound, "Paint が帯より広い: 面積 {area} > {bound} ({:?})", (0..d.len).map(|k| (d.rects[k].x, d.rects[k].y, d.rects[k].w, d.rects[k].h)).collect::<Vec<_>>());
+}
+
+/// アプリが Paint を受けて描き直し、COMMIT しても**今の枠は欠けない**
+/// (Codex レビュー P2: 帯の 32px 丸めが今の枠に掛かり、op_commit が枠を戻さずに
+/// present していた = 次の WM 周まで枠の上辺が消えてちらつく)。
+#[test]
+fn app_commit_during_drag_keeps_the_live_frame() {
+    use crate::handler;
+    use os32api::gui::proto::{GUI_COLOR_HIGHLIGHT, GUI_OP_COMMIT, GUI_OP_POLL};
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    let g = wm::g();
+    *g = windows(&shm, &[(372, 80, 242, 180), (40, 40, 320, 240)]);
+    g.inited = true;
+    g.screen_w = 640;
+    g.screen_h = 480;
+    crate::visible::recompute_and_expose(g);
+    wm::composite_full(g);
+    park_pointer(g, 20, 400);
+    paint_clients_as_app(g);
+    let tb = g.windows[1].titlebar_rect();
+    let (tx, ty) = (tb.x + 20, tb.y + tb.h / 2);
+    park_pointer(g, tx, ty);
+    for &(dx, dy) in &[(0, 0), (100, 71), (200, 160)] {
+        *mocks::MOUSE.lock().unwrap() = ((tx + dx) as i16, (ty + dy) as i16, 1);
+        input::capture(g, input::Ctx::Wait);
+        wm::flush_screen_dirty(g);
+    }
+    assert_eq!(g.drag_index, 1, "ドラッグが続いていない");
+    /* Help (owner 2) のアプリ: Paint を受けて、その矩形を丸ごと塗って COMMIT */
+    let n = handler::gshell_gui_handler(GUI_OP_POLL, 0, 2);
+    assert!(n > 0, "旧枠の帯が Help の Paint にならない");
+    let (ox, oy) = g.windows[0].client_origin();
+    let mut hit_live = false;
+    let f = g.drag_frame;
+    for k in 0..g.windows[0].issued.len {
+        let r = g.windows[0].issued.rects[k].translate(ox, oy);
+        if r.intersects(&wm::Rect::new(f.x, f.y, f.w, 1)) || r.intersects(&wm::Rect::new(f.x, f.y, 1, f.h)) {
+            hit_live = true;
+        }
+        unsafe { os32api::gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, CLIENT_SENTINEL) };
+    }
+    assert!(hit_live, "前提: Paint の矩形が今の枠に掛かる配置になっていない");
+    assert_eq!(handler::gshell_gui_handler(GUI_OP_COMMIT, 0, 2), 0);
+    /* 今の枠の輪郭 (カーソルの下を除く) が全部枠の色のまま */
+    let px = mocks::pixels();
+    let cr = crate::cursor::rect(g);
+    let mut broken = Vec::new();
+    for x in f.x..f.right() {
+        for &y in &[f.y, f.bottom() - 1] {
+            if !cr.contains(x, y) && px[y as usize * mocks::W + x as usize] != GUI_COLOR_HIGHLIGHT {
+                broken.push((x, y));
+            }
         }
     }
+    for y in f.y..f.bottom() {
+        for &x in &[f.x, f.right() - 1] {
+            if !cr.contains(x, y) && px[y as usize * mocks::W + x as usize] != GUI_COLOR_HIGHLIGHT {
+                broken.push((x, y));
+            }
+        }
+    }
+    assert!(broken.is_empty(), "COMMIT で今の枠が欠けた: {} 点 (先頭 {:?})", broken.len(), broken.first());
+    *mocks::MOUSE.lock().unwrap() = ((tx + 200) as i16, (ty + 160) as i16, 0);
+    input::capture(g, input::Ctx::Wait);
 }
 
 /// 前面が替わったら、**重なっていなくても**旧前面のタイトルを非アクティブ色へ

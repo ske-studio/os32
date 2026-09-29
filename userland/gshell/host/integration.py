@@ -166,6 +166,19 @@ MUTATIONS = [
      '            let o = st.windows[oi].outer();\n            st.dirty_screen(o);\n',
      '            let _ = oi;\n',
      'focus_change_repaints_the_old_front_title'),
+    # Codex レビュー (2026-09-29) P2×2: 帯が外接矩形へ畳まれる / COMMIT が今の枠を消す。
+    ('frame bands merge into their bounding box', 'src/input.rs',
+     'crate::damage::add_dirty_band(&mut st.windows[i], e.translate(-ox, -oy));',
+     'crate::damage::add_dirty(&mut st.windows[i], e.translate(-ox, -oy));',
+     'drag_frame_paint_stays_band_shaped'),
+    ('band merge ignores the area bound', 'src/damage.rs',
+     'if area(&u) <= area(&d) + area(&r) && (d.intersects(&r) || near(&d, &r)) {',
+     'if d.intersects(&r) || near(&d, &r) {',
+     'drag_frame_paint_stays_band_shaped'),
+    ('app commit does not restore the live frame', 'src/handler.rs',
+     '    if crate::input::refresh_frame_if_hit(st, touched) {',
+     '    if false && crate::input::refresh_frame_if_hit(st, touched) {',
+     'app_commit_during_drag_keeps_the_live_frame'),
 ]
 
 
