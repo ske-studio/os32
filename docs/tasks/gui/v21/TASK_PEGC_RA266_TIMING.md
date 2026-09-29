@@ -108,6 +108,11 @@ NP21/W の固定値より **実機 BIOS の設定を優先する**。
 「RA266だけを条件分岐で特例化」する前に BIOS work area / capability / mode table から
 安全に選べる契約を検討する。
 
+> **下準備 (2026-09-29、wt/pegc480-prep)**: PITCH・GDC クロックを明示して書き、順序を `pegc_apply_timing` 1 か所、
+> 値を `include/pegc.h` §10 1 か所に集めた (今は NP21/W 由来の値。実機の `v86 -g` の記録で差し替える)。
+> `gdc_send` は FIFO を待つ。詳細と実機の 1 回目の `v86 -g` の結果は
+> [TASK_PEGC480_REALHW](../../realhw/TASK_PEGC480_REALHW.md) §3「段 1 の実機での記録」「段 2 の下準備」・§4。
+
 ## 5. 受入条件
 
 v2.1 の修正完了条件:

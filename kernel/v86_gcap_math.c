@@ -171,6 +171,12 @@ void v86g_pass_out(V86Gcap *g, const V86gIoOps *ops, unsigned int port,
 /*    BH = 行数 << 3 | 解像度 << 1       解像度 00b/01b/10b/11b は同じ順      */
 /*  どちらも 30 行は 480 のときだけ、480 は 31kHz のときだけ指定できる。     */
 /*                                                                          */
+/*  **AL の bit0 はどちらの並びでも許し、30h へそのまま渡す** (実機 Ra266 の  */
+/*  AH=31h が AX=310Dh BX=0100h を返した、2026-09-29。NP21/W は 3108h)。     */
+/*  [US] memsys.md 0000:0459h bit3「INT 18h Function 30h,31h のモード設定    */
+/*  情報 bit 0」= ラスタスキャンモード (BIOS とは値の意味が逆)。対象は        */
+/*  PC-98GS・PC-9821 (ノーマル)・BA2 等。弾くと実機では並びが決まらない。     */
+/*                                                                          */
 /*  **解像度が 400 であることは決め手にしない**。NP21/W の AH=31h は解像度を */
 /*  0000:0597h の bit1-0 から返し、そこは AH=42h / AH=30h を誰かが呼ぶまで   */
 /*  0 (= 200 LOWER) のまま — OS32 の起動では誰も呼ばないので、画面は 400     */
@@ -181,6 +187,8 @@ void v86g_pass_out(V86Gcap *g, const V86gIoOps *ops, unsigned int port,
 /*  並びを取り違えても戻しの AH=30h は AH=31h の値をそのまま渡すので         */
 /*  (ROM 自身の並び)、元のモードへの戻りは並びの判定に依らない。            */
 /* ------------------------------------------------------------------------ */
+#define V86G_AL_RASTER 0x01U   /* AL bit0: ラスタスキャン (上の注記) */
+
 static int valid_mode(unsigned int res, unsigned int rows, int is31k)
 {
     if (rows == 3U) return 0;
@@ -191,14 +199,14 @@ static int valid_mode(unsigned int res, unsigned int rows, int is31k)
 
 static int is_bit2(unsigned int al, unsigned int bh)
 {
-    if ((al & 0xFBU) != 0x08U) return 0;
+    if ((al & ~(0x04U | V86G_AL_RASTER) & 0xFFU) != 0x08U) return 0;
     if ((bh & 0xCCU) != 0) return 0;
     return valid_mode((bh >> 4) & 3U, bh & 3U, (al & 0x04U) != 0);
 }
 
 static int is_bit3(unsigned int al, unsigned int bh)
 {
-    if ((al & 0xF7U) != 0) return 0;
+    if ((al & ~(0x08U | V86G_AL_RASTER) & 0xFFU) != 0) return 0;
     if ((bh & 0xE1U) != 0) return 0;
     return valid_mode((bh >> 1) & 3U, (bh >> 3) & 3U, (al & 0x08U) != 0);
 }
@@ -219,12 +227,12 @@ int v86g_decide(unsigned int al, unsigned int bh,
     b3 = is_bit3(al, bh);
     if (b2 && !b3) {
         /* 31kHz / 640x480 / 30 行 (OS32 の PEGC と同じ 30 行) */
-        *al480 = 0x08U | 0x04U;
+        *al480 = 0x08U | 0x04U | (al & V86G_AL_RASTER);
         *bh480 = (3U << 4) | 2U;
         return V86G_LAYOUT_BIT2;
     }
     if (b3 && !b2) {
-        *al480 = 0x08U;
+        *al480 = 0x08U | (al & V86G_AL_RASTER);
         *bh480 = (2U << 3) | (3U << 1);
         return V86G_LAYOUT_BIT3;
     }

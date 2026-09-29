@@ -27,7 +27,8 @@ typedef struct {
 } V86gIoOps;
 
 /* AH=31h を呼ぶ前に AL / BH へ入れておく印。どちらの並びでも正しい値に
- * ならない (bit2 並びは AL & F8h == 08h、bit3 並びは AL の D3 以外が 0)。
+ * ならない (bit2 並びは AL & FAh == 08h、bit3 並びは AL の D3・D0 以外が 0。
+ * D0 = ラスタスキャンはどちらでも許す — 実機 Ra266 は AL=0Dh を返す)。
  * ROM が答えなければ (未対応の機能) 印のまま戻る。 */
 #define V86G_SENTINEL_AL     0xFFU
 #define V86G_SENTINEL_BH     0xFFU

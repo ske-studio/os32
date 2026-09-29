@@ -549,6 +549,14 @@ check-kprintf-attr-host:
 check-cirrus-win-host:
 	python3 -B tools/tests/test_cirrus_win.py $(MUT)
 
+# gfx/backend_pegc.c の 640x480 へ入る / 戻る OUT 列と GDC の FIFO 待ち
+# (票 docs/tasks/realhw/TASK_PEGC480_REALHW.md §2 H2・H3・H5、§4)。実物の
+# ソースをホスト ILP32 で回し、偽の I/O で ポート・値・順序を期待列と比べる。
+# 待ちの上限 (詰まったままでも終わる) も見る。i386-elf -Werror でも通す。
+# 記録は tools/tests/pegc_mode_tdd.md。
+check-pegc-mode-host:
+	python3 -B tools/tests/test_pegc_mode.py $(MUT)
+
 # fs/vfs.c + fs/ext2_vfs.c の mount 経路。fd0 が hd0 に化けて同じ
 # パーティションを二重マウントする回帰 (2026-09-10) を止める。
 check-vfs-mount-dev-host:
@@ -1075,7 +1083,7 @@ CHECK_PAR_TARGETS := check-bootinfo-host check-hdd-stage1-host \
     check-sh-status-host check-hsync-h3-host check-hsync-h2-host \
     check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host \
     check-cat-linenum-host check-result-conv-host check-guest-host \
-    check-cirrus-win-host
+    check-cirrus-win-host check-pegc-mode-host
 check-par: $(CHECK_PAR_TARGETS)
 
 # エディタ GUI 版の本文と libos32gui の桁・折り返し (票 TASK_EDIT_GUI 受入 E8 / E10)。

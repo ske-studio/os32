@@ -129,7 +129,7 @@ GUI もアプリも 400 ライン / 16 色 / プレーンを決め打ちしな�
 | バックエンド | 画面 | バックバッファ (CPU が描く面) | 表示面へ | 能力ビット |
 |---|---|---|---|---|
 | `backend_pc98.c` (9801) | 640×400×16 (4 プレーン) | 主記憶 0x6A000 (128KB、`MEM_GFX_BB_BASE`) | CPU 転送 + ページフリップ | TEXT_OVERLAY, PAGE_FLIP |
-| `backend_pegc.c` (9821 PEGC) | 640×480×256 (PACKED8) | 主記憶末尾から 300KB (`sys_reserve_top`) | CPU 転送 (F00000h リニア窓、GDC SYNC は BIOS 表から 480 ライン) | TEXT_OVERLAY (合成ありと実測) |
+| `backend_pegc.c` (9821 PEGC) | 640×480×256 (PACKED8) | 主記憶末尾から 300KB (`sys_reserve_top`) | CPU 転送 (F00000h リニア窓、09A8h・GDC クロック・SYNC・PITCH・SCROLL を明示して 480 ライン) | TEXT_OVERLAY (合成ありと実測) |
 | `backend_cirrus.c` (CL-GD5430、Xe10 内蔵) | 640×480×256 | カード VRAM のクライアント面 (リニア窓 01000000h + 04B000h、300KB) | エンジン BLT (`present_rect` = 非表示面 → 表示面)。塗り / 転送も HW、256 画素以下は CPU 直書き | HW_FILL, HW_BLT (映像はリレーで切替、TEXT_OVERLAY 無し) |
 
 デバイス窓は master PD に **supervisor + PCD** で張り、CPL=3 に見せるのはクライアント面だけ
@@ -143,10 +143,12 @@ GUI もアプリも 400 ライン / 16 色 / プレーンを決め打ちしな�
 `kernel/v86_gcap.c`、票 [TASK_PEGC480_REALHW](tasks/realhw/TASK_PEGC480_REALHW.md) §3 段 1):
 `include/pegc.h` の 480 ラインの SYNC は NP21/W の `bios18.c` 由来で、uPD7220 の SYNC は読み戻せない。
 そこで V86 の監視部で**実機の ROM の INT 18h** を呼ぶ — AH=31h で今のモードを読み、その値の bit の並び
-(NP21/W の bit2 / Bible 3-2 の bit3。その並びとして正しい値になるのがちょうど 1 つのときだけ決め、決まらなければ 30h を呼ばない)
+(NP21/W の bit2 / Bible 3-2 の bit3。その並びとして正しい値になるのがちょうど 1 つのときだけ決め、決まらなければ 30h を呼ばない。
+AL bit0 = ラスタスキャンはどちらの並びでも許して 30h へ保つ — 実機 Ra266 は AL=0Dh を返す)
 から AH=30h の 640x480 の引数を決めて呼び、同じ AH=30h で元のモードへ戻す (480 を断られたら無変化なので戻しは呼ばない。
 戻しが 05h で返らなければ `pegc_restore_text_sync` が AH=31h で読んだ周波数の 400 ラインへ — 24kHz 固定にはしない。
-戻すのは同期 (09A8h・SYNC・6Ah・GDC STOP) だけでテキスト CRTC と PITCH / CSRFORM は戻さない)。その間、
+戻すのは同期 (09A8h・SYNC・6Ah・GDC STOP) と、PEGC の probe が通った機種では起動時に記録した GDC クロックと
+それに合う PITCH だけで、テキスト CRTC とテキスト GDC の PITCH / CSRFORM は戻さない)。その間、
 09A8h・09A0h・60h〜7Ah の偶数・A0h〜A6h の偶数を捕まえて**記録してから実機へ幅どおりに**通し、OUT を畳まずに
 512 件まで積む (溢れ・INS/OUTS・66h 付きの IN/OUT EAX・AH≠05h は失敗で、列は出さない)。通常の V86 で素通しの
 ポート (GRCG 7Ch・7Eh、EGC 4A0h〜、5Fh、パレット、FM) は捕まえないので記録に出ない。ROM の 1 呼び出しは IF を立てたまま
@@ -155,6 +157,16 @@ GUI もアプリも 400 ライン / 16 色 / プレーンを決め打ちしな�
 両方に出る 1 件 1 行の形。`v86 -g -t` は決まった I/O 列の試験ゲストで記録器を確かめる (実機へ通さない)。
 NP21/W の ROM は SYNC を内部状態へ直接書くので、エミュレータでは SYNC の列は採れない (件数は構成次第)。
 純粋部 (記録・判定) のホスト試験は `make check-v86-gcap-host`。
+
+**PEGC の 480 ラインへの出入りは起動時の BIOS 状態に頼らない** (2026-09-29〜、票
+[TASK_PEGC480_REALHW](tasks/realhw/TASK_PEGC480_REALHW.md) §2 H2・H3・H5):
+`pegc_apply_timing` が 1 か所で 09A8h → 6Ah GDC クロック (83h・85h = 5MHz) → 両 GDC の SYNC → グラフィック GDC の
+PITCH (80) → SCROLL → 表示開始の順に書く (クロックは SYNC の前 — Bible 3-2 表3-2)。戻りは起動時に 09A0h
+(sel 09h の bit0 = CLOCK-1、読み値 bit1 = CLOCK-2) で読んだクロックへ戻し、PITCH (書き込み専用)・グラフィック GDC の SYNC・
+SCROLL の IM もそのクロックとの組で選ぶ (両方 5MHz なら PITCH 80・C/R 4Eh・IM 1、それ以外は 40・26h・0 — Bible 2-6 表2-27、2-7)。値は `include/pegc.h` §10 に集めてあり、**実機の `v86 -g` の記録で差し替える箇所はそこだけ**
+(今は NP21/W 由来)。GDC へは 1 バイトずつステータスの FIFO を見てから書く (コマンドの前は EMPTY、パラメータの前は FULL でない。
+上限 2µs × 5000 回で打ち切って数える — `pegc_gdc_fifo_timeouts`、kernel.map から読める)。09A8h へは bit1,0 だけを書く
+(実機の読みは 81h だが bit7〜2 は「常に 0」、PLL を持つ機種がある)。ホスト試験は `make check-pegc-mode-host`。
 
 | 項目 | 仕様 (9801 バックエンド) |
 |------|------|

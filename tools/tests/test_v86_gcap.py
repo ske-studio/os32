@@ -94,9 +94,26 @@ MUTATIONS = [
      "    if (v86g_note_out(g, port, size, value, cs, ip, 1, phase) != 0) return;\n",
      "溢れたら実機へ通すのをやめる (ROM のモード切り替えが途中で崩れ、戻しの "
      "AH=30h の前提が壊れる)"),
-    (r"\*al480 = 0x08U \| 0x04U;",
-     "*al480 = 0x08U;",
+    (r"\*al480 = 0x08U \| 0x04U \| \(al & V86G_AL_RASTER\);",
+     "*al480 = 0x08U | (al & V86G_AL_RASTER);",
      "bit2 並びの 480 で 31kHz の bit を立てない (NP21/W は 640x480 を断る)"),
+    (r"    if \(\(al & ~\(0x04U \| V86G_AL_RASTER\) & 0xFFU\) != 0x08U\) return 0;",
+     "    if ((al & 0xFBU) != 0x08U) return 0;",
+     "bit2 並びで AL bit0 (ラスタスキャン) を弾く — 実機 Ra266 の AX=310Dh が "
+     "V86G_ST_UNDECIDED になり 30h へ進まない (2026-09-29 の実機の v86 -g)"),
+    (r"    if \(\(al & ~\(0x08U \| V86G_AL_RASTER\) & 0xFFU\) != 0\) return 0;",
+     "    if ((al & 0xF7U) != 0) return 0;",
+     "bit3 並びで AL bit0 を弾く (資料の bit0 は並びを区別しない)"),
+    (r"    if \(\(al & ~\(0x04U \| V86G_AL_RASTER\) & 0xFFU\) != 0x08U\) return 0;",
+     "    if ((al & 0xF9U) != 0x08U) return 0;",
+     "bit2 並びで bit0 の代わりに予約の bit1 を許す"),
+    (r"        \*al480 = 0x08U \| 0x04U \| \(al & V86G_AL_RASTER\);",
+     "        *al480 = 0x08U | 0x04U;",
+     "30h へ渡す AL で ROM の bit0 を落とす (ROM の設定したラスタスキャンを "
+     "480 へ入るときに勝手に変える)"),
+    (r"        \*al480 = 0x08U \| \(al & V86G_AL_RASTER\);",
+     "        *al480 = 0x08U;",
+     "bit3 並びで 30h へ渡す AL の bit0 を落とす"),
     (r"\*bh480 = \(3U << 4\) \| 2U;",
      "*bh480 = (3U << 4) | 1U;",
      "bit2 並びの 480 を 25 行にする (OS32 の PEGC は 30 行 = "
