@@ -491,11 +491,8 @@ fn op_commit(st: &mut GuiState, owner: i32, _slot_no: usize, arg: u32) -> i32 {
         return 0;
     }
     /* ドラッグ枠 (マウス / キーボードの移動・サイズ) はアプリの描画より前面。
-     * 潰されていたら描き直す。カーソルは枠の上なので、描き直した範囲もカーソルの
-     * 判定に含める (枠がカーソルの画素を上書きしたため)。 */
-    if crate::input::refresh_frame_if_hit(st, touched) {
-        touched = touched.union(&st.drag_frame);
-    }
+     * 潰されていたら描き直す (カーソルの扱いは関数の注記)。 */
+    crate::input::refresh_frame_if_hit(st, touched);
     /* アプリが描いた領域にカーソルが掛かっていれば、下地は既に潰れている。
      * 退避を捨てて退避し直し、同じ commit で一緒に出す (X2 の許される描画)。 */
     /* WM 自身の最前面物 (モーダル / FEP の候補窓) が潰されていたら描き直す。 */

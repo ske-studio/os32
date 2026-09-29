@@ -1354,6 +1354,28 @@ fn app_commit_during_drag_keeps_the_live_frame() {
         }
     }
     assert!(broken.is_empty(), "COMMIT で今の枠が欠けた: {} 点 (先頭 {:?})", broken.len(), broken.first());
+    /* カーソルは COMMIT に掛かっていない (Help の Paint から離れている)。退避した
+     * 下地が本当の下地なら、消したあとにカーソルの形の画素は残らない (Codex レビュー
+     * 2 回目 P2: 枠の外接矩形で discard → show して、カーソル自身を下地に退避していた)。 */
+    let cr = crate::cursor::rect(g);
+    assert!(
+        (0..g.windows[0].issued.len).all(|k| !g.windows[0].issued.rects[k].translate(ox, oy).intersects(&cr)),
+        "前提: カーソルが COMMIT の矩形に掛かっている"
+    );
+    crate::cursor::hide(g);
+    let px = mocks::pixels();
+    use os32api::gui::proto::{GUI_COLOR_TEXT, GUI_COLOR_WINDOW};
+    let mut ghost = Vec::new();
+    for y in cr.y..cr.bottom() {
+        for x in cr.x..cr.right() {
+            let c = px[y as usize * mocks::W + x as usize];
+            if c == GUI_COLOR_TEXT || c == GUI_COLOR_WINDOW {
+                ghost.push((x, y, c));
+            }
+        }
+    }
+    assert!(ghost.is_empty(), "カーソルを消した跡にカーソルの画素が残る: {} 点 (先頭 {:?})", ghost.len(), ghost.first());
+    crate::cursor::show(g);
     *mocks::MOUSE.lock().unwrap() = ((tx + 200) as i16, (ty + 160) as i16, 0);
     input::capture(g, input::Ctx::Wait);
 }
@@ -1386,4 +1408,64 @@ fn focus_change_repaints_the_old_front_title_without_overlap() {
     wm::flush_screen_dirty(&mut st);
     assert_eq!(px_at(&st, 0), active, "新しい前面のタイトルがアクティブ色にならない");
     assert_eq!(px_at(&st, 1), inactive, "旧前面のタイトルがアクティブ色のまま残る");
+}
+
+/// ドラッグ中にアプリが窓を resize し、マウスキーの離し (NP_DOT) が枠の追従を
+/// 通らずに確定しても、最後の枠の跡を残さない (Codex レビュー 2 回目 P2)。
+#[test]
+fn drop_after_app_resize_erases_the_last_frame() {
+    mocks::init();
+    fep_off();
+    mocks::clear(0);
+    let shm = mocks::Shm::new();
+    /* 0 = 背面 (枠の右辺がクライアント面を通る)、1 = 動かす窓 (前面) */
+    let mut st = windows(&shm, &[(150, 40, 300, 300), (20, 20, 200, 150)]);
+    st.screen_w = 640;
+    st.screen_h = 480;
+    crate::visible::recompute_and_expose(&mut st);
+    wm::composite_full(&mut st);
+    let tb = st.windows[1].titlebar_rect();
+    park_pointer(&mut st, tb.x + 20, tb.y + tb.h / 2);
+    wm::flush_screen_dirty(&mut st);
+    paint_clients_as_app(&mut st);
+    let mut r = vec![SC_KANA | DOWN | KANA];
+    r.extend_from_slice(&tap(NP_0, KANA));
+    for _ in 0..10 {
+        r.push(NP_6 | DOWN | KANA);
+    }
+    run(&mut st, &r);
+    wm::flush_screen_dirty(&mut st);
+    assert_eq!(st.drag_index, 1, "ドラッグが始まらない");
+    let last = st.drag_frame;
+    assert_eq!((last.x, last.w), (39, 200), "前提: 枠が 19 ドット動いていない");
+    /* ドラッグ中にアプリが自分の窓を縮める */
+    let wid = id(&st, 1);
+    assert_eq!(wm::resize_window(&mut st, 3, wid, 80, 60), 0);
+    /* 背面のアプリが resize の露出分 (dirty) を描き直した状態にする。枠の跡は
+     * その外にあるので残っている。 */
+    {
+        let (ox, oy) = st.windows[0].client_origin();
+        let d = st.windows[0].dirty;
+        let mut touched = wm::Rect::EMPTY;
+        for k in 0..d.len {
+            let r = d.rects[k].translate(ox, oy);
+            unsafe { os32api::gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, CLIENT_SENTINEL) };
+            touched = touched.union(&r);
+        }
+        st.windows[0].dirty.clear();
+        st.windows[0].issued.clear();
+        /* その COMMIT は今の枠を描き直す (op_commit と同じ) */
+        input::refresh_frame_if_hit(&mut st, touched);
+    }
+    let rx = last.right() - 1;
+    let px = mocks::pixels();
+    assert_ne!(px[(last.y + 60) as usize * mocks::W + rx as usize], CLIENT_SENTINEL, "前提: 枠の右辺の跡が背面のクライアント面に無い");
+    run(&mut st, &tap(NP_DOT, KANA));
+    wm::flush_screen_dirty(&mut st);
+    assert_eq!(st.drag_index, -1, "離しでドラッグが終わらない");
+    assert_eq!((st.windows[1].w, st.windows[1].h), (80, 60));
+    assert!(st.windows[1].outer() != last, "前提: 確定した外形が最後の枠と同じ");
+    let cr = crate::cursor::rect(&st);
+    let stale = stale_client_pixels(&st, 0, &|x, y| cr.contains(x, y));
+    assert!(stale.is_empty(), "背面のクライアント面に最後の枠の跡が残り、Paint も無い: {} 点 (先頭 {:?})", stale.len(), stale.first());
 }

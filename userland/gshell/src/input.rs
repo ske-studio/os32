@@ -818,8 +818,16 @@ fn wm_button_up(st: &mut GuiState, mx: i32, my: i32) {
         st.windows[idx].y = cy;
         st.drag_index = -1;
         st.drag_frame = Rect::EMPTY;
-        /* 最後の枠 `nf` は update_drag が同じ関数でクランプ済みなので、新しい
-         *外形と一致する (窓自身の再描画が枠を覆う)。 */
+        /* 最後の枠が確定後の外形と違えば、枠の縁を消す (下地は損傷、クライアント
+         * 面は Paint)。普通は update_drag が同じクランプで枠を決めるので一致するが、
+         * ドラッグ中にアプリが resize_window し、マウスキーの離し (NP_DOT) が
+         * update_drag を通らずに確定すると大きさがずれる (Codex レビュー 2 回目 P2)。 */
+        if nf != st.windows[idx].outer() {
+            for e in frame_edges(nf).iter() {
+                st.dirty_screen(*e);
+            }
+            expose_frame_edges(st, nf);
+        }
 
         /* 露出計算 + 旧位置と新位置を画面損傷に。 */
         st.dirty_screen(old_outer);
@@ -1144,8 +1152,22 @@ pub fn refresh_frame_if_hit(st: &mut GuiState, touched: Rect) -> bool {
     if !hit {
         return false;
     }
+    /* カーソルは枠より前面。アプリが潰していない (touched に掛からない) カーソルは
+     * 下地を戻してから枠を描き、退避し直す — 枠の外接矩形を touched に足して
+     * `discard → show` させると、表示中のカーソル画素を下地として退避し、次の移動で
+     * 旧位置に残像が出る (Codex レビュー 2 回目 P2)。touched に掛かるカーソルは
+     * 呼ぶ側の `cursor::refresh_if_hit` が従来どおり退避し直す。 */
+    let cursor_clean = !cursor::rect(st).intersects(&touched);
+    if cursor_clean {
+        cursor::hide(st);
+    }
     crate::chrome::draw_drag_outline(f.x, f.y, f.w, f.h, crate::lease::mono(st));
     queue_frame_edges(st, f);
+    if cursor_clean {
+        cursor::show(st);
+        let cr = cursor::rect(st);
+        wm::queue_present(st, cr);
+    }
     true
 }
 

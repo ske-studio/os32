@@ -176,9 +176,18 @@ MUTATIONS = [
      'if d.intersects(&r) || near(&d, &r) {',
      'drag_frame_paint_stays_band_shaped'),
     ('app commit does not restore the live frame', 'src/handler.rs',
-     '    if crate::input::refresh_frame_if_hit(st, touched) {',
-     '    if false && crate::input::refresh_frame_if_hit(st, touched) {',
+     '    crate::input::refresh_frame_if_hit(st, touched);\n',
+     '    let _ = touched;\n',
      'app_commit_during_drag_keeps_the_live_frame'),
+    # Codex レビュー 2 回目 (2026-09-29) P2×2。
+    ('commit re-saves the cursor over the frame bounding box', 'src/handler.rs',
+     '    crate::input::refresh_frame_if_hit(st, touched);\n',
+     '    if crate::input::refresh_frame_if_hit(st, touched) {\n        touched = touched.union(&st.drag_frame);\n    }\n',
+     'app_commit_during_drag_keeps_the_live_frame'),
+    ('drop leaves the last frame when it differs from the outer', 'src/input.rs',
+     '        if nf != st.windows[idx].outer() {',
+     '        if false && nf != st.windows[idx].outer() {',
+     'drop_after_app_resize_erases_the_last_frame'),
 ]
 
 
