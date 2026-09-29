@@ -422,7 +422,7 @@ python3 tools/mkpkg.py --list packages/NORMAL.PKG                # 中身の一�
 |---|---|---|---|
 | `BOOT.PKG` | IPL + ローダ (`type: boot`、セクタへ直接書く。分割しない、無圧縮) | 全部 | 2 本 / 6,376 B |
 | `MINIMAL.PKG` | `core` + `base` — **CUI のレスキュー兼インストーラ** (下)。カーネル、unicode.bin、shell、filetypes、settings.tsv、install / cdinst / hsync、less / grep / hexdump / cfg + 媒体だけの settings.db。**起動 FD と同じ集合** (下) | 1. Minimal 以上 | 13 本 / 861,245 B |
-| `GUI.PKG` | `gui` — gshell、libos32gui.shlib、shlib を使うアプリ (filer / edit_gui / about)。shlib を使う試験アプリ (gui_demo / gdi_test / v12_api_test …) は `test` のまま DEBUG | 2. Normal 以上 | 5 本 / 440,022 B (2026-09-29、about 追加後) |
+| `GUI.PKG` | `gui` — gshell、libos32gui.shlib、shlib を使うアプリ (filer / edit_gui / about)。shlib を使う試験アプリ (gui_demo / gdi_test / v12_api_test …) は `test` のまま DEBUG | 2. Normal 以上 | 5 本 / 430,530 B (2026-09-29、About を `ver` の中身に揃えた後) |
 | `NORMAL.PKG` | `programs` / `docs` / `data` — コマンドとアプリ (sh / more / find / sort / head / tail / wc / tee / touch / sleep / diff / du / cal / man / sndctl / ime / v86 …)、man ページ、**既定フォント (`/sys/font/default.kcgfont`)**、FEP 辞書、TTF、MGX サンプル | 2. Normal 以上 | 102 本 / 10,107,991 B |
 | `DEBUG.PKG` | `test` — 試験バイナリと試験用データ | 3. Full | 62 本 / 1,272,396 B |
 

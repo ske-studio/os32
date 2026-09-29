@@ -197,7 +197,7 @@ check-tools-host:
 	python3 -B tools/tests/test_nhd_deploy_failure.py
 	python3 -B tools/tests/test_filer_normalize.py
 	python3 -B tools/tests/test_filer_copy_abort.py
-	python3 -B tools/tests/test_about_info.py
+	python3 -B tools/tests/test_about_info.py $(MUT)
 	python3 -B tools/tests/test_gui_button_dispatch.py
 	PYTHONPATH=. python3 -B tools/tests/test_emu_playbook.py
 	python3 -B tools/tests/test_mk_settings_db.py

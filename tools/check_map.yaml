@@ -832,6 +832,7 @@ checks:
     - tools/pc98pt.py
     - tools/tests/os32api_host.py
     - tools/tests/stat_cmd_host.c
+    - tools/tests/mutpar.py
     - tools/tests/test_about_info.py
     - tools/tests/test_emu_playbook.py
     - tools/tests/test_filer_copy_abort.py
@@ -847,11 +848,14 @@ checks:
     - tools/tests/test_np21w_trial.py
     - tools/tests/test_stat_cmd.py
     - tools/tests/test_tar_cmd.py
+    - tools/tests/ver_about_host.c
     - userland/cmds/stat.c
     - userland/cmds/tar.c
     - userland/deploy.yaml
     - userland/rust/about/src/info.rs
     - userland/rust/about/src/lib.rs
+    - userland/shell/cmd_base.c
+    - userland/shell/shell.h
     - userland/gshell/src/wm.rs
     - userland/rust/filer/host/model_tests.rs
     - userland/rust/filer/src/model.rs
