@@ -471,7 +471,10 @@ static void gcap_selftest(V86Gcap *g)
     /* 時間の見切り: ROM の呼び出しと同じ形 (IF を立てて始め、INT FFh で
      * 入る) で、I/O も #GP も出さずに回るゲスト。IF が落ちずに入り
      * (INT の先で見た FLAGS の IF)、タイマの見切りで戻ること。
-     * 代行レビュー P2-1: IF を落としていた頃は見切りが死んでいた。 */
+     * 代行レビュー P2-1: IF を落としていた頃は見切りが死んでいた。
+     * 下の `g->n_out != 0` は**仮想 PIC 全塞ぎの回帰検査も兼ねる** — IF=1 で
+     * 0.3 秒回す間に実 IRQ (タイマ) がゲストへ反射されると、ゲストの IVT の
+     * 先 (BIOS の ISR) が EOI などの OUT を出して記録に載る。 */
     gcap_reset_keep(g);
     reason = gcap_run(g, GCAP_ENTRY_HANG, V86G_PH_SELFTEST, 0, 0, 0, 0, &done,
                       1, GCAP_HANG_TICKS);

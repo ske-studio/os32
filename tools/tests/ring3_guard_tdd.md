@@ -90,6 +90,29 @@ MUTATION 11 RED: gshell の終了で FEP の描画先を戻さない
 MUTATIONS 11/11 RED
 ```
 
+### 追記 (2026-09-26、代行レビュー P3) — gui_register も同じ門、WM の中で落ちた観測点
+
+`gui_register` の門を `gui_ime_set_render` と同じ「owner 1 かつ `ring3_call_from_user()` が偽」に揃えた。
+ホストの §6 (6a〜6g) が「gshell の top-level (owner 1、ディスパッチの外) の登録は通って gui_call が届く」
+「owner 1 でも CPL=3 由来は断り、登録済みのハンドラは変えない」「owner 2 はディスパッチ中でも WM 文脈でも断る」
+「NULL は断る」を見る。§4 の 4d は登録を top-level から行うように直した (それまでディスパッチ中の owner 1 で
+登録していた — 新しい門では断られる筋書き)。
+
+WM の中で落ちるとアプリの kill として畳まれる (§4-61 の「例外 0 件・`fault_kill_count` だけ増える」)。
+`exec/exec.c` の `ring3_kill_kind` が深さを 0 に戻す**前**に `ring3_wm_fault_count` を +1 (FAULT のみ)、
+`kernel/isr_handlers.c` の 2 つの kill の行に深さ 1 以上で ` (in WM)` を足す。exec.c / ISR はホストで組めないので
+字面で見る (`static_checks`、変異は写しの上で同じ関数に通す)。
+
+```
+MUTATION 12 RED: gui_register の門が由来 (ring3_call_from_user) を見ない (= 直す前)
+MUTATION 13 RED: gui_register の門が top-level の正当な登録を断る (過剰)
+MUTATION 14 RED: ring3_wm_fault_count を深さを 0 に戻した後で数える (常に 0)
+MUTATION 15 RED: ring3_wm_fault_count を数えない
+MUTATION 16 RED: 例外の kill の行に (in WM) を付けない
+MUTATION 17 RED: #PF の kill の行に (in WM) を付けない
+MUTATIONS 17/17 RED
+```
+
 ## この試験が見ていないもの
 
 - **実際に filer の窓が出ること** — NP21/W で PM が確かめる (`fault_kill_count` が増えない、`ring3_range_reject_count` が 0 のまま)。
@@ -98,3 +121,5 @@ MUTATIONS 11/11 RED
 - gshell の他の出力付き KAPI (`gfx_screen_info` / `gfx_stats` / `launch_take`) — 同じ門を通るので同じ直しで通る。
 - 登録時の歩きを `_always` から文脈つきの門へ戻す変異は**同値** (登録時に由来がアプリ = 深さ 0 + ディスパッチ中で、
   そこでは 2 つの門が同じ答えを返す) なので変異に入れていない。
+- `ring3_wm_fault_count` / ` (in WM)` が**実際に**増える / 出ること — ゲストで WM の中に #PF を起こす筋書きは無い
+  (字面の検査だけ)。

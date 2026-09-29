@@ -93,7 +93,11 @@ WM が選ぶ (gshell は `arg` をポインタとして解釈しない — 入�
 `IME_Render` 表の関数を**以後ずっと CPL=0 で呼ぶ**ので、アプリの表を受け取るとアプリのコードが CPL=0 で走り、アプリの終了後は
 解放済みの物理へ飛ぶ。KAPI の target を `gui_ime_set_render` (`kernel/gui.c`) に替え、owner 1 かつ `ring3_call_from_user()` が偽の
 呼び手 (gshell の top-level) だけを通す (戻り void・番号・引数は不変、断った回数は `gui_ime_render_rejected`)。同じ形の残り:
-`gui_register(handler, pump)` は owner 1 の検査だけで `ring3_call_from_user` は見ない (owner 1 は常駐シェルだけなので現状は穴ではない)、
+`gui_register(handler, pump)` は owner 1 の検査だけで `ring3_call_from_user` は見ない (owner 1 は常駐シェルだけなので現状は穴ではない。
+**同日の代行レビュー P3 で同じ門に揃えた** — `ring3_guard_host.c` §6)、
 `sys_ls(path, cb, ctx)` の `cb` は**同期的に** CPL=0 で呼ばれる (CPL=3 の呼び手のコードが CPL=0 で走る。寿命の問題は無いが特権の
 問題は残る — 別票)、`gfx_present_raster(table)` はデータの表で関数を含まない。試験 `ring3_guard_host.c` §5 (変異 11/11 RED)、
 kselftest `test_ime_render_gate`。
+追記 3 (同日、代行レビュー P3): WM を信頼境界の内側に置く (深さ 1 以上で門を素通し) 一方、フォールトの帰属は `ring3_in_syscall`
+のままなので **WM の中で落ちるとアプリの kill として畳まれ、`fault_kill_count` しか増えない**。挙動は変えず、観測点
+`ring3_wm_fault_count` (`exec/exec.c`) と ISR の kill の行の ` (in WM)` を足した。関係の説明は `docs/POLICY_DEBUG.md` §4-61 の追記 3。

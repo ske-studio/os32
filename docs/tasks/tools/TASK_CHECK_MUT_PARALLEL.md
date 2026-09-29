@@ -184,6 +184,9 @@ check-par の wall はいま **check-pcm-cs4231-host (単独 248 秒、本票の
 - `overlay(root, dst, real)` — 写しの木。`real` (ファイルかディレクトリ) とその祖先のディレクトリだけ実体で、
   ほかの項目は実物への symlink。symlink のディレクトリから `..` で辿る `#include` は実物へ出るので、
   C の試験は **gcc -MM の依存を全部実体にする** (`mutant_tree(..., gcc_cmds=)`)。
+  **写しに `.git` は置かない** (2026-09-26、代行レビュー P3): どの階層の `.git` も symlink にも複写にもせず、サブモジュールは
+  実体のディレクトリにして中身を symlink にする — 写しの中で走る git の書き操作が実物の repo に届かない。`real` のディレクトリは
+  git の追跡ファイル + 追跡外 (gitignore を除く) だけを写す (生成物を毎回複写しない。名指しのファイルは生成物でも写す)。
 - `build_in_tree` (C: 写しの中で gcc を流す)、`run_script_in_tree` (Python: 試験スクリプト自身も実体で写し、
   `ROOT = Path(__file__).resolve().parents[2]` が写しを指すようにして流し直す)。
 - `run_with_control` — **変異なしの写し**を変異と同じ関数で回し、GREEN であることを確かめる
