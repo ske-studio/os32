@@ -20,7 +20,7 @@
 | 文書 | 状態 | 要旨 | 提案 |
 |---|---|---|---|
 | [PLAN.md](PLAN.md) | 計画 (2026-09-17) | 機能を足す前に入れ物を作り直す。順序 C11 → 再配置 → 動的読み込み → PCI → 82557 (§1「動かさない」)、再配置の前に決めること (§2)、ドライバの動的読み込み (§3)、HAL の棚卸し (§3-1)、アプリへの払い出し (§4)、温めているアイデア 5-1〜5-7 (§5) | **v3 (本案へ書き直す元)**。§1 の順序は 09-22 の決裁で崩れている (§4 D1)。§5 は個別に振り分ける (§1-6) |
-| [TASK_MEMMAP_V3.md](TASK_MEMMAP_V3.md) | 設計中 (**方針確定 2026-09-30**、3 者討論で決定、Codex Approve) | v3 のメモリマップ。決定 D1〜D22、帯の表 (恒等のシステム + 池 + アプリ帯 0x80000000 + lease 窓)、物理台帳と P2V/V2P、SQLite・FEP・モジュール・ブート順、Unicode 表・OpenType・BB、票 T0〜T7、受入、未確認の前提 U1〜U22、経緯 | **v3 — 決定** (§3-1)。P1 の正典。実装は T0〜T7 の順 |
+| [TASK_MEMMAP_V3.md](TASK_MEMMAP_V3.md) | 設計中 (**方針確定 2026-09-30**、3 者討論で決定、Codex Approve) | v3 のメモリマップ。決定 D1〜D28 (D23〜D28 = 池の運用規則の残りと SQLite の予算、2026-09-30)、帯の表 (恒等のシステム + 池 + アプリ帯 0x80000000 + lease 窓)、物理台帳と P2V/V2P、池の運用規則 R1〜R7、SQLite・FEP・モジュール・ブート順、Unicode 表・OpenType・BB、票 T0〜T7、受入、未確認の前提 U1〜U23、経緯 | **v3 — 決定** (§3-1)。P1 の正典。実装は T0〜T7 の順 |
 | [TASK_HAL_WIRING.md](TASK_HAL_WIRING.md) | 受入完了・実機確認待ち (残: W7) | 結線の土台: 割り込みの動的登録 / 8237 の共通部 / DMA プール (0x2E8000、**暫定承諾**) / PCI の結線表 / µs 時計。v2.1 に同梱。`struct pci_driver.size` は外部モジュールへの口だけ | **並行** (W7 実機) + **v3** (§3 の取り決めを外部モジュールへ開く、DMA プールの再配置は §3-1 の論点) |
 | [TASK_PCM_CS4231.md](TASK_PCM_CS4231.md) | 受入待ち (E0〜E3 合格、残 E4・E5 NP21/W、E6 実機) | CS4231 の PCM 再生 (§5-5 の P1)。KAPI v61。リングは DMA プール、ステージングは KHEAP | **並行** (E4〜E6) + **v3 後半** (P2〜P4 = ソフト OPNA 合成器、動的読み込みの顧客) |
 
@@ -116,7 +116,7 @@
 
 同日の決定で v3 の柱に効くもの (正典は各票、ここは一覧):
 
-- **SQLite と FEP は常に読み込む。例外は FD 起動の回復用構成 (MINIMAL) だけ** (`db_*` は「機能なし」の決まった誤りを返す)。FEP の任意省略は決めない。理由: SQLite は KAPI 経由でユーザーランドに開放された機能 (`settings.db`、libos32cfg、libos32db、install)。8MB の勘定は読み込んだ構成でも +1.57〜1.74MB 余る (TASK_MEMMAP_V3 D21・§4-3)。
+- **SQLite と FEP は常に読み込む。例外は FD 起動の回復用構成 (MINIMAL) だけ** (`db_*` は「機能なし」の決まった誤りを返す)。FEP の任意省略は決めない。理由: SQLite は KAPI 経由でユーザーランドに開放された機能 (`settings.db`、libos32cfg、libos32db、install)。8MB の勘定は読み込んだ構成でも余る (決定時 +1.57〜1.74MB、**MEMSYS5 512KB (D27) で +1.44〜1.62MB**、TASK_MEMMAP_V3 D21・D27・§4-3)。
 - **P8 (音・入力の層) と P9 (Video HAL / VESA2 的 / SDL) は P1 から切り出した別の柱** (TASK_MEMMAP_V3 D19)。BB は v3 の最初は gshell 所有 + 全画面 lease、PEGC 直描きは全画面 lease に限る、アプリ私有サーフェス + WM 合成はサーフェス層の票で。
 - **KAPI / ABI の後方互換は基本考えない** (P7、§7-1 U8)。
 - **P6 の意図** (下の表) と **P5 のディスクの速さ** (同) は 2026-09-30 の同じ回で決めた。
@@ -130,7 +130,7 @@
 | 柱 | 内容 | 出典 | 依存 | 段 (案) |
 |---|---|---|---|---|
 | **P0 規約と道具** | C11 への移行 ([C1] の改訂、`_Static_assert`)、`u32` か `<stdint.h>` か (混在が最悪)、fork 先での `make check` / CI / 文書検査の作り直し、文書の正典の移転 | PLAN §1 の 1、ROADMAP §2「着手の前に決めること」、KSTACK §7-5、ROADMAP §0-1 | 無し (最初) | **1** |
-| **P1 メモリマップの再構築** | **決定 (2026-09-30) — [TASK_MEMMAP_V3](TASK_MEMMAP_V3.md) 参照**。要点: カーネル・シェル・通常 RAM は恒等写像のまま、アプリだけ 0x80000000〜 の私有写像 (lease 窓 0xF0000000〜)。物理地図と所有権台帳を先に作り、固定帯はカーネル 3MB + シェル 1MB だけ、残りは owner 付きの池。SQLite は同一リンクをやめてモジュール、FEP・音源・LAN・NP21/W 専用もモジュール (FDC はコア)。低位 640KB は V86 へ、Unicode 表はカーネル `.rodata` 28KB、`.kcgfont` 廃止 → OpenType (KCG ROM は予備)。票は T0〜T7 | TASK_MEMMAP_V3 §0 (D1〜D22)、§2、§6 | P0 (C11 = T0 が先) | **2** (T1 台帳 → T2 アプリ帯 → T3 カーネル帯 → T4 SQLite → T5 モジュール → T6b ローダ → T7 低位・OpenType) |
+| **P1 メモリマップの再構築** | **決定 (2026-09-30) — [TASK_MEMMAP_V3](TASK_MEMMAP_V3.md) 参照**。要点: カーネル・シェル・通常 RAM は恒等写像のまま、アプリだけ 0x80000000〜 の私有写像 (lease 窓 0xF0000000〜)。物理地図と所有権台帳を先に作り、固定帯はカーネル 3MB + シェル 1MB だけ、残りは owner 付きの池。SQLite は同一リンクをやめてモジュール、FEP・音源・LAN・NP21/W 専用もモジュール (FDC はコア)。低位 640KB は V86 へ、Unicode 表はカーネル `.rodata` 28KB、`.kcgfont` 廃止 → OpenType (KCG ROM は予備)。票は T0〜T7 | TASK_MEMMAP_V3 §0 (D1〜D28)、§2、§3-5、§6 | P0 (C11 = T0 が先) | **2** (T1 台帳 → T2 アプリ帯 → T3 カーネル帯 → T4 SQLite → T5 モジュール → T6b ローダ → T7 低位・OpenType) |
 | **P2 ドライバの置き場 (動的読み込み)** | カーネル権限のモジュールを起動時に一覧から順に載せる。内側向けの取り決め (ドライバが実装する口 / カーネルが提供する口)、失敗時の扱い、どれを外に出すか (ブートに要るものは静的) | PLAN §3、HAL_WIRING 1-4 (`struct pci_driver.size`)、shlib.c の再配置・ジャンプ表、M0 §6 (ロードしたコードへ飛ぶ経路) | P1 (置き場は帯と同時に決める) | 2 |
 | **P3 HAL の結線** | HAL_WIRING の残 (W7)、NIC 境界 `net/nic.h` (L-C)、音源バックエンド (P3)、1kHz tick、ISA 非依存化の仕分け | HAL_WIRING §2・§4・§6、PLAN §3-1、§5-5 | P2 (取り決めの形を共有) | 2〜3 |
 | **P4 デバイス窓の帯の資源割当** | 予約 broker (owner 台帳、一括 transaction、GUI 境界)、physmem → pgalloc → mapping の接続、>16MiB の安全な検出源、面公開 API の記述子化 (`virt`/`phys`)、APP_BAND §5 の受入 | DEVICE_RESERVATION、MEMORY_RAM_INTEGRATION、TRIDENT §4-2、02_memory「デバイス窓」、APP_BAND_PDE | P1 (帯の決定に依存する部分を分ける: 帯 `0xFE000000` は実装済みなので broker は先行できる) | 2〜3 |
@@ -141,7 +141,7 @@
 | **P7 KAPI / ABI** | 追記のみ (v69〜) を続けるか fork で 1 回整理するか、R = 300 の残り 60 本、OS32X ヘッダ、64 ビットを返せない (出力 2 本)、SDK ヘッダの C11 化と apps/game の C89。**決定 (ユーザー 2026-09-30): 後方互換は基本考えない** — 全再ビルド・旧形式は拒否・互換層なし (TASK_MEMMAP_V3 D7)。KAPI のスロット順は維持する ([ABI2]) が、v2.1 のバイナリを v3 で動かすことは目的にしない。追記のみか fork で 1 回整理するかは残る (§7-1 U8) | KAPI_SPEC §3-2・§4-0、ROADMAP §0、TASK_KAPI_DATA_FIELDS、ARM_GAUGE §10 | P0 (C11)、§5 の決裁 | 決裁 1、実施は P1 と同時 |
 | **P8 GUI 層** | 1.4 で閉じた → v3 の線。8bpp のまま (Trident T6)、640×480×16bit の境界の扱い (§4 D5)、microUI へのマウスキー、F3a〜c 等の保留、GUI アプリ群 (先送り)。**決定 (2026-09-30): 音 (PCM リング) と入力の層は P1 ではなくここ (別の柱)** (TASK_MEMMAP_V3 D19) | ROADMAP §0・§2、TRIDENT §4-3、KBD_NAV、HANDOVER_v14 §3 | P5 (Trident 段 3) | 4 |
 | **P9 アプリ層・互換層** | Video HAL の共通化 (framebuffer / pitch / VSync / flip / optional BitBLT)、VESA2 的互換層、SDL 1.2 の受け皿、ZSNES 試験台、Host Services の延長 (ネット CD 5-6、HostDrv 5-7)。**決定 (2026-09-30): P1 から切り出した別の柱** (TASK_MEMMAP_V3 D19)。全画面アプリの表示面 / フリップ面は lease で受け取る (同 §2-2)、アプリ私有サーフェス + WM 合成はサーフェス層の票で | DESIGN_APP_FIRST §7〜§10、PLAN §5-6・5-7、TASK_MEMMAP_V3 §5-7 | P5 (Trident か Cirrus の 16bit 面)、P4 (面公開)、P1 (lease 契約) | **v3 後半** (5) |
-| **P10 データ・設定層** | F2 (SQLite 接続単位の FD 所有)、FEP_BOUNDARY、F3a〜c (SQLite VFS の正直化)、settings §7 の対象外 | F2_OWNERSHIP、FEP_BOUNDARY、settings/DESIGN、HANDOVER_v14 §3 | 独立 (P1 に依存しない) | **拾うかの決裁** (§7 U6)、実施は 2〜4 のどこでも |
+| **P10 データ・設定層** | F2 (SQLite 接続単位の FD 所有)、FEP_BOUNDARY、F3a〜c (SQLite VFS の正直化)、settings §7 の対象外。**追加 (ユーザー決定 2026-09-30): [TASK_DICT_META](../fep/TASK_DICT_META.md) — FEP 辞書のメタ情報 (形式の版・dict_id・license・`mem_reserve_kb` 等) と学習データの別ファイル化 (`/etc/fep_user.db`)。着手は v3 後半** (TASK_MEMMAP_V3 D27・D28、§4-6) | F2_OWNERSHIP、FEP_BOUNDARY、settings/DESIGN、HANDOVER_v14 §3、TASK_DICT_META | 独立 (P1 に依存しない)。TASK_DICT_META だけは P1 の T4・T5a の後 | **拾うかの決裁** (§7 U6)、実施は 2〜4 のどこでも。**TASK_DICT_META は v3 後半** |
 
 **順序の案 (PLAN §1 の引き直し)**:
 
