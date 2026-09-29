@@ -17,9 +17,11 @@ np2sysp getmpos で位置を取るので dx/dy は効かない。POLICY_DEBUG §
 
 出力: 各手順の要点 1 行と、スクリーンショット (--out、既定 build/out/gui_gate/) の PNG。
 判定は人間 (PM) がする。数値だけ自動で照合する: GUI に入った直後の `/api/status` が
-`scrn_ymax == --h` かつ `grph_disp == 1` でなければ NG (`gui_entered`。CUI のままでも
+「`scrn_ymax == --h` かつ `grph_disp == 1`」(98 の GDC / PEGC) でも「`wab_relay == 1` かつ
+`wab_height == --h`」(Cirrus の WAB 中継) でもなければ NG (`gui_entered`。CUI のままでも
 `leave_gshell` の `ver` は通るので、これが無いと GUI に入らなくても RESULT: OK になった)。
-v11 は加えて最後の `wab_relay == 0`。
+Cirrus の gshell 中は 98 の表示レジスタが `scrn_ymax 400 grph_disp 0` のまま残る (2026-09-29 夕)。
+v11 は加えて最後の `wab_relay == 0`。撮影ごとの `X-Screen-Source` は `--out` の `shots.json` に残る。
 v1.2 の台本 (Start / taskbar / dialog / filer / session) は W3〜C5 の結合時にここへ足す。
 
 CUI へ戻る経路について (G5 で ESC の即時切替と上部バーを撤去した。契約 S6 / 票 W3 §4.1):
@@ -160,7 +162,11 @@ def _cmd_raw(line, timeout):
         return r.read().decode("utf-8", "replace")
 
 
-def status(keys=("scrn_ymax", "grph_disp", "wab_relay", "fault_generation")):
+STATUS_KEYS = ("scrn_ymax", "grph_disp", "wab_relay", "wab_width", "wab_height",
+               "fault_generation")
+
+
+def status(keys=STATUS_KEYS):
     import json
     d = json.loads(get("/api/status")[0])
     return {k: d.get(k) for k in keys}
@@ -227,13 +233,30 @@ def close_rshell(first_wait=5.0, extra_wait=3.0, max_extra=2, poll=0.5):
 
 
 def gui_entered(st, h):
-    """`status()` の値から、GUI (gshell) の画面に居るかを判定する。
+    """`status()` の値から、GUI (gshell) の画面に --h ラインで居るかを判定する。
 
-    GUI は --h ラインのグラフィック表示 (`grph_disp == 1`)。CUI は 400 ラインで
-    グラフィックを消している (R2 の予備調査: CUI は `scrn_ymax 400 grph_disp 0`、
+    98 の GDC / PEGC の GUI は --h ラインのグラフィック表示 (`grph_disp == 1`)。CUI は
+    400 ラインでグラフィックを消している (R2 の予備調査: CUI は `scrn_ymax 400 grph_disp 0`、
     PEGC の GUI は `scrn_ymax 480 grph_disp 1`)。9801 (--h 400) では scrn_ymax が
-    CUI と同じなので、grph_disp が決め手になる。"""
-    return st.get("scrn_ymax") == h and st.get("grph_disp") == 1
+    CUI と同じなので、grph_disp が決め手になる。
+    Cirrus の GUI は WAB 中継 (`wab_relay == 1`) で、画面高は `wab_height`。このとき 98 の
+    表示レジスタは CUI と同じ `scrn_ymax 400 grph_disp 0` のまま (2026-09-29 夕の R2)。"""
+    if st.get("scrn_ymax") == h and st.get("grph_disp") == 1:
+        return True
+    return st.get("wab_relay") == 1 and st.get("wab_height") == h
+
+
+def gui_height(st):
+    """GUI に居るなら実際の画面高、居なければ None (`back_to_cui` が使う)。
+
+    `gui_entered` と同じ規則: WAB 中継中 (Cirrus) は `wab_height`、そうでなく
+    `grph_disp == 1` なら `scrn_ymax`。Cirrus では `scrn_ymax` が 400 のままなので、
+    それで座標を作ると Start に当たらない。値が無いときは 0 (呼び手が --h で補う)。"""
+    if st.get("wab_relay") == 1:
+        return st.get("wab_height") or 0
+    if st.get("grph_disp") == 1:
+        return st.get("scrn_ymax") or 0
+    return None
 
 
 def restore_rshell():
@@ -268,7 +291,8 @@ def begin_gui(h, settle=10.0, poll=1.0):
             break
         time.sleep(poll)
     print("  status %s" % st)
-    print("  NG: GUI に入っていない (期待 scrn_ymax=%d grph_disp=1)" % h)
+    print("  NG: GUI に入っていない (期待 scrn_ymax=%d grph_disp=1 "
+          "または wab_relay=1 wab_height=%d)" % (h, h))
     back_to_cui(st, h)
     return False
 
@@ -276,14 +300,16 @@ def begin_gui(h, settle=10.0, poll=1.0):
 def back_to_cui(st, h):
     """入口の NG の後始末: CUI + rshell へ戻す。
 
-    `grph_disp == 1` なら GUI には入っている (高さが --h と違うだけ)。そこで CUI の前提の
-    `restore_rshell` を打つと `rshell` が gshell に打ち込まれ、ゲストが GUI に残る
-    (2026-09-29 の Cirrus 試験で発生)。その場合は**実際の高さ** (`scrn_ymax`) の座標で
+    `gui_height` が高さを返すなら GUI には入っている (高さが --h と違うだけ)。そこで CUI の
+    前提の `restore_rshell` を打つと `rshell` が gshell に打ち込まれ、ゲストが GUI に残る
+    (2026-09-29 の Cirrus 試験で 2 回発生: 昼は 98 の `scrn_ymax` 違い、夕は WAB 中継で
+    `grph_disp 0` のまま)。その場合は**実際の高さ** (`gui_height`) の座標で
     `leave_gshell` を通して CUI へ戻す (rshell の復旧も leave_gshell がする)。
     GUI に入っていなければ従来どおり `restore_rshell`。"""
-    if st.get("grph_disp") == 1:
-        real_h = st.get("scrn_ymax") or h
-        print("  GUI には入っている (scrn_ymax=%s) -> その高さで CUI へ戻す" % real_h)
+    real_h = gui_height(st)
+    if real_h is not None:
+        real_h = real_h or h
+        print("  GUI には入っている (高さ %s) -> その高さで CUI へ戻す" % real_h)
         return leave_gshell(Mouse(real_h))
     return restore_rshell()
 
@@ -324,9 +350,23 @@ class Mouse:
 
 
 class Shots:
+    """撮影。1 枚ごとに名前・`X-Screen-Source`・寸法を `outdir/shots.json` に書き足す。
+
+    Cirrus では `src=auto` が WAB の画面 (`X-Screen-Source: wab`) を返す — 98 の GDC の
+    画面を撮っていないことを後から確かめられるように、撮るたびに記録を書き直す
+    (台本が途中で落ちても、それまでの分は残る)。"""
+
     def __init__(self, outdir):
         self.outdir = outdir
+        self.log = []
         os.makedirs(outdir, exist_ok=True)
+
+    def _record(self, name, src, size):
+        import json
+        self.log.append({"name": name, "src": src,
+                         "size": list(size) if size else None})
+        with open(os.path.join(self.outdir, "shots.json"), "w", encoding="utf-8") as f:
+            json.dump(self.log, f, ensure_ascii=False, indent=1)
 
     def take(self, name):
         data, hdr = get("/api/screenshot?src=auto")
@@ -334,14 +374,20 @@ class Shots:
         with open(bmp, "wb") as f:
             f.write(data)
         png = os.path.join(self.outdir, name + ".png")
+        size = None
         try:
             from PIL import Image
-            Image.open(bmp).convert("RGB").save(png)
+            im = Image.open(bmp)
+            size = im.size
+            im.convert("RGB").save(png)
             os.remove(bmp)
             out = png
         except Exception:
             out = bmp
-        print("  shot %-24s src=%s" % (name, hdr.get("X-Screen-Source", "?")))
+        src = hdr.get("X-Screen-Source", "?")
+        self._record(name, src, size)
+        print("  shot %-24s src=%s%s" % (name, src,
+                                        " %dx%d" % size if size else ""))
         return out
 
 
