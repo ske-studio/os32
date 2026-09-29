@@ -3,7 +3,7 @@
 > 発行: 2026-09-28 / 状態: **調査課題**
 > 対象リリース: **kernel v2.1**
 > 対象: PC-9821Ra266 実機 / PEGC 640x480x256
-> 関連: [GUI設計](../DESIGN.md) / [PEGC完了記録](../../archive/gui_v11/TASK_H2_pegc.md) / [ドライバ仕様](../../05_drivers.md#5-5-グラフィック-gfx-hal--libos32gfx)
+> 関連: [GUI設計](../DESIGN.md) / [PEGC完了記録](../../../archive/gui_v11/TASK_H2_pegc.md) / [ドライバ仕様](../../../05_drivers.md#5-5-グラフィック-gfx-hal--libos32gfx)
 
 ## 0. 位置づけ
 
