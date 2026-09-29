@@ -2,6 +2,10 @@
 """gui_gate.py — NP21/W ai-debug の HTTP API で GUI のゲート操作列を回す (PM 所有)。
 
 前提: NP21/W (ai-debug 版) が 127.0.0.1:8025 で動き、OS32 が CUI (rshell) で起動済み。
+台本は先頭で `/api/key seq=ESC` を送って rshell を閉じ、tvram に `[Remote shell closed]` が
+新しく出たことを確かめてから `os32gui` を打つ (`close_rshell`)。確かめられなければ GUI へ
+入らずに NG で終わる。rshell が有効なまま `os32gui` を 4 文字ずつ打つと `os32` / `gui` の
+2 コマンドになり GUI に入らない (POLICY_DEBUG §4-31。2026-09-29 に R2 の予備調査で再発)。
 マウスは `/api/mouse` の **ax/ay (シームレス絶対座標)** を使う (OS32 は NP21/W では
 np2sysp getmpos で位置を取るので dx/dy は効かない。POLICY_DEBUG §4-23)。
 
@@ -12,7 +16,10 @@ np2sysp getmpos で位置を取るので dx/dy は効かない。POLICY_DEBUG §
   python3 tools/gui_gate.py click X Y      # 1 回クリック (デバッグ)
 
 出力: 各手順の要点 1 行と、スクリーンショット (--out、既定 build/out/gui_gate/) の PNG。
-判定は人間 (PM) がする。数値 (wab_relay / scrn_ymax / fault_generation) だけ自動で照合する。
+判定は人間 (PM) がする。数値だけ自動で照合する: GUI に入った直後の `/api/status` が
+`scrn_ymax == --h` かつ `grph_disp == 1` でなければ NG (`gui_entered`。CUI のままでも
+`leave_gshell` の `ver` は通るので、これが無いと GUI に入らなくても RESULT: OK になった)。
+v11 は加えて最後の `wab_relay == 0`。
 v1.2 の台本 (Start / taskbar / dialog / filer / session) は W3〜C5 の結合時にここへ足す。
 
 CUI へ戻る経路について (G5 で ESC の即時切替と上部バーを撤去した。契約 S6 / 票 W3 §4.1):
@@ -159,6 +166,112 @@ def status(keys=("scrn_ymax", "grph_disp", "wab_relay", "fault_generation")):
     return {k: d.get(k) for k in keys}
 
 
+def tvram_lines():
+    """`/api/tvram` の 25 行 (右端の空白を落とす)。"""
+    import json
+    d = json.loads(get("/api/tvram")[0])
+    return [l.rstrip() for l in d.get("lines", [])]
+
+
+RSHELL_CLOSED = "[Remote shell closed]"   # userland/shell/rshell.c の rshell_exit
+
+
+def _tail(lines, n):
+    return [l for l in lines if l.strip()][-n:]
+
+
+def rshell_closed_fresh(before, after):
+    """ESC の前後の tvram (行の列) から、**この ESC で** rshell が閉じたと言えるか。
+
+    rshell は閉じるときに `\n[Remote shell closed]\n` を出し、その後ろには CUI の
+    プロンプトしか続かない。だから「印が画面の末尾 (空でない最後の 2 行) にあり、
+    かつ ESC の前から変わった」ことを見る。前の回の印が画面に残っているだけでは
+    数えない (末尾が同じで、印の数も増えていない)。
+    印の数は、同じ末尾 (印 + プロンプト) が 2 回続いたときの判定に使う。"""
+    a_tail = _tail(after, 2)
+    if not any(RSHELL_CLOSED in l for l in a_tail):
+        return False
+    n_before = sum(l.count(RSHELL_CLOSED) for l in before)
+    n_after = sum(l.count(RSHELL_CLOSED) for l in after)
+    return n_after > n_before or a_tail != _tail(before, 2)
+
+
+def close_rshell(first_wait=5.0, extra_wait=3.0, max_extra=2, poll=0.5):
+    """ESC で rshell を閉じ、tvram に `[Remote shell closed]` が新しく出たことを確かめる。
+
+    rshell は重なりうる (§4-31: 手打ちの `rshell` が 2 段になる)。最初の ESC で閉じたのを
+    確かめた後も、印が新しく出なくなるまで ESC を足す (最大 `max_extra` 回)。CUI の
+    プロンプトでの ESC は行を捨てるだけなので害は無い。
+    最初の ESC で印が出なければ False (rshell が居ない・ESC が届かない — どちらにしても
+    GUI へ入る前提が確かめられない)。"""
+    def one(wait):
+        before = tvram_lines()
+        key(seq="ESC")
+        t0 = time.time()
+        while True:
+            time.sleep(poll)
+            after = tvram_lines()
+            if rshell_closed_fresh(before, after):
+                return True
+            if time.time() - t0 >= wait:
+                return False
+
+    if not one(first_wait):
+        print("  rshell close: NG (%r が tvram に出ない)" % RSHELL_CLOSED)
+        return False
+    n = 1
+    while n <= max_extra and one(extra_wait):
+        n += 1
+    print("  rshell close: ok (%d 段)" % n)
+    return True
+
+
+def gui_entered(st, h):
+    """`status()` の値から、GUI (gshell) の画面に居るかを判定する。
+
+    GUI は --h ラインのグラフィック表示 (`grph_disp == 1`)。CUI は 400 ラインで
+    グラフィックを消している (R2 の予備調査: CUI は `scrn_ymax 400 grph_disp 0`、
+    PEGC の GUI は `scrn_ymax 480 grph_disp 1`)。9801 (--h 400) では scrn_ymax が
+    CUI と同じなので、grph_disp が決め手になる。"""
+    return st.get("scrn_ymax") == h and st.get("grph_disp") == 1
+
+
+def restore_rshell():
+    """GUI に入れなかった後 (CUI・rshell は閉じている) に rshell を戻す。
+
+    CUI のプロンプトは行単位で読むので、ここでは 4 文字ずつの text で困らない。"""
+    key(text="rshell")
+    time.sleep(0.5)
+    key(seq="RETURN")
+    time.sleep(2)
+    ok = "OS32" in _cmd_raw("ver", 20)
+    print("  rshell restore: %s" % ("ok" if ok else "NG"))
+    return ok
+
+
+def begin_gui(h, settle=10.0, poll=1.0):
+    """台本の入口: rshell を閉じる → `os32gui` → `/api/status` で GUI に居ることを確かめる。
+
+    False なら台本はそこで NG で終わる (CUI に Run... のパスなどを打ち込まない)。
+    GUI に入れなかったときは rshell を戻しておく (次の台本・/api/cmd が使えるように)。"""
+    if not close_rshell():
+        return False
+    enter_gshell()
+    t0 = time.time()
+    while True:
+        st = status()
+        if gui_entered(st, h):
+            print("  status %s (GUI ok)" % st)
+            return True
+        if time.time() - t0 >= settle:
+            break
+        time.sleep(poll)
+    print("  status %s" % st)
+    print("  NG: GUI に入っていない (期待 scrn_ymax=%d grph_disp=1)" % h)
+    restore_rshell()
+    return False
+
+
 class Mouse:
     def __init__(self, h):
         self.h = h
@@ -259,8 +372,9 @@ def enter_gshell():
 
     **rshell が有効なまま呼ばない。** rshell は `kbd_trygetchar` の生読みで、入力が
     途切れるたびに 1 コマンドとして実行するので、4 文字ずつの text が
-    `os32` / `gui` という別々のコマンドになる (memory os32-fep-testing)。先に
-    `key(seq="ESC")` で抜けること。text と RETURN の間は少し待つ (打鍵の取りこぼし避け)。"""
+    `os32` / `gui` という別々のコマンドになる (POLICY_DEBUG §4-31)。台本は `begin_gui`
+    から呼ぶこと — `close_rshell` で抜けたのを tvram で確かめ、入った後は
+    `gui_entered` で `/api/status` を照合する。text と RETURN の間は少し待つ (打鍵の取りこぼし避け)。"""
     key(text="os32gui")
     time.sleep(1.0)
     key(seq="RETURN")
@@ -316,9 +430,8 @@ def scenario_v11(h, shots):
     """v1.1 G2 相当: gui_demo の窓 2 枚でドラッグ / 重なり / クリック配送。"""
     m = Mouse(h)
     print("[v11] enter gshell + gui_demo (Start -> Run...)")
-    enter_gshell()
-    st = status()
-    print("  status %s" % st)
+    if not begin_gui(h):
+        return False
     run_dialog(m, "/usr/bin/gui_demo.bin")
     shots.take("v11_1_two_windows")
     print("[v11] drag Widgets title (100,58) -> (300,208) with XOR frame")
@@ -359,7 +472,8 @@ def scenario_v12_g1(h, shots):
     """G1: taskbar / Start / Programs / context menu / clock / window button."""
     m = Mouse(h)
     print("[g1] enter gshell")
-    enter_gshell()
+    if not begin_gui(h):
+        return False
     shots.take("g1_1_desktop_taskbar")
     print("[g1] Start menu open")
     m.click(30, tb(h))
@@ -400,7 +514,8 @@ def scenario_v12_g4(h, shots, do_halt=False):
     optionally Shut Down (halt: NP21/W must be restarted afterwards)."""
     m = Mouse(h)
     print("[g4] gshell + gui_demo via Run...")
-    enter_gshell()
+    if not begin_gui(h):
+        return False
     run_dialog(m, "/usr/bin/gui_demo.bin")
     shots.take("g4_1_demo")
     print("[g4] Run... again while demo runs -> v12_api_test replaces it")
@@ -417,7 +532,9 @@ def scenario_v12_g4(h, shots, do_halt=False):
     print("  system.cfg: %s" % " | ".join(l for l in cfg.splitlines() if "GUI" in l))
     if do_halt:
         print("[g4] Shut Down -> halt (NP21/W must be restarted by os32-cycle deploy)")
-        enter_gshell()
+        # leave_gshell が rshell を戻しているので、もう一度閉じてから入る。
+        if not begin_gui(h):
+            return False
         m.click(30, tb(h))
         m.click(*start_row(h, ROW_HALT))
         time.sleep(1.5)
