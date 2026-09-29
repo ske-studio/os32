@@ -12,6 +12,7 @@ RESULT: OK になっていた。ここで固定するのは 3 つ:
   2. GUI に居ることの判定 (`gui_entered`) — `scrn_ymax == --h` かつ `grph_disp == 1`。
   3. 台本の入口 (`begin_gui`) と台本全体 — 偽のゲスト (rshell の段数・GUI の有無・
      tvram・/api/status を持つ) の上で、GUI に入れなければ NG、入れれば OK。
+     NG の後は CUI + rshell へ戻す — 高さ違いで GUI に入っていれば GUI から抜けてから。
 
 NP21/W もゲストも要らない。実物の tools/gui_gate.py (または変異させた写し) を
 import して、post / get / _cmd_raw / time を偽物に差し替える。
@@ -81,6 +82,8 @@ class FakeGuest:
         self.gui_entries = 0
         self.ax = self.ay = 0
         self.cui_pending = False
+        self.clicks = 0
+        self.gui_text = []
         self.now = 0.0
 
     # --- 画面 ---
@@ -131,6 +134,7 @@ class FakeGuest:
 
     def text(self, t):
         if self.gui:
+            self.gui_text.append(t)   # 実物では gshell (の端末・窓) に打ち込まれる
             return
         if self.depth > 0:
             self.out("> " + t)
@@ -145,6 +149,8 @@ class FakeGuest:
     def mouse(self, data):
         if "ax" in data:
             self.ax, self.ay = data["ax"], data["ay"]
+        if data.get("btn") == 1:
+            self.clicks += 1
         if data.get("btn") == 1 and self.gui:
             px = self.ax * 639 // 65535
             py = self.ay * (self.h - 1) // 65535
@@ -284,10 +290,22 @@ def case_begin(mod, tmp):
     wire(mod, guest, tmp)
     check(mod.begin_gui(480) is False, "begin: GUI に入らないのに OK")
     check(guest.depth == 1, "begin: 失敗の後に rshell を戻さない")
-    # 高さ違い (400 ラインで入ったのに --h 480) → NG。
+    check(guest.clicks == 0, "begin: GUI に入っていないのにマウスを押す (従来どおりでない)")
+    # 高さ違い (400 ラインで GUI に入ったのに --h 480) → NG。GUI には入っているので、
+    # 実際の高さで Start → CUI mode → Yes を通して CUI へ戻し、rshell を戻す
+    # (2026-09-29 Cirrus 試験: CUI の前提で打った `rshell` が gshell に入り、GUI に残った)。
     guest = FakeGuest(h=400, depth=1)
     wire(mod, guest, tmp)
     check(mod.begin_gui(480) is False, "begin: 高さ違いを OK にする")
+    check(not guest.gui, "begin: 高さ違いで GUI に入ったまま残す")
+    check(guest.depth == 1, "begin: 高さ違いの後に rshell を戻さない")
+    check(not guest.gui_text, "begin: GUI に text を打ち込む (%r)" % guest.gui_text)
+    # 逆向き (480 ラインで入ったのに --h 400) も同じ。
+    guest = FakeGuest(h=480, depth=1)
+    wire(mod, guest, tmp)
+    check(mod.begin_gui(400) is False, "begin: 高さ違い (480/--h 400) を OK にする")
+    check(not guest.gui and guest.depth == 1,
+          "begin: 高さ違い (480/--h 400) で CUI + rshell に戻らない")
 
 
 def case_scenarios(mod, tmp):
@@ -348,7 +366,7 @@ MUTATIONS = [
     (r"    a_tail = _tail\(after, 2\)\n    if not any\(RSHELL_CLOSED in l for l in a_tail\):",
      "    a_tail = _tail(after, 2)\n    if not any(RSHELL_CLOSED in l for l in after):",
      "印が末尾に無くても数える (古い印の後で rshell が生きている)"),
-    (r"    restore_rshell\(\)\n    return False",
+    (r"    back_to_cui\(st, h\)\n    return False",
      "    return False",
      "GUI に入れなかった後に rshell を戻さない"),
     (r"    if not begin_gui\(h\):\n        return False\n    run_dialog\(m, \"/usr/bin/gui_demo.bin\"\)\n    shots\.take\(\"v11_1",
@@ -363,6 +381,14 @@ MUTATIONS = [
     (r"        if not begin_gui\(h\):\n            return False\n        m\.click\(30, tb\(h\)\)",
      "        enter_gshell()\n        m.click(30, tb(h))",
      "--halt の 2 回目で rshell を閉じない"),
+    (r"    if st\.get\(\"grph_disp\"\) == 1:\n        real_h",
+     "    if False:\n        real_h",
+     "高さ違いで GUI に入っても CUI の前提で rshell を打つ (Cirrus 試験で GUI に残った)"),
+    (r"leave_gshell\(Mouse\(real_h\)\)", "leave_gshell(Mouse(h))",
+     "GUI から抜けるのに --h の座標を使う (実際の高さでないと Start に当たらない)"),
+    (r"    if st\.get\(\"grph_disp\"\) == 1:\n        real_h",
+     "    if True:\n        real_h",
+     "GUI に入っていなくても leave_gshell を通す (従来どおりでない)"),
 ]
 
 

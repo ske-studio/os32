@@ -56,9 +56,32 @@ rshell を閉じるか、`/api/status` の `scrn_ymax` / `grph_disp` がこの�
 | 11〜13 | v11 / v12g1 / v12g4 が入口の NG を無視する (元の不具合) | scenarios |
 | 14 | `--halt` の 2 回目で rshell を閉じない | scenarios |
 
+## 4b. 入口の NG で GUI に残る (2026-09-29 追加)
+
+- 経緯: Cirrus 試験で入口が「GUI に入ったが `scrn_ymax` が `--h` と一致しない」で NG になり、
+  `restore_rshell()` が CUI の前提で打った `rshell` が gshell に入ってゲストが GUI に残った
+  (手で `leave_gshell` を呼んで復旧)。
+- 直し: NG の後始末を `back_to_cui(st, h)` にした。`grph_disp == 1` なら**実際の高さ**
+  (`scrn_ymax`) の `Mouse` で `leave_gshell` を通して CUI へ戻す (rshell の復旧も
+  `leave_gshell` がする)。GUI に入っていなければ従来どおり `restore_rshell`。
+- 試験 (`case_begin`): 偽ゲスト h=400 に `begin_gui(480)`、h=480 に `begin_gui(400)` —
+  NG・CUI に戻る・rshell 1 段・GUI に text を打たない。GUI に入らない場合はマウスを押さない。
+  偽ゲストは GUI 中の text (`gui_text`) と押下の回数 (`clicks`) を数える。
+- RED (直す前の実物 = feat/gui `ab3a3a65`): `begin` の 4 件 (GUI に残す・rshell を戻さない・
+  `['rshe', 'll']` を GUI に打つ・逆向きも同じ)。GREEN: `SUMMARY 5/5 PASS`。
+
+| # | 壊し方 | 当たる試験 |
+|---|---|---|
+| 10 | (対象を `back_to_cui(st, h)` に付け替え) NG の後に何もしない | begin |
+| 15 | `grph_disp == 1` でも CUI の前提で `restore_rshell` (直す前の挙動) | begin |
+| 16 | GUI から抜けるのに `--h` の座標を使う | begin |
+| 17 | GUI に入っていなくても `leave_gshell` を通す | begin |
+
 ## 5. 未検証 (NP21/W で見ること)
 
 - 実ゲストで ESC 1 回目に `[Remote shell closed]` が 5 秒以内に tvram に出ること。
 - CUI のプロンプトでの 2 回目の ESC が画面を変えないか、変えても末尾 2 行に印を残さないこと
   (残すと重なりの判定で余分に ESC を 1 回送るだけ — 上限 2 回で止まる)。
 - 9801 (`--h 400`) と PEGC (`--h 480`) の両方で、GUI 中の `grph_disp == 1` と `scrn_ymax == --h`。
+- 高さ違いで GUI に入ったとき、実際の高さの座標で Start → CUI mode → Yes が当たり CUI へ戻ること
+  (Cirrus で `scrn_ymax` が実際の画面高を表すかを含む)。
