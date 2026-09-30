@@ -116,7 +116,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [archive/gui_v11/](archive/gui_v11/TASK_H1_hal_backend.md) | GUI シェル v1.1 の票 12 本 (H1〜H3 / K1〜K4 / W1 W2 / C1〜C3)。索引は [tasks/gui/TASKS.md](tasks/gui/TASKS.md) | 2026-09-06 |
 | [archive/gui_v12/](archive/gui_v12/TASK_K5_v12_proto.md) | GUI シェル v1.2 の票 5 本 (K5 / W3 W4 / C4 C5)。索引は [tasks/gui/v12/TASKS.md](tasks/gui/v12/TASKS.md) | 2026-09-07 (`d739494`) |
 | [archive/gui_v13_reviews/](archive/gui_v13_reviews/REVIEW_T0_T1.md) | GUI シェル v1.3 のレビュー記録 5 本 + [限定クロスリンク](archive/gui_v13_reviews/CROSS_LINK_T4.md) + [途中保存](archive/gui_v13_reviews/VERIFICATION_PROGRESS.md)。票そのものは `tasks/gui/v13/` に残る | 2026-09-14 |
-| [archive/settings/](archive/settings/TASK_S2.md) | 設定レジストリの票 5 本 (S2 / S3 / S3I2 / S4 / S5)。S0 / S6 / S6P と設計文書は `tasks/settings/` に残る | 2026-09-13〜14 |
+| [archive/settings/](archive/settings/TASK_S2.md) | 設定レジストリの票 5 本 (S2 / S3 / S3I2 / S4 / S5)。S0 / S6 / S6P と設計文書は `tasks/settings/` に残る。撤回した MEMORY_RAM_INTEGRATION (2026-09-30) もここ | 2026-09-13〜14 |
 | [archive/network/](archive/network/TASK_N0.md) | Host Services の票 5 本 (N0〜N4)。計画 3 本は `tasks/network/` に残る | 2026-09-14〜15 |
 | [archive/kernel_v2/](archive/kernel_v2/PLAN.md) | カーネル 2.0 の完了記録 8 本 (計画・M1〜M3・凍結契約・コーダー票 3 本)。タグ `v2.0` | 2026-09-03 |
 | [archive/TEST_INVENTORY_2026-09-14.md](archive/TEST_INVENTORY_2026-09-14.md) | 試験の棚卸しの快照。正典は [TESTS.md](TESTS.md) へ移行 | 2026-09-14 |
@@ -182,12 +182,12 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 |-------------|------|
 | [tasks/v3/V3_PLAN_DRAFT.md](tasks/v3/V3_PLAN_DRAFT.md) | **v3 本案の草案 — 草案群のまとめ (2026-09-30、草案)** — 草案の一覧と振り分け (§1)、目的と範囲・**目標の 2 段** (§2、§2-1)、柱と順序の案 (§3)、**メモリマップの柱は決定済み** (§3-1 は要点と決着先、正典は TASK_MEMMAP_V3)、食い違いの一覧 (§4)、v2.x との互換 (§5)、fork の段取り (§6)、ユーザー判断と Codex の論点 (§7)。本案への昇格はユーザー判断と Codex の突き合わせの後 |
 | [tasks/v3/PLAN.md](tasks/v3/PLAN.md) | **v3 の計画 (2026-09-17)** — 機能を足す前に入れ物を作り直す (C11 → メモリマップ再配置 → ドライバの動的読み込み → PCI → 82557)。カーネル本体の大きさと残りは [02_memory.md §2-1](02_memory.md) (生成)。アプリへの払い出し §4、アイデア §5。**本案へ書き直す対象** |
-| [tasks/v3/TASK_MEMMAP_V3.md](tasks/v3/TASK_MEMMAP_V3.md) | **v3 のメモリマップ — 設計中 (方針確定 2026-09-30、3 者討論で決定、Codex Approve)**。決定 D1〜D22 (システムは恒等のまま、アプリだけ 0x80000000〜、物理台帳、SQLite のモジュール化、低位 640KB を V86 へ、OpenType)、帯の表、票 T0〜T7、受入条件、経緯。実装は未着手 |
-| [tasks/v3/U6_PENDING_REVIEW.md](tasks/v3/U6_PENDING_REVIEW.md) | **U6 の仕分け表 — 草案 (2026-09-30)**: 保留 5 件 (F3a〜c / F2c / FEP_BOUNDARY / MEMORY_RAM_INTEGRATION / DEVICE_RESERVATION) の現状 (コードで確認)、TASK_MEMMAP_V3 の決定で置き換わった部分と残る部分、拾う先 (P4 / P10 / T 票の要件 / 撤回) の提案、ユーザーの判断点 6 つ。ユーザーの再確認用で決定ではない |
+| [tasks/v3/TASK_MEMMAP_V3.md](tasks/v3/TASK_MEMMAP_V3.md) | **v3 のメモリマップ — 設計中 (方針確定 2026-09-30、3 者討論で決定、Codex Approve)**。決定 D1〜D34 (D29〜D34 = 保留 5 件 U6 の拾い方、2026-09-30; システムは恒等のまま、アプリだけ 0x80000000〜、物理台帳、SQLite のモジュール化、低位 640KB を V86 へ、OpenType)、帯の表、票 T0〜T7、受入条件、経緯。実装は未着手 |
+| [tasks/v3/U6_PENDING_REVIEW.md](tasks/v3/U6_PENDING_REVIEW.md) | **U6 の仕分け表 — 決裁済み (2026-09-30、ユーザーが 6 点すべて推奨どおりに決定 → TASK_MEMMAP_V3 D29〜D34)**: 保留 5 件 (F3a〜c / F2c / FEP_BOUNDARY / MEMORY_RAM_INTEGRATION / DEVICE_RESERVATION) の現状 (コードで確認)、TASK_MEMMAP_V3 の決定で置き換わった部分と残る部分、拾う先 (T2 / T4 / T5a の要件、P4、撤回)、判断点 6 つとその決定 |
 | [tasks/v3/PORT_CANDIDATES.md](tasks/v3/PORT_CANDIDATES.md) | **既存ソフトウェアの移植候補 — 計画 (2026-09-30、v3 後半・P9)** — 移植の前提となる基盤 (libc の穴・C++ 無し・x87・Video HAL・PCM・協調型・ライセンスの置き場)、候補 23 本の表 (ライブラリ / テキスト系 / 8bpp ゲーム / メディア / ワープロ・表計算)、**ZSNES の難度と障害**、推奨の挑戦順 (zlib → Lua → … → doomgeneric → Wolf4SDL → ZSNES)、未確認事項 |
 | [tasks/v3/TASK_HAL_WIRING.md](tasks/v3/TASK_HAL_WIRING.md) | 結線の土台 (割り込みの動的登録 / 8237 / DMA プール / PCI の結線表 / µs 時計) **受入完了・実機確認待ち** (残: W7) |
 | [tasks/v3/TASK_PCM_CS4231.md](tasks/v3/TASK_PCM_CS4231.md) | CS4231 (MATE-X PCM) の PCM 再生ドライバ **受入待ち** (E0〜E3 合格、残: E4・E5 は NP21/W、E6 は実機)。ini の SNDboard は [D2] |
-| [tasks/settings/DEVICE_RESERVATION.md](tasks/settings/DEVICE_RESERVATION.md) / [MEMORY_RAM_INTEGRATION.md](tasks/settings/MEMORY_RAM_INTEGRATION.md) / [FEP_BOUNDARY.md](tasks/settings/FEP_BOUNDARY.md) / [F2_OWNERSHIP.md](tasks/settings/F2_OWNERSHIP.md) | v3 の入力になる設計提案 (計画 / 計画 / 設計中 / 設計中)。DEVICE_RESERVATION は 2026-09-29 に Cirrus の窓の帯で更新。F2 は F2b の内部基盤だけ着地 |
+| [tasks/settings/DEVICE_RESERVATION.md](tasks/settings/DEVICE_RESERVATION.md) / [FEP_BOUNDARY.md](tasks/settings/FEP_BOUNDARY.md) / [F2_OWNERSHIP.md](tasks/settings/F2_OWNERSHIP.md) | v3 の入力になる設計提案 (計画 / 設計中 / 設計中)。**U6 決定 (2026-09-30) を状態行に注記**: DEVICE_RESERVATION は改訂して P4 (核は T1 の台帳)、FEP_BOUNDARY と F2 の残りは P1 の T2 / T4 / T5a の要件。MEMORY_RAM_INTEGRATION は撤回して [archive/settings/](archive/settings/MEMORY_RAM_INTEGRATION.md) へ |
 | [DESIGN_APP_FIRST.md](DESIGN_APP_FIRST.md) | **アプリケーション優先設計の草案** — 前景 1 アプリへ資源を集中する設計思想。640×480×16bit を高機能グラフィックスの境界とし、Video HAL / VESA2 的互換層 / SDL 等の判断基準を整理。ロードマップではない |
 | [AUXILIARY_CORE_SERVICE.md](AUXILIARY_CORE_SERVICE.md) / [LEGACY_LIVING_PRESERVATION.md](LEGACY_LIVING_PRESERVATION.md) | 草案 (2026-09-28) — 余剰コアを固定機能アクセラレータに / レガシー実機の動態保存と OS32・OS64・Host Service の役割分離。**OS64 は版数表に載せていない** (v3 本案の段で位置を決める) |
 
@@ -218,13 +218,14 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 ### 設定レジストリ (settings、v1.3 で完了)
 
-完了した票 (S0 / S2 / S3 / S3I2 / S4 / S5 / S6 / S6P) と S0 の計画・基盤設計は [archive/settings/](archive/settings/TASK_S2.md) へ。v3 の入力になる設計提案 4 本は上の「v3」節。
+完了した票 (S0 / S2 / S3 / S3I2 / S4 / S5 / S6 / S6P) と S0 の計画・基盤設計は [archive/settings/](archive/settings/TASK_S2.md) へ。v3 の入力になる設計提案 3 本は上の「v3」節 (MEMORY_RAM_INTEGRATION は 2026-09-30 に撤回して下の表へ)。
 
 | ドキュメント | 内容 |
 |-------------|------|
 | [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md) | **設定レジストリ**の設計 — `system.cfg` (起動キー) + `/etc/settings.db` (SQLite)。置き場の正典 |
 | [archive/settings/S0_PLAN_2026-09-13.md](archive/settings/S0_PLAN_2026-09-13.md) | 着手計画 (PM 縮約案、2026-09-13 決裁) |
 | [archive/settings/S0_FOUNDATION.md](archive/settings/S0_FOUNDATION.md) | S0 の基盤設計 (配備の保護、所有権) |
+| [archive/settings/MEMORY_RAM_INTEGRATION.md](archive/settings/MEMORY_RAM_INTEGRATION.md) | RAM 統合 Phase 2 — **撤回 (2026-09-30、U6 決定)**。A / B は K6 で着地済み、残りは TASK_MEMMAP_V3 D3 で撤去側。残る 2 点は T1 の受入へ (D32) |
 | [archive/settings/TASK_S0.md](archive/settings/TASK_S0.md) / [TASK_S2.md](archive/settings/TASK_S2.md) / [TASK_S3.md](archive/settings/TASK_S3.md) / [TASK_S3I2.md](archive/settings/TASK_S3I2.md) / [TASK_S4.md](archive/settings/TASK_S4.md) / [TASK_S5.md](archive/settings/TASK_S5.md) / [TASK_S6.md](archive/settings/TASK_S6.md) / [TASK_S6P.md](archive/settings/TASK_S6P.md) | 票 S0〜S6P (いずれも受入完了、2026-09-13〜14) — KAPI v50 db_*、libos32cfg と `cfg`、install の回復、gshell の消費者、実測、tar |
 
 ### ネットワーク・Host Services (v1.4)

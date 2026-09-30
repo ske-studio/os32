@@ -1,9 +1,10 @@
 # U6_PENDING_REVIEW — 保留 5 件 (F3a〜c / F2c / FEP_BOUNDARY / MEMORY_RAM_INTEGRATION / DEVICE_RESERVATION) の仕分け表
 
-> 状態: **草案 (2026-09-30)** — [V3_PLAN_DRAFT.md](V3_PLAN_DRAFT.md) §7-1 **U6**「保留 5 件を v3 で拾うか」を**ユーザーが内容を再確認するための仕分け表**。決定ではない。各票の状態行・本文はここでは書き換えていない (決裁の後に PM が直す)。
+> 状態: **完了記録 (2026-09-30)** — **決裁済み**。[V3_PLAN_DRAFT.md](V3_PLAN_DRAFT.md) §7-1 **U6**「保留 5 件を v3 で拾うか」の仕分け表。§2 の判断 6 点は **2026-09-30 にユーザーがすべて推奨 (★) どおりに決定**: (1) F3b は (b) 同一 DB の排他 open を TASK_DICT_META の後、(2) F2 の残りは (a) T4 + T5a に畳む、(3) FEP_BOUNDARY は (a) T2 / T4 / T5a の要件 + 旧 `db_exec` / `db_prepare` の 1024B 超は失敗に、(4) MEMORY_RAM_INTEGRATION は撤回して archive へ、(5) DEVICE_RESERVATION は (c) 識別 + 予約は起動時・probe + enable は GUI 境界、範囲は検証済みの実測 BAR へ (X4 は Codex へ)、(6) U6 の答えは「一部」。決定の正典は [TASK_MEMMAP_V3](TASK_MEMMAP_V3.md) **D29〜D34**、§2 末尾の「決裁後に PM が行うこと」は同日に反映済み (各票の状態行、T1 / T2 / T4 / T5a の受入、V3_PLAN_DRAFT P4 / P10 / U6、ROADMAP §1、INDEX)。以下の本文は草案時のまま。
+> それまでの状態: 草案 (2026-09-30) — ユーザーが内容を再確認するための仕分け表。決定ではない
 >
 > 発行: コーダー `claude-fable-5-1` (2026-09-30)、PM の指示 (ユーザー指示「U6 の仕分け表を作る」) による。基点 `feat/gui` 2a6cc836 (KernelAPI v68)。
-> 読んだもの: 5 件の票 ([F2_OWNERSHIP](../settings/F2_OWNERSHIP.md) / [FEP_BOUNDARY](../settings/FEP_BOUNDARY.md) / [MEMORY_RAM_INTEGRATION](../settings/MEMORY_RAM_INTEGRATION.md) / [DEVICE_RESERVATION](../settings/DEVICE_RESERVATION.md)、F3a〜c は [S0_FOUNDATION §3](../../archive/settings/S0_FOUNDATION.md) の表)、保留の出典 ([HANDOVER_v14 §3](../../archive/agents/HANDOVER_v14.md)、[S0_PLAN_2026-09-13 §2 後回し欄](../../archive/settings/S0_PLAN_2026-09-13.md))、[V3_PLAN_DRAFT](V3_PLAN_DRAFT.md) §1-3・§3・§4、**[TASK_MEMMAP_V3](TASK_MEMMAP_V3.md) の決定 D1〜D28・§2-2 lease・§3-5 池の運用規則 R1〜R7・§4-6 SQLite/FEP の取り分・§6 票 T0〜T7**、[TASK_DICT_META](../fep/TASK_DICT_META.md)、[TASK_TRIDENT_DRIVER §4-2](../realhw/TASK_TRIDENT_DRIVER.md)。
+> 読んだもの: 5 件の票 ([F2_OWNERSHIP](../settings/F2_OWNERSHIP.md) / [FEP_BOUNDARY](../settings/FEP_BOUNDARY.md) / [MEMORY_RAM_INTEGRATION](../../archive/settings/MEMORY_RAM_INTEGRATION.md) / [DEVICE_RESERVATION](../settings/DEVICE_RESERVATION.md)、F3a〜c は [S0_FOUNDATION §3](../../archive/settings/S0_FOUNDATION.md) の表)、保留の出典 ([HANDOVER_v14 §3](../../archive/agents/HANDOVER_v14.md)、[S0_PLAN_2026-09-13 §2 後回し欄](../../archive/settings/S0_PLAN_2026-09-13.md))、[V3_PLAN_DRAFT](V3_PLAN_DRAFT.md) §1-3・§3・§4、**[TASK_MEMMAP_V3](TASK_MEMMAP_V3.md) の決定 D1〜D28・§2-2 lease・§3-5 池の運用規則 R1〜R7・§4-6 SQLite/FEP の取り分・§6 票 T0〜T7**、[TASK_DICT_META](../fep/TASK_DICT_META.md)、[TASK_TRIDENT_DRIVER §4-2](../realhw/TASK_TRIDENT_DRIVER.md)。
 > **「今の状態」の列は 2026-09-30 に HEAD 2a6cc836 のソースと `git log` で確かめたもの** (根拠は §3)。票の本文の行番号は 09-13 の作業ツリーのものなので、ここでは関数名で書く。
 
 ---
@@ -68,7 +69,7 @@ U6 の選択肢「拾う (P4・P10) / 一部 / 拾わない」に当てると **
 
 ### 1-4. MEMORY_RAM_INTEGRATION — RAM 統合 Phase 2
 
-出典: [MEMORY_RAM_INTEGRATION](../settings/MEMORY_RAM_INTEGRATION.md) (計画)。V3_PLAN_DRAFT §1-3 は「再棚卸しが先」(§4 D10・D11)。
+出典: [MEMORY_RAM_INTEGRATION](../../archive/settings/MEMORY_RAM_INTEGRATION.md) (計画)。V3_PLAN_DRAFT §1-3 は「再棚卸しが先」(§4 D10・D11)。
 
 | | 内容 |
 |---|---|
@@ -103,7 +104,7 @@ U6 の選択肢「拾う (P4・P10) / 一部 / 拾わない」に当てると **
 | 5 | **DEVICE_RESERVATION の時期と範囲** | 予約 / probe の時期: (a) 起動時 / (b) GUI 境界 / ★(c) 識別 + 予約は起動時、probe + enable は GUI 境界。**範囲**: 定数だけ → ★検証済み実測 BAR も (X4 を Codex へ) | §1-5 |
 | 6 | **U6 の答え** | ★「一部」= F3a / F3c / F2 / FEP_BOUNDARY / DEVICE_RESERVATION を形を変えて拾う (P10・P4、多くは T 票の要件)、MEMORY_RAM_INTEGRATION は撤回、F3b は 1 の結果次第 | §0 |
 
-決裁の後に PM が行うこと (この草案では行っていない): 各票の状態行の更新 (MEMORY_RAM_INTEGRATION → 撤回 + archive、DEVICE_RESERVATION に改訂の注記、F2 / FEP_BOUNDARY に「T4 / T5a の要件として拾う」の注記)、TASK_MEMMAP_V3 §6 の T1 / T2 / T4 / T5a の受入への追記、V3_PLAN_DRAFT §3 P4 / P10 と §7-1 U6 の行の書き換え、ROADMAP §1 v1.3 の「保留 5 件」の行。
+決裁の後に PM が行うこと (**2026-09-30 に反映済み** — TASK_MEMMAP_V3 D29〜D34、この状態行を参照): 各票の状態行の更新 (MEMORY_RAM_INTEGRATION → 撤回 + archive、DEVICE_RESERVATION に改訂の注記、F2 / FEP_BOUNDARY に「T4 / T5a の要件として拾う」の注記)、TASK_MEMMAP_V3 §6 の T1 / T2 / T4 / T5a の受入への追記、V3_PLAN_DRAFT §3 P4 / P10 と §7-1 U6 の行の書き換え、ROADMAP §1 v1.3 の「保留 5 件」の行。
 
 ---
 

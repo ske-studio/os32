@@ -1,8 +1,9 @@
 # 任意デバイス予約 broker — 次の実装票
 
-> 発行: PM (2026-09-09) / 状態: **計画 (2026-09-13)**
+> 発行: PM (2026-09-09) / 状態: **計画 (2026-09-30)** — **U6 決定 (ユーザー 2026-09-30、[TASK_MEMMAP_V3](../v3/TASK_MEMMAP_V3.md) D33): v3 P4 で拾うが改訂する。** (i) transaction 核 (`pgalloc_device_reserve` / `sys_device_reserve_core`) と owner 台帳は TASK_MEMMAP_V3 §6 **T1 の台帳の MMIO 登録**に載せ直す (複数 span の一括 commit と永久保持は T1 の仕様として残す、`test_device_reservation.py` を流用); (ii) **時期は折衷**: 副作用のない識別と予約は**起動時** (TASK_MEMMAP_V3 §4-5 の「gfx probe + BB 確保」を「識別 + 予約 + BB 確保」と読む)、破壊的な probe / enable は **GUI 境界** (TRIDENT T8 (i) と一致); (iii) 許可範囲は「既知候補の定数だけ」から**検証済みの実測 BAR** へ広げる (Trident のため。[V3_PLAN_DRAFT](../v3/V3_PLAN_DRAFT.md) §7-2 **X4 は Codex へ回す**); (iv) §5 (後発 GUI の PEGC BB) と exec arena 全域の禁止は D19 / D3 で不要になったので改訂で削る。改訂の本文は P4 の着手時 (T1 の後) に書く — それまで §1〜§7 は 09-13 (Cirrus の帯だけ 09-29) のまま。仕分けは [U6_PENDING_REVIEW](../v3/U6_PENDING_REVIEW.md) §1-5。
+> それまでの状態: 計画 (2026-09-13)
 
-計画・未実装。現在の dirty/untracked 作業ツリーを読んだ設計であり、ゲスト検証結果ではない。本票だけを追加する。[MEMORY_RAM_INTEGRATION.md](MEMORY_RAM_INTEGRATION.md) の旧 API 案・起動時 GFX 予約案ではなく、以下の現行コードと GUI activation 時の契約を実装基準にする。
+計画・未実装。現在の dirty/untracked 作業ツリーを読んだ設計であり、ゲスト検証結果ではない。本票だけを追加する。[MEMORY_RAM_INTEGRATION.md](../../archive/settings/MEMORY_RAM_INTEGRATION.md) の旧 API 案・起動時 GFX 予約案ではなく、以下の現行コードと GUI activation 時の契約を実装基準にする。
 
 ## 1. 範囲と既定動作
 

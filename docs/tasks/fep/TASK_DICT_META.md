@@ -114,6 +114,7 @@
 - **v3 の後の方** (ユーザー 2026-09-30)。前提: TASK_MEMMAP_V3 の **T4** (SQLite のモジュール化 — `mem_reserve_kb` の既定値と `db_open` の上限はそこで入る) と **T5a** (FEP のモジュール化)。この票はその上に「辞書からの読み取り」と「学習の別ファイル化」を載せる。
 - 並べる先: [`../v3/V3_PLAN_DRAFT.md`](../v3/V3_PLAN_DRAFT.md) §3 **P10 データ・設定層** (v3 後半)。
 - 関係する票: [`../settings/FEP_BOUNDARY.md`](../settings/FEP_BOUNDARY.md) (FEP の KAPI 境界)、[`../settings/F2_OWNERSHIP.md`](../settings/F2_OWNERSHIP.md) (接続単位の FD 所有 — 学習 DB の接続も同じ規則)、[`04_DICT_QUALITY.md`](04_DICT_QUALITY.md) (コスト式。`cost_scale` / `pos_table_version` の値を決めるのはそちら)。
+- **後続 (U6 決定、ユーザー 2026-09-30、TASK_MEMMAP_V3 D29)**: F3b「同一 DB の排他 open」(S0_FOUNDATION の lock 表は作らず、親子 (exec の入れ子) が同じ DB を同時に開く経路を open で塞ぐ最小代案) は**この票の後**に P10 で行う — 辞書 RO 1 本 + 学習 RW 1 本になれば「辞書は RO 共有、学習は RW 単独」で排他 open と相性がよい。出典 [`../v3/U6_PENDING_REVIEW.md`](../v3/U6_PENDING_REVIEW.md) §1-1。
 
 ---
 

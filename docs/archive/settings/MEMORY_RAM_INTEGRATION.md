@@ -1,6 +1,7 @@
 # RAM 統合 Phase 2 — 次のコード実装票
 
-> 発行: PM (2026-09-09) / 状態: **計画 (2026-09-13)**
+> 発行: PM (2026-09-09) / 状態: **撤回 (2026-09-30)** — **U6 決定 (ユーザー 2026-09-30、TASK_MEMMAP_V3 D32)**: A / B の大半は K6 (2026-09-10〜12、`kernel/memory_boot.c` / `pgalloc.c` / `physmem.c`) で着地済み、残り (A3 の exec 永久 claim・C・D) は TASK_MEMMAP_V3 D3 で「撤去」と決まった機構の完成形なので v3 では作らない。残る 2 点 (8MB 機もモデル経路 = legacy `pgalloc_init` fallback の撤去、高位 RAM の検出源 0594h の機種資料との照合) は TASK_MEMMAP_V3 §6 **T1 の受入**へ移した。仕分けは U6_PENDING_REVIEW §1-4。本文は 09-13 のままで書き換えない (根拠行の hotdeploy 窓・Cirrus 16MiB 窓・physmem 未リンクは古い)。
+> それまでの状態: 計画 (2026-09-13)
 
 計画・未実装。現在の作業ツリーの `physmem` と受入対象の sparse paging を前提にする。今回作成するのは本票だけ。既存の dirty/untracked 変更は保持し、コミット、コード変更、ビルド、配備、エミュレータ起動/API 呼出しは行わない。
 
@@ -200,4 +201,4 @@ KAPI/SDK 変更は不要。新関数は kernel 内部だけで、以下の名前
 
 Phase 2 CODE 完了は A～D と H1～H3 の統合、および H4 の target build/配置検査まで。単なる bitmap サイズ変更、physmem の単体 PASS、疎 PTE の追加だけでは完了扱いにしない。実機対応完了は §8 の正式 provider と H4 の実機確認が別途必要。
 
-今回確認したのは現在ソース・対象 dirty diff・build 入力・既存テスト構成と設計整合だけ。新規作成は `docs/tasks/settings/MEMORY_RAM_INTEGRATION.md` のみ。ネットワーク、環境変数/秘密情報、`docs/hw/`、エージェント起動、エミュレータ/API、コード編集・ビルド・配備は行っていない。
+今回確認したのは現在ソース・対象 dirty diff・build 入力・既存テスト構成と設計整合だけ。新規作成は `docs/archive/settings/MEMORY_RAM_INTEGRATION.md` のみ。ネットワーク、環境変数/秘密情報、`docs/hw/`、エージェント起動、エミュレータ/API、コード編集・ビルド・配備は行っていない。
