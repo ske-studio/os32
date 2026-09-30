@@ -1,0 +1,25 @@
+IPAex フォント — 出所とライセンス
+=================================
+
+出所: IPAexフォント Ver.004.01 (IPAexfont00401.zip)
+      一般社団法人 文字情報技術促進協議会 (旧 独立行政法人 情報処理推進機構 (IPA) 配布)
+      https://moji.or.jp/ipafont/  (zip: https://moji.or.jp/wp-content/ipafont/IPAexfont/IPAexfont00401.zip)
+      ipaexg.ttf (ゴシック) / ipaexm.ttf (明朝) は **zip の中身と同一** (2026-09-30 に sha256 で照合:
+      ipaexg 3b9955a5…f400dd、ipaexm 7a306386…3d71c7)。改変なし。
+
+ライセンス: IPA Font License Agreement v1.0 (OSI 承認)。原文は同じディレクトリの
+`IPA_Font_License_Agreement_v1.0.txt` (zip に同梱のものをそのまま置いた。UTF-8 (BOM)、CRLF、
+日本語/英語。取得 2026-09-30)。ライセンスの解説ページ: https://moji.or.jp/ipafont/license/
+
+再配布のしかた (第 3 条):
+- `ipaexg.ttf` / `ipaexm.ttf` をそのまま配る場合 (3 条 2 項): 名前を変えない・改変しない・
+  本契約の写し (上記 txt) を添える。
+- 派生プログラム (3 条 1 項): `make assets-all` が作る `*_subset.ttf` (`tools/subset_font.py`、
+  グリフのサブセット) と `*.kcgfont` (`tools/gen_font16.py`、16px ビットマップ) は
+  「許諾プログラムの一部から文字情報を取り出して作った」派生プログラムに当たる。配布物に
+  含めるときは (1) 派生プログラムの写しを提供できること、(2) オリジナルに置き換える方法
+  (このファイルの出所 URL) を示すこと、(3) 同じライセンスで配ること、
+  (4) **プログラム名・フォント名・ファイル名に「IPA」を含む名前を使わない**こと、が要る。
+  現状の生成物の名前 (`ipaexg_subset.ttf`、`ipaexg16.kcgfont`、ゲストの `/data/ipaexg_subset.ttf`)
+  は (4) に**抵触する** — ディスクイメージや SDK に同梱して配る前に改名すること
+  (ゲスト側の `/sys/font/default.kcgfont` は問題ない)。生成物は git に入れない (`.gitignore`)。
