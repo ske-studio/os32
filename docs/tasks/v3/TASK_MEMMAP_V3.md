@@ -407,6 +407,8 @@ P2 は「shlib ローダの流用」ではなく、**形式検査・表生成の
 
 材料: `font_test` (ttf-parser 0.21 + ab_glyph_rasterizer、107KB) はファイル全体を `Face::parse` に渡し、ttf-parser は `glyf` のスライスを保持する (`lib.rs:255,263`) → **`lseek` 置換だけでは動かない**。サブセット TTF: 7,144 グリフ、`glyf` 3,231,617B (平均 452B、**最大 1,076B、複合 0**、Codex 実測)、`loca` 28,580B、`cmap` 40,496B、`hmtx` 28,572B。
 
+> **注記 (ユーザー決定 2026-09-30)**: 上の数字は JIS X 0208 サブセット (`ipaexg_subset.ttf`、3.2MB) の実測で、**サブセット化は廃止した**。**日本語 OpenType は配布物に同梱しない** (使う人が別途ダウンロードして置く)。**CUI は内蔵フォント (KCG ROM) だけで描く**。内蔵フォントの無い移植先の GUI 基本フォントは**寛容ライセンスの欧文 OpenType** (候補: Go fonts = 3-clause BSD、DejaVu = Bitstream Vera License。選定は T7b)。参考: 無改変の原本 `ipaexg.ttf` (6,099,900B) は 12,239 グリフ、`glyf` 5,593,490B (平均 457B、最大 1,224B、複合 0)、`loca` 48,960B、`cmap` 245,775B、`hmtx` 48,914B (fontTools 実測 2026-09-30) — 作業域の上限は同梱する欧文フォントで T7b が測り直す。
+
 | 項目 | 設計 |
 |---|---|
 | ストリーミング読み出し層 (**実装項目**) | 常駐する表: `cmap` `loca` `hmtx` `head` `hhea` `maxp` ≈ 100KB。`glyf` は字形ごとに `sys_lseek` + `read` (loca から offset/length)。ttf-parser には**字形 1 つ分のスライス**を `glyf` として渡す薄い層を書く (ttf-parser の `Face` 全体を使わず `glyf::Table` 相当を自前で組む、推測: 数百行)。作業域: 輪郭 ≤ 2KB (このファイルは 1,076B、**OpenType 一般の保証ではない** → 上限超えは字形を「□」に落とす)、累積面 16px 1KB / 32px 4KB |
