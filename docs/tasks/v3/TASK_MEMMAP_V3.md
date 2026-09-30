@@ -1,6 +1,6 @@
 # TASK_MEMMAP_V3 — v3 のメモリマップ (カーネル帯の切り直し・アプリ帯の仮想化・物理台帳)
 
-> 状態: **設計中 (2026-09-30)** — **方針確定**。2026-09-30 にユーザー・Fable 5.1・Codex (gpt-6-astra) の 3 者討論で決定 (Codex 最終確認 **Approve**、ユーザーの判断もすべて確定)。実装は §6 の票 T0〜T7 の順で、未着手。**§3-5 (池の運用規則) は Codex 往復 6・7 の突き合わせを 2026-09-30 に反映 (§8-3)。残っていた判断 (R2 の採否・閾値・trim・起動予約、必須モジュール失敗時の MINIMAL、MEMSYS5 の量と FEP の取り分) は同日ユーザーが決定 (D23〜D28)。**保留 5 件 (V3_PLAN_DRAFT U6) の拾い方も同日ユーザーが決定 (D29〜D34、仕分けは [U6_PENDING_REVIEW](U6_PENDING_REVIEW.md))。ユーザー判断待ちの項目は無い。**
+> 状態: **設計中 (2026-09-30)** — **方針確定**。2026-09-30 にユーザー・Fable 5.1・Codex (gpt-6-astra) の 3 者討論で決定 (Codex 最終確認 **Approve**、ユーザーの判断もすべて確定)。実装は §6 の票 T0〜T7 の順で、未着手。**§3-5 (池の運用規則) は Codex 往復 6・7 の突き合わせを 2026-09-30 に反映 (§8-3)。残っていた判断 (R2 の採否・閾値・trim・起動予約、必須モジュール失敗時の MINIMAL、MEMSYS5 の量と FEP の取り分) は同日ユーザーが決定 (D23〜D28)。**保留 5 件 (V3_PLAN_DRAFT U6) の拾い方も同日ユーザーが決定 (D29〜D34、仕分けは [U6_PENDING_REVIEW](U6_PENDING_REVIEW.md))。ユーザー判断待ちの項目は無い。** **V3_PLAN_DRAFT §7-2 の論点 X1〜X8 への Codex の回答 (2026-09-30) をユーザーが全部承認し、決定を変えない補足として反映 (D35 = D7 の改訂だけが決定の改め。対応表は §8-4)。**
 > それまでの状態: 設計 v2 (Codex 往復 1 の 9 件を反映。2-2 は保留、2-3 (KHEAP 192KB) は着地) — 経緯は §11。
 >
 > 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23)。出所: ユーザー指示 2026-09-23「カーネル予算はシュリンクではなく考え直す。順に実行」→ 2026-09-29「3 者で討論して決める」。
@@ -10,7 +10,7 @@
 
 ---
 
-## 0. 決定事項の一覧 (D1〜D34)
+## 0. 決定事項の一覧 (D1〜D35)
 
 | # | 決定 | 出所 |
 |---|---|---|
@@ -20,7 +20,7 @@
 | D4 | 物理池の境界定数とアプリ仮想配置定数を分離 | 両者合意 |
 | D5 | DMA プールは 64KB 整列、ISA の 16MB 未満・境界は割当条件 (`dma_alloc(size, align, limit)`) | 両者合意 |
 | D6 | 15〜16MB は既定で予約 | 両者合意 |
-| D7 | 全再ビルド・旧形式は拒否・KAPI スロット順は維持。互換層なし。**KAPI / ABI の後方互換は基本考えない** (ソース互換は極力維持するが絶対ではない) | ユーザー (2026-09-29、09-30) |
+| D7 | 全再ビルド・旧形式は拒否・~~KAPI スロット順は維持~~ (**D35 で改訂**: fork 時の整理で順を変えてよい、世代の識別と旧新混在試験が条件)。互換層なし。**KAPI / ABI の後方互換は基本考えない** (ソース互換は極力維持するが絶対ではない) | ユーザー (2026-09-29、09-30) |
 | D8 | シェルの 2 ヒープは API 2・供給元 1 | 両者合意 |
 | D9 | 8MB 機は **9801 planar と PEGC の両方で GUI + 私有メモリ総量 2MB のアプリ** (内訳は任意) | ユーザー |
 | D10 | 通常アプリの `--cpl0` 廃止。バックエンド・ドライバは CPL=0 モジュール (当面は静的)、常駐シェルは例外 | ユーザー (当面許可) |
@@ -46,8 +46,9 @@
 | D30 | **F2 の残り** (F2b の呼び出し側接続・F2c・F2d の隔離経路・default VFS の fail-closed・R0 / R1) は**独立票にせず T4 (`kapi_db` / `ime_dict` の接続部) と T5a (FEP の接続 2 本を起動時に RESIDENT group で) の受入に畳む**。RESIDENT group は 1 → 2 本 (辞書 RO + 学習 RW)。票 [F2_OWNERSHIP](../settings/F2_OWNERSHIP.md) の本文は書き換えない | ユーザー (2026-09-30、U6_PENDING_REVIEW §1-2) |
 | D31 | **FEP_BOUNDARY は独立票にせず T2 / T4 / T5a の要件として拾う**: B1 uaccess (NUL まで 1 バイトずつ検証する bounded copy、`db_user_str_copy` を `exec/` へ共通化) → T2、B3 (旧 `db_exec` / `db_prepare` の checked copy) と B4 (エクスポート表のラッパに `enter` / `leave`、SQLite 進入中の例外は app-kill でなく kernel 異常) → T4、B2 (FEP facade: staging → finalize → copyout) → T5a。**旧 `db_exec` / `db_prepare` の SQL 1024B 超は「切捨てて実行」→「失敗」** (D7 の範囲)。票 [FEP_BOUNDARY](../settings/FEP_BOUNDARY.md) の本文は書き換えない | ユーザー (2026-09-30、U6_PENDING_REVIEW §1-3) |
 | D32 | **MEMORY_RAM_INTEGRATION は撤回** ([archive/settings/](../../archive/settings/MEMORY_RAM_INTEGRATION.md) へ) — A / B の大半は K6 で着地済み、残り (A3 の exec 永久 claim・C・D) は D3 で撤去と決めた機構の完成形。残る 2 点は **T1 の受入**へ: 8MB / 17MB / 64MB のすべてでモデル経路 (legacy `pgalloc_init` の fallback を撤去 — 8MB 機は今も legacy に落ちる)、高位 RAM の登録源は `memory_boot_detect` (0594h + 書き込み検証、機種資料との照合は U24) | ユーザー (2026-09-30、U6_PENDING_REVIEW §1-4) |
-| D33 | **DEVICE_RESERVATION は v3 P4 で拾うが改訂する**: 核 (`pgalloc_device_reserve` / `sys_device_reserve_core`) と owner 台帳は **T1 の台帳の MMIO 登録**に載せ直す (複数 span の一括 commit と永久保持は仕様として残す、試験流用)。**時期は折衷 — 副作用のない識別と予約は起動時 (§4-5)、破壊的な probe / enable は GUI 境界** (TRIDENT T8 (i) と一致)。**許可範囲は定数だけ → 検証済みの実測 BAR へ広げる** (Trident。V3_PLAN_DRAFT §7-2 X4 を Codex へ)。§5 (後発 GUI の BB) と exec arena 全域の禁止は D19 / D3 で不要。順序契約 (識別 → 予約 → 写像 → probe / enable → 面公開) と gfx バックエンドの識別 / probe 分離は P4 の票 (T2 の後、Trident 段 3 の前) | ユーザー (2026-09-30、U6_PENDING_REVIEW §1-5) |
+| D33 | **DEVICE_RESERVATION は v3 P4 で拾うが改訂する**: 核 (`pgalloc_device_reserve` / `sys_device_reserve_core`) と owner 台帳は **T1 の台帳の MMIO 登録**に載せ直す (複数 span の一括 commit と永久保持は仕様として残す、試験流用)。**時期は折衷 — 副作用のない識別と予約は起動時 (§4-5)、破壊的な probe / enable は GUI 境界** (TRIDENT T8 (i) と一致)。**許可範囲は定数だけ → 検証済みの実測 BAR へ広げる** (Trident。V3_PLAN_DRAFT §7-2 X4 を Codex へ)。§5 (後発 GUI の BB) と exec arena 全域の禁止は D19 / D3 で不要。順序契約 (識別 → 予約 → 写像 → probe / enable → 面公開) と gfx バックエンドの識別 / probe 分離は P4 の票 (T2 の後、Trident 段 3 の前)。**X4 の答え (検証済み資源レコード、予約 / 写像 / 面の範囲の分離、一括 commit、永久予約とモジュール回収の分離) は §8-4 と T1** | ユーザー (2026-09-30、U6_PENDING_REVIEW §1-5) |
 | D34 | **U6 の答えは「一部」**: F3a / F3c / F2 / FEP_BOUNDARY / DEVICE_RESERVATION は形を変えて拾う (多くは T 票の要件、DEVICE_RESERVATION は P4)、MEMORY_RAM_INTEGRATION は撤回、F3b は TASK_DICT_META の後 | ユーザー (2026-09-30、U6_PENDING_REVIEW §0・§2) |
+| D35 | **D7 の改訂 (KAPI の整理)**: fork 時の KAPI 整理で**スロットの順を変えてよい** ([ABI2] の「追記のみ」は fork 後に再開)。**条件 (P7 の必須)**: (1) **世代の識別を 4 つ別に持つ** — OS32X ヘッダの形式版・**KAPI ABI 世代**・**メモリ配置世代**・**shlib プロトコル**。互換性を切る世代は一致を要求し、その世代の内側でだけ最低機能版 (min KAPI) を使う (今の検査はヘッダ v3 以上 + データ欄の位置 `os32x_hdr.c:14` と「要求版がカーネルより新しければ拒否」の片方向 `exec.c:1697` だけで、容量を保ったままスロットを整理して版だけ上げた旧バイナリを通してしまう); (2) **拒否契約** (Codex X6): **入口へ飛ぶ前の検査は常駐シェルも例外にしない** (ロード番地の照合が `!is_shell` の内側 `exec.c:1703,1722`)、**未知の形式版を「既知版以上だから可」としない**、C / Rust の生成物と**各コンパイル単位**に ABI 識別を結び付けて最終 ELF の印・旧シンボル・配置を照合する (包装時に SDK の印を付けるだけでは旧 `.o` を新 SDK で包む経路を防げない — `clean` に `clean-external` が含まれず `.o` の依存もソース中心 `Makefile:73,91`、`apps/Makefile:75`)、**移行成果物は kernel・loader・SDK・CRT・ライブラリ・shell・shlib・モジュール・in-tree・apps/game の一組で固定** (private submodule を取得できないビルドは完全な成果物と扱わない)、**v2 の戻り先と v3 の配備先・成果物ディレクトリを分け、停止中に一組を更新してから起動する** (`hsync` は既定で `/sys` を除外し kernel / boot 配備も別経路 — 「新 kernel を先に起動して旧 shell から更新」は前提にしない)、**Rust 生成器 (`sdk/kapi_rust_gen.py:45`) は未知の非ポインタ型を `u32` に倒さず生成失敗に**する (C11 化に合わせて型や構造体返却を変えるなら引数幅・呼出規約 (戻りは EAX `exec.c:1494`) も同時に検証); (3) **旧新混在の試験** — 旧アプリ / 旧常駐シェル / 旧 shlib / 新 SDK + 旧 `.o` / v2 SDK でビルドした apps・game / HostDrv と NHD の食い違い — が入口の前で拒否されることを P7 の受入に (§7 の全構成の行)。ソース互換は SDK の名前・薄いラッパーで可能な範囲を残す | ユーザー (2026-09-30、Codex X6 の推奨を承認。V3_PLAN_DRAFT §3 P7・§5 C1・§7-1 U8) |
 
 ---
 
@@ -100,8 +101,13 @@ v3 の答え: **システム側は恒等のまま (D1・D20)、物理地図と�
 - 解放は「その AS の lease を外す」だけで他 AS に波及しない。物理の解放は全 lease が返り、かつ owner が返したとき。
 - 表示面 (planar の VRAM、PEGC のリニア窓 / バンク窓、Cirrus の表示面) は**全画面 lease だけ**に貸す (G4、D19)。通常 GUI アプリには VRAM の lease を与えない (`exec.c:1932` の常時 USER 写像を撤去)。CUI アプリの TVRAM 直書き (`lconsole` 等、U20) は TVRAM (0xA0000–0xA3FFF) だけの lease。
 - **V86**: V86 ゲストは実アドレス (seg<<4)+off で低位を触るので lease 窓では届かない。**V86 セッション中だけ** `v86_mem.c` の既存機構どおり master の低位 (ページ 0 は実物、アリーナ 0x1000〜0x9FFFF、VRAM 0xA0000〜0xBFFFF、ROM) に USER を立て、**終了時に supervisor へ復元する** (`v86_mem.c:73,99`、`v86.c:93`)。V86 は CUI 専用 (`exec.c:1743-1747`) で通常アプリの AS とは同時に存在しないので、§2-1 の不変条件は「V86 セッション外」で検査する。
-- BB の連続性: **ブート時 (gfx probe の直後、live AS = 0) に台帳から連続確保し、owner=boot → GUI 起動時に gshell へ移譲、GUI 終了時も返さず保持** (再確保の失敗を避ける)。`rep movs` に要るのは仮想の連続だが、gshell は CPL=0・恒等で使うので**物理連続のまま持つ**のが最も単純。スプラッシュには同じ面を lease し、終了で lease だけ返る。
+- BB の連続性: **ブート時 (§4-5 の「gfx の識別 + デバイス窓の予約 + BB 確保」の段、live AS = 0 — D33 で破壊的な probe は GUI 境界へ移ったので「probe の直後」ではなく識別の直後) に台帳から連続確保し、owner=boot → GUI 起動時に gshell へ移譲、GUI 終了時も返さず保持** (再確保の失敗を避ける)。**probe の前に BB の量を決める**ので、識別 (機種 / PCI ID) で決まる backend の量 (planar 128KB / PEGC 300KB / Cirrus 0) を取り、識別できない・probe に失敗して別の backend へ落ちたときも**確保済みの BB をそのまま使う** (足りない側へ落ちる組み合わせは無い: PEGC 機で planar に落ちれば 300KB の内側。Codex X7-1、T1 / T2 で定める)。`rep movs` に要るのは仮想の連続だが、gshell は CPL=0・恒等で使うので**物理連続のまま持つ**のが最も単純。スプラッシュには同じ面を lease し、終了で lease だけ返る。
 - 検査 (§2-3 の ⑥ (b)(c)) は「共有種別なら可」ではなく **「その AS の台帳に lease があるページなら可」**。
+- **lease の API と記述子 (Codex X3、2026-09-30、ユーザー承認)**: 内部の記述子は**台帳の SURFACE への参照**として扱う (中身: owner・面種別・物理範囲または VRAM 範囲・形式・pitch・プレーン配置・権限・キャッシュ属性・世代。全部を公開 ABI にはしない)。**lease の結果 = 呼出元 AS の lease 窓の仮想番地は、記述子とは別に返す**。今の `gfx_get_framebuffer()` はバックエンドの `bb_base` かカーネルの `bb[]` を返し (`gfx_core.c:114`)、SDK はそのポインタへ直接描く (`libos32gfx_core.c:25`) — 写像だけ lease 窓へ移して返すポインタが旧番地のままだと、3 バックエンドとも CPL=3 の描画が失敗する。**カーネル内部の仮想番地と AS に返す lease 番地を分け**、planar のカーネル側プレーンポインタ (`gfx_core.c:17`) も低位固定 BB から更新する。旧 TRIDENT §4-2 の `{virt, phys, size}` + `map_user_range_phys_keep()` (共有 PT の USER 昇格) は**この契約で置き換える** (共有 PT 経路は上で廃止)。
+- **キャッシュ属性は台帳から**: 現行の `keep_cache` は書込先 PTE の PCD/PWT を読む (`paging.c:806`) が、新規の lease PTE は空なので継承できない (Cirrus の面をこの方法で写すと PCD が消える)。**SURFACE が参照する物理資源の台帳 (RAM / MMIO 登録の属性) から取り、kernel alias と一致させる**。
+- **共有 PT を書く要求は通常の map / unmap API で拒否する**。V86 の例外は専用の入口と、終了・異常終了時の復元に限る。master を変更できる別の API (`paging.c:486` 系) も監査対象 — 「共有 PT の物理番号が不変」だけでは USER/RW の変更や他 AS への波及を取り逃す。
+- **ページ端と寿命**: 面の末尾をページへ切り上げた結果、表示面・MMIO・別 owner の RAM が同じページに同居すると、その部分も露出する。**面はページ単位で占有する** (SURFACE の確保はページ整列、同じページを他の用途と共有しない)。解除の順は **lease 解除 → TLB 反映 → 参照数の減算 → (owner も返していれば) 物理の回収** に固定。再 init・モード変更では**既存の lease を残したまま面の意味を変えない** (先に revoke)。
+- **「互いに見えない」の定義**: 同じ物理面を明示的に 2 つの AS に貸せば画素は共有される。隔離が意味するのは **未貸与の面へのアクセスと、lease 操作 (付け外し) の他 AS への波及を防ぐ**こと。§2-3 ⑥ (c) の受入と §7 (f) はこの定義で読む。
 
 ### 2-3. Codex 往復 2 の指摘への答え (設計に取り込んだもの)
 
@@ -112,7 +118,7 @@ v3 の答え: **システム側は恒等のまま (D1・D20)、物理地図と�
 | ③ shlib 184KB | 池から実ページ数、owner=shlib。text は各 AS の私有 PT に RO+USER (`shlib.c:262` の attach を AS ごとに)、data 複製は owner=そのアプリ (**私有総量 2MB の内側**) |
 | ④ BB / 共有 USER / 後付け PDE | §2-2。共有 PDE の追加は最初の AS の前に全部 (池の PT、PCI BAR、デバイス窓)。lease 窓の PT は AS ごとの私有なので後付けの問題は無い |
 | ⑤ ローダ | §4-5 に区間表と寿命 |
-| ⑥ メモリマップ検査 | 3 段: **(a) master**: PDE 0〜池の上端と高位窓を台帳から期待値を引いて走査。USER はトランポリンと SHM だけ、デバイス窓・PCI BAR・**台帳に MMIO として登録した範囲 (PEGC のリニア窓 0xF00000〜0xF4AFFF を含む) は sup+PCD**、**15〜16MB のうち登録の無い部分は NP** (「RAM として配らない」と「NP」は別)。V86 セッション中は (a)(b) を走らせない。**(b) AS 生成時**: PDE 0〜511 が master と同一 (= USER の PTE はトランポリン・SHM だけ)。PDE 512〜959 の PTE は台帳で owner=その AS のページ (shlib text は owner=shlib を RO で許可)。PDE 960〜1015 の PTE は**その AS の lease に載っている物理だけ**。**(c) 毎起動**: (a) + 生成した試験 AS で (b) + lease を 2 つの AS に貸して互いに見えないこと |
+| ⑥ メモリマップ検査 | 3 段: **(a) master**: PDE 0〜池の上端と高位窓を台帳から期待値を引いて走査。USER はトランポリンと SHM だけ、デバイス窓・PCI BAR・**台帳に MMIO として登録した範囲 (PEGC のリニア窓 0xF00000〜0xF4AFFF を含む) は sup+PCD**、**15〜16MB のうち登録の無い部分は NP** (「RAM として配らない」と「NP」は別)。V86 セッション中は (a)(b) を走らせない。**(b) AS 生成時**: PDE 0〜511 が master と同一 (= USER の PTE はトランポリン・SHM だけ)。PDE 512〜959 の PTE は台帳で owner=その AS のページ (shlib text は owner=shlib を RO で許可)。PDE 960〜1015 の PTE は**その AS の lease に載っている物理だけ**。**(c) 毎起動**: (a) + 生成した試験 AS で (b) + lease を 2 つの AS に貸して互いに見えないこと (§2-2 の定義: 未貸与面と lease 操作の波及)。**(d) lease の回帰 (Codex X3、T2 の受入)**: lease の物理対応と全 alias のキャッシュ属性の一致、master と無関係な AS の権限・物理対応が不変、**3 バックエンド (planar / PEGC / Cirrus) での描画・present の回帰** (「従来と同じ PTE」ではなく)、PT / lease 台帳不足時の全体巻き戻し、片方の AS だけの revoke、終了時回収、再 init |
 | ⑦ 定数の分離 | 下の一覧 |
 | ⑧ 既定 exec_heap の先取り | `heap_size == 0` は MEM_EXEC_HEAP_MIN から始め、失敗時にページ単位で伸ばす。sbrk も張ったぶんだけ。**伸ばす経路 (通常文脈の KAPI、大きな塊は map/unmap) は §3-5 R2** |
 
@@ -145,6 +151,7 @@ RAM の存在 (物理地図)・割当可否・owner・写像を**別の情報**�
 - **規則**: カーネルが物理番地をポインタとして触る箇所は `P2V(phys)` を通し、ポインタを装置 (DMA・ページ表・窓) に渡す箇所は `V2P(ptr)` を通す。恒等の v3 では両方とも**何もしない関数 (`static inline`) / マクロ** (`include/memmap.h` に 1 か所)。台帳の API は**物理 PFN / 物理番地を返す**ことにし、呼び手が P2V で触る形に揃える。
 - **監査の対象 (Codex 往復 2 の一覧 + 追加)**: `kernel/paging.c` の PD/PT (`:717,737,794,836,889` の `(u32 *)phys`)、`kernel/shlib.c:208,285` の複製、`kernel/v86_mem.c:44` のバッキング、`gfx/backend_pegc.c:704-705` の BB、`drivers/fdc.c:787,816` / ATAPI / PCM の DMA バッファ (`dma_pool_alloc` の戻り値、V2P 側)、BIOS データ領域 (`backend_pegc.c:117-125` の 0000:0400h、`kbd_init` の BIOS ワーク)、VRAM 窓 (`PEGC_LINEAR_BASE`、`0xA8000` 系、Cirrus の `s_lin`)。`kmalloc` は対象外 (仮想のヒープ)。
 - **票**: **T1 (台帳) の中**に置く — 台帳の API を作り替えるときに呼び手を全部触るので、同じ差分で P2V/V2P に揃えるのが最も安い。恒等なので動作は変わらず、危険は無い。**`tools/check_constraints.py` に検査を足す**: `kernel/ drivers/ gfx/ fs/ exec/` で `(u8 *)` / `(u32 *)` / `(void *)` を物理番地の変数・定数 (`*_phys`、`MEM_*_BASE`、`PEGC_LINEAR_BASE` など) に当てるキャストは P2V を通っていなければ違反 (ID は新設、例外は一覧で許可)。
+- **適用範囲 (Codex X7-3、2026-09-30、ユーザー承認)**: `P2V` / `V2P` が使えるのは**恒等の supervisor 領域だけ** (カーネル帯・シェル帯・池・MMIO の恒等窓)。**アプリ帯と lease 窓は v3 でも非恒等**なので、そのポインタを恒等の `V2P` に渡すと装置へ仮想番地を渡してしまう — **AS のページと lease は台帳 (PTE / SURFACE) から物理へ変換する別の関数**にし、`V2P` には渡せないことを検査 (`check_constraints.py` の同じ検査で、アプリ帯・lease 窓の番地を持つ変数に `V2P` を当てたら違反) で分ける。**DMA には物理の記述子 (PFN 区間) を渡す** — 仮想ポインタを受け取る DMA API を作らない (`dma_alloc` の戻りは物理と仮想の組)。
 - **v4 で高位化するとき**に変わるのはこの 1 か所と、lease 窓の別名 (既に非恒等) だけ、という状態を v3 の終わりに作る。Codex 往復 2 の W1〜W3 (live-AS 規則・exec の CR3 切替・監査対象の広さ) は v4 の設計で改めて解く。
 
 ---
@@ -184,7 +191,7 @@ RAM の存在 (物理地図)・割当可否・owner・写像を**別の情報**�
   - ドライバの**利用時の割当** (`pcm_open` の `dma_pool_alloc`、`pcm_cs4231.c:525`) は池ではなく固定プールの内側 → R4。
 
 - **R4 連続した物理 — 池からの予約は起動時、固定プール内部の割当は利用時でよい。** (Codex 往復 6 P3 で「予約」と「利用時の割当」を分けた)
-  - BB は起動時 (gfx probe の直後、live AS = 0) に池から連続確保 (§2-2)。**池からの新規の連続確保はこれと同梱域・モジュール本体 (読み込み時) だけ** — 断片化で後から取れなくなるのを避ける。
+  - BB は起動時 (§4-5 の識別 + 予約 + BB 確保の段、live AS = 0、D33 — probe より前) に池から連続確保 (§2-2)。**池からの新規の連続確保はこれと同梱域・モジュール本体 (読み込み時) だけ** — 断片化で後から取れなくなるのを避ける。
   - DMA プール 64KB (§3-2) は固定の塊として起動時に予約済み。**プール内部の割当 (`dma_pool_alloc` → `dma_alloc(size, align, limit)`) は利用時 (`pcm_open`、82557 の open) の通常文脈でよい** — 池を触らないので R3 に反しない。顧客は PCM リングと 82557 CB/RFD の固定サイズ 2 種なので、最悪の並びで両方入ることを T1 の kselftest (64KB 境界の検査) に加える。PCM の確保時点は変えない。
 
 - **R5 回収の検査 — 通常 AS の終了検査と永続資源を分ける。** (Codex 往復 6 P2)
@@ -223,6 +230,13 @@ R1〜R4 はプリエンプティブでない前提をそのまま約束にした
 3. **lease / 回収の順序** — 「lease を全部外してから物理を返す」「shlib detach の後に PD を捨てる」「回収より先に親の文脈へ戻す」(`exec.c:1362`) は、1 本の通常文脈が最後まで走ることで守られている。許すなら回収を再入可能な状態機械にする。
 
 つまりこの 3 つが R1〜R4 の前提そのもの。**R2〜R4 の「起動時・読み込み時に取る」方針はプリエンプションの有無から必然的には決まらない** (Codex) — P6 を見直しても先取りの方針は変えず、変えるのは 1〜3 の守り方だけ。
+
+**P6 の票に載せる要件 (Codex X5、2026-09-30、ユーザー承認)** — 協調モデルは維持 (決定は変えない)。P6 は「番犬の方式」だけでなく、**停止対象・停止可能点・最大応答時間・FP 状態**を決める票にする:
+
+1. **「固まった」の自動判定と、ユーザーによる強制停止 (CTRL+STOP) を別に定義する。** 今の暴走判定は最後にカーネルへ入った時刻を syscall ごとに更新する (`appslot.c:669`、`exec.c:1445`) ので、**軽い KAPI を無限に繰り返すアプリは暴走にならず**、**KAPI 内部の永久待ちは CPL=3 へ戻らないので R1 の移譲条件に入らない**。単にタイマを足しても両方は解けない。**アプリ側の停止は安全点で保証し、長い KAPI (期限待ち・PCM・I/O) には期限・取消の確認・巻き戻し可能点を持たせる**。カーネル自身の不具合で止まった場合までアプリ単位の安全な回収を保証する、とは書かない。
+2. **KAPI の中では AS を切り替えない** (上の 1〜3 の前提)。**D24 の trim は「要求を記録して安全な配送点 (WM の配送、syscall の出口) で処理する」方式を第一候補**にする。同期で配送するなら、台帳の更新完了・owner の固定・再入禁止を満たす専用の境界が要る — **`ring3_wm_depth` をその代用にしない** (それは WM が渡すポインタを信頼側に置く印であって、KAPI の再入防止機構ではない `gui.c:25`)。反例: A の `mem_map` が台帳更新中に WM を回し、B の trim フックが `mem_unmap` へ再入して同じ台帳と current owner を途中状態で扱う (IRQ 起点でなくても起こる)。
+3. **x87 の状態はアプリごとに初期化・保存・復元する** — プリエンプションの有無と無関係。起動時に x87 を初期化する (`kentry.asm:21`) が、`AppSlot` と park / resume の経路 (`appslot.h:102`、`ring3_entry.asm:105`) に x87 の保存欄が無い: A が丸めモードを変えて park → B が別の設定で計算 → A が resume、で環境が混ざる。**IRQ 文脈の合成器 (V3_PLAN_DRAFT U5 の Rust) はまず整数演算に限り、生成コードに x87 / SSE / MMX が無いことを検査する** (ユーザー決定 2026-09-30。Rust ターゲットの `-sse,-mmx` `i686-os32-none.json:14` だけでは x87 不使用を保証しない)。IRQ 専用の完全な退避復元を設計するのはその後。U5 の Rust 容認は維持。
+4. **受入**: CPL=3 の無限ループ、KAPI 連打、期限待ち中、PCM 再生中、trim の配送中、FP 設定の異なる 2 アプリの切替 — のそれぞれで前景を止めて WM / シェルへ戻れ、池の空きが戻ること。最大応答時間は票に数字で書く。
 
 #### 3-5-4. 断片化 (ユーザーの問い 2026-09-30: 「A が起動後に追加確保 → B を起動 → A に戻って追加確保 → B を閉じる」で断片化しないか)
 
@@ -318,6 +332,8 @@ MEMSYS5 を 384KB から 512KB へ (D27) 増やした分 (+128KB) は、この�
 
 1. ローダ: 圧縮画像を**集積域**へ読む → CRC → 展開 (カーネル → カーネル帯、同梱モジュール → **同梱域**)。
 2. カーネル (PG=0 でも動く順): メモリ検出 → `paging_init` → **台帳初期化 (集積域は解放、同梱域は owner=bundle で予約)** → **必須モジュール (ブート FS: FAT / iso9660+ATAPI、必要なら HostDrv) をその場で再配置・登録** (コピーしない、同梱域を最終置き場にしてよい) → **ルートマウント** → **gfx の識別 (副作用なし) + デバイス窓の予約 (台帳の MMIO 登録) + BB 確保** (D33: 破壊的な probe / enable は GUI 境界で) → `exec_init` → 通常モジュール (`/sys/*.mod`: SQLite → FEP → PCM …) → **スプラッシュ (最初のアプリ、終了でアンロード)** → シェル (`exec_run`、シリアルの会話 (rshell / SerialFS) はここから、D18)。
+   - **gfx の識別部の置き場 (Codex X7-2)**: この段は通常モジュールの読み込みより前なので、Cirrus 等をモジュールにしても**識別 (PCI ID / 機種判定 / BAR の読み取り) の小さな部分はコアに残すか、同梱域の早期ロード対象にする** — 識別コードを丸ごとモジュールへ出すとこの段で呼べない。どちらにするかは T5c / P4 の境界で決め、§4-4 の区分に書く。
+   - **PT の準備はこの段で終える** (Codex X4): 共有 PDE の追加は最初の AS より前 (§2-3 ④) なので、デバイス窓・PCI BAR・台帳に MMIO 登録した範囲の PT はここで作り終える。装置の probe / enable は GUI 境界に残る。
    - `paging_init` / 台帳をルートマウントより前に動かす (今は逆)。動かせない事情があれば (U19)、同梱域は**固定番地の静的予約**として台帳初期化時に除外するだけで同じ効果 (必須モジュールは PG=0・恒等で再配置できる)。
    - HDD (ext2 ルート) の構成では同梱は無し (ext2 はコア)。**FD 起動の最小構成 = コア + FAT の 2 エントリ**。MINIMAL (D21) はこれに SQLite / FEP のモジュールを読まない構成。
 
@@ -346,6 +362,20 @@ MEMSYS5 を 384KB から 512KB へ (D27) 増やした分 (+128KB) は、この�
 | 完全分離ではない | MEMSYS5 は 1 ヒープなので、**cache_size の制限は上限であって予約ではない** — アプリの接続の一時確保 (prepare・sort・一時表) で FEP の分が食われうる。SQLite はプロセスにヒープを 1 つしか持てないので FEP 専用の 2 つ目のヒープは作れない。**実装の段 (T4) で「アプリの接続が上限まで使った状態で FEP の 1 語変換が通る」を試験し**、足りなければ `sqlite3_soft_heap_limit64` か FEP 側の最小 cache の再確保で補う (§7 に受入を足した) |
 | 辞書の入れ替え | `ime_switch_dict` (S/M/L、`ime.c:882-895`) で切り替える先の `mem_reserve_kb` が起動時の確保量を超えるときは、**その場で再確保せず「再起動で再確保」** (設定に保存して再起動を促す)。超えないときはそのまま切り替える |
 | MINIMAL | SQLite を読まないので取り分も無い (D21・D26) |
+| 同一 DB の重複接続 (排他 open の導入まで) | D29 は排他 open を TASK_DICT_META の後へ送る根拠に「同時実行しない」を使ったが、現行 SQLite の lock は no-op (`os32_sqlite_vfs.c:286`) で、協調でも **GUI アプリ A が transaction を開いたまま park → B が同じ DB を更新 → A が再開**、で transaction は重なる (Codex X7-4、到達可能性からの推論で破損の実測ではない)。**排他 open の導入まで同一 DB の重複接続をどう禁止するかを T4 で明記し、受入に親子だけでなく parked アプリ同士を足す** (§7)。D29 の決定 (lock 表は作らない、排他 open は DICT_META の後) は変えない |
+
+### 4-7. モジュールローダの契約 (Codex X2、2026-09-30、ユーザー承認)
+
+P2 は「shlib ローダの流用」ではなく、**形式検査・表生成の共通部を使った専用のモジュールローダ**として作る。現行 `shlib.c` は固定番地の読み込み・ヘッダ検査・BSS ゼロ化・ジャンプ表検査・AS ごとの data 複製で、**実行時の再配置器は持たない** (`shlib.c:74`、`mkshlib.py:6`)。ブート FS の同梱経路 (§4-5) と `/sys/*.mod` 経路で**検証核を共通**にし、前者は未マウントの VFS や後続モジュールを import しない依存検査を持つ。R7 (owner 単位の回収、装置状態は init が戻す) はそのまま。
+
+| 項 | 契約 |
+|---|---|
+| 生成時とロード時の検証を分ける | `mkmod.py` の合格は、ディスクから読んだ画像が同じ内容である保証にはならない。**ロード時にも**: ヘッダ最小長、形式・ABI 世代の識別 (D35)、text / data / bss / 各表の範囲が `mem_size` の内側、整数オーバーフロー、**再配置の書込先 4 バイト全体が範囲内** (位置が `mem_size − 2` なら隣を壊す)、**重複・重なる再配置の拒否** (同じ位置が二度あればベースを二度足す)、import slot・export・init の参照が範囲内 — を検査する。現行 shlib の「加算した後に比較する」サイズ検査 (`shlib.c:147`) はそのまま雛形にしない |
+| 信頼の範囲 | 署名なしで保証できるのは構造の妥当性だけで、**任意の CPL=0 コードの安全性は保証しない**。**信頼する配布物 (起動一覧と同梱域) からだけ読む**契約を明示し、チェックサムを実行権限の証明として扱わない |
+| IRQ 登録と初期化状態の結び付け | `irq_register()` は登録直後に PIC のマスクを開く (`irq.c:45`) が、owner や handler の所属範囲は見ない (`irq_math.c:31`)。**IRQ 登録成功 → 残りの init に失敗 → コードを回収**、の順で登録だけ残ると次の割り込みが解放済みコードへ飛ぶ — 取り外しを実装しなくても**起動時の失敗だけで到達する**。既存 PCI 契約の **STARTING → RUNNING** (`pci_bind.h:15`) をモジュールにも適用し、登録時点で handler と引数を使用可能にする。**通常利用者への export 公開は init 成功後**に限る。init 失敗時はローダが (init 自身の戻しに加えて) owner=モジュール名の IRQ / tick callback の登録が残っていないことを確認してから回収へ進む (R7) |
+| 「戻せた失敗」と「停止を証明できない失敗」 | R7 の一括回収へ進めるのは **IRQ・tick・登録済み callback・DMA からの参照が切れたとき**だけ。装置の停止が確認できない失敗は、既存の `PCI_PROBE_QUARANTINE` (`pci_bind.h:35`) と「DMA 停止を証明できないリングは返さない」(`pcm_cs4231.c:460`) と同じく、**必要資源を隔離保持するか起動を止める**。`irq_unregister()` だけでは tick 経由のアクセスは止まらない (`pcm_cs4231.c:744`)。省略可能モジュールの「未搭載 stub で継続」(R7) は**戻せた失敗にだけ**使う |
+| 実行可能として公開する境界 | コピー・BSS 初期化・再配置・import 書込を終え、必要なアーキテクチャ処理 (命令キャッシュの整合、M0 §6 の「ロードしたコードへ飛ぶ経路」) を済ませてから init / callback を公開する順序にする。x86 でキャッシュ障害を確認した所見ではなく設計上の順序。ARM の実装は v3 の完了条件に入れない |
+| 受入 (T4 / T5a / T5c) | 壊れた画像 (範囲外・重複の再配置、未知の形式版、範囲外の export / import) の拒否、各確保段階の失敗、IRQ 登録後の失敗、停止不能 — を注入し、**回収後に callback と装置からの参照が残らない**こと。Rust の合成器も同じ契約に載る (IRQ 内の確保・待ち・失敗処理の制約は言語と無関係) |
 
 ---
 
@@ -435,13 +465,13 @@ MEMSYS5 を 384KB から 512KB へ (D27) 増やした分 (+128KB) は、この�
 | 票 | 内容 | 受入の要点 |
 |---|---|---|
 | **T0 C11** | `_Static_assert` へ (V3_PLAN_DRAFT P0) | 全ビルド + check |
-| **T1 台帳** | 物理地図 + 所有権台帳 + **SURFACE / lease の型**、池を `MEM_POOL_BASE` から model 経路で全 RAM 量に (legacy 撤去)、owner タグ、`dma_alloc`、**集積域・同梱域の予約規則**、`sys_reserve_top` 撤去、BB のブート時確保と移譲、**P2V / V2P の導入と物理ポインタ直接参照の監査 (§3-4、D20) + `check_constraints.py` の検査**、**§3-5 の台帳側: owner を AS / 永続の 2 種に (R5)、割り込み中の確保・解放を数える検査 (R1、T2 で panic に)、モジュール owner の一括回収 (R7)、DMA プール内の最悪の並び (R4)**、**DEVICE_RESERVATION の核 (`pgalloc_device_reserve` / `sys_device_reserve_core`) を台帳の MMIO 登録に載せ直す (D33: 複数 span の一括 commit・永久保持・owner を仕様として残す、`test_device_reservation.py` 流用)、Cirrus の写像 (`paging_map_phys`) を probe の前へ (識別 → 予約 → 写像 → probe の順、D33)** | kselftest: 予約・割当・解放・失敗時回収 (モジュール init の途中失敗を含む)、64KB 境界 (PCM リング + 82557 の同居)、**8MB/17MB/64MB のすべてでモデル経路 (legacy `pgalloc_init` の fallback を撤去、D32)**、高位 RAM の登録源は `memory_boot_detect` (0594h + 書き込み検証) だけ、MMIO 登録の一括 commit と失敗時の全不変 (流用試験)、P2V 検査 0 件、割り込み中の台帳操作の件数を報告 |
-| **T2 アプリ帯 + lease 窓** | **設計段で lease 契約 (§2-2) を先に決める** → 0x80000000 へ、lease 窓 0xF0000000、定数分離、claim / DEVICE_FLOOR / `--cpl0` 撤去、`exec.c:1932-1959` の共有 USER 写像撤去 (SHM・トランポリン以外)、`paging.c:796` の共有 PT 経路撤去、shlib を池 + AS ごと写像、既定 heap、**スタックを可変 (OS32X ヘッダ)**、検査 3 段 (§2-3 ⑥)、app.ld / shlib.ld / mkshlib / stub.rs、全再ビルド・旧形式拒否、**BB を gshell 所有 + lease に (b)**、**§3-5 の exec 側: 強制脱出を移譲 / 回収の 2 段に (R1)、伸長の KAPI は `mem_map` / `mem_unmap` の 2 つだけ (libc の `_sbrk` をヒープ末尾に続けて map する形へ、閾値 64KB、池不足時の trim 通知、起動予約なし — R2、D23〜D25)、lease 窓の PT 1 枚の事前確保と失敗時の巻き戻し (R3-e)**、**FEP_BOUNDARY B1 (D31): `ring3_ptr_ok` の帯判定を新しい帯で書き直す差分に「NUL まで 1 バイトずつ検証する bounded copy」を含める (`db_user_str_copy` を `exec/` へ移して共通化、`[start, start+len)` の overflow 検査)** | CPL=3 起動・終了・fault・複数 AS、旧バイナリ拒否、**未終端・ページ跨ぎの user 文字列を渡した KAPI は失敗 (SQLite 進入中の #PF にならない)**、**lease を 2 AS に貸して互いに見えない**、通常 GUI アプリが VRAM を読み書きすると kill、**CUI の無限ループ中の CTRL+STOP と PCM 再生中の CTRL+STOP で池の空きが戻る (R1)**、伸長 → unmap → 終了で owner のページ 0 (R2・R5) |
+| **T1 台帳** | 物理地図 + 所有権台帳 + **SURFACE / lease の型**、池を `MEM_POOL_BASE` から model 経路で全 RAM 量に (legacy 撤去)、owner タグ、`dma_alloc`、**集積域・同梱域の予約規則**、`sys_reserve_top` 撤去、BB のブート時確保と移譲、**P2V / V2P の導入と物理ポインタ直接参照の監査 (§3-4、D20) + `check_constraints.py` の検査**、**§3-5 の台帳側: owner を AS / 永続の 2 種に (R5)、割り込み中の確保・解放を数える検査 (R1、T2 で panic に)、モジュール owner の一括回収 (R7)、DMA プール内の最悪の並び (R4)**、**DEVICE_RESERVATION の核 (`pgalloc_device_reserve` / `sys_device_reserve_core`) を台帳の MMIO 登録に載せ直す (D33: 複数 span の一括 commit・永久保持・owner を仕様として残す、`test_device_reservation.py` 流用)、Cirrus の写像 (`paging_map_phys`) を probe の前へ (識別 → 予約 → 写像 → probe の順、D33)**、**MMIO 登録の形 (Codex X4、§8-4)**: 生の `{base, size}` を予約権限にせず**検証済み資源レコード** (BDF・vendor/device/revision・BAR 番号・生値・種別・**確定した decode 幅とその根拠**・boot 世代) を台帳に持ち、glue はその参照を渡す (owner と要求集合の整合は台帳が再検査)。**予約範囲 (装置が応答する decode aperture 全体)・写像範囲 (確認済みの必要部分)・面範囲 (USER lease する面) を別に持つ**。enable が開く銀行窓・別名窓も同じ予約集合に。**全 span を検査してから一括 commit** (PFN 半開区間で境界・丸め・4GiB 終端を検査、RAM・固定用途・allocated・他 owner・既存装置資源と照合、管理上限外も完全な範囲を台帳に残し bitmap 操作は管理範囲との交差だけ、失敗時は出力も含め不変)。**永久予約 (device owner = kernel 寿命の安定 ID) とモジュール owner の RAM 回収を分離** — R7 の回収で MMIO 予約や復帰フックが依存する写像・コード・データを消さない (R7 と D33 を単一の無条件 free にしない)。**BB は識別で決めた backend の量を probe の前に確保** (§2-2、X7-1) | kselftest: 予約・割当・解放・失敗時回収 (モジュール init の途中失敗を含む)、64KB 境界 (PCM リング + 82557 の同居)、**8MB/17MB/64MB のすべてでモデル経路 (legacy `pgalloc_init` の fallback を撤去、D32)**、高位 RAM の登録源は `memory_boot_detect` (0594h + 書き込み検証) だけ、MMIO 登録の一括 commit と失敗時の全不変 (流用試験)、**MMIO 登録 (X4): 第二 span の衝突、台帳満杯、同 owner の部分一致の拒否、丸めによる衝突、map / probe 失敗後の永久保持、モジュール回収後の予約保持**、P2V 検査 0 件 (アプリ帯・lease 窓の番地に `V2P` を当てた箇所も 0、§3-4)、割り込み中の台帳操作の件数を報告 |
+| **T2 アプリ帯 + lease 窓** | **設計段で lease 契約 (§2-2) を先に決める** → 0x80000000 へ、lease 窓 0xF0000000、定数分離、claim / DEVICE_FLOOR / `--cpl0` 撤去、`exec.c:1932-1959` の共有 USER 写像撤去 (SHM・トランポリン以外)、`paging.c:796` の共有 PT 経路撤去、shlib を池 + AS ごと写像、既定 heap、**スタックを可変 (OS32X ヘッダ)**、検査 3 段 (§2-3 ⑥)、app.ld / shlib.ld / mkshlib / stub.rs、全再ビルド・旧形式拒否、**BB を gshell 所有 + lease に (b)**、**§3-5 の exec 側: 強制脱出を移譲 / 回収の 2 段に (R1)、伸長の KAPI は `mem_map` / `mem_unmap` の 2 つだけ (libc の `_sbrk` をヒープ末尾に続けて map する形へ、閾値 64KB、池不足時の trim 通知、起動予約なし — R2、D23〜D25)、lease 窓の PT 1 枚の事前確保と失敗時の巻き戻し (R3-e)**、**FEP_BOUNDARY B1 (D31): `ring3_ptr_ok` の帯判定を新しい帯で書き直す差分に「NUL まで 1 バイトずつ検証する bounded copy」を含める (`db_user_str_copy` を `exec/` へ移して共通化、`[start, start+len)` の overflow 検査)**、**lease の API (Codex X3、§2-2)**: 記述子は SURFACE 台帳への参照、lease 結果の仮想番地は別に返す (`gfx_get_framebuffer` の返す番地を AS ごとに)、キャッシュ属性は台帳から、共有 PT を書く要求の拒否、ページ整列の占有と解除順、planar のカーネル側プレーンポインタの更新。全再ビルド・旧形式拒否の**世代の識別は D35** (旧新混在試験は P7 の受入と共有) | CPL=3 起動・終了・fault・複数 AS、旧バイナリ拒否、**未終端・ページ跨ぎの user 文字列を渡した KAPI は失敗 (SQLite 進入中の #PF にならない)**、**lease を 2 AS に貸して互いに見えない** (§2-2 の定義)、**lease の回帰 (X3、§2-3 ⑥ (d)): 3 バックエンドで描画・present、lease の物理対応と alias のキャッシュ属性の一致、無関係な AS の権限・物理不変、PT / 台帳不足の全体巻き戻し、片方だけの revoke、終了時回収、再 init**、通常 GUI アプリが VRAM を読み書きすると kill、**CUI の無限ループ中の CTRL+STOP と PCM 再生中の CTRL+STOP で池の空きが戻る (R1)**、伸長 → unmap → 終了で owner のページ 0 (R2・R5) |
 | **T3 カーネル帯** | 3MB + 固定の塊 + KERNEL_SLACK + シェル 0x400000 (1 箱) + DMA 整列 + PT を画像の外へ + Unicode 組表を `.rodata` へ (T7a から前倒し可)。SQLite は本体の直後に連結 | 地図検査、8MB の予算検査、`pgalloc_free_pages` の実測で §4-3 を更新 |
-| **T4 SQLite 分離** | §4-2 (ベース 0 リンク + emit-relocs、インポートスタブ、外部データ禁止、未対応再配置の拒否)、**MEMSYS5 512KB** / 代替スタックを池へ、`kapi_db` / `ime_dict` を表経由 (FEP 案 A)、MINIMAL での `db_*`、**FEP の取り分の優先確保と `db_open` の上限 (§4-6、`mem_reserve_kb` は既定値 + settings だけ。辞書のメタ情報の読み取りは TASK_DICT_META)**、読み込み失敗で MINIMAL へ (D26)、**F2 の残り (D30): `kapi_db` / `ime_dict` の open を `os32_sqlite_group_open` 経由に (RESIDENT group 2 本)、F2d の隔離経路 (`exec_cleanup_owned_resources`、quarantine の到達)、default VFS の未所属 open の fail-closed**、**F3a + F3c の VFS 側 (D29): I/O の rc を捨てない、`SQLITE_IOERR_TRUNCATE` / `SQLITE_IOERR_FSYNC`、`pOutFlags`、RO 接続の write 拒否**、**FEP_BOUNDARY B3 / B4 (D31): 旧 `db_exec` / `db_prepare` の checked copy (1024B 超は失敗、旧 stmt の finalize より前に SQL を全コピー)、エクスポート表のラッパに `enter` / `leave` (= 全 outer 呼び出しの台帳)、SQLite 進入中の例外は app-kill でなく kernel 異常 (`isr_handlers.c` の判定順)** | `db_*` 全 KAPI、FEP 変換、`db_mem_used` の戻り、MINIMAL で起動、**アプリの接続が上限まで使った状態で FEP の 1 語変換が通る**、**F2 の T01 / T02 / T07 / T12 (親の接続の生存、後発 journal の所属、close 失敗の隔離、子の実行中の FEP 学習)、SQL 1025B の `db_exec` が失敗、truncate が `SQLITE_IOERR_TRUNCATE`、RO 接続の write が拒否** |
+| **T4 SQLite 分離** | §4-2 (ベース 0 リンク + emit-relocs、インポートスタブ、外部データ禁止、未対応再配置の拒否)、**MEMSYS5 512KB** / 代替スタックを池へ、`kapi_db` / `ime_dict` を表経由 (FEP 案 A)、MINIMAL での `db_*`、**FEP の取り分の優先確保と `db_open` の上限 (§4-6、`mem_reserve_kb` は既定値 + settings だけ。辞書のメタ情報の読み取りは TASK_DICT_META)**、読み込み失敗で MINIMAL へ (D26)、**F2 の残り (D30): `kapi_db` / `ime_dict` の open を `os32_sqlite_group_open` 経由に (RESIDENT group 2 本)、F2d の隔離経路 (`exec_cleanup_owned_resources`、quarantine の到達)、default VFS の未所属 open の fail-closed**、**F3a + F3c の VFS 側 (D29): I/O の rc を捨てない、`SQLITE_IOERR_TRUNCATE` / `SQLITE_IOERR_FSYNC`、`pOutFlags`、RO 接続の write 拒否**、**FEP_BOUNDARY B3 / B4 (D31): 旧 `db_exec` / `db_prepare` の checked copy (1024B 超は失敗、旧 stmt の finalize より前に SQL を全コピー)、エクスポート表のラッパに `enter` / `leave` (= 全 outer 呼び出しの台帳)、SQLite 進入中の例外は app-kill でなく kernel 異常 (`isr_handlers.c` の判定順)**、**ローダの契約 (§4-7、Codex X2)**: ロード時検証 (範囲・重複再配置・世代)、信頼する配布物だけ、公開の境界 (init 成功後に export)、**排他 open (D29) の導入まで同一 DB の重複接続をどう禁止するかを明記 (§4-6、X7-4)** | `db_*` 全 KAPI、FEP 変換、`db_mem_used` の戻り、MINIMAL で起動、**アプリの接続が上限まで使った状態で FEP の 1 語変換が通る**、**F2 の T01 / T02 / T07 / T12 (親の接続の生存、後発 journal の所属、close 失敗の隔離、子の実行中の FEP 学習)、SQL 1025B の `db_exec` が失敗、truncate が `SQLITE_IOERR_TRUNCATE`、RO 接続の write が拒否**、**壊れたモジュール画像 (範囲外・重複の再配置、未知の形式版) の拒否と init の各段階の失敗注入で参照が残らない (X2)**、**parked アプリ同士が同じ DB を開く経路の扱い (X7-4)** |
 | **T5a FEP** | 案 B (`/sys/fep.mod`)、**API 別 stub**、**F2c (D30): FEP の接続 2 本 (辞書 RO + 学習 RW、[TASK_DICT_META](../fep/TASK_DICT_META.md) 前は辞書 1 本) を起動時 (live AS = 0) に RESIDENT group で開く、`dict_fd_protect` の撤去、close 失敗を隠さない reopen 拒否**、**FEP_BOUNDARY B2 (D31): `ime_user_list / delete / export` の facade を bounded copy + kernel staging → finalize → copyout に (不正 kanji で全候補削除に拡大しない、不正 path で truncate しない、上限表 §3)** | FEP 有り / MINIMAL の両方で英数入力・編集、FEP で 1 語変換、**子アプリの実行中に FEP が学習 (journal を開く) して子の終了で FEP の FD が閉じない**、**不正ポインタ・未終端の `ime_user_*` は失敗して SQLite に届かない** |
 | **T5b ブート必須 FS の同梱・早期ロード** (**T5c より前**) | 2 段階の起動順 (§4-5)、`paging_init` / 台帳をルートマウントの前へ (U19)、同梱域、mkvk32 の複数エントリ、FAT / iso9660+ATAPI / HostDrv の切り出し | **FD 起動 (コア + FAT 同梱の 2 エントリ)**、CD 起動、HDD 起動 (同梱なし) |
-| **T5c その他のモジュール** | V86 / FM+snd / PCM / LAN / KCG ROM (予備) / NP21/W 専用 3 種、一覧ファイル、supervisor 検査、**スプラッシュをアプリへ** (D18) | 実機で NP21/W 専用を読まずに起動、コアだけの本体サイズを記録、スプラッシュ → シェルの順 |
+| **T5c その他のモジュール** | V86 / FM+snd / PCM / LAN / KCG ROM (予備) / NP21/W 専用 3 種、一覧ファイル、supervisor 検査、**スプラッシュをアプリへ** (D18)、**ローダの契約 §4-7 (Codex X2): IRQ 登録と初期化状態の結び付け (STARTING → RUNNING、export は init 成功後)、停止を証明できない失敗は隔離保持か起動停止**、**gfx バックエンドの識別部はコアに残すか早期ロード (X7-2、§4-5)** | 実機で NP21/W 専用を読まずに起動、コアだけの本体サイズを記録、スプラッシュ → シェルの順、**IRQ 登録後の init 失敗と停止不能の注入で callback・装置からの参照が残らない (X2)**、**GUI=0 でも gfx の識別と予約まで走り probe は走らない (D33)** |
 | **T6b ローダ 508KiB 解除** | 集積を 0x500000〜 (上限 1MB)、非重複検査 | 8MB での展開ピーク、FAT 経路 |
 | **T7a 低位解放** | BB (planar) を池へ、V86 の低位直接使用、フォントキャッシュ (0x1000) の撤去、`.kcgfont` の撤去 | V86 起動 (CUI)、GUI と交互 |
 | **T7b OpenType** | ストリーミング読み出し層、libos32gui + gshell のラスタライザ、私有キャッシュ、KCG ROM fallback (予備) | 1x の見た目、cold/warm の描画時間 (D15) |
@@ -458,8 +488,8 @@ MEMSYS5 を 384KB から 512KB へ (D27) 増やした分 (+128KB) は、この�
 | NP21/W 17MB | 上と同じ + 15〜16MB が池に無い + 2 枚以上の PDE を使うアプリ |
 | 実機 Ra266 64MB | 上と同じ + PCI BAR の窓が sup+PCD + PCM 再生中の操作 + D15 の判定 (数字を票へ) |
 | FD 起動 (NP21/W と実機) | コア + FAT 同梱で `/` がマウントでき、シェルまで上がる。MINIMAL で `db_*` が決まった誤りを返す |
-| 全構成 | 旧形式 (load_addr 0x500000 / `--cpl0` / 旧 shell.bin / 旧 shlib / 旧 `.kcgfont`) の拒否、DMA 64KB 境界、圧縮画像の上限 (T6b 前 508KiB / 後 1MB) と非重複検査、変異 (境界を 1 ページずらす) をリンク ASSERT と地図検査が止める |
-| 保護 | ring3_guard: アプリから (a) シェル帯、(b) 池の他 owner、(c) 自分の PT、(d) 固定 PT、(e) **VRAM (テキスト・プレーン・バンク窓・リニア窓)**、(f) 他 AS に貸したサーフェス を触ると kill されて OS が生きる。(g) SHM・トランポリン・自分の lease は読めて生き残る。**通常 GUI アプリは VRAM に触れない** |
+| 全構成 | 旧形式 (load_addr 0x500000 / `--cpl0` / 旧 shell.bin / 旧 shlib / 旧 `.kcgfont`) の拒否、**旧新混在 (D35 / Codex X6、P7 と共有): 旧アプリ・旧常駐シェル・旧 shlib・新 SDK + 旧 `.o`・v2 SDK でビルドした apps/game・HostDrv と NHD の食い違い、のそれぞれが入口へ飛ぶ前に拒否される (形式版・KAPI ABI 世代・メモリ配置世代・shlib プロトコルの不一致。未知の形式版も拒否)**、DMA 64KB 境界、圧縮画像の上限 (T6b 前 508KiB / 後 1MB) と非重複検査、変異 (境界を 1 ページずらす) をリンク ASSERT と地図検査が止める |
+| 保護 | ring3_guard: アプリから (a) シェル帯、(b) 池の他 owner、(c) 自分の PT、(d) 固定 PT、(e) **VRAM (テキスト・プレーン・バンク窓・リニア窓)**、(f) 他 AS に貸したサーフェス (自分には未貸与の面) を触ると kill されて OS が生きる。(g) SHM・トランポリン・自分の lease は読めて生き残る。**通常 GUI アプリは VRAM に触れない** |
 
 ---
 
@@ -522,6 +552,23 @@ MEMSYS5 を 384KB から 512KB へ (D27) 増やした分 (+128KB) は、この�
 | P3-c | 仮想が RAM より広くても、長寿命アプリの map/unmap で仮想の外部断片化は起こる (最大の穴 < 要求) | **反映**: `mem_map` は仮想の連続不足でも ENOMEM と明記 (R2 2.)、Codex の反例と軽くする方針 (大小の塊を帯の両端から、再利用、帯を広めに) を §3-5-4 に | R2、§3-5-4 |
 
 追加のユーザー判断だった「必須モジュール (SQLite / FEP) の読み込み失敗時に MINIMAL へ移るか起動を拒否するか」は **2026-09-30 に MINIMAL へ移ると決定** (D26)。同日、SQLite の予算 (MEMSYS5 512KB、FEP の取り分、辞書の入れ替えは再起動で再確保、`mem_reserve_kb` + settings) と辞書のメタ情報・学習データの分離も決定 (D27・D28、§4-6、[`../fep/TASK_DICT_META.md`](../fep/TASK_DICT_META.md))。
+
+### 8-4. V3_PLAN_DRAFT §7-2 の論点 X1〜X8 (Codex gpt-6-astra、2026-09-30、基点 d0284b81) → 決定を変えない補足
+
+Codex は読み取りのみ (ビルド・試験・実機は未実施、反例はコードと契約からの推論)。**ユーザーは 8 件の推奨をすべて承認** (同日)。決定を改めたのは **D7 → D35** だけで、残りは実装境界と受入条件の補足。原文は [`V3_PLAN_DRAFT.md`](V3_PLAN_DRAFT.md) §7-2 (結論と反映先の列を足した)。
+
+| # | 論点 | Codex の結論 | 反映 | 場所 |
+|---|---|---|---|---|
+| X1 | C11 を先にする根拠 | **成立しない** (「C11 が無いと検査なし」は誤り — `STATIC_ASSERT` `types.h:32`・`os32.ld` の ASSERT・`gen_memmap.py`・`kselftest.c:543` が既にある)。C11 を単独で先行させる順序は維持できる | 根拠を「**コンパイラの規格変更と配置変更を別々に受け入れ、障害の原因を分ける**」に書き直し。既存の検査は残し T1 / T2 / T3 ごとに広げる。`_Static_assert` への置換だけを受入条件にしない。P0 に型の全面改名や整形を集めない | V3_PLAN_DRAFT §3 P0・順序の案 1 |
+| X2 | shlib ローダの流用でカーネル権限モジュール | **条件付き** — 流用では検証・公開・失敗回収の保証が不足 | **専用のモジュールローダ**: ロード時検証 (範囲・重複再配置・世代)、信頼する配布物だけ、IRQ 登録と初期化状態の結び付け (STARTING → RUNNING、export は init 成功後)、停止を証明できない失敗は隔離保持か起動停止、実行可能として公開する境界。注入試験 | §4-7、T4 / T5a / T5c、V3_PLAN_DRAFT P2 |
+| X3 | 面公開 API の記述子化と lease | **条件付き** — 私有 lease PT の契約は成立。旧 `{virt,phys,size}` + `map_user_range_phys_keep()` (共有 PT の USER 昇格) だけでは成立しない | 記述子は SURFACE 台帳への参照、lease の仮想番地は別に返す (`gfx_get_framebuffer` の旧番地問題)、キャッシュ属性は台帳から (`keep_cache` は新規 PTE から継承できない)、共有 PT を書く要求の拒否 (V86 は専用入口)、ページ端の占有と解除順、「互いに見えない」の定義、試験 (a)〜(e) の読み替え | §2-2、§2-3 ⑥ (d)、T2、TRIDENT §4-2 の注記 |
+| X4 | 実測 BAR を受ける broker | **条件付き** — 検証結果を装置の同一性・完全な decode 範囲・永久所有権に結び付ける | 検証済み資源レコード (BDF・ID・BAR 番号・確定 decode 幅と根拠・世代)、予約 / 写像 / 面の範囲の分離、全 span の一括 commit、GUI 境界での同一性の再確認 (不一致なら enable 拒否、予約の差し替えはしない)、永久予約とモジュール回収の分離。**Trident の今の採取値は未検証** (幅が未測定)。旧 DEVICE_RESERVATION の受入 3 項目 (GUI 境界で初回予約・arena 全域禁止・GUI=0 で予約ゼロ) を D33 に合わせる | D33、T1、§4-5、DEVICE_RESERVATION 状態行、TRIDENT §4-2 の注記 |
+| X5 | 協調 + 固まった前景からの回収 | **条件付き** — 停止可能点・KAPI 再入・x87 の契約が要る | P6 の票の要件: 自動判定とユーザー強制停止の分離、長い KAPI の期限・取消、**KAPI 中に AS を切り替えない**、trim は要求を記録して安全点で配送 (`ring3_wm_depth` を再入防止の代用にしない)、**x87 をアプリごとに保存・復元**、受入 6 項目。**IRQ の合成器はまず整数演算** (ユーザー決定。U5 の Rust 容認は維持) | §3-5-3、V3_PLAN_DRAFT P6・U5 |
+| X6 | fork 時の KAPI 整理と旧新混在の拒否 | **条件付き** — 現行 v63 型の検査 (ヘッダ v3 以上 + データ欄の位置、min KAPI の片方向) では不足 | **D35** (D7 の改訂): スロットの順を変えてよい、世代の識別 4 つ、拒否契約 (常駐シェルも例外にしない、未知の形式版を拒否、コンパイル単位の ABI 識別、成果物を一組で固定、v2 / v3 の配備先を分ける、Rust 生成器の未知型は生成失敗)、旧新混在試験を P7 の必須に | D35、§7 全構成、V3_PLAN_DRAFT P7・§5 C1・U8 |
+| X7 | D1〜D34 の抜け | **「抜けなし」は成立しない** (既決方針を変えずに補える境界条件が 4 件。元の X7 の 4 項目 — デバイス窓・DMA・APP_BAND・高位 RAM の検出源 — は D32・D33・U24 で取り込み済み) | (1) BB 確保の時点を D33 に統一 (識別の直後、probe 前に量を決める)、(2) gfx の識別部はコアに残すか早期ロード、(3) P2V / V2P は恒等 supervisor 領域だけ・AS と lease は台帳から・DMA は物理記述子、(4) 排他 open の導入までの同一 DB の重複接続 (parked アプリ同士) を T4 で明記 | §2-2、R4、§4-5、§3-4、§4-6、T4 |
+| X8 | データの互換 (NHD・settings・辞書・HDD 区画・ext2) | **全再ビルドだけでは成立しない** — 再配置自体はデータ形式を変えないが、配備による上書きと後半の辞書変更には明示の保存・移行が要る | **二段移行**: (1) 既存データを保持した媒体で v3 のシステム一式に更新 (settings.db の新マスタ上書きを移行と呼ばない、`fep.db` の `dict_user` を配備で消さない)、(2) TASK_DICT_META で学習の移行 (件数・内容・再実行の二重加算防止・途中失敗の復旧、S/M/L の `dict_id` 対応)。`fep_user.db` を `hsync` の保護名に。**v2.x の戻り先は旧バイナリに加えて旧データの写しも保持**。HDD の再区画・ext2 の再フォーマットは不要 (P5 の DMA / キャッシュは別途検証) | [TASK_DICT_META](../fep/TASK_DICT_META.md) §3・§5・§6、V3_PLAN_DRAFT §5 C7 |
+
+反論した点は無い。X1 の「成立しない」は順序の変更ではなく根拠の言い換え (順序 P0 → P1 は維持)。X5 の FP と安全点、X6 の世代識別を **T2 / T4 / P6 / P7 のどこが受け持つか**は上の表の「場所」列と §6 の T 票に載せた (Codex の求めた対応表)。
 
 ---
 
@@ -608,3 +655,4 @@ MEMSYS5 を 384KB から 512KB へ (D27) 増やした分 (+128KB) は、この�
 | ユーザー決定 + Codex 往復 6 | `codex_pool.md` (09-30) | §3-5 池の運用規則 R1〜R6 (ユーザー決定) → Codex「修正が必要」7 件 (R1 と CTRL+STOP の衝突、R2 と ⑧ の矛盾、lease の PT、2MB の上限化、R5 と永続 BB、R4 の予約と割当、モジュールの寿命と P6) → §3-5 改訂 (R1 の 2 段化、R2 は伸長側へ (推奨案)、R3-e、R5 の owner 2 種、R7、§3-5-3/-4) → §8-3 |
 | Codex 往復 7 | `codex_pool2.md` (09-30) | 2d3576d0 の確認: 6 件解消、残り 3 件 (同梱モジュールの owner 移譲と回収範囲、必須 / 省略可能の区分と D21、仮想の外部断片化) → R7・R2・§3-5-4 に反映 (§8-3 往復 7) |
 | ユーザー決定 (池の運用規則まわり) | `user_2.md` 末尾「池の運用規則まわりの決定」1〜7 (09-30) | (1) R2 採用、口は `mem_map` / `mem_unmap` の 2 つだけ、`brk` は libc、allocator は実装の段 / (2) 閾値 64KB 固定 / (3) trim は池不足時に裏のアプリへ通知、SDK 内で処理 / (4) 起動予約なし / (5) SQLite・FEP の失敗は MINIMAL、FEP の取り分は起動時に優先確保、超える辞書は再起動で再確保、量は `mem_reserve_kb` + settings / (6) MEMSYS5 512KB (8MB の余りは PEGC 約 1.44MB) / (7) 辞書のメタ情報と学習データの分離を採用、着手は v3 の後の方 → **D23〜D28**、R2、§4-2・§4-3・§4-6、§5-6、§7、[`../fep/TASK_DICT_META.md`](../fep/TASK_DICT_META.md)。**ユーザー判断待ちの項目は無くなった** |
+| Codex X1〜X8 | `x18/a.md` (X1〜X4)・`x18/b.md` (X5〜X8) (09-30、基点 d0284b81) | V3_PLAN_DRAFT §7-2 の 8 論点への回答: X1 成立しない (根拠の言い換え)、X2〜X6 条件付き、X7 抜け 4 件、X8 全再ビルドだけでは不成立 → **ユーザーが推奨をすべて承認** (同日、`user_2.md` 末尾)。決定の改めは **D7 → D35** (fork 時の KAPI 整理でスロット順を変えてよい、世代の識別と旧新混在試験が条件) と **IRQ 合成器は整数演算から** の 2 点、残りは決定を変えない補足 → §8-4、§2-2、§2-3 ⑥ (d)、§3-4、§3-5-3、§4-5、§4-6、§4-7、§6 (T1 / T2 / T4 / T5c)、§7、[TASK_DICT_META](../fep/TASK_DICT_META.md)、[TASK_TRIDENT_DRIVER](../realhw/TASK_TRIDENT_DRIVER.md) §4-2、[DEVICE_RESERVATION](../settings/DEVICE_RESERVATION.md) |
