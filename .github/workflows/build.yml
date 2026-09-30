@@ -66,6 +66,22 @@ jobs:
           echo "artifact=os32-${ref}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           echo "CROSS_DIR=$HOME/opt/cross" >> "$GITHUB_ENV"
 
+      # IPAex フォント (ipaexg.ttf / ipaexm.ttf) はリポジトリに無く、tools/fetch_fonts.py が
+      # IPA の公式配布から取る (docs/08_build.md §8-2)。取得先への負荷を減らすため、取れた ttf を
+      # zip の SHA-256 (スクリプトに固定) を key にキャッシュする。ヒットすればスクリプトは
+      # SHA-256 を照合して何も取らない。
+      - name: IPAex font cache key
+        id: fontkey
+        run: echo "key=ipaex-$(python3 tools/fetch_fonts.py --print-zip-sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache IPAex fonts
+        uses: actions/cache@v4
+        with:
+          path: |
+            assets/fonts/ipaexg.ttf
+            assets/fonts/ipaexm.ttf
+          key: ${{ steps.fontkey.outputs.key }}
+
       - name: apt packages
         run: |
           sudo apt-get update
@@ -101,7 +117,11 @@ jobs:
         if: steps.cross-cache.outputs.cache-hit != 'true'
         run: tools/ci/build_cross.sh --prefix "$HOME/opt/cross" --work "$RUNNER_TEMP/cross-work" --jobs "$(nproc)"
 
+      # OS32_ACCEPT_IPA_LICENSE=1: リポジトリ所有者が IPA Font License v1.0 に同意している前提で、
+      # CI では非対話に同意する (未取得のときだけ fetch_fonts.py が使う)。
       - name: Build (all external fd144)
+        env:
+          OS32_ACCEPT_IPA_LICENSE: "1"
         run: |
           export PATH="$CROSS_DIR/bin:$PATH"
           i386-elf-gcc --version | head -1
