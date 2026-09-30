@@ -146,6 +146,7 @@ make deploy-kernel # NHDイメージへのデプロイ (要NP21/W再起動)
 
 ## ライセンス
 
-[MIT License](LICENSE)
+[MIT License](LICENSE)。取り込んでいる第三者の部品 (SQLite、zlib、FatFs、IPADIC、IPAex フォントなど) と
+その配布条件は [THIRD_PARTY.md](THIRD_PARTY.md)。ホストの Python 依存は [requirements.txt](requirements.txt)。
 
 Copyright (c) 2025-2026 すけさん
