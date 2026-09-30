@@ -146,7 +146,9 @@ make deploy-kernel # NHDイメージへのデプロイ (要NP21/W再起動)
 ```
 
 必要なツールチェイン: `i386-elf-gcc` (13.2.0 + newlib-nano), `nasm`, `make`, `python3` (+lz4), `rustup`
-(構築手順は [docs/08_build.md](docs/08_build.md) §8-5 参照)
+(構築手順は [docs/08_build.md](docs/08_build.md) §8-5 参照)。
+日本語フォント (IPAex) はリポジトリに無く、初回の `make all` (または `make fonts`) が IPA の公式配布から取得する —
+IPA Font License v1.0 への同意を聞く (非対話は `OS32_ACCEPT_IPA_LICENSE=1`、[docs/08_build.md](docs/08_build.md) §8-1)。
 
 ## ライセンス
 
