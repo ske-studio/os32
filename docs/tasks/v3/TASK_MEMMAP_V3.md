@@ -1,6 +1,6 @@
 # TASK_MEMMAP_V3 — v3 のメモリマップ (カーネル帯の切り直し・アプリ帯の仮想化・物理台帳)
 
-> 状態: **設計中 (2026-09-30)** — **方針確定**。2026-09-30 にユーザー・Fable 5.1・Codex (gpt-6-astra) の 3 者討論で決定 (Codex 最終確認 **Approve**、ユーザーの判断もすべて確定)。実装は §6 の票 T0〜T7 の順で、未着手。**§3-5 (池の運用規則) は Codex 往復 6・7 の突き合わせを 2026-09-30 に反映 (§8-3)。残っていた判断 (R2 の採否・閾値・trim・起動予約、必須モジュール失敗時の MINIMAL、MEMSYS5 の量と FEP の取り分) は同日ユーザーが決定 (D23〜D28)。ユーザー判断待ちの項目は無い。**
+> 状態: **設計中 (2026-09-30)** — **方針確定**。2026-09-30 にユーザー・Fable 5.1・Codex (gpt-6-astra) の 3 者討論で決定 (Codex 最終確認 **Approve**、ユーザーの判断もすべて確定)。実装は §6 の票 T0〜T7 の順で、未着手。**§3-5 (池の運用規則) は Codex 往復 6・7 の突き合わせを 2026-09-30 に反映 (§8-3)。残っていた判断 (R2 の採否・閾値・trim・起動予約、必須モジュール失敗時の MINIMAL、MEMSYS5 の量と FEP の取り分) は同日ユーザーが決定 (D23〜D28)。**保留 5 件 (V3_PLAN_DRAFT U6) の拾い方も同日ユーザーが決定 (D29〜D34、仕分けは [U6_PENDING_REVIEW](U6_PENDING_REVIEW.md))。ユーザー判断待ちの項目は無い。**
 > それまでの状態: 設計 v2 (Codex 往復 1 の 9 件を反映。2-2 は保留、2-3 (KHEAP 192KB) は着地) — 経緯は §11。
 >
 > 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23)。出所: ユーザー指示 2026-09-23「カーネル予算はシュリンクではなく考え直す。順に実行」→ 2026-09-29「3 者で討論して決める」。
@@ -10,7 +10,7 @@
 
 ---
 
-## 0. 決定事項の一覧 (D1〜D28)
+## 0. 決定事項の一覧 (D1〜D34)
 
 | # | 決定 | 出所 |
 |---|---|---|
@@ -42,6 +42,12 @@
 | D26 | **必須モジュール (SQLite / FEP) の読み込み失敗は MINIMAL へ移る** (起動を拒否しない。表示付き、R7) | ユーザー (2026-09-30) |
 | D27 | **SQLite の MEMSYS5 は 512KB** (全機種同じ。8MB 機で 256KB に絞る案は不採用)。**FEP の SQLite 取り分は起動時に優先確保**し、アプリの接続は「プール − FEP 分」で上限。**事前確保量を超える辞書への入れ替えは再起動で再確保**。確保量は**辞書のメタ情報 `mem_reserve_kb`** に書き、**settings で上書き可** (§4-6) | ユーザー (2026-09-30) |
 | D28 | **辞書のメタ情報** (形式の版・page_size・min_fep_version・dict_id・kind・language/charset・variant・source/版・license/attribution・build_tool/date・entry_count・pos_table_version・cost_scale・mem_reserve_kb・cache_pages・checksum) と、**学習データを辞書と別ファイルに分ける** — 採用。**ただし着手は v3 の後の方** (票 [`../fep/TASK_DICT_META.md`](../fep/TASK_DICT_META.md)) | ユーザー (2026-09-30) |
+| D29 | **F3 (SQLite VFS の正直化)**: F3a (I/O の rc を捨てない、truncate 未対応は `SQLITE_IOERR_TRUNCATE`、sync / delete / access の失敗を区別) と F3c の VFS 側 (`pOutFlags`、RO 接続の write 拒否) は **T4 の受入**へ。**F3b は lock 表を作らず「同一 DB の排他 open」を [TASK_DICT_META](../fep/TASK_DICT_META.md) の後 (v3 後半、P10) に** — P6 (同時実行しない) で lock 表が守るのは入れ子の親子 1 経路だけ | ユーザー (2026-09-30、[U6_PENDING_REVIEW](U6_PENDING_REVIEW.md) §1-1) |
+| D30 | **F2 の残り** (F2b の呼び出し側接続・F2c・F2d の隔離経路・default VFS の fail-closed・R0 / R1) は**独立票にせず T4 (`kapi_db` / `ime_dict` の接続部) と T5a (FEP の接続 2 本を起動時に RESIDENT group で) の受入に畳む**。RESIDENT group は 1 → 2 本 (辞書 RO + 学習 RW)。票 [F2_OWNERSHIP](../settings/F2_OWNERSHIP.md) の本文は書き換えない | ユーザー (2026-09-30、U6_PENDING_REVIEW §1-2) |
+| D31 | **FEP_BOUNDARY は独立票にせず T2 / T4 / T5a の要件として拾う**: B1 uaccess (NUL まで 1 バイトずつ検証する bounded copy、`db_user_str_copy` を `exec/` へ共通化) → T2、B3 (旧 `db_exec` / `db_prepare` の checked copy) と B4 (エクスポート表のラッパに `enter` / `leave`、SQLite 進入中の例外は app-kill でなく kernel 異常) → T4、B2 (FEP facade: staging → finalize → copyout) → T5a。**旧 `db_exec` / `db_prepare` の SQL 1024B 超は「切捨てて実行」→「失敗」** (D7 の範囲)。票 [FEP_BOUNDARY](../settings/FEP_BOUNDARY.md) の本文は書き換えない | ユーザー (2026-09-30、U6_PENDING_REVIEW §1-3) |
+| D32 | **MEMORY_RAM_INTEGRATION は撤回** ([archive/settings/](../../archive/settings/MEMORY_RAM_INTEGRATION.md) へ) — A / B の大半は K6 で着地済み、残り (A3 の exec 永久 claim・C・D) は D3 で撤去と決めた機構の完成形。残る 2 点は **T1 の受入**へ: 8MB / 17MB / 64MB のすべてでモデル経路 (legacy `pgalloc_init` の fallback を撤去 — 8MB 機は今も legacy に落ちる)、高位 RAM の登録源は `memory_boot_detect` (0594h + 書き込み検証、機種資料との照合は U24) | ユーザー (2026-09-30、U6_PENDING_REVIEW §1-4) |
+| D33 | **DEVICE_RESERVATION は v3 P4 で拾うが改訂する**: 核 (`pgalloc_device_reserve` / `sys_device_reserve_core`) と owner 台帳は **T1 の台帳の MMIO 登録**に載せ直す (複数 span の一括 commit と永久保持は仕様として残す、試験流用)。**時期は折衷 — 副作用のない識別と予約は起動時 (§4-5)、破壊的な probe / enable は GUI 境界** (TRIDENT T8 (i) と一致)。**許可範囲は定数だけ → 検証済みの実測 BAR へ広げる** (Trident。V3_PLAN_DRAFT §7-2 X4 を Codex へ)。§5 (後発 GUI の BB) と exec arena 全域の禁止は D19 / D3 で不要。順序契約 (識別 → 予約 → 写像 → probe / enable → 面公開) と gfx バックエンドの識別 / probe 分離は P4 の票 (T2 の後、Trident 段 3 の前) | ユーザー (2026-09-30、U6_PENDING_REVIEW §1-5) |
+| D34 | **U6 の答えは「一部」**: F3a / F3c / F2 / FEP_BOUNDARY / DEVICE_RESERVATION は形を変えて拾う (多くは T 票の要件、DEVICE_RESERVATION は P4)、MEMORY_RAM_INTEGRATION は撤回、F3b は TASK_DICT_META の後 | ユーザー (2026-09-30、U6_PENDING_REVIEW §0・§2) |
 
 ---
 
@@ -311,7 +317,7 @@ MEMSYS5 を 384KB から 512KB へ (D27) 増やした分 (+128KB) は、この�
 **2 段階の起動順**:
 
 1. ローダ: 圧縮画像を**集積域**へ読む → CRC → 展開 (カーネル → カーネル帯、同梱モジュール → **同梱域**)。
-2. カーネル (PG=0 でも動く順): メモリ検出 → `paging_init` → **台帳初期化 (集積域は解放、同梱域は owner=bundle で予約)** → **必須モジュール (ブート FS: FAT / iso9660+ATAPI、必要なら HostDrv) をその場で再配置・登録** (コピーしない、同梱域を最終置き場にしてよい) → **ルートマウント** → gfx probe + BB 確保 → `exec_init` → 通常モジュール (`/sys/*.mod`: SQLite → FEP → PCM …) → **スプラッシュ (最初のアプリ、終了でアンロード)** → シェル (`exec_run`、シリアルの会話 (rshell / SerialFS) はここから、D18)。
+2. カーネル (PG=0 でも動く順): メモリ検出 → `paging_init` → **台帳初期化 (集積域は解放、同梱域は owner=bundle で予約)** → **必須モジュール (ブート FS: FAT / iso9660+ATAPI、必要なら HostDrv) をその場で再配置・登録** (コピーしない、同梱域を最終置き場にしてよい) → **ルートマウント** → **gfx の識別 (副作用なし) + デバイス窓の予約 (台帳の MMIO 登録) + BB 確保** (D33: 破壊的な probe / enable は GUI 境界で) → `exec_init` → 通常モジュール (`/sys/*.mod`: SQLite → FEP → PCM …) → **スプラッシュ (最初のアプリ、終了でアンロード)** → シェル (`exec_run`、シリアルの会話 (rshell / SerialFS) はここから、D18)。
    - `paging_init` / 台帳をルートマウントより前に動かす (今は逆)。動かせない事情があれば (U19)、同梱域は**固定番地の静的予約**として台帳初期化時に除外するだけで同じ効果 (必須モジュールは PG=0・恒等で再配置できる)。
    - HDD (ext2 ルート) の構成では同梱は無し (ext2 はコア)。**FD 起動の最小構成 = コア + FAT の 2 エントリ**。MINIMAL (D21) はこれに SQLite / FEP のモジュールを読まない構成。
 
@@ -429,11 +435,11 @@ MEMSYS5 を 384KB から 512KB へ (D27) 増やした分 (+128KB) は、この�
 | 票 | 内容 | 受入の要点 |
 |---|---|---|
 | **T0 C11** | `_Static_assert` へ (V3_PLAN_DRAFT P0) | 全ビルド + check |
-| **T1 台帳** | 物理地図 + 所有権台帳 + **SURFACE / lease の型**、池を `MEM_POOL_BASE` から model 経路で全 RAM 量に (legacy 撤去)、owner タグ、`dma_alloc`、**集積域・同梱域の予約規則**、`sys_reserve_top` 撤去、BB のブート時確保と移譲、**P2V / V2P の導入と物理ポインタ直接参照の監査 (§3-4、D20) + `check_constraints.py` の検査**、**§3-5 の台帳側: owner を AS / 永続の 2 種に (R5)、割り込み中の確保・解放を数える検査 (R1、T2 で panic に)、モジュール owner の一括回収 (R7)、DMA プール内の最悪の並び (R4)** | kselftest: 予約・割当・解放・失敗時回収 (モジュール init の途中失敗を含む)、64KB 境界 (PCM リング + 82557 の同居)、8MB/17MB/64MB、P2V 検査 0 件、割り込み中の台帳操作の件数を報告 |
-| **T2 アプリ帯 + lease 窓** | **設計段で lease 契約 (§2-2) を先に決める** → 0x80000000 へ、lease 窓 0xF0000000、定数分離、claim / DEVICE_FLOOR / `--cpl0` 撤去、`exec.c:1932-1959` の共有 USER 写像撤去 (SHM・トランポリン以外)、`paging.c:796` の共有 PT 経路撤去、shlib を池 + AS ごと写像、既定 heap、**スタックを可変 (OS32X ヘッダ)**、検査 3 段 (§2-3 ⑥)、app.ld / shlib.ld / mkshlib / stub.rs、全再ビルド・旧形式拒否、**BB を gshell 所有 + lease に (b)**、**§3-5 の exec 側: 強制脱出を移譲 / 回収の 2 段に (R1)、伸長の KAPI は `mem_map` / `mem_unmap` の 2 つだけ (libc の `_sbrk` をヒープ末尾に続けて map する形へ、閾値 64KB、池不足時の trim 通知、起動予約なし — R2、D23〜D25)、lease 窓の PT 1 枚の事前確保と失敗時の巻き戻し (R3-e)** | CPL=3 起動・終了・fault・複数 AS、旧バイナリ拒否、**lease を 2 AS に貸して互いに見えない**、通常 GUI アプリが VRAM を読み書きすると kill、**CUI の無限ループ中の CTRL+STOP と PCM 再生中の CTRL+STOP で池の空きが戻る (R1)**、伸長 → unmap → 終了で owner のページ 0 (R2・R5) |
+| **T1 台帳** | 物理地図 + 所有権台帳 + **SURFACE / lease の型**、池を `MEM_POOL_BASE` から model 経路で全 RAM 量に (legacy 撤去)、owner タグ、`dma_alloc`、**集積域・同梱域の予約規則**、`sys_reserve_top` 撤去、BB のブート時確保と移譲、**P2V / V2P の導入と物理ポインタ直接参照の監査 (§3-4、D20) + `check_constraints.py` の検査**、**§3-5 の台帳側: owner を AS / 永続の 2 種に (R5)、割り込み中の確保・解放を数える検査 (R1、T2 で panic に)、モジュール owner の一括回収 (R7)、DMA プール内の最悪の並び (R4)**、**DEVICE_RESERVATION の核 (`pgalloc_device_reserve` / `sys_device_reserve_core`) を台帳の MMIO 登録に載せ直す (D33: 複数 span の一括 commit・永久保持・owner を仕様として残す、`test_device_reservation.py` 流用)、Cirrus の写像 (`paging_map_phys`) を probe の前へ (識別 → 予約 → 写像 → probe の順、D33)** | kselftest: 予約・割当・解放・失敗時回収 (モジュール init の途中失敗を含む)、64KB 境界 (PCM リング + 82557 の同居)、**8MB/17MB/64MB のすべてでモデル経路 (legacy `pgalloc_init` の fallback を撤去、D32)**、高位 RAM の登録源は `memory_boot_detect` (0594h + 書き込み検証) だけ、MMIO 登録の一括 commit と失敗時の全不変 (流用試験)、P2V 検査 0 件、割り込み中の台帳操作の件数を報告 |
+| **T2 アプリ帯 + lease 窓** | **設計段で lease 契約 (§2-2) を先に決める** → 0x80000000 へ、lease 窓 0xF0000000、定数分離、claim / DEVICE_FLOOR / `--cpl0` 撤去、`exec.c:1932-1959` の共有 USER 写像撤去 (SHM・トランポリン以外)、`paging.c:796` の共有 PT 経路撤去、shlib を池 + AS ごと写像、既定 heap、**スタックを可変 (OS32X ヘッダ)**、検査 3 段 (§2-3 ⑥)、app.ld / shlib.ld / mkshlib / stub.rs、全再ビルド・旧形式拒否、**BB を gshell 所有 + lease に (b)**、**§3-5 の exec 側: 強制脱出を移譲 / 回収の 2 段に (R1)、伸長の KAPI は `mem_map` / `mem_unmap` の 2 つだけ (libc の `_sbrk` をヒープ末尾に続けて map する形へ、閾値 64KB、池不足時の trim 通知、起動予約なし — R2、D23〜D25)、lease 窓の PT 1 枚の事前確保と失敗時の巻き戻し (R3-e)**、**FEP_BOUNDARY B1 (D31): `ring3_ptr_ok` の帯判定を新しい帯で書き直す差分に「NUL まで 1 バイトずつ検証する bounded copy」を含める (`db_user_str_copy` を `exec/` へ移して共通化、`[start, start+len)` の overflow 検査)** | CPL=3 起動・終了・fault・複数 AS、旧バイナリ拒否、**未終端・ページ跨ぎの user 文字列を渡した KAPI は失敗 (SQLite 進入中の #PF にならない)**、**lease を 2 AS に貸して互いに見えない**、通常 GUI アプリが VRAM を読み書きすると kill、**CUI の無限ループ中の CTRL+STOP と PCM 再生中の CTRL+STOP で池の空きが戻る (R1)**、伸長 → unmap → 終了で owner のページ 0 (R2・R5) |
 | **T3 カーネル帯** | 3MB + 固定の塊 + KERNEL_SLACK + シェル 0x400000 (1 箱) + DMA 整列 + PT を画像の外へ + Unicode 組表を `.rodata` へ (T7a から前倒し可)。SQLite は本体の直後に連結 | 地図検査、8MB の予算検査、`pgalloc_free_pages` の実測で §4-3 を更新 |
-| **T4 SQLite 分離** | §4-2 (ベース 0 リンク + emit-relocs、インポートスタブ、外部データ禁止、未対応再配置の拒否)、**MEMSYS5 512KB** / 代替スタックを池へ、`kapi_db` / `ime_dict` を表経由 (FEP 案 A)、MINIMAL での `db_*`、**FEP の取り分の優先確保と `db_open` の上限 (§4-6、`mem_reserve_kb` は既定値 + settings だけ。辞書のメタ情報の読み取りは TASK_DICT_META)**、読み込み失敗で MINIMAL へ (D26) | `db_*` 全 KAPI、FEP 変換、`db_mem_used` の戻り、MINIMAL で起動、**アプリの接続が上限まで使った状態で FEP の 1 語変換が通る** |
-| **T5a FEP** | 案 B (`/sys/fep.mod`)、**API 別 stub** | FEP 有り / MINIMAL の両方で英数入力・編集、FEP で 1 語変換 |
+| **T4 SQLite 分離** | §4-2 (ベース 0 リンク + emit-relocs、インポートスタブ、外部データ禁止、未対応再配置の拒否)、**MEMSYS5 512KB** / 代替スタックを池へ、`kapi_db` / `ime_dict` を表経由 (FEP 案 A)、MINIMAL での `db_*`、**FEP の取り分の優先確保と `db_open` の上限 (§4-6、`mem_reserve_kb` は既定値 + settings だけ。辞書のメタ情報の読み取りは TASK_DICT_META)**、読み込み失敗で MINIMAL へ (D26)、**F2 の残り (D30): `kapi_db` / `ime_dict` の open を `os32_sqlite_group_open` 経由に (RESIDENT group 2 本)、F2d の隔離経路 (`exec_cleanup_owned_resources`、quarantine の到達)、default VFS の未所属 open の fail-closed**、**F3a + F3c の VFS 側 (D29): I/O の rc を捨てない、`SQLITE_IOERR_TRUNCATE` / `SQLITE_IOERR_FSYNC`、`pOutFlags`、RO 接続の write 拒否**、**FEP_BOUNDARY B3 / B4 (D31): 旧 `db_exec` / `db_prepare` の checked copy (1024B 超は失敗、旧 stmt の finalize より前に SQL を全コピー)、エクスポート表のラッパに `enter` / `leave` (= 全 outer 呼び出しの台帳)、SQLite 進入中の例外は app-kill でなく kernel 異常 (`isr_handlers.c` の判定順)** | `db_*` 全 KAPI、FEP 変換、`db_mem_used` の戻り、MINIMAL で起動、**アプリの接続が上限まで使った状態で FEP の 1 語変換が通る**、**F2 の T01 / T02 / T07 / T12 (親の接続の生存、後発 journal の所属、close 失敗の隔離、子の実行中の FEP 学習)、SQL 1025B の `db_exec` が失敗、truncate が `SQLITE_IOERR_TRUNCATE`、RO 接続の write が拒否** |
+| **T5a FEP** | 案 B (`/sys/fep.mod`)、**API 別 stub**、**F2c (D30): FEP の接続 2 本 (辞書 RO + 学習 RW、[TASK_DICT_META](../fep/TASK_DICT_META.md) 前は辞書 1 本) を起動時 (live AS = 0) に RESIDENT group で開く、`dict_fd_protect` の撤去、close 失敗を隠さない reopen 拒否**、**FEP_BOUNDARY B2 (D31): `ime_user_list / delete / export` の facade を bounded copy + kernel staging → finalize → copyout に (不正 kanji で全候補削除に拡大しない、不正 path で truncate しない、上限表 §3)** | FEP 有り / MINIMAL の両方で英数入力・編集、FEP で 1 語変換、**子アプリの実行中に FEP が学習 (journal を開く) して子の終了で FEP の FD が閉じない**、**不正ポインタ・未終端の `ime_user_*` は失敗して SQLite に届かない** |
 | **T5b ブート必須 FS の同梱・早期ロード** (**T5c より前**) | 2 段階の起動順 (§4-5)、`paging_init` / 台帳をルートマウントの前へ (U19)、同梱域、mkvk32 の複数エントリ、FAT / iso9660+ATAPI / HostDrv の切り出し | **FD 起動 (コア + FAT 同梱の 2 エントリ)**、CD 起動、HDD 起動 (同梱なし) |
 | **T5c その他のモジュール** | V86 / FM+snd / PCM / LAN / KCG ROM (予備) / NP21/W 専用 3 種、一覧ファイル、supervisor 検査、**スプラッシュをアプリへ** (D18) | 実機で NP21/W 専用を読まずに起動、コアだけの本体サイズを記録、スプラッシュ → シェルの順 |
 | **T6b ローダ 508KiB 解除** | 集積を 0x500000〜 (上限 1MB)、非重複検査 | 8MB での展開ピーク、FAT 経路 |
@@ -532,7 +538,7 @@ MEMSYS5 を 384KB から 512KB へ (D27) 増やした分 (+128KB) は、この�
 
 ---
 
-## 10. 未確認の前提と、実装の段で測って決めるもの (U1〜U23)
+## 10. 未確認の前提と、実装の段で測って決めるもの (U1〜U24)
 
 | # | 前提 / 測るもの | どこで |
 |---|---|---|
@@ -559,6 +565,7 @@ MEMSYS5 を 384KB から 512KB へ (D27) 増やした分 (+128KB) は、この�
 | U21 | 共有グリフキャッシュ (gshell 所有、RO lease、GUI op で補充) の価値 — 私有 80KB × プロセス数 vs 契約の複雑さ | T7b の後 |
 | U22 | モジュールの再配置表の大きさ (SQLite で十数 KB は推測) と、`memset` / `memcpy` をモジュール内に持つかスタブにするか | T4 |
 | U23 | 起動後に読むモジュールが物理連続を取れないときの別案「カーネル側の仮想窓で多ページを束ねる」— 恒等写像 (D20) の外なので v3 では未確認。v3 のモジュールは全部起動時に読むので不要 (§3-5-4) | 後から読むモジュールを足す票 |
+| U24 | 高位 RAM の検出源 BDA 0594h の意味 (MB 単位) を NP21/W と Ra266 以外の機種資料 (`docs/hw`) と照合する (`memory_boot_detect` の書き込み検証があるので「無かった RAM」側にしか切り詰めないが、資料との照合は未実施 — D32、旧 MEMORY_RAM_INTEGRATION §8) | T1 |
 
 ---
 
