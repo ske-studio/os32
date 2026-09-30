@@ -10,7 +10,7 @@
 
 ---
 
-## 0. 決定事項の一覧 (D1〜D35)
+## 0. 決定事項の一覧 (D1〜D36)
 
 | # | 決定 | 出所 |
 |---|---|---|
@@ -49,6 +49,7 @@
 | D33 | **DEVICE_RESERVATION は v3 P4 で拾うが改訂する**: 核 (`pgalloc_device_reserve` / `sys_device_reserve_core`) と owner 台帳は **T1 の台帳の MMIO 登録**に載せ直す (複数 span の一括 commit と永久保持は仕様として残す、試験流用)。**時期は折衷 — 副作用のない識別と予約は起動時 (§4-5)、破壊的な probe / enable は GUI 境界** (TRIDENT T8 (i) と一致)。**許可範囲は定数だけ → 検証済みの実測 BAR へ広げる** (Trident。V3_PLAN_DRAFT §7-2 X4 を Codex へ)。§5 (後発 GUI の BB) と exec arena 全域の禁止は D19 / D3 で不要。順序契約 (識別 → 予約 → 写像 → probe / enable → 面公開) と gfx バックエンドの識別 / probe 分離は P4 の票 (T2 の後、Trident 段 3 の前)。**X4 の答え (検証済み資源レコード、予約 / 写像 / 面の範囲の分離、一括 commit、永久予約とモジュール回収の分離) は §8-4 と T1** | ユーザー (2026-09-30、U6_PENDING_REVIEW §1-5) |
 | D34 | **U6 の答えは「一部」**: F3a / F3c / F2 / FEP_BOUNDARY / DEVICE_RESERVATION は形を変えて拾う (多くは T 票の要件、DEVICE_RESERVATION は P4)、MEMORY_RAM_INTEGRATION は撤回、F3b は TASK_DICT_META の後 | ユーザー (2026-09-30、U6_PENDING_REVIEW §0・§2) |
 | D35 | **D7 の改訂 (KAPI の整理)**: fork 時の KAPI 整理で**スロットの順を変えてよい** ([ABI2] の「追記のみ」は fork 後に再開)。**条件 (P7 の必須)**: (1) **世代の識別を 4 つ別に持つ** — OS32X ヘッダの形式版・**KAPI ABI 世代**・**メモリ配置世代**・**shlib プロトコル**。互換性を切る世代は一致を要求し、その世代の内側でだけ最低機能版 (min KAPI) を使う (今の検査はヘッダ v3 以上 + データ欄の位置 `os32x_hdr.c:14` と「要求版がカーネルより新しければ拒否」の片方向 `exec.c:1697` だけで、容量を保ったままスロットを整理して版だけ上げた旧バイナリを通してしまう); (2) **拒否契約** (Codex X6): **入口へ飛ぶ前の検査は常駐シェルも例外にしない** (ロード番地の照合が `!is_shell` の内側 `exec.c:1703,1722`)、**未知の形式版を「既知版以上だから可」としない**、C / Rust の生成物と**各コンパイル単位**に ABI 識別を結び付けて最終 ELF の印・旧シンボル・配置を照合する (包装時に SDK の印を付けるだけでは旧 `.o` を新 SDK で包む経路を防げない — `clean` に `clean-external` が含まれず `.o` の依存もソース中心 `Makefile:73,91`、`apps/Makefile:75`)、**移行成果物は kernel・loader・SDK・CRT・ライブラリ・shell・shlib・モジュール・in-tree・apps/game の一組で固定** (private submodule を取得できないビルドは完全な成果物と扱わない)、**v2 の戻り先と v3 の配備先・成果物ディレクトリを分け、停止中に一組を更新してから起動する** (`hsync` は既定で `/sys` を除外し kernel / boot 配備も別経路 — 「新 kernel を先に起動して旧 shell から更新」は前提にしない)、**Rust 生成器 (`sdk/kapi_rust_gen.py:45`) は未知の非ポインタ型を `u32` に倒さず生成失敗に**する (C11 化に合わせて型や構造体返却を変えるなら引数幅・呼出規約 (戻りは EAX `exec.c:1494`) も同時に検証); (3) **旧新混在の試験** — 旧アプリ / 旧常駐シェル / 旧 shlib / 新 SDK + 旧 `.o` / v2 SDK でビルドした apps・game / HostDrv と NHD の食い違い — が入口の前で拒否されることを P7 の受入に (§7 の全構成の行)。ソース互換は SDK の名前・薄いラッパーで可能な範囲を残す | ユーザー (2026-09-30、Codex X6 の推奨を承認。V3_PLAN_DRAFT §3 P7・§5 C1・§7-1 U8) |
+| D36 | **Rust の適用範囲と混在の約束** ([RUST_VS_C11](RUST_VS_C11.md) §5 の 7 点 + (a)): 適用範囲は同 §3-1 の表どおり (IRQ の合成器と OpenType は Rust、カーネル核・FS・FEP・SDK・デコーダは C11 に揃える。V4 §7 は「純粋計算の staticlib は例外」と改訂)、**Rust で作る部品も 386 下限を守る** (最終成果物 — LTO・最終リンク後、`compiler_builtins`・依存・asm 込み — に `bswap` / `cmpxchg` / `xadd` / `cmov` / `cmpxchg8b` 等 386 に無い命令が無いことを `make check` の必須の工程に。出れば Rust で作らないかコードで避ける。`cpu=i386` の明示は前提だが合格条件にしない — LLVM #58470 でバージョンアップでは直らない。同 §7)、panic 方針 (カーネル文脈は `kpanic` 相当、gshell は CUI へ落ちるか再起動 (P6 と一緒に)、CPL=3 は `sys_exit`)、外部クレートは MIT ソースを vendor に写す (C8 は維持)、SDK ヘッダは C89 互換のまま (§5 C3 = (a))、`os32_lz4` は直してから T7a で呼び手が消えたら撤去、nightly は固定済み (更新は必要時のみ、更新時は再検査)、TCP/IP は足さない (LEGACY_LIVING_PRESERVATION に反する) | ユーザー (2026-09-30、RUST_VS_C11 §5・§7。Codex の事実確認 `x18/rustisa.md` / `x18/rustver.md`) |
 
 ---
 
