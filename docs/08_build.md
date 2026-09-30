@@ -423,7 +423,7 @@ python3 tools/mkpkg.py --list packages/NORMAL.PKG                # 中身の一�
 | `BOOT.PKG` | IPL + ローダ (`type: boot`、セクタへ直接書く。分割しない、無圧縮) | 全部 | 2 本 / 6,376 B |
 | `MINIMAL.PKG` | `core` + `base` — **CUI のレスキュー兼インストーラ** (下)。カーネル、unicode.bin、shell、filetypes、settings.tsv、install / cdinst / hsync、less / grep / hexdump / cfg + 媒体だけの settings.db。**起動 FD と同じ集合** (下) | 1. Minimal 以上 | 13 本 / 861,245 B |
 | `GUI.PKG` | `gui` — gshell、libos32gui.shlib、shlib を使うアプリ (filer / edit_gui / about)。shlib を使う試験アプリ (gui_demo / gdi_test / v12_api_test …) は `test` のまま DEBUG | 2. Normal 以上 | 5 本 / 430,530 B (2026-09-29、About を `ver` の中身に揃えた後) |
-| `NORMAL.PKG` | `programs` / `docs` / `data` — コマンドとアプリ (sh / more / find / sort / head / tail / wc / tee / touch / sleep / diff / du / cal / man / sndctl / ime / v86 …)、man ページ、**既定フォント (`/sys/font/default.kcgfont`)**、FEP 辞書、MGX サンプル (`build/out/manga/`、ビルド時生成)。**TTF は入れない** (2026-09-30: 日本語 OpenType は同梱しない、サブセット TTF は廃止) | 2. Normal 以上 | 102 本 / 6,781,829 B (2026-09-30、サブセット TTF 3,348,916 B を外した後。外す前は 10,130,774 B) |
+| `NORMAL.PKG` | `programs` / `docs` / `data` — コマンドとアプリ (sh / more / find / sort / head / tail / wc / tee / touch / sleep / diff / du / cal / man / sndctl / ime / v86 …)、man ページ、**既定フォント (`/sys/font/default.kcgfont`)**、FEP 辞書。**TTF は入れない** (2026-09-30: 日本語 OpenType は同梱しない、サブセット TTF は廃止) | 2. Normal 以上 | 95 本 / 6,569,090 B (2026-09-30、サブセット TTF 3,348,916 B と MGX 7 本を外した後。外す前は 10,130,774 B) |
 | `DEBUG.PKG` | `test` — 試験バイナリと試験用データ | 3. Full | 62 本 / 1,272,396 B |
 
 cdinst の展開は依存の順 BOOT → MINIMAL → GUI → NORMAL → DEBUG。Minimal だけの HDD で

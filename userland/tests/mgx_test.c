@@ -704,8 +704,8 @@ int main(int argc, char **argv, KernelAPI *k)
     test_malformed();
     test_blit();
 
-    /* 同一画像を bpp 1..4 で用意したもの (build/assets.mk が sample/ の jpg から
-     * ビルド時に作り、deploy.yaml が /data/manga/bench/ に配る)。プレーン数と
+    /* 同一画像を bpp 1..4 で用意したもの (配布物には含めない。計るときは
+     * tools/img2mgx.py --bpp N で作って /data/manga/bench/ に置く)。プレーン数と
      * 時間の関係を見る。無ければ省略する。計測なので合否には数えない (票 §8)。
      * 集計行より**先**に出す — 集計行は最終行でなければランナーが拾えない。 */
     bench_deflate("/data/manga/bench/B1.MGX");

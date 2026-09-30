@@ -327,17 +327,6 @@ filesystem:
     - host: userland/tests/data/hello.sh
       guest: /test/hello.sh
       tags: [test]
-    # --- MGX 漫画サンプルページ (build/assets.mk が sample/ の Gemini 生成 jpg
-    #     から tools/img2mgx.py でビルド時に作る。追跡しない) ---
-    - host: "build/out/manga/*.MGX"
-      guest: /data/manga/
-      type: glob
-      tags: [data]
-    # --- bpp 別ベンチ用 (同一画像を bpp 1..4 で符号化したもの。mgx_test が読む) ---
-    - host: "build/out/manga/bench/*.MGX"
-      guest: /data/manga/bench/
-      type: glob
-      tags: [data]
 
     # --- ビットマップフォント (KCG キャッシュ形式) ---
     # カーネルが起動時に /sys/font/default.kcgfont を読む
