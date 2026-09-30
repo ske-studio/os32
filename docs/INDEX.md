@@ -9,8 +9,8 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 同じ事実を 2 か所で独立に更新する構造は必ず食い違う (2026-09-05 の診断で 6 件)。
 **変わりやすい数値・手順・進捗は下表の正典だけを更新し、他の文書は要約と参照に留める。**
 
-> **このリポジトリ (os32) は v2.1 時点の記録 (戻り先)。現行の開発は v3 で、別リポジトリ os32-v3 へ fork する予定** (2026-09-30 の fork の準備時点 — 手順 a・b まで済み、リポジトリの作成と push は未実施。段取りは [tasks/v3/FORK_PLAN.md](tasks/v3/FORK_PLAN.md) §3)。
-> fork 後は文書の正典は os32-v3 に移り、ここは更新しない (URL は fork 後に足す。ユーザー決定 2026-09-29、正典は [ROADMAP.md §0-1](ROADMAP.md))。経緯の要約は [HISTORY.md](HISTORY.md)、普遍的な教訓は [CASE_STUDIES.md](CASE_STUDIES.md)。
+> **このリポジトリ (os32) は v2.1 時点の記録 (戻り先)。現行の開発は v3 で、別リポジトリ [os32-v3](https://github.com/ske-studio/os32-v3) へ 2026-09-30 に fork した** (初期コミットは os32 のタグ `v2.1` = `6ccc4049` と feat/gui `dfa97f57` の写し。段取りは [tasks/v3/FORK_PLAN.md](tasks/v3/FORK_PLAN.md) §3)。
+> 文書の正典は os32-v3 に移り、ここは更新しない (ユーザー決定 2026-09-29、正典は [ROADMAP.md §0-1](ROADMAP.md))。経緯の要約は [HISTORY.md](HISTORY.md)、普遍的な教訓は [CASE_STUDIES.md](CASE_STUDIES.md)。
 
 | 情報単位 | 正典 (ここだけ更新) | 参照側 (要約 + リンクのみ) |
 |---|---|---|

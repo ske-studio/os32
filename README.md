@@ -8,7 +8,7 @@
 GCC (i386-elf) クロスコンパイラおよび NASM を用い、WSL (Ubuntu等) 環境上で開発されています。
 NP21/W エミュレータと実機で動作します (実機は PC-9821Ra266 で FD 起動・CD からの HDD インストール・HDD 起動を確認 — [v2.1 のリリースノート](docs/RELEASE_v2.1.md))。
 
-> **このリポジトリは v2.1 時点の記録 (戻り先) です。** 現行の開発は v3 で、別リポジトリ **os32-v3** (パブリック) へ fork する予定です (2026-09-30 の準備時点、段取りは [docs/tasks/v3/FORK_PLAN.md](docs/tasks/v3/FORK_PLAN.md))。
+> **このリポジトリは v2.1 時点の記録 (戻り先) です。** 現行の開発は v3 で、別リポジトリ **[os32-v3](https://github.com/ske-studio/os32-v3)** (パブリック) へ 2026-09-30 に fork しました (段取りは [docs/tasks/v3/FORK_PLAN.md](docs/tasks/v3/FORK_PLAN.md))。
 > fork 後、この v2.x (タグ `v2.1`、`main`) には新機能を入れません — 戻る必要が生じたときと致命的な不具合のときだけ手を入れます ([docs/ROADMAP.md §0-1](docs/ROADMAP.md))。
 > 開発の経緯は [docs/HISTORY.md](docs/HISTORY.md)、得た教訓は [docs/CASE_STUDIES.md](docs/CASE_STUDIES.md)。
 
