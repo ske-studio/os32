@@ -4,7 +4,10 @@
 #  assets/ には性質の違う 3 種類が混ざっている:
 #
 #    上流       第三者の配布物そのもの。再生成できないので git で追跡する。
-#               fonts/ipaexg.ttf, fonts/ipaexm.ttf, ipadic/*.csv
+#               ipadic/*.csv
+#               例外: fonts/ipaexg.ttf, fonts/ipaexm.ttf は追跡せず、ビルド時に
+#               IPA の公式配布から tools/fetch_fonts.py が取る (ユーザー決定
+#               2026-09-30。初回はライセンスの同意が要る — 下の `fonts`)。
 #    設定       人が書くもの。git で追跡する。
 #               filetypes, profile, profile_fdd, joyo_kanji.txt
 #    派生物     上流から生成できるもの。git では追跡せず、ここで作る。
@@ -21,8 +24,32 @@
 FONT_DIR   = assets/fonts
 IPADIC_DIR = assets/ipadic
 
+# --- IPAex フォントの取得 (ビルド時ダウンロード) ---
+# 2 本は 1 回の実行で揃う (grouped target `&:`、GNU make 4.3 以上)。揃っていて
+# SHA-256 が合えば fetch_fonts.py は何も聞かず mtime だけ更新する。未取得なら
+# ライセンス全文を出して同意を聞く (端末が無ければ OS32_ACCEPT_IPA_LICENSE=1 で
+# 非対話に同意)。失敗のときは案内を make の失敗文の直前にもう 1 度出す。
+FONT_TTFS = $(FONT_DIR)/ipaexg.ttf $(FONT_DIR)/ipaexm.ttf
+
+$(FONT_TTFS) &: tools/fetch_fonts.py
+	@python3 tools/fetch_fonts.py $(FONT_FETCH_FLAGS) || { rc=$$?; \
+	  if [ $$rc -eq 2 ]; then \
+	    echo "*** フォント未取得: \`make fonts\` でライセンスに同意して取得するか、OS32_ACCEPT_IPA_LICENSE=1 を付けて非対話で同意" >&2; \
+	  else \
+	    echo "*** フォント取得失敗 (tools/fetch_fonts.py rc=$$rc): 上の理由を見る。オフラインなら zip を手で置いて \`python3 tools/fetch_fonts.py --zip PATH\`" >&2; \
+	  fi; exit $$rc; }
+
+fonts: $(FONT_TTFS)
+	@echo "=== IPAex フォント 2 本 ($(FONT_DIR)/) ==="
+
+# 取得した ttf と同意の記録は `make clean` (clean-assets) では消さない (ユーザー指示
+# 2026-09-30: ライセンスの確認は初回ビルドの 1 回だけ)。消すのはこの明示の目標だけ。
+fonts-clean:
+	rm -f $(FONT_TTFS) $(FONT_DIR)/*.ttf.part $(FONT_DIR)/.license_accepted
+
 # --- 16px ビットマップフォント (カーネルが /sys/font/default.kcgfont で読む) ---
 # 本文用はゴシック。明朝は 16x16 だと細い横画が飛ぶ (CLAUDE.md の Known Gotchas)。
+# ipaexg.ttf が無ければ上の規則で取得が走る (make all → kcgfont → ttf)。
 $(FONT_DIR)/ipaexg16.kcgfont: $(FONT_DIR)/ipaexg.ttf tools/gen_font16.py
 	python3 tools/gen_font16.py $< $@
 
@@ -86,4 +113,4 @@ assets-all: $(ASSETS_ALL)
 clean-assets:
 	rm -f $(ASSETS_ALL)
 
-.PHONY: assets-deployed assets-all clean-assets
+.PHONY: fonts fonts-clean assets-deployed assets-all clean-assets

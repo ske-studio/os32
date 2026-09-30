@@ -826,6 +826,7 @@ checks:
     - sdk/include/os32/os32_kapi_generated.h
     - sdk/include/os32/os32_kapi_shared.h
   check-tools-host:
+    - assets/fonts/IPA_Font_License_Agreement_v1.0.txt
     - assets/settings/defaults.tsv
     - build/core.yaml
     - build/packages.yaml
@@ -837,6 +838,7 @@ checks:
     - tools/deploy_manifests.py
     - tools/deploy_protect.py
     - tools/emu_agent/playbook.py
+    - tools/fetch_fonts.py
     - tools/mk_settings_db.py
     - tools/mkpkg.py
     - tools/nhd_deploy.py
@@ -851,6 +853,7 @@ checks:
     - tools/tests/mutpar.py
     - tools/tests/test_about_info.py
     - tools/tests/test_emu_playbook.py
+    - tools/tests/test_fetch_fonts.py
     - tools/tests/test_filer_copy_abort.py
     - tools/tests/test_filer_normalize.py
     - tools/tests/test_gui_button_dispatch.py

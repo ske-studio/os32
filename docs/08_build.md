@@ -13,6 +13,33 @@ make iso
 make clean
 ```
 
+#### ビルド前提: 日本語フォント (IPAex) は初回ビルド時に取得する
+
+`ipaexg.ttf` / `ipaexm.ttf` (IPAex フォント Ver.004.01) は**リポジトリに含めない** (ユーザー決定
+2026-09-30)。`make all` は `assets/fonts/ipaexg16.kcgfont` を作るために `assets/fonts/ipaexg.ttf` を
+要求し、無ければ `tools/fetch_fonts.py` (`build/assets.mk` の規則) が IPA (文字情報技術促進協議会) の
+公式配布 `https://moji.or.jp/wp-content/ipafont/IPAexfont/IPAexfont00401.zip` (SHA-256
+`bcf8374a…7974b`、スクリプトに固定) を取得して 2 本を `assets/fonts/` に展開する (zip と各 ttf の
+SHA-256 を照合。第三者ミラーは使わない。プロキシは `https_proxy` 等の環境変数)。
+**取得の前に IPA Font License Agreement v1.0 への同意が要る**:
+
+- 端末から `make all` または `make fonts` を打つと、同梱のライセンス全文
+  (`assets/fonts/IPA_Font_License_Agreement_v1.0.txt`) を標準出力に出して `同意しますか [y/N]` と聞く。
+  `y` 以外なら rc=2 で止まり、最後に案内が 1 行出る。
+- 端末が無い (CI・パイプ・`</dev/null`) ときは **`OS32_ACCEPT_IPA_LICENSE=1`** を付けたときだけ同意と
+  みなす。無ければ rc=2。GitHub Actions (§8-6) はリポジトリ所有者が同意している前提でこれを付け、
+  取れた ttf を zip の SHA-256 を key に `actions/cache` で持つ。
+- 同意は `assets/fonts/.license_accepted` (日時とライセンス文の SHA-256。追跡しない) に記録され、
+  次回は聞かない。
+- 2 本が揃っていて SHA-256 が合えば、何も聞かず何も取らない (mtime だけ更新)。取り直しは
+  `python3 tools/fetch_fonts.py --force`、オフラインのホストは手で取った zip を `--zip PATH` で渡す。
+- **`make clean` (と `clean-assets`) は ttf も `.license_accepted` も消さない** — 同意を聞くのは初回
+  ビルドの 1 回だけ。消したいときだけ `make fonts-clean` (ttf 2 本と同意の記録を消す)。
+- ttf はゲストに配らない (`userland/deploy.yaml` にフォントの項目は無い)。ゲストが使うのは ttf から
+  焼いた `ipaexg16.kcgfont` (`/sys/font/default.kcgfont`) だけ。再配布の条件は `assets/fonts/README.OS32`。
+
+試験: `tools/tests/test_fetch_fonts.py` (`make check-tools-host` の 1 行。ネットワーク無し)。
+
 ### §8-2 ビルドパイプライン
 
 ```
