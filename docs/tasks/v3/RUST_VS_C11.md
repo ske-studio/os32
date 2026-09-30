@@ -20,10 +20,10 @@ Rust が**確実に効く**のは「外部入力を解釈する純粋計算で�
 
 | 項目 | 事実 | コスト (推測) |
 |---|---|---|
-| いまの規約 | [C1] C89 (GNU89) 厳守 ([CONSTRAINTS.md](../../CONSTRAINTS.md) §C1)。`-std=gnu89` は `build/config.mk:112` (`CFLAGS_COMMON`)、`build/boot.mk:15`、`build/kernel.mk:110` (NE2K ホスト試験)、`build/kernel.mk:175` (SQLite 本体の専用規則)、`build/programs.mk:368` (SQLite 単体) の 5 か所 | 旗の書き換え 5 行。**SQLite の 2 か所は据え置き** (amalgamation の専用規則なので C11 化の対象外にできる) |
-| `_Static_assert` | 自作 `STATIC_ASSERT` は `include/types.h:36-39` の負の配列長。カーネル側 (`kernel fs exec drivers gfx net lib include kapi boot`) で **102 か所**。`kernel/shm.c` の 2 本は定数式でなく黙って無効 ([PLAN.md](PLAN.md) §1) | マクロ本体を `_Static_assert(cond, #name)` に置き換えれば **1 行**。無効だった 2 本はコンパイルエラーになるので、そこだけ式を定数にするか起動時検査に落とす |
+| いまの規約 | [C1] C89 (GNU89) 厳守 ([CONSTRAINTS.md](../../CONSTRAINTS.md) §C1)。`-std=gnu89` は `build/config.mk:112` (`CFLAGS_COMMON`)、`build/boot.mk:15`、`build/kernel.mk:110` (NE2K ホスト試験)、`build/kernel.mk:175` (SQLite 本体の専用規則)、`build/programs.mk:368` (SQLite 単体) の 5 か所 | 旗の書き換え 5 行。**SQLite の 2 か所は据え置き** (amalgamation の専用規則なので C11 化の対象外にできる)。**訂正 (2026-09-30、Codex、[TASK_C11_MIGRATION](TASK_C11_MIGRATION.md) §2 F1・F2)**: `kernel.mk:175` は SQLite 本体でなく `os32_sqlite_test.c` 用。本体 (`kernel.mk:169`) と VFS (`:172`) は `CFLAGS_SQLITE` で、それは `CFLAGS_COMMON` を継承する (`config.mk:158`) → 共通旗を gnu11 にすると SQLite も gnu11 になるので**言語指定の分離が要る**。旗は `build/*.mk` の 5 か所の外にも: `tools/tests/*.py` 89 ファイル・167 出現、`apps/Makefile:37`、`game/Makefile:51`、`sdk/example/hello/Makefile:28` |
+| `_Static_assert` | 自作 `STATIC_ASSERT` は `include/types.h:36-39` の負の配列長。カーネル側 (`kernel fs exec drivers gfx net lib include kapi boot`) で **102 か所**。`kernel/shm.c` の 2 本は定数式でなく黙って無効 ([PLAN.md](PLAN.md) §1) | マクロ本体を `_Static_assert(cond, #name)` に置き換えれば **1 行**。無効だった 2 本はコンパイルエラーになるので、そこだけ式を定数にするか起動時検査に落とす。**訂正 (2026-09-30、TASK_C11_MIGRATION §2 F3・F4)**: `shm.c` の 2 本は **2026-09-17 に修正済み** (`shm.c:25` のコメント、今は `MEM_SHM_GUI_OFFSET` の定数式) — T0 では変えない。102 件はマクロ定義 1 件 (`types.h:37`) を含み**呼出しは 101 件**。非定数式で残るのは `tss.c:17` (→ `offsetof`)、他に gnu89 でも出る暗黙宣言 5 件を先に直す (同票 §3) |
 | gnu89 → gnu11 で意味が変わるもの | `inline` の外部定義の扱い (gnu89 と C99 以降で逆)。カーネル側に **`static` でない `inline` は無い** (grep 2026-09-30、`lib/sqlite3` のコメント以外 0 件)。`//` コメントもカーネル側に 0 件 | 影響なし。**書き直しは要らない** — 解禁 (ブロック途中の宣言・`//`・`_Static_assert`・`<stdint.h>` の型) だけ |
-| 規則と検査 | [C1] の本文、`CLAUDE.md` の規則行、`tools/check_constraints.py` (ID で照合)、`docs/POLICY_DEV.md` §2 | 文書 3 か所 + 検査器 |
+| 規則と検査 | [C1] の本文、`CLAUDE.md` の規則行、`tools/check_constraints.py` (ID で照合)、`docs/POLICY_DEV.md` §2 | 文書 3 か所 + 検査器。**訂正 (TASK_C11_MIGRATION §2 F5)**: `check_constraints.py` は ID の参照整合だけで **[C1] の言語検査 (`//`・宣言位置・C99 機能) はしていない** — T0 で `check-c-dialect` を新設する。文書は `AGENTS.md:22` と `08_build.md:94` も対象 |
 | SDK ヘッダと apps/game | `sdk/include/os32/*.h` を C89 互換に保つか (V3_PLAN_DRAFT §5 **C3**、未決)。apps/game (submodule、C) の保守は当面 os32 側。ユーザーランドの旗は `-std=gnu89 -march=i386` (PORT_CANDIDATES §1) | **決裁 1 件** (§5 の 4)。「SDK ヘッダは C89 互換のまま、in-tree は gnu11」が最も安い |
 | 型 | `u32` か `<stdint.h>` か (V3_PLAN_DRAFT P0)。32 ビット限定 (ARM_GAUGE §10) なので `u32` = ポインタ幅の前提は残る | 選ぶだけ。混在が最悪 |
 
@@ -153,7 +153,7 @@ Rust が**確実に効く**のは「外部入力を解釈する純粋計算で�
 
 | 部品 | Rust | C11 | 差の中身 |
 |---|---|---|---|
-| T0 C11 化そのもの | — | **S** | 旗 5 行 + マクロ 1 行 + `shm.c` の 2 本 + 規則 3 文書 + 検査器 + C3 の決裁 |
+| T0 C11 化そのもの | — | **S** | 旗 5 行 + マクロ 1 行 + `shm.c` の 2 本 + 規則 3 文書 + 検査器 + C3 の決裁 (**訂正 2026-09-30**: 実際の作業は [TASK_C11_MIGRATION](TASK_C11_MIGRATION.md) §3 — SQLite 旗の分離、既存欠陥 5 + 1 件、ホスト試験 89 ファイルの旗、`check-c-dialect`、変異試験の更新。`shm.c` は修正済みで対象外。相対コストは依然 S) |
 | N1 合成器 | **M〜L** (移植 2,464〜4,762 行 + 表の `const` 化 + ホスト md5 試験 + IRQ 制約の検査 + target JSON) | **M** (C 版をほぼそのまま + `_math.c` 分離 + ホスト試験) | Rust は +S〜M (表の整数化・target JSON・panic 方針・`unsafe` 境界の設計)。見返りは回り込み・添字の誤りをコンパイル時に出せること |
 | N2 + N3 OpenType | **M** (読み出し層 数百行 + ラスタライザの取り込み + キャッシュ + T7b の受入) | **M + S** (stb_truetype 移植 + Rust からの FFI + C8 の話は消えるが二重構造) | C11 のほうが**高い** (置き場が Rust) |
 | N4 デコーダ | (Rust クレート + C ABI 包み: M) | **S〜M / 本** (移植元そのまま) | C11 のほうが安い |
