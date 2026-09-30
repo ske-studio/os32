@@ -6,7 +6,6 @@ lz4          # tools/mkvmkernel.py, gen_font16.py, gen_kcg_font.py, lz4_compress
 PyYAML       # tools/check_manifests.py, check_select.py, deploy_manifests.py, hostdrv_deploy.py, mkpkg.py, nhd_deploy.py
 Pillow       # tools/gen_font16.py, gen_kcg_font.py, gui_gate.py, img2mgx.py, img2vbz.py, screenshot.py, .claude/skills/run-os32/driver.py
 numpy        # tools/img2mgx.py, img2vbz.py
-fontTools    # tools/subset_font.py (make assets-all)
 zopfli       # tools/img2mgx.py
 pyserial     # tools/rshell_serial.py (実機のシリアル会話)
 pandas       # tools/fep_compiler.py (旧形式 fep.dic のみ)

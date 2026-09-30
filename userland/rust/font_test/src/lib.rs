@@ -4,7 +4,11 @@
  * ttf-parser (zero-alloc) + ab_glyph_rasterizer でオンデマンドラスタライズ。
  * fontdue と違い、全グリフを一括パースしないためメモリ効率が良い。
  *
- * フォントファイル: /data/ipaexg_subset.ttf (ゲスト側パス)
+ * フォントファイル: /data/ipaexg.ttf (ゲスト側パス、明朝は /data/ipaexm.ttf)。
+ * 日本語 OpenType は配布物に同梱しない (ユーザー決定 2026-09-30) — 使う人が
+ * assets/fonts/ipaexg.ttf (無改変の原本) を hsync などで /data に置く。
+ * 無ければ open 失敗を報告して終了する (GFX モードには入らない)。
+ * 以前の JIS X 0208 サブセット (ipaexg_subset.ttf) は廃止した。
  */
 #![no_std]
 #![no_main]
@@ -21,7 +25,22 @@ use os32api::kprint;
 use os32api::KernelAPI;
 
 /* フォントファイルのゲスト側パス */
-const FONT_PATH: &[u8] = b"/data/ipaexg_subset.ttf\0";
+const FONT_PATH: &[u8] = b"/data/ipaexg.ttf\0";
+const FONT_PATH_MINCHO: &[u8] = b"/data/ipaexm.ttf\0";
+
+/// フォントファイルが開けるか (中身は読まない)。無いときに GFX モードへ
+/// 入らず報告して終わるための前検査。
+fn font_available(path: &[u8]) -> bool {
+    unsafe {
+        let a = os32api::api();
+        let fd = (a.sys_open)(path.as_ptr(), os32api::fs::O_RDONLY);
+        if fd < 0 {
+            return false;
+        }
+        (a.sys_close)(fd);
+        true
+    }
+}
 
 /* PC-98 画面サイズ */
 const SCREEN_W: i32 = 640;
@@ -306,6 +325,19 @@ pub extern "C" fn main(
 
     os32api::print(b"TrueType Font Test - 1bit Monochrome\r\n\0");
     os32api::print(b"Gothic + Mincho x 16/24/32px = 6 patterns\r\n\0");
+
+    /* フォントは同梱していない。無ければここで終わる (GFX モードに入らない) */
+    if !font_available(FONT_PATH) {
+        kprint!(
+            b"font_test: cannot open %s\r\n\0",
+            FONT_PATH.as_ptr()
+        );
+        os32api::print(
+            b"  put assets/fonts/ipaexg.ttf at /data/ipaexg.ttf (e.g. hsync)\r\n\0",
+        );
+        return 1;
+    }
+
     os32api::print(b"Press any key to start...\r\n\0");
     os32api::wait_key();
 
@@ -328,7 +360,7 @@ pub extern "C" fn main(
 
     /* --- ゴシック体 (読み込み → 描画 → スコープ終了で解放) --- */
     let y_mid = load_and_render(
-        b"/data/ipaexg_subset.ttf\0",
+        FONT_PATH,
         b"--- IPAex Gothic ---\0",
         24,
         15,
@@ -336,7 +368,7 @@ pub extern "C" fn main(
 
     /* --- 明朝体 (ゴシックのデータは解放済み) --- */
     load_and_render(
-        b"/data/ipaexm_subset.ttf\0",
+        FONT_PATH_MINCHO,
         b"--- IPAex Mincho ---\0",
         y_mid,
         15,

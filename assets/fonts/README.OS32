@@ -14,12 +14,20 @@ IPAex フォント — 出所とライセンス
 再配布のしかた (第 3 条):
 - `ipaexg.ttf` / `ipaexm.ttf` をそのまま配る場合 (3 条 2 項): 名前を変えない・改変しない・
   本契約の写し (上記 txt) を添える。
-- 派生プログラム (3 条 1 項): `make assets-all` が作る `*_subset.ttf` (`tools/subset_font.py`、
-  グリフのサブセット) と `*.kcgfont` (`tools/gen_font16.py`、16px ビットマップ) は
-  「許諾プログラムの一部から文字情報を取り出して作った」派生プログラムに当たる。配布物に
-  含めるときは (1) 派生プログラムの写しを提供できること、(2) オリジナルに置き換える方法
-  (このファイルの出所 URL) を示すこと、(3) 同じライセンスで配ること、
+- 派生プログラム (3 条 1 項): `make all` が作る `*.kcgfont` (`tools/gen_font16.py`、16px
+  ビットマップ) は「許諾プログラムの一部から文字情報を取り出して作った」派生プログラムに
+  当たる。配布物に含めるときは (1) 派生プログラムの写しを提供できること、(2) オリジナルに
+  置き換える方法 (このファイルの出所 URL) を示すこと、(3) 同じライセンスで配ること、
   (4) **プログラム名・フォント名・ファイル名に「IPA」を含む名前を使わない**こと、が要る。
-  現状の生成物の名前 (`ipaexg_subset.ttf`、`ipaexg16.kcgfont`、ゲストの `/data/ipaexg_subset.ttf`)
-  は (4) に**抵触する** — ディスクイメージや SDK に同梱して配る前に改名すること
-  (ゲスト側の `/sys/font/default.kcgfont` は問題ない)。生成物は git に入れない (`.gitignore`)。
+  ホスト側の生成物名 `ipaexg16.kcgfont` は (4) に**抵触する** — ディスクイメージや SDK に
+  同梱して配る前に改名すること (ゲスト側の `/sys/font/default.kcgfont` は問題ない)。
+  生成物は git に入れない (`.gitignore`)。
+
+TTF の扱い (ユーザー決定 2026-09-30):
+- **サブセット TTF (`tools/subset_font.py` が作っていた `ipaexg_subset.ttf`) は廃止**した。
+  TTF はゲストに配らない — 日本語 OpenType は配布物に同梱せず、使う人が別途ダウンロードして
+  (このディレクトリの原本をそのまま) `/data/ipaexg.ttf` に置く (`font_test` が読む)。
+- **v3 (os32-v3) には `ipaexg.ttf` / `ipaexm.ttf` もライセンス文も持っていかない**。CUI は
+  内蔵フォント (KCG ROM) だけで描き、内蔵フォントの無い移植先は寛容ライセンスの欧文 OpenType
+  (候補: Go fonts = 3-clause BSD、DejaVu = Bitstream Vera License。選定は T7b) で対応する。
+  このディレクトリの原本 2 本とライセンス文は os32 (v2.x) 側にそのまま残す。

@@ -19,7 +19,7 @@ OS32 本体は MIT ([LICENSE](LICENSE))。ここに挙げるのはリポジト�
 | Rust クレート `ab_glyph_rasterizer` | 0.1.10 | Apache-2.0 | 同上 | 無改変 | https://crates.io/crates/ab_glyph_rasterizer |
 | Rust クレート `libm` | 0.2.16 | MIT (crates.io の表記、2026-09-30) | 同上 | 無改変 | https://crates.io/crates/libm |
 | IPADIC (MeCab 版 CSV 13 本) | mecab-ipadic 2.7.0-20070801 | IPADIC の配布条件 (NAIST の表示 + ICOT Free Software の条件) | `assets/ipadic/*.csv` → 生成物 `assets/fep.db` (配布物、ゲストの `/db/fep.db`) | CSV は**無改変** (上流と sha256 一致)。辞書 DB は CSV から生成 | `assets/ipadic/COPYING` (原文、EUC-JP)、出所は `assets/ipadic/README.OS32` |
-| IPAex フォント | Ver.004.01 | IPA Font License Agreement v1.0 | `assets/fonts/ipaexg.ttf` `ipaexm.ttf` → 生成物 `*_subset.ttf` `*.kcgfont` (派生プログラム) | TTF は**無改変** (zip と sha256 一致)。派生物は第 3 条の条件 — 名前に IPA を含めない (現状の生成物名は要改名)、ライセンス同梱 | `assets/fonts/IPA_Font_License_Agreement_v1.0.txt` (原文)、条件の整理は `assets/fonts/README.OS32` |
+| IPAex フォント | Ver.004.01 | IPA Font License Agreement v1.0 | `assets/fonts/ipaexg.ttf` `ipaexm.ttf` → 生成物 `*.kcgfont` (派生プログラム)。**TTF そのものはゲストに配らない** (サブセット TTF は 2026-09-30 に廃止) | TTF は**無改変** (zip と sha256 一致)。派生物は第 3 条の条件 — 名前に IPA を含めない (ホスト側の生成物名は要改名)、ライセンス同梱 | `assets/fonts/IPA_Font_License_Agreement_v1.0.txt` (原文)、条件の整理は `assets/fonts/README.OS32` |
 | 常用漢字表 | 2010 年内閣告示 (2,136 字) | 事実の一覧 (告示) | `assets/joyo_kanji.txt` (`tools/fep_to_sqlite.py` が辞書の絞り込みに使う) | 漢字だけを 1 行に並べたもの | — |
 | Python パッケージ (ホストの道具) | [requirements.txt](requirements.txt) | 各パッケージ (Pillow = HPND/MIT-CMU、PyYAML = MIT、lz4 = BSD-3、numpy = BSD-3、fontTools = MIT、zopfli = Apache-2.0、pyserial = BSD-3、pywin32 = PSF、pyautogui = BSD-3、pandas = BSD-3) | `tools/` の実行時に import。**配布物には入らない** | — | 各パッケージの配布物 |
 
