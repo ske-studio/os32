@@ -8,10 +8,14 @@
 #    設定       人が書くもの。git で追跡する。
 #               filetypes, profile, profile_fdd, joyo_kanji.txt
 #    派生物     上流から生成できるもの。git では追跡せず、ここで作る。
-#               fonts/*_subset.ttf, fonts/*.kcgfont, fep*.db, fep.dic, $(BUILD_OUT)/manga/*.MGX
+#               fonts/*.kcgfont, fep*.db, fep.dic, $(BUILD_OUT)/manga/*.MGX
 #
 #  派生物を追跡しないのは、履歴上位の巨大 blob の大半がこれだったため。
 #  生成は数秒で終わる (FEP 辞書 5.8MB で 1 秒未満、MGX は 1 枚 1 秒)。
+#
+#  TrueType フォントはゲストに配らない (ユーザー決定 2026-09-30): 日本語
+#  OpenType は配布物に同梱せず、使う人が別途置く。以前あった JIS X 0208 の
+#  サブセット TTF (tools/subset_font.py、ipaexg_subset.ttf) は廃止した。
 # ============================================================================
 
 FONT_DIR   = assets/fonts
@@ -21,10 +25,6 @@ IPADIC_DIR = assets/ipadic
 # 本文用はゴシック。明朝は 16x16 だと細い横画が飛ぶ (CLAUDE.md の Known Gotchas)。
 $(FONT_DIR)/ipaexg16.kcgfont: $(FONT_DIR)/ipaexg.ttf tools/gen_font16.py
 	python3 tools/gen_font16.py $< $@
-
-# --- サブセット TTF (JIS X 0208 の範囲だけ残す。約 45% 削減) ---
-$(FONT_DIR)/%_subset.ttf: $(FONT_DIR)/%.ttf tools/subset_font.py
-	python3 tools/subset_font.py $< $@
 
 # --- MGX (漫画専用画像形式) のサンプルページと計測データ ---
 # 元画像は sample/ の Gemini 生成 jpg 3 枚 (出所は sample/README.OS32)。
@@ -95,13 +95,13 @@ $(SETTINGS_V2_FIXTURE): $(SETTINGS_TSV) tools/mk_settings_db.py FORCE
 	python3 tools/mk_settings_db.py --tsv $(SETTINGS_TSV) --out $@ --schema-version 2
 
 # 配備に必要な最小限。make all はこれに依存する。
-ASSETS_DEPLOYED = $(FONT_DIR)/ipaexg16.kcgfont $(FONT_DIR)/ipaexg_subset.ttf \
-                  assets/fep.db $(MANGA_PAGES) $(MANGA_BENCH)
+ASSETS_DEPLOYED = $(FONT_DIR)/ipaexg16.kcgfont assets/fep.db \
+                  $(MANGA_PAGES) $(MANGA_BENCH)
 
 # 開発時に使うものも含めた全部。
 # settings.db は通常配備の対象ではない (媒体だけが持つ) ので ASSETS_DEPLOYED
 # には入れず、ここと `all` / 媒体ターゲットから引く。
-ASSETS_ALL = $(ASSETS_DEPLOYED) $(FONT_DIR)/ipaexm_subset.ttf \
+ASSETS_ALL = $(ASSETS_DEPLOYED) \
              assets/fep_s.db assets/fep_l.db assets/fep.dic \
              $(SETTINGS_DB) $(SETTINGS_V2_FIXTURE)
 

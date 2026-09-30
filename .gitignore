@@ -29,7 +29,6 @@
 # 派生アセット (make assets-all で assets/ の上流ファイルから生成する)
 # 上流 (fonts/ipaex{g,m}.ttf, ipadic/*.csv) と設定 (filetypes, profile) は追跡する。
 # MGX (漫画サンプル・計測データ) は build/out/manga/ に作る (上の /build/out/)。
-/assets/fonts/*_subset.ttf
 /assets/fonts/*.kcgfont
 /assets/fep.db
 /assets/fep_s.db

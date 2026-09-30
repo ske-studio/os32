@@ -351,10 +351,9 @@ filesystem:
     - host: assets/fonts/ipaexg16.kcgfont
       guest: /sys/font/default.kcgfont
       tags: [data]
-    # --- TrueType フォント ---
-    - host: assets/fonts/ipaexg_subset.ttf
-      guest: /data/ipaexg_subset.ttf
-      tags: [data]
+    # --- TrueType フォントは配らない (ユーザー決定 2026-09-30) ---
+    # 日本語 OpenType は配布物に同梱せず、使う人が assets/fonts/ipaexg.ttf を
+    # hsync などで /data/ipaexg.ttf に置く (font_test が読む)。サブセット TTF は廃止。
     # --- フォントテスト ---
     - host: userland/tests/font_test.bin
       guest: /usr/bin/
