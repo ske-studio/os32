@@ -51,8 +51,10 @@ PC-98 の 640x400 グラフィック画面は 4 プレーン = 16 色。パレ�
 32KB 窓の確保といった固定コストは測定に現れない程度に小さい。
 つまり bpp を 1 段下げると展開時間もちょうど 1 プレーン分減る。
 
-計測用の固定データは `assets/manga/bench/B1..B4.MGX` (同一画像を bpp 1..4 で
-符号化したもの)。`mgx_test` が実行時に読んで時間を出す。
+計測用の固定データは `build/out/manga/bench/B1..B4.MGX` (同一画像
+`sample/Gemini_Generated_Image_dm5n0hdm5n0hdm5n.jpg` (走る少年、Gemini 生成) を
+bpp 1..4 で符号化したもの。`build/assets.mk` が `make all` で作り、追跡しない)。
+`/data/manga/bench/` に配り、`mgx_test` が実行時に読んで時間を出す (無ければ省略)。
 
 ※ 圧縮率の違う**別画像**どうしで比べると固定コストがあるように見えるので注意。
    プレーン数と時間の関係を見るときは必ず同一画像で比べること。
@@ -555,5 +557,5 @@ bpp=3 で 96,000、bpp=2 で 64,000 バイト。`build/app.conf` の `apps/mgxvi
 | `lib/zlib/` | deflate 展開 (zlib 本体、無改変。`README.OS32` に出所) |
 | `apps/mgxview/mgxview.c` | ビューワ (ファイラは `libos32filer` を利用) |
 | `userland/tests/mgx_test.c` | ユニットテスト (56 項目) |
-| `assets/manga/*.MGX` | サンプルページ |
-| `assets/manga/bench/B1..B4.MGX` | 同一画像を bpp 1..4 で符号化した計測用データ |
+| `build/out/manga/P001..P003.MGX` | サンプルページ (`sample/*.jpg` 3 枚から `build/assets.mk` がビルド時に生成。追跡しない) |
+| `build/out/manga/bench/B1..B4.MGX` | 同一画像を bpp 1..4 で符号化した計測用データ (同上) |
