@@ -1,6 +1,6 @@
 # TASK_C11_MIGRATION — T0: C89 (gnu89) → C11 (gnu11) への移行 (言語モードと検査の移行)
 
-> 状態: **計画 (2026-09-30)** — v3 の最初の票 T0 ([TASK_MEMMAP_V3](TASK_MEMMAP_V3.md) §6、[V3_PLAN_DRAFT](V3_PLAN_DRAFT.md) §3 P0)。Codex (gpt-6-astra、読み取りのみ) の調査提案 (`x18/c11.md`、2026-09-30、基点 `d995e078`) を元に起票。**ユーザー判断が要る点 3 つ (§8) と [C1] の改訂文面 (§9) は未決** — 決定後に [CONSTRAINTS.md](../../CONSTRAINTS.md) を直し、設計票へ進む。コードは未着手。
+> 状態: **計画 (2026-09-30)** — §8 の判断 3 点は同日にユーザー承認 (推奨どおり)、[C1] の改訂案 (§9) は文面確定、CONSTRAINTS.md の改訂は fork 後の T0 で。v3 の最初の票 T0 ([TASK_MEMMAP_V3](TASK_MEMMAP_V3.md) §6、[V3_PLAN_DRAFT](V3_PLAN_DRAFT.md) §3 P0)。Codex (gpt-6-astra、読み取りのみ) の調査提案 (`x18/c11.md`、2026-09-30、基点 `d995e078`) を元に起票。**ユーザー判断が要る点 3 つ (§8) と [C1] の改訂文面 (§9) は未決** — 決定後に [CONSTRAINTS.md](../../CONSTRAINTS.md) を直し、設計票へ進む。コードは未着手。
 >
 > 発行: PM (Claude Code) の指示によりコーダー `claude-fable-5-1` (feat/gui `e8931cac`)。読んだもの: Codex 提案 `x18/c11.md`、V3_PLAN_DRAFT §3 P0 (根拠は X1 で改訂済み)・§6-4、[RUST_VS_C11](RUST_VS_C11.md) §1-1、[CONSTRAINTS](../../CONSTRAINTS.md) [C1]、`tools/check_constraints.py`、[POLICY_DEV](../../POLICY_DEV.md) §2、`build/config.mk` / `boot.mk` / `kernel.mk` / `programs.mk` の旗、`include/types.h`、`kernel/tss.c`、`kernel/shm.c`。**事実は `file:line` で示す。Codex の実測は §3・§5 の表の「実測」列に写した (再実行はしていない)。**
 
