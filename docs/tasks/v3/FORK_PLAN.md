@@ -1,6 +1,6 @@
 # FORK_PLAN — os32-v3 への fork の段取り (持っていくもの・公開前の監査・手順)
 
-> 状態: **計画 (2026-09-30)** — ユーザー承認「準備を承認」(2026-09-30) を受けて、**票と一覧の作成まで**。リポジトリの作成・push・GitHub 操作は行っていない (§3 c の [D2])。監査の grep は基点 `d995e078` の作業ツリーで**実行済み** (§2 の「結果」列)。判断が要る点は §4。
+> 状態: **実装中 (2026-09-30)** — ユーザー承認「準備を承認」(2026-09-30) を受けて票と一覧を作成。**手順 a (監査で見つかったものの修正) はブランチ `wt/fork-prep` で実施済み** (J1〜J8 は推奨どおり、J6 の manga は未回答のため触らず)。§2 の「結果」列の *(a)* が修正後の値。リポジトリの作成・push・GitHub 操作は行っていない (§3 c の [D2])。監査の grep は基点 `d995e078` の作業ツリーで**実行済み** (§2 の「結果」列)。判断が要る点は §4。
 
 決定済みの前提 (正典は [ROADMAP.md §0-1](../../ROADMAP.md)、[HANDOVER_2026-09-29 §2](../agents/HANDOVER_2026-09-29.md)、[V3_PLAN_DRAFT §6・§7-1 U9〜U11](V3_PLAN_DRAFT.md)。ここには写さず要点だけ):
 
@@ -100,14 +100,14 @@ U11「開発の経緯と推移は文書に起こす。ケーススタディの�
 | S2 | `git log --all --oneline -- .env SOUL.md docs/DESIGN_PHILOSOPHY.md docs/hw \| wc -l` | 0 (新履歴では不要だが、os32 側の確認として) | **0** (合格) |
 | S3 | `git grep -n -I -iE "(api[_-]?key\|secret\|passw(or)?d\|token)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{8,}\|sk-[A-Za-z0-9]{20,}\|ghp_[A-Za-z0-9]{20,}\|github_pat_[A-Za-z0-9_]{20,}\|AKIA[0-9A-Z]{16}\|-----BEGIN (RSA \|OPENSSH \|EC )?PRIVATE KEY\|xox[baprs]-[A-Za-z0-9-]{10,}\|AIza[0-9A-Za-z_\-]{30,}"` | 実物 0 件 (当たりは目視で偽陽性と確認) | **34 件、実物 0** — `exec/launch.c` (6: 起動要求の番号 `token`)、`tools/tests/launch_host.c` (8: 同)、`tools/tests/test_emu_playbook.py:701` (試験用の偽値)、`lib/sqlite3/sqlite3.c` (18: SQLite 本文の語) |
 | S4 | `git grep -n SUBMODULE_TOKEN` | 名前だけ (値なし) | **9 件、すべて名前** (`build.yml`、`08_build.md:771`、V3_PLAN_DRAFT、archive の HANDOVER) |
-| S5 | 公開の直前に secret scanner を 1 回 (`gitleaks detect --no-git -s <写しの木>` または GitHub の secret scanning を有効に) | 0 件 | 未実施 (§3 a で) |
+| S5 | 公開の直前に secret scanner を 1 回 (`gitleaks detect --no-git -s <写しの木>` または GitHub の secret scanning を有効に) | 0 件 | **未実施** — *(a)* 手元に gitleaks が無い。S3 の grep は修正後も同じ 33 件 (実物 0)。写しを作る c で gitleaks か GitHub の secret scanning を |
 
 ### 2-2. 著作権物 (PC-98 資料のミラーと引用)
 
 | # | 調べるコマンド | 合格条件 | 結果 (2026-09-30) |
 |---|---|---|---|
 | C1 | `git ls-files docs/hw \| wc -l`; `git log --all --oneline -- docs/hw \| wc -l` | 0 / 0 | **0 / 0** (合格)。`.gitignore` の `/docs/hw` と `tools/sync_hwdocs.sh` の注意書きはそのまま持つ |
-| C2 | `git grep -n -I -iE "Bible\|UNDOCUMENTED\|io_[a-z0-9_]+\.md" -- docs ':!docs/archive'` | 出典表示 (§番号・ファイル名) と数行の要旨だけ。**表・図・段落の丸写しが無い** | **25 ファイル、様式は出典表示** — 多いのは `TASK_TRIDENT_DRIVER.md` (42)、`POLICY_DEBUG.md` (15)、`TASK_PEGC480_REALHW.md` (9)、`gui/DESIGN.md` (7)。**目視の要判断**: POLICY_DEBUG §4-47・§4-50・§4-53・§4-57・§4-59 (資料の文を「」で引く箇所) と TASK_TRIDENT §3 (資料の節)。短い引用は出典付きで残し、長い写しは要旨に書き換える (§3 a) |
+| C2 | `git grep -n -I -iE "Bible\|UNDOCUMENTED\|io_[a-z0-9_]+\.md" -- docs ':!docs/archive'` | 出典表示 (§番号・ファイル名) と数行の要旨だけ。**表・図・段落の丸写しが無い** | **25 ファイル、様式は出典表示** — 多いのは `TASK_TRIDENT_DRIVER.md` (42)、`POLICY_DEBUG.md` (15)、`TASK_PEGC480_REALHW.md` (9)、`gui/DESIGN.md` (7)。**目視の要判断**: POLICY_DEBUG §4-47・§4-50・§4-53・§4-57・§4-59 (資料の文を「」で引く箇所) と TASK_TRIDENT §3 (資料の節)。短い引用は出典付きで残し、長い写しは要旨に書き換える (§3 a)。*(a)* 目視の結果: §4-53 (io_fdd.md の 1 文)・§4-57 (io_kb.md の 2 文)・TRIDENT §2-2 (io_wab.md 0FACh の 2 文) を要旨に書き換え。§4-47 (引用なし)・§4-50 (数値のみ)・§4-59 (ビット名のみ)・TRIDENT §3-1 (資料名の列挙) は変更なし |
 | C3 | 同じ grep を `-- ':!docs' ':!lib/sqlite3'` で (コード側) | 同上 | **`include/pc98.h` (31)、`include/pegc.h` (19)、`drivers/serial.c` (9)、`drivers/pci_decode.h` (8)、`drivers/dma8237.h` (8) …** — すべて `/* 出典: PC9800Bible §1-3 */` の形の §番号参照 (合格) |
 | C4 | `git ls-files \| grep -iE '\.(pdf\|jpg\|jpeg\|png)$'` を目視 | 資料のスキャン・写真の写り込みが無い | **8 件**: `docs/images/` (2、スプラッシュとデモ)、`docs/logs/*.png` (3、2026-04 の画面写し。§1-2 で持たない)、`sample/Gemini_Generated_Image_*.jpg` (3、生成画像) — 資料のスキャンは無い (合格) |
 
@@ -123,16 +123,16 @@ U11「開発の経緯と推移は文書に起こす。ケーススタディの�
 | LZ4 ブロック展開 (自作) | `lib/lz4.c`、`lib/os32_lz4/`、`boot/lz4_mini.c` | MIT (本リポジトリ) | — | 「仕様準拠の自作、公式コード不使用」と 1 行 |
 | newlib 4.4.0 nano | ツールチェーン側 (`tools/ci/build_cross.sh`)。成果物にリンク | 各ファイルの BSD 系 | リポジトリに無い (toolchain) | 表に「リンクされる」と載せ、`COPYING.NEWLIB` の入手先を書く |
 | Rust クレート `ttf-parser` 0.21.1、`ab_glyph_rasterizer` 0.1.10、`libm` 0.2.16 | `userland/rust/font_test/` (`userland/rust/Cargo.lock`) | ttf-parser・libm = MIT OR Apache-2.0、ab_glyph_rasterizer = Apache-2.0 (a で crates.io の表記を確認) | vendor していない (ビルド時に取得) | 表に載せる。成果物 (font_test) に含まれるので配布物には表記が要る |
-| **IPADIC** (MeCab 版 CSV 13 本) | `assets/ipadic/` → `assets/fep.db` (生成、配布物) | IPADIC の配布条件 (ICOT 由来の独自条件) | **原文が無い** ([TASK_DICT_META §1](../fep/TASK_DICT_META.md)) | **原文を取り寄せて `assets/ipadic/COPYING` に置き、`fep.db` の `meta` に `license` / `attribution` を運ばせる** (TASK_DICT_META M5) — **公開の前提条件** |
-| **IPAex フォント** (`ipaexg.ttf` `ipaexm.ttf` と派生の `*_subset.ttf` `*.kcgfont`) | `assets/fonts/` | IPA Font License Agreement v1.0 | **原文が無い** | **`assets/fonts/IPA_Font_License_Agreement_v1.0.txt` を置く**。派生フォント (サブセット・ビットマップ) は同ライセンスの第 3 条 (派生プログラム) の条件 — 名前に「IPA」を使わない・ライセンス同梱 — を確認 (§4 J2) |
+| **IPADIC** (MeCab 版 CSV 13 本) | `assets/ipadic/` → `assets/fep.db` (生成、配布物) | IPADIC の配布条件 (ICOT 由来の独自条件) | ~~原文が無い~~ → *(a)* **`assets/ipadic/COPYING` を同梱** (mecab-ipadic 2.7.0-20070801 の原文、無改変。CSV 13 本は上流と sha256 一致。出所は `README.OS32`) | **原文を取り寄せて `assets/ipadic/COPYING` に置き、`fep.db` の `meta` に `license` / `attribution` を運ばせる** (TASK_DICT_META M5) — **公開の前提条件** |
+| **IPAex フォント** (`ipaexg.ttf` `ipaexm.ttf` と派生の `*_subset.ttf` `*.kcgfont`) | `assets/fonts/` | IPA Font License Agreement v1.0 | ~~原文が無い~~ → *(a)* **`assets/fonts/IPA_Font_License_Agreement_v1.0.txt` を同梱** (IPAexfont00401.zip の原文、無改変、`.gitattributes -text` で改行も保つ。TTF は zip と sha256 一致)。**派生物の名前 `ipaexg_subset.ttf` / `ipaexg16.kcgfont` は第 3 条 (4) に抵触 — 配布前に改名** (`README.OS32`) | **`assets/fonts/IPA_Font_License_Agreement_v1.0.txt` を置く**。派生フォント (サブセット・ビットマップ) は同ライセンスの第 3 条 (派生プログラム) の条件 — 名前に「IPA」を使わない・ライセンス同梱 — を確認 (§4 J2) |
 | `assets/joyo_kanji.txt` | 常用漢字 2,136 字 | 文化庁の告示 (事実の一覧) | — | 出所を 1 行 |
-| Python (ホストの道具) | `tools/` | Pillow、PyYAML、lz4、numpy、fontTools、zopfli、pyserial、pywin32、pyautogui、pandas | `requirements*.txt` が無い | **`tools/requirements.txt` を足す** (配布物には入らないので表記は任意) |
+| Python (ホストの道具) | `tools/` | Pillow、PyYAML、lz4、numpy、fontTools、zopfli、pyserial、pywin32、pyautogui、pandas | ~~`requirements*.txt` が無い~~ → *(a)* ルートの `requirements.txt` (import を git grep で確認、Windows 専用 2 つは環境マーカー) | 一覧は *(a)* ルートの `THIRD_PARTY.md` (J2 (a))。libm 0.2.16 は crates.io では MIT 単独 |
 
 ### 2-4. ユーザー名を含む実パス
 
 | # | 調べるコマンド | 合格条件 | 結果 (2026-09-30) |
 |---|---|---|---|
-| P1 | `git grep -n -I -E "/home/hight\|/mnt/c/Users\|C:\\\\Users\|C:/Users"` | 0 件 (プレースホルダ `<user>` と試験の架空値は可) | **7 ファイル 8 件** — 合格: `docs/08_build.md:745` (`<user>`)、`tools/tests/test_np21w_ctl.py:1432` (架空値)。**直す (6)**: `drivers/wab_cirrus.c:16`、`include/pegc.h:265`、`include/wab_xe10.h:14`、`tools/os32_server.py:9`、`tools/tests/test_key_inject.py:23` (いずれも `/home/hight/np21w-src` → `~/np21w-src` か `$NP21W_SRC`) |
+| P1 | `git grep -n -I -E "/home/hight\|/mnt/c/Users\|C:\\\\Users\|C:/Users"` | 0 件 (プレースホルダ `<user>` と試験の架空値は可) | **7 ファイル 8 件** — 合格: `docs/08_build.md:745` (`<user>`)、`tools/tests/test_np21w_ctl.py:1432` (架空値)。**直す (6)**: `drivers/wab_cirrus.c:16`、`include/pegc.h:265`、`include/wab_xe10.h:14`、`tools/os32_server.py:9`、`tools/tests/test_key_inject.py:23` (いずれも `/home/hight/np21w-src` → `~/np21w-src` か `$NP21W_SRC`)。*(a)* **修正済み**: コメント 4 か所は `~/np21w-src`、`test_key_inject.py` は環境変数 `NP21W_SRC_DIR` (既定 `~/np21w-src`)。残りは `<user>`・架空値・本票の grep 文字列だけ |
 | P2 | 同じ grep を `-- .claude` で | 0 件 | **0 件** (合格。`C:\os32` `/mnt/c/os32` はユーザー名を含まない) |
 | P3 | `git grep -n -I "np21w-src"` | `~/np21w-src` の形 (別リポジトリの名前として可) | 上記 5 件以外は `~/np21w-src` (合格) |
 
@@ -143,20 +143,20 @@ U11「開発の経緯と推移は文書に起こす。ケーススタディの�
 | H1 | `git grep -n -I -iE "hight-PC\|VJ24"` | 0 件 | **0 件** (合格。実機ホストの名前は memory 側だけ) |
 | H2 | `git grep -h -o -I -E "\b[0-9]{1,3}(\.[0-9]{1,3}){3}\b" -- . ':!lib/sqlite3' \| sort \| uniq -c` | 127.0.0.1、10.0.2.2 (NP21/W の NAT) 以外が無い | **合格** (127.0.0.1 ×71、10.0.2.2 ×1、残りは版番号) |
 | H3 | `git grep -n -I -oE "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}" -- . ':!lib/sqlite3' ':!lib/zlib' ':!fs/fatfs'` | 実在のアドレスが無い | **合格** (`t@example.invalid` のみ) |
-| H4 | `git grep -n -I -E "google-colab-[a-z0-9]+"` | 0 件 (私設の Ollama ホスト名) | **4 ファイル**: `opencode.json` (baseURL)、`tools/review_local.py` (×2)、`.claude/skills/os32-local-review/SKILL.md` (×2)、`.claude/skills/os32-local-ai/SKILL.md` — 実害は無い (LAN 内の名前) が、**環境変数か `.env` に逃がす** (§4 J7) |
+| H4 | `git grep -n -I -E "google-colab-[a-z0-9]+"` | 0 件 (私設の Ollama ホスト名) | **3 ファイル** (`opencode.json` (baseURL)、`tools/review_local.py` (×2)、`.claude/skills/os32-local-review/SKILL.md` — `os32-local-ai/SKILL.md` には無かった)。*(a)* **修正済み**: 環境変数 `OS32_REVIEW_LLM_URL` (無ければ `.env` の同名の行、既定 127.0.0.1)。`.env.sample` に行を追加。残るのは本票の記述だけ |
 | H5 | `git grep -n -I "/dev/ttyUSB"` | 一般名だけ | **合格** (`tools/rshell_serial.py`、`TASK_LAN_82557.md`、`manpages/sfs.1` — いずれも既定値の例) |
 
 ### 2-6. NP21/W の ini・NHD・ディスクイメージ・写真
 
 | # | 調べるコマンド | 合格条件 | 結果 (2026-09-30) |
 |---|---|---|---|
-| M1 | `git ls-files \| grep -iE '\.(ini\|nhd\|hdi\|img\|d88\|iso\|fdi)$'` | 0 件 | **0 件** (合格。`*.img` `*.d88` `*.iso` `/build/nhd/` は gitignore。`.ini` は gitignore に無いが追跡も無い — **`.gitignore` に `*.ini` を足す**) |
+| M1 | `git ls-files \| grep -iE '\.(ini\|nhd\|hdi\|img\|d88\|iso\|fdi)$'` | 0 件 | **0 件** (合格。`*.img` `*.d88` `*.iso` `/build/nhd/` は gitignore。`.ini` は gitignore に無いが追跡も無い — *(a)* **`.gitignore` に `*.ini` を足した**) |
 | M2 | `git ls-files \| grep -iE '\.(jpg\|jpeg\|png)$'` を目視 | 個人情報の写り込みが無い | **合格** (§2-2 C4 の 8 件。実機の写真 `lcd_osd_cui_2026-09-29.jpg` は追跡されていない) |
-| M3 | `git ls-files \| xargs -d '\n' ls -l \| sort -k5 -n \| tail` (大きいファイル) | 100KB 超は理由が言える | 未実施 (§3 a で。`sqlite3.c`、`ipaex*.ttf`、`ipadic/*.csv`、`assets/manga/*.MGX` が候補) |
+| M3 | `git ls-files \| xargs -d '\n' ls -l \| sort -k5 -n \| tail` (大きいファイル) | 100KB 超は理由が言える | *(a)* **20 件、すべて理由が言える**: `ipadic/*.csv` (4)、`ipaex*.ttf` (2)、`sqlite3.{c,h}`、`sample/*.jpg` (3、Gemini 生成) と `sample/*.vbz` (5)、`fs/fatfs/ff.c`、`tools/tests/b8_open_host.c` (223KB の試験)、`Noun.adjv.csv`。`assets/manga/*.MGX` は 100KB 未満 |
 
 ### 2-7. 追跡と `.gitignore` の食い違い (写しの前に片付ける)
 
-`.gitignore` に `/sample/` `/tasks/` `/tests/` があるのに `sample/` (10)、`tasks/vzeditor_status.md`、`tests/` (2) が追跡されている (ignore より前に add)。空ファイル `serial` も同じ。§1-3 のとおり `serial` と `tasks/` は持たず、`sample/` `tests/` は §4 J6。
+`.gitignore` に `/sample/` `/tasks/` `/tests/` があるのに `sample/` (10)、`tasks/vzeditor_status.md`、`tests/` (2) が追跡されている (ignore より前に add)。空ファイル `serial` も同じ。§1-3 のとおり `serial` と `tasks/` は持たず、`sample/` `tests/` は §4 J6。*(a)* **片付け済み**: `.gitignore` の 3 行を外し、`serial`・`tasks/vzeditor_status.md`・`tests/` (2 本、どのビルド規則も参照せず `userland/tests/gfx_demo200.c` が後継) を削除、`sample/README.OS32` に出所を記載。
 
 ---
 

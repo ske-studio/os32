@@ -262,7 +262,7 @@
 /*  しか載っていない)。検証対象は NP21/W なので、そちらの実装を正典として     */
 /*  値を採った (docs/INDEX.md の「食い違ったら…」の適用: この環境では NP21/W)。*/
 /*                                                                          */
-/*  出典 (NP21/W ai-debug fork, /home/hight/np21w-src/src/):                  */
+/*  出典 (NP21/W ai-debug fork, ~/np21w-src/src/):                            */
 /*    bios/bios18.c gdcmastersync[6][8] / gdcslavesync[6][8]                 */
 /*      — INT 18h AH=42h (CRT モード設定) が GDC へ流す SYNC 8 バイト。       */
 /*        master[2]="31"(400/31kHz), [5]="31-480:30", [1]="24"(400/24.83kHz)  */

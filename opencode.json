@@ -4,9 +4,9 @@
   "provider": {
     "ollama": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "Colab Ollama (L4)",
+      "name": "Ollama (OS32_REVIEW_LLM_URL の口)",
       "options": {
-        "baseURL": "http://google-colab-qwen38:11434/v1"
+        "baseURL": "http://127.0.0.1:11434/v1"
       },
       "models": {
         "gemma4:31b": {

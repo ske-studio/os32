@@ -13,7 +13,8 @@ Codex・Antigravity・Fable サブエージェントが枯渇したときの補�
     python3 tools/review_local.py prompt.txt fs/ext2_dir.c fs/ext2_file.c > out.md
 
 環境変数:
-    REVIEW_HOST    Ollama の口 (既定 http://google-colab-a100:11434)
+    OS32_REVIEW_LLM_URL  Ollama の口 (既定 http://127.0.0.1:11434)。環境変数に無ければ
+                         リポジトリ直下の .env の同名の行を読む (REVIEW_HOST は旧名、互換)
     REVIEW_MODEL   モデル名 (既定 gemma4:31b — 実測でいちばん見つける。SKILL.md の表)
     REVIEW_MAXTOK  生成の上限トークン (既定 8192)
     REVIEW_TIMEOUT 待ち時間の秒 (既定 1800)
@@ -28,7 +29,24 @@ import time
 import urllib.request
 import urllib.error
 
-HOST = os.environ.get("REVIEW_HOST", "http://google-colab-a100:11434")
+
+
+def _env_file_value(name):
+    """リポジトリ直下の .env から name= の値だけを読む (無ければ None)。値は出力しない。"""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
+    try:
+        with open(path, encoding="utf-8") as fp:
+            for line in fp:
+                line = line.strip()
+                if line.startswith(name + "="):
+                    return line[len(name) + 1:].strip().strip('"').strip("'") or None
+    except OSError:
+        pass
+    return None
+
+
+HOST = (os.environ.get("OS32_REVIEW_LLM_URL") or os.environ.get("REVIEW_HOST")
+        or _env_file_value("OS32_REVIEW_LLM_URL") or "http://127.0.0.1:11434")
 MODEL = os.environ.get("REVIEW_MODEL", "gemma4:31b")
 MAXTOK = int(os.environ.get("REVIEW_MAXTOK", "8192"))
 TIMEOUT = int(os.environ.get("REVIEW_TIMEOUT", "1800"))

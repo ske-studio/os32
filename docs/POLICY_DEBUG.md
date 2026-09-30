@@ -1192,8 +1192,8 @@ read-modify-write で保つ。
 
 ### 4-53. FDC は **FRY (0x94 bit6) を立てないと実機で Not Ready** (2026-09-22)
 
-- `docs/hw/undocumented/io_fdd.md` 191 行: FRY は「RDY 信号を強制的にアクティブ。ドライブからの RDY 信号と
-  OR したあと FDC に入力される」。READY 線を出さないドライブでは、FRY 無しだと µPD765A が全コマンドを
+- `docs/hw/undocumented/io_fdd.md` 191 行 (要旨): FRY は RDY を強制的に有効にするビットで、ドライブの RDY と
+  OR を取った結果が FDC に入る。READY 線を出さないドライブでは、FRY 無しだと µPD765A が全コマンドを
   ST0 の NR (bit3) で即終了する。
 - 旧コードは RECALIBRATE の結果を `SE` だけで見ていたので NR でも「成功」し、READ で落ちて root panic。
   §4-51 の修正で NR を即失敗にしたら、今度は `fdc_init` の `ER` として同じ原因が正しく見えた。
@@ -1269,8 +1269,8 @@ read-modify-write で保つ。
 
 - **症状**: 実機 PC-9821Ra266 で本体キーボードの打鍵が**一切**効かない。シリアル (rshell) は動く。NP21/W では効く。
 - **原因 (本命)**: `kbd_init()` が 0043h にコマンド語 **0x14** (ER + RxE) を書いていた。bit1 (DTR) = 0 は
-  **RTY# を LOW にする = キーボードへの再送要求** (`docs/hw/undocumented/io_kb.md` の 0043h [WRITE]:
-  「1= RTY#信号をHIGHレベルにする / 0= LOWレベル」「通常はHIGH。LOWのとき、キーボードにデータの再送を要求する」)。
+  **RTY# を LOW にする = キーボードへの再送要求** (`docs/hw/undocumented/io_kb.md` の 0043h [WRITE] の要旨:
+  bit1 は RTY# の信号レベル (1 = HIGH、0 = LOW)。通常は HIGH で、LOW はキーボードへのデータ再送要求)。
   BIOS の定常値は **0x16** (NP21/W の BIOS `src/bios/bios09.c` も 0x3A → 0x32 → 0x16)。コメントは「FreeBSD は空関数
   → BIOS 初期化済みを前提」と書きながら、その前提を自分で壊していた。Bible の「D1: リトライ 1:有効」という書き方は
   極性の根拠にしない (信号レベルで書いてある io_kb.md を採る、§4-50)。

@@ -87,11 +87,10 @@ rance.png
 # 一時調査ファイル
 *.html
 
-# ワークエリア・テスト用ディレクトリ
+# ワークエリア
+# (/sample/ /tasks/ /tests/ は追跡と食い違っていたので 2026-09-30 に外した —
+#  sample/ は VBZ の試験データとして持つ (sample/README.OS32)、tasks/ と tests/ は削除)
 /mount/
-/sample/
-/tasks/
-/tests/
 /shared.vqd
 
 # 自動プレイの実行ログ (スクリーンショット・決定ログ)
@@ -99,6 +98,9 @@ rance.png
 
 # 環境変数ファイル
 .env
+
+# NP21/W の設定 (ホストごとの値。リポジトリに入れない — [D2] の対象)
+*.ini
 
 # 個人的な設計思想ドキュメント（非公開）
 docs/DESIGN_PHILOSOPHY.md
