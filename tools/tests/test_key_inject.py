@@ -14,13 +14,15 @@
 注意: **実際にゲストへキーが届くかはここでは分からない。** それは NP21/W を動かして
 確かめるしかない (票 §4 の K1/K7)。ここで見ているのは対応表と台本の側だけ。
 """
+import os
 import pathlib
 import subprocess
 import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-NP21W = pathlib.Path('/home/hight/np21w-src')
+# NP21/W ai-debug フォークの置き場。環境変数 NP21W_SRC_DIR で変えられる (既定 ~/np21w-src)。
+NP21W = pathlib.Path(os.path.expanduser(os.environ.get('NP21W_SRC_DIR', '~/np21w-src')))
 AIDEBUG = NP21W / 'src/win9x/aidebug'
 
 

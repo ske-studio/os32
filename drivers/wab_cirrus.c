@@ -13,7 +13,7 @@
 /*    [W]  docs/hw/undocumented/io_wab.md — SR / GR / CR のインデックス表     */
 /*         (0CA5h の Sequencer Index 表、0CAFh の Graphics Controller Index  */
 /*         表 = BLT レジスタ 20h〜39h、0DA5h の CRTC Index 表)               */
-/*    [N]  NP21/W ai-debug fork /home/hight/np21w-src/src/wab/cirrus_vga.c   */
+/*    [N]  NP21/W ai-debug fork ~/np21w-src/src/wab/cirrus_vga.c             */
 /*         cirrus_bitblt_start() (GR20〜GR32 のラッチ)、cirrus_write_bitblt()*/
 /*         (GR31 の起動条件)、cirrus_get_bpp()/cirrus_get_resolution()       */
 /*         (SR7 と CR01/CR07/CR12 で解像度が決まる)、cirrusvga_drawGraphic() */

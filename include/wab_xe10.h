@@ -11,7 +11,7 @@
 /*         「ウィンドウアクセラレータ制御」/ I/O 0FAAh・0FABh (内蔵制御)、    */
 /*         0904h・0CA0h〜0CAFh・0DA4h/0DA5h/0DAAh・FF82h (CL-GD5428,5430 の   */
 /*         VGA レジスタ写像)、内部レジスタ 00h(ID) 01h(VRAM 窓) 02h 03h(リレー)*/
-/*    [N]  NP21/W ai-debug fork /home/hight/np21w-src/src/                   */
+/*    [N]  NP21/W ai-debug fork ~/np21w-src/src/                             */
 /*         wab/cirrus_vga.c cirrusvga_ofaa/ifaa/ofab/ifab (2 段 I/O の実装)、 */
 /*         pc98_cirrus_vga_initVRAMWindowAddr() (内蔵型の既定窓 = F60000h)、  */
 /*         wab/cirrus_vga_extern.h VRA2WINDOW_SIZEX (窓サイズ 32KB)、         */
