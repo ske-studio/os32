@@ -51,6 +51,69 @@ host側だけで以下の mock provider を作り、OS32側契約を検証する
 既存 raw Ethernet/Host Agent と service contract を分離する。
 将来別transportを使ってもservice APIを変えない。
 
+## Subtask H4: deferred host event / pending request queue
+
+目的:
+- プリエンプティブ・マルチタスクや常駐アプリを導入せず、host側で発生した更新要求を対象アプリの次回起動時に配送する。
+- ユーザーからは、アプリ終了中にも更新準備が進み、起動時に最新情報へ追従できるように見せる。
+- これはバックグラウンド実行ではなく、host-driven deferred event として扱う。
+
+基本フロー:
+
+```text
+Host
+  -> Kernel pending queue
+  -> target application starts
+  -> kernel notifies "pending host event exists"
+  -> application requests event metadata
+  -> application queries Host Service
+  -> latest result is fetched normally
+```
+
+キューに保持するもの:
+- target application / application class
+- service
+- event kind
+- generation または単調増加ID
+- 必要なら最小限の flags
+
+キューに保持しないもの:
+- 天気情報、ニュース本文、画像等のサービスデータ本体
+- provider固有JSONやクラウドSDK固有データ
+- 大容量payload
+- アプリ固有の実行状態
+
+例:
+
+```text
+target_app = weather
+service    = weather
+event      = refresh_available
+generation = 184
+```
+
+要求:
+- kernelは「問い合わせるべきものがある」ことだけを保持し、結果本体のcacheにはならない。
+- 実データ取得は対象アプリ起動後に通常の Host Services request/result/stream 契約で行う。
+- 同一 target/service/event の古い通知は generation により集約できること。不要に同種イベントを積み続けない。
+- host側で pending list の追加・更新・削除・集約を行えること。
+- 未知target、未知service、version mismatch、host offline を安全に処理すること。
+- アプリがイベントを処理しなくてもkernelや他アプリの進行を妨げないこと。
+- OS32側で任意コードを自動起動しないこと。
+- timer interrupt等でアプリを強制切替しないこと。
+- この機構をプリエンプティブ・マルチタスク化の入口にしないこと。
+
+受入例:
+- weatherアプリ終了中にhostが複数回 refresh を要求しても、次回起動時には最新 generation の1件として通知できる。
+- host未接続時はpending通知そのものと実データ取得失敗を区別できる。
+- pending event を持たないアプリには追加処理が発生しない。
+- 通知受領後に通常の Host Service API だけで最新情報を取得できる。
+- queue内にサービス結果本体を保存しないことをテストで確認する。
+
+設計原則:
+
+> アプリを裏で動かすのではなく、アプリが次に動いた時に、裏で発生した世界の変化を引き渡す。
+
 ## 非対象
 
 - OpenSSL導入
